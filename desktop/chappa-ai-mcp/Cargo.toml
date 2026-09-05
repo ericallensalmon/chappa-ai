@@ -1,0 +1,17 @@
+[package]
+name = "chappa-ai-mcp"
+version = "0.1.0"
+description = "chappa-ai — stdio MCP server that proxies agent tools to the desktop app's control surface (127.0.0.1:8324)"
+edition = "2021"
+rust-version = "1.77.2"
+
+[[bin]]
+name = "chappa-ai-mcp"
+path = "src/main.rs"
+
+# Deliberately dependency-light: JSON-RPC over stdio and HTTP/1.1 to
+# localhost are both hand-rolled on std — no async runtime, no MCP SDK, no
+# HTTP client crate. Everything on the wire is `serde_json::Value`, so serde
+# itself is not a direct dependency (no derives here).
+[dependencies]
+serde_json = "1.0"

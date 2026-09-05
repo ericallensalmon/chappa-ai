@@ -1,0 +1,14 @@
+# Build artifacts
+desktop/**/target/
+desktop/target/
+desktop/node_modules/
+desktop/ui/node_modules/
+desktop/ui/dist/
+desktop/src-tauri/gen/
+node_modules/
+
+# Editor and OS state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,51 @@
+[package]
+name = "chappa-ai-desktop"
+version = "0.1.0"
+description = "chappa-ai — terminal workspace for agents and dev processes"
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+# The native folder picker behind `pick_directory`. Rust side ONLY —
+# the npm package is deliberately NOT installed, so ipc.ts stays the single
+# frontend Tauri surface.
+tauri-plugin-dialog = "2"
+# Process cpu/memory/child-tree sampling for `term://stats`. Only the
+# `system` feature — the disk/network/component/user collectors are dead weight
+# here and the poller must never do a full system scan (see stats.rs).
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
+term-core = { path = "../term-core" }
+project-model = { path = "../project-model" }
+indexmap = { version = "2", features = ["serde"] }
+
+# The debug-only HTTP server AND the all-builds control surface
+# (control_http.rs on 8324) share this one server crate.
+tiny_http = "0.12"
+# The control bearer token (32 random bytes at first launch).
+# Already in the dependency tree via tauri; a direct dep so the OS CSPRNG
+# is reached without a hand-rolled mixer.
+getrandom = "0.3"
+# coordination.db (scratchpads + todos). `bundled` = no system sqlite
+# on Windows; the file lives in the app-config dir next to settings.json.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[dev-dependencies]
+# Tempdir project roots + projects.json for the add-name tests.
+tempfile = "3"

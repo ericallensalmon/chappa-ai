@@ -1,0 +1,89 @@
+{
+  "name": "wide-zerowidth",
+  "seq": 7,
+  "kind": "delta",
+  "cursor": {
+    "row": 1,
+    "col": 4,
+    "shape": "underline",
+    "visible": true
+  },
+  "displayOffset": 2,
+  "historyLen": 42,
+  "selection": null,
+  "altScreen": true,
+  "rows": [
+    {
+      "row": 0,
+      "colStart": 2,
+      "cells": [
+        {
+          "ch": "界",
+          "fg": "5FAFD7FF",
+          "bg": "181818FF",
+          "flags": [
+            "wide"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "",
+          "fg": "5FAFD7FF",
+          "bg": "181818FF",
+          "flags": [
+            "wide_spacer"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "e",
+          "fg": "AC4242FF",
+          "bg": "00000000",
+          "flags": [
+            "bold",
+            "underline"
+          ],
+          "link": 0
+        }
+      ]
+    },
+    {
+      "row": 1,
+      "colStart": 0,
+      "cells": [
+        {
+          "ch": "a",
+          "fg": "90A959FF",
+          "bg": "181818FF",
+          "flags": [],
+          "link": 0
+        },
+        {
+          "ch": "́",
+          "fg": "90A959FF",
+          "bg": "181818FF",
+          "flags": [],
+          "link": 0
+        }
+      ]
+    }
+  ],
+  "zerowidth": [
+    {
+      "row": 0,
+      "col": 4,
+      "chars": [
+        "́",
+        "⃝"
+      ]
+    },
+    {
+      "row": 1,
+      "col": 1,
+      "chars": [
+        "̀"
+      ]
+    }
+  ],
+  "matches": []
+}

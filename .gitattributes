@@ -1,0 +1,19 @@
+# Line endings. Every text file is LF in the repository AND in the working
+# tree, on every platform. Without `eol=lf` a Windows checkout gets CRLF while
+# tools that rewrite files (vitest snapshots, generated docs) write LF, so the
+# file reads as modified the moment a test runs.
+#
+# There are no `.bat`/`.cmd`/`.ps1` scripts here. If any are added they must
+# opt back in to CRLF, because the Windows shell needs it:
+#     *.bat  text eol=crlf
+* text=auto eol=lf
+
+# Binary: never line-ending-converted, never diffed as text.
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.woff2 binary
+
+# Wire-protocol frame fixtures: byte-exact, and a line-ending rewrite would
+# silently corrupt them.
+*.bin   binary

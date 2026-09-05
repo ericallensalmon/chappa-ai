@@ -1,0 +1,140 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`shader sources > are stable snapshots (accidental-edit guard; real compile is host-side) > color fragment 1`] = `
+"#version 300 es
+precision mediump float;
+uniform float u_dpr;                    // scales decoration sizes from CSS px
+// highp: must match the vertex stage's default precision or the link fails.
+uniform highp vec2 u_viewport;          // device px canvas size (y-flip)
+in vec4 v_color;
+in vec4 v_rect;                         // device px, top-left origin
+flat in float f_kind;
+out vec4 fragColor;
+void main() {
+  // v_rect is x,y,w,h — in swizzle terms width is .z and height is .w.
+  // Name them: 'v_rect.h' does not compile, and 'v_rect.w' compiles to the
+  // HEIGHT, which is exactly the trap.
+  float rw = v_rect.z;
+  float rh = v_rect.w;
+  // Local coordinates in device px, ly measured DOWN from the rect top —
+  // gl_FragCoord is bottom-origin, so flip through the viewport height.
+  float lx = gl_FragCoord.x - v_rect.x;
+  float ly = (u_viewport.y - gl_FragCoord.y) - v_rect.y;
+  float dpr = max(u_dpr, 1.0);
+  float a = 1.0;
+  if (f_kind > 0.5 && f_kind < 1.5) {
+    // undercurl: 3px-amplitude sine, ~8px wavelength, 1px stroke.
+    float y = rh - 2.0 * dpr - 3.0 * dpr * sin(lx * 0.785398163 / dpr);
+    a *= step(abs(ly - y), 0.75 * dpr);
+  } else if (f_kind > 1.5 && f_kind < 2.5) {
+    // dashed underline: 4px on / 2px off.
+    a *= step(0.6666667, fract(lx / (6.0 * dpr)));
+  } else if (f_kind > 2.5 && f_kind < 3.5) {
+    // dotted underline: 2px on / 2px off.
+    a *= step(0.5, fract(lx / (4.0 * dpr)));
+  } else if (f_kind > 3.5 && f_kind < 4.5) {
+    // double underline: two 1px lines, 1px and 3.5px above the bottom.
+    float y1 = rh - 1.0 * dpr;
+    float y2 = rh - 3.5 * dpr;
+    a *= max(step(abs(ly - y1), 0.5 * dpr), step(abs(ly - y2), 0.5 * dpr));
+  } else if (f_kind > 4.5 && f_kind < 5.5) {
+    // hollow cursor: 1px border ring.
+    float left = step(lx, 1.0 * dpr);
+    float right = step(rw - 1.0 * dpr, lx);
+    float top = step(ly, 1.0 * dpr);
+    float bottom = step(rh - 1.0 * dpr, ly);
+    a *= max(max(left, right), max(top, bottom));
+  } else if (f_kind > 5.5 && f_kind < 6.5) {
+    // underline + strikeout: a bottom line and a line through the middle.
+    float yb = rh - 1.0 * dpr;
+    float ym = rh * 0.5;
+    a *= max(step(abs(ly - yb), 0.5 * dpr), step(abs(ly - ym), 0.5 * dpr));
+  }
+  if (a <= 0.0) discard;
+  // Premultiplied output for ONE, ONE_MINUS_SRC_ALPHA blending.
+  fragColor = vec4(v_color.rgb * v_color.a, v_color.a) * a;
+}
+"
+`;
+
+exports[`shader sources > are stable snapshots (accidental-edit guard; real compile is host-side) > color vertex 1`] = `
+"#version 300 es
+// Color pass vertex: instanced rects in device px -> clip space.
+layout(location = 0) in vec4 a_rect;    // x, y, w, h (device px)
+layout(location = 1) in vec4 a_color;   // straight rgba 0..1
+layout(location = 2) in float a_kind;   // RECT_KIND_* (plain/undercurl/...)
+uniform vec2 u_viewport;                // device px canvas size
+out vec4 v_color;
+out vec4 v_rect;
+flat out float f_kind;
+void main() {
+  vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+  vec2 pos = a_rect.xy + corner * a_rect.zw;
+  vec2 clip = pos / u_viewport * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_color = a_color;
+  v_rect = a_rect;
+  f_kind = a_kind;
+}
+"
+`;
+
+exports[`shader sources > are stable snapshots (accidental-edit guard; real compile is host-side) > glyph fragment 1`] = `
+"#version 300 es
+precision mediump float;
+// sampler2DArray has NO default precision in GLSL ES 3.00 — it must be
+// qualified explicitly or the shader does not compile.
+uniform mediump sampler2DArray u_atlas;
+in vec2 v_uv;
+flat in float f_page;
+flat in vec4 f_fg;
+flat in float f_flags;
+out vec4 fragColor;
+void main() {
+  vec4 texel = texture(u_atlas, vec3(v_uv, f_page));
+  float a = texel.a;
+  if (a < 0.02) discard;
+  if (f_flags > 0.5) {
+    // Colored glyph (emoji): the atlas page carries its own colors, already
+    // premultiplied by the rasterizer's canvas backing store.
+    fragColor = texel;
+  } else {
+    // Grayscale-AA coverage composited with naive sRGB alpha blending makes
+    // light-on-dark text bloom about a weight step bolder than the same
+    // font in the DOM (whose text stack gamma-corrects). Sharpen the
+    // coverage curve to compensate — the ghostty/kitty-style correction
+    // (host-run: GL text read a weight step bolder than the same
+    // font rendered by the DOM path).
+    a = pow(a, 1.45);
+    // The page holds premultiplied white (r=g=b=a), so premultiplying the
+    // straight fg tint by the corrected coverage gives the tinted glyph.
+    fragColor = vec4(f_fg.rgb * a, a);
+  }
+}
+"
+`;
+
+exports[`shader sources > are stable snapshots (accidental-edit guard; real compile is host-side) > glyph vertex 1`] = `
+"#version 300 es
+layout(location = 0) in vec4 a_rect;    // x, y, w, h (device px)
+layout(location = 1) in vec4 a_uv;      // u, v, uw, vh (fractions of a page)
+layout(location = 2) in float a_page;   // texture array layer
+layout(location = 3) in vec4 a_fg;      // straight rgba tint (dim applied)
+layout(location = 4) in float a_flags;  // bit 0: colored glyph (skip tint)
+uniform vec2 u_viewport;
+out vec2 v_uv;
+flat out float f_page;
+flat out vec4 f_fg;
+flat out float f_flags;
+void main() {
+  vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+  vec2 pos = a_rect.xy + corner * a_rect.zw;
+  vec2 clip = pos / u_viewport * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_uv = a_uv.xy + corner * a_uv.zw;
+  f_page = a_page;
+  f_fg = a_fg;
+  f_flags = a_flags;
+}
+"
+`;

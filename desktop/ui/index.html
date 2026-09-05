@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>chappa-ai</title>
+    <style>
+      /* Geist Mono (OFL, vendored from npm geist@1.7.2) — the default
+         terminal face. JetBrains Mono stays
+         bundled as the stack fallback. */
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("/fonts/GeistMono-Regular.woff2") format("woff2");
+        font-weight: 400;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("/fonts/GeistMono-Bold.woff2") format("woff2");
+        font-weight: 700;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("/fonts/GeistMono-Italic.woff2") format("woff2");
+        font-weight: 400;
+        font-style: italic;
+      }
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("/fonts/GeistMono-BoldItalic.woff2") format("woff2");
+        font-weight: 700;
+        font-style: italic;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+        font-weight: 400;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+        font-weight: 700;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("/fonts/JetBrainsMono-Italic.woff2") format("woff2");
+        font-weight: 400;
+        font-style: italic;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("/fonts/JetBrainsMono-BoldItalic.woff2") format("woff2");
+        font-weight: 700;
+        font-style: italic;
+      }
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        background: #0d0e10;
+        color: #d6d8dc;
+        font-family: system-ui, sans-serif;
+        overflow: hidden;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      .mono {
+        font-family: "Geist Mono", "JetBrains Mono", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,132 @@
+{
+  "name": "selection-matches",
+  "seq": 11,
+  "kind": "delta",
+  "cursor": {
+    "row": 2,
+    "col": 8,
+    "shape": "hollow",
+    "visible": false
+  },
+  "displayOffset": 5,
+  "historyLen": 200,
+  "selection": {
+    "startRow": -2,
+    "startCol": 3,
+    "endRow": 1,
+    "endCol": 12
+  },
+  "mouseCapture": true,
+  "altScreen": true,
+  "rows": [
+    {
+      "row": 0,
+      "colStart": 0,
+      "cells": [
+        {
+          "ch": "s",
+          "fg": "F4BF75FF",
+          "bg": "181818FF",
+          "flags": [
+            "inverse"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "e",
+          "fg": "F4BF75FF",
+          "bg": "181818FF",
+          "flags": [
+            "inverse"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "l",
+          "fg": "F4BF75FF",
+          "bg": "181818FF",
+          "flags": [
+            "inverse"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "e",
+          "fg": "F4BF75FF",
+          "bg": "181818FF",
+          "flags": [
+            "inverse"
+          ],
+          "link": 0
+        }
+      ]
+    },
+    {
+      "row": 2,
+      "colStart": 4,
+      "cells": [
+        {
+          "ch": "x",
+          "fg": "D8D8D8FF",
+          "bg": "181818FF",
+          "flags": [
+            "bold",
+            "italic",
+            "dim"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "y",
+          "fg": "D8D8D8FF",
+          "bg": "181818FF",
+          "flags": [
+            "strikeout",
+            "hidden"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "z",
+          "fg": "D8D8D8FF",
+          "bg": "181818FF",
+          "flags": [
+            "dashed_underline"
+          ],
+          "link": 0
+        },
+        {
+          "ch": "!",
+          "fg": "D8D8D8FF",
+          "bg": "181818FF",
+          "flags": [
+            "dotted_underline",
+            "double_underline"
+          ],
+          "link": 0
+        }
+      ]
+    }
+  ],
+  "zerowidth": [],
+  "matches": [
+    {
+      "startRow": 0,
+      "startCol": 1,
+      "endRow": 0,
+      "endCol": 4
+    },
+    {
+      "startRow": 2,
+      "startCol": 4,
+      "endRow": 2,
+      "endCol": 6
+    },
+    {
+      "startRow": -1,
+      "startCol": 0,
+      "endRow": 0,
+      "endCol": 2
+    }
+  ]
+}
