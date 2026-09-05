@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>chappa-ai gl debug</title>
+    <style>
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+      }
+      body { background: #101014; color: #cfd3da; font: 13px ui-monospace, monospace; padding: 16px; }
+      h2 { font-size: 13px; margin: 18px 0 6px; color: #8ab4ff; }
+      pre { margin: 4px 0; white-space: pre-wrap; }
+      .stage { border: 1px solid #2a2c33; padding: 8px; margin-bottom: 10px; }
+      canvas.peek { border: 1px solid #444; image-rendering: pixelated; background: #181818; }
+      #term { position: relative; width: 360px; height: 90px; background: #181818; }
+      .ok { color: #7ce38b; } .bad { color: #ff7b72; }
+    </style>
+  </head>
+  <body>
+    <h1 style="font-size:14px">chappa-ai WebGL renderer debug harness</h1>
+    <div class="stage"><h2>1 · raster + atlas</h2><pre id="r1"></pre><div id="peek1"></div></div>
+    <div class="stage"><h2>2 · glyph instance builder</h2><pre id="r2"></pre></div>
+    <div class="stage"><h2>3 · full WebGLRenderer</h2><pre id="r3"></pre><div id="term"></div></div>
+    <div class="stage"><h2>4 · panel lifecycle (0-metrics ctor + setMetrics + real dpr)</h2><pre id="r4"></pre></div>
+    <div class="stage"><h2>5 · faithful app replay (fractional cells, dpr 1.5, JetBrains Mono, delta frames)</h2><pre id="r5"></pre><div id="s5host"></div></div>
+    <script type="module" src="/src/gldebug.ts"></script>
+  </body>
+</html>

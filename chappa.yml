@@ -1,0 +1,13 @@
+# Chappa'Ai's own project file: this repo's single command, the desktop app
+# in dev mode. It earns a permanent entry because the process OWNER kills the
+# whole tree on stop, where a shell-launched run leaks its vite child on port
+# 5173. One-off runs (vitest, cargo test) still happen from a shell.
+name: chappa-ai
+processes:
+  chappa-ai dev:
+    command: npx tauri dev
+    working_dir: desktop          # the app's workspace root, NOT desktop/ui
+    auto_start: false
+    auto_restart: false
+    restart_when_changed: []
+    env: {}
