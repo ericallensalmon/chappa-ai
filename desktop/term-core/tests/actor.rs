@@ -1277,7 +1277,7 @@ fn frame_carries_mouse_capture_and_alt_screen_flags() {
     assert!(!frame.alt_screen);
 }
 
-/// PLAN bugs (0.10.0 parity): a TUI killed while mouse tracking
+/// A TUI killed while mouse tracking
 /// is on never sends its reset sequences — the final frame must not export
 /// the stale capture, or the dead pane demands Shift-selection forever
 /// (panel.ts takes `frameMouseCapture` from every frame, so a false bit in
