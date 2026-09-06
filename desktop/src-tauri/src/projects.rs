@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -768,29 +769,75 @@ pub fn list_projects(projects: State<'_, Projects>) -> Result<Vec<ProjectInfoDto
     Ok(store.list().iter().map(ProjectInfoDto::from).collect())
 }
 
+/// At most one native picker per process. Two pickers open at once — a
+/// second Browse click while the first dialog was still coming up — crashed
+/// the process with heap corruption inside the OS text-services layer, which
+/// both dialog threads initialise against shared state. The gate turns the
+/// second request into an immediate "cancelled" (`None`), which the frontend
+/// already handles; the slot frees itself when the first pick returns,
+/// however it returns (chosen, cancelled, or panicked).
+pub struct PickerGate(AtomicBool);
+
+/// Held for the lifetime of one picker; dropping it reopens the gate.
+pub struct PickerSlot<'a>(&'a PickerGate);
+
+impl PickerGate {
+    pub const fn new() -> Self {
+        PickerGate(AtomicBool::new(false))
+    }
+
+    /// `None` when a picker is already open.
+    pub fn claim(&self) -> Option<PickerSlot<'_>> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then_some(PickerSlot(self))
+    }
+}
+
+impl Drop for PickerSlot<'_> {
+    fn drop(&mut self) {
+        self.0 .0.store(false, Ordering::Release);
+    }
+}
+
+static PICKER_GATE: PickerGate = PickerGate::new();
+
 /// Open the OS folder picker and answer the chosen directory as a PLAIN path
 /// string (never a `file://` URI — the frontend feeds it straight back into
-/// `add_project`, which does `Path::new(&path)`). `None` = the user cancelled.
+/// `add_project`, which does `Path::new(&path)`). `None` = the user cancelled,
+/// or a picker is already open (see `PickerGate`).
 ///
 /// `tauri-plugin-dialog` is wired on the Rust side plus the capability only;
 /// the npm package is deliberately NOT installed, so ipc.ts stays the only
 /// Tauri surface. This command IS that surface.
 ///
-/// ASYNC + blocking pool, deliberately (review fix): a synchronous
-/// `#[tauri::command]` runs on the MAIN thread, and `blocking_pick_folder`
-/// parks its calling thread on a channel while the dialog runs on the
-/// platform's UI loop — parked main thread ⇒ deadlock/frozen UI. An async
-/// command runs on the async runtime; the park itself still belongs on the
-/// blocking pool, not a tokio worker.
+/// The picker is OWNED by the calling window: it opens centred over the app
+/// and in front of it, and the OS disables the owner for the dialog's
+/// lifetime, so the Browse button cannot be pressed again while it is up. An
+/// unowned picker could open behind the app window and read as "nothing
+/// happened", inviting exactly the second click the gate exists to absorb.
+///
+/// ASYNC + blocking pool, deliberately: a synchronous `#[tauri::command]`
+/// runs on the MAIN thread, and `blocking_pick_folder` parks its calling
+/// thread on a channel while the dialog runs on the platform's UI loop —
+/// parked main thread ⇒ deadlock/frozen UI. An async command runs on the
+/// async runtime; the park itself still belongs on the blocking pool, not a
+/// tokio worker. Resolving the owner handle also round-trips through the
+/// main thread, which is only safe from off it.
 #[tauri::command]
 pub async fn pick_directory(
-    app: AppHandle,
+    window: tauri::Window,
     title: Option<String>,
     start: Option<String>,
 ) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
+    let slot = PICKER_GATE.claim()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut builder = app.dialog().file();
+        // Moved in so the slot is released when the pick returns, on every
+        // path out of this closure.
+        let _slot = slot;
+        let mut builder = window.dialog().file().set_parent(&window);
         if let Some(title) = title {
             builder = builder.set_title(title);
         }
@@ -2659,5 +2706,23 @@ mod tests {
         let (program, args) = execution_command("make", &settings);
         assert_eq!(program, "bash.exe");
         assert_eq!(args, vec!["-c".to_owned(), "make".to_owned()]);
+    }
+
+    #[test]
+    fn picker_gate_admits_one_picker_at_a_time() {
+        let gate = PickerGate::new();
+        let first = gate.claim().expect("gate starts open");
+        assert!(gate.claim().is_none(), "a second picker is refused while one is up");
+        drop(first);
+        let again = gate.claim();
+        assert!(again.is_some(), "the slot frees itself when the first pick returns");
+        drop(again);
+        // A pick that unwinds still releases the slot: the guard is a Drop.
+        let unwound = std::panic::catch_unwind(|| {
+            let _slot = gate.claim().expect("open again");
+            panic!("picker thread died");
+        });
+        assert!(unwound.is_err());
+        assert!(gate.claim().is_some());
     }
 }

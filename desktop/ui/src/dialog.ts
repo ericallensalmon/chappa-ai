@@ -375,7 +375,16 @@ export function addProjectDialog(
       btn.textContent = "Browse…";
       btn.style.cssText = BROWSE_BTN_CSS;
       btn.addEventListener("click", () => {
+        // One picker at a time. The native dialog can take a beat to appear,
+        // and a second click in that window would open a second picker on top
+        // of the first (the backend refuses it too, but the button should not
+        // even offer it). Re-enabled once the pick settles either way.
+        if (btn.disabled) return;
+        btn.disabled = true;
         void browse()
+          .finally(() => {
+            btn.disabled = false;
+          })
           .then((picked) => {
             // null = the user cancelled the picker (or there is no picker: the
             // ipc wrapper answers null outside Tauri). Leave the typed path.
