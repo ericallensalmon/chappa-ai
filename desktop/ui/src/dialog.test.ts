@@ -303,6 +303,42 @@ describe("addProjectDialog", () => {
     expect(await p).toEqual({ path: "/home/dev/code/chappa-ai", name: null });
   });
 
+  it("Browse… is disabled while a pick is pending, so a second click opens nothing", async () => {
+    let calls = 0;
+    let settle: (value: string | null) => void = () => {};
+    const browse = (): Promise<string | null> => {
+      calls += 1;
+      return new Promise((resolve) => {
+        settle = resolve;
+      });
+    };
+    const p = addProjectDialog({ browse });
+
+    browseButton()!.click();
+    await flush();
+    expect(browseButton()!.disabled).toBe(true);
+    // The second click lands while the first picker is still up.
+    browseButton()!.click();
+    await flush();
+    expect(calls).toBe(1);
+
+    settle("/home/dev/code/chappa-ai");
+    await flush();
+    expect(browseButton()!.disabled).toBe(false);
+    expect(pathField().value).toBe("/home/dev/code/chappa-ai");
+
+    // Re-enabled after a cancel too, and the next click is a fresh pick.
+    browseButton()!.click();
+    await flush();
+    expect(calls).toBe(2);
+    settle(null);
+    await flush();
+    expect(browseButton()!.disabled).toBe(false);
+
+    okButton().click();
+    expect(await p).toEqual({ path: "/home/dev/code/chappa-ai", name: null });
+  });
+
   it("a REJECTED picker behaves like a cancelled one (no unhandled rejection)", async () => {
     const p = addProjectDialog({ browse: async () => Promise.reject(new Error("no plugin")) });
     type(pathField(), "/p/typed");
