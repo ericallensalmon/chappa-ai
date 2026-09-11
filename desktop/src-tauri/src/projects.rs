@@ -2357,7 +2357,7 @@ mod tests {
     /// offers both on every platform, so "sh" on Windows must mean sh, not
     /// silently cmd).
     #[test]
-    fn builtin_exec_profiles_keep_the_task21_behavior() {
+    fn builtin_exec_profiles_keep_their_shell_semantics() {
         let (args, env) = cmd_quote_indirection(
             "cmd",
             vec!["/C".to_owned(), r#"py -c "import time; time.sleep(999)""#.to_owned()],

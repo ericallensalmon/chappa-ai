@@ -258,15 +258,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let m = ChangeMatcher::new(
             root.path().to_path_buf(),
-            &["app/tasks/**/*.md".into(), "*.toml".into()],
+            &["app/docs/**/*.md".into(), "*.toml".into()],
         );
-        assert!(m.matches(&root.path().join("app/tasks/09_x.md")));
-        assert!(m.matches(&root.path().join("app/tasks/deep/9.md")));
+        assert!(m.matches(&root.path().join("app/docs/intro.md")));
+        assert!(m.matches(&root.path().join("app/docs/deep/notes.md")));
         assert!(m.matches(&root.path().join("Cargo.toml")));
         assert!(!m.matches(&root.path().join("app/main.py")));
-        assert!(!m.matches(&root.path().join("tasks/09_x.md")));
+        assert!(!m.matches(&root.path().join("docs/intro.md")));
         // Paths outside the root never match.
-        assert!(!m.matches(&tempfile::tempdir().unwrap().path().join("app/tasks/a.md")));
+        assert!(!m.matches(&tempfile::tempdir().unwrap().path().join("app/docs/a.md")));
     }
 
     #[test]
