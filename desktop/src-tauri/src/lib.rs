@@ -8,6 +8,7 @@ mod commands;
 pub mod control_http;
 pub mod coordination;
 pub mod coordination_http;
+pub mod crash;
 #[cfg(debug_assertions)]
 pub mod debug_http;
 pub mod projects;
@@ -17,6 +18,17 @@ pub mod stats;
 pub mod timers;
 pub mod timers_http;
 pub mod workspace;
+
+/// All of the app's own allocations live in mimalloc's arenas, not in the
+/// OS process heap. DLLs that other software injects into the process
+/// (antivirus behavioral hooks are the usual case) allocate from the OS
+/// heap, and a bug in one of them corrupts whatever else lives there.
+/// Keeping our data out of that heap turns such a bug from a crash in
+/// unrelated code of ours into, at worst, a crash inside the OS component
+/// that shares the heap with the hook. See crash.rs for the evidence
+/// trail that is written when it happens anyway.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use agent_tools::AgentToolsState;
 use coordination::Coordination;
@@ -47,6 +59,14 @@ pub fn run() {
         .manage(Workspace::default())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().unwrap_or_default();
+            // Crash evidence first, before anything that could fail:
+            // module inventory now, minidump + report on a native crash,
+            // a report on a panic. All in the log directory.
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .unwrap_or_else(|_| config_dir.join("logs"));
+            crash::install(log_dir);
             // Load `<app-config>/settings.json` BEFORE the projects
             // store: project spawns read the execution profile out of it.
             let settings = app.state::<SettingsState>();
