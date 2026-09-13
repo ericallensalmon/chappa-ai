@@ -48,6 +48,7 @@ import { NotifyDrawer } from "./notify_drawer";
 import { StatsStore, statsChip, statsTooltip } from "./stats";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
 import { ScratchpadsSection, type ScratchpadsApi } from "./scratchpads_section";
+import { makeCollapsibleSection, SIDEBAR_SECTIONS_CSS } from "./sidebar_sections";
 
 /** The process-status vocabulary. */
 export type RailStatus = "starting" | "running" | "stopped" | "exited" | "failed";
@@ -842,7 +843,7 @@ function injectAppStyles(): void {
   if (appStylesInjected || typeof document === "undefined") return;
   appStylesInjected = true;
   const el = document.createElement("style");
-  el.textContent = APP_CSS;
+  el.textContent = APP_CSS + SIDEBAR_SECTIONS_CSS;
   document.head.appendChild(el);
 }
 
@@ -1228,6 +1229,12 @@ export class App {
     this.projectTermList = document.createElement("div");
     this.projectTermList.className = "chappa-project-term-list";
     this.projectTermsEl.append(termsHeader, this.projectTermList);
+    makeCollapsibleSection({
+      header: termsHeader,
+      body: this.projectTermList,
+      storageKey: "project.terminals",
+      icon: "terminal",
+    });
     // Same capture-phase dismiss as the rail's menu (shared helper).
     // Preserved drift: the ▾ toggle is anchor-excluded; no Escape.
     this.dismissUnbinds.push(
@@ -1269,6 +1276,12 @@ export class App {
     this.projectAgentList = document.createElement("div");
     this.projectAgentList.className = "chappa-project-term-list";
     this.projectAgentsEl.append(agentsHeader, this.projectAgentList);
+    makeCollapsibleSection({
+      header: agentsHeader,
+      body: this.projectAgentList,
+      storageKey: "project.agents",
+      icon: "agents",
+    });
     // SCRATCHPADS subsection: below COMMANDS, same house header.
     this.scratchpads = new ScratchpadsSection({ api: opts.scratchpads, modalContainer: this.root });
     this.projectSection.append(
@@ -1338,6 +1351,14 @@ export class App {
 
     this.railList = document.createElement("div");
     this.railList.className = "chappa-rail-list";
+    // The workspace TERMINALS section (this `header` + the rail list below it)
+    // folds like the project sections; it carries the same terminal icon.
+    makeCollapsibleSection({
+      header,
+      body: this.railList,
+      storageKey: "workspace.terminals",
+      icon: "terminal",
+    });
 
     // Rail footer: the gear, beneath the launcher hint.
     // `.chappa-rail` is a column flexbox and
@@ -1392,6 +1413,12 @@ export class App {
     this.wsCmdList = document.createElement("div");
     this.wsCmdList.className = "chappa-project-term-list chappa-workspace-cmd-list";
     this.wsCmdsEl.append(wsHeader, this.wsCmdList);
+    makeCollapsibleSection({
+      header: wsHeader,
+      body: this.wsCmdList,
+      storageKey: "workspace.commands",
+      icon: "commands",
+    });
 
     // ACTIVE sits at the TOP of the rail — above the project bar
     // and (a fortiori) above the workspace TERMINALS. The workspace COMMANDS

@@ -13,6 +13,7 @@
 
 import type { ScratchpadDto, ScratchpadSummaryDto } from "./ipc";
 import * as ipc from "./ipc";
+import { makeCollapsibleSection } from "./sidebar_sections";
 
 /** The two reads the section needs (stubbed in tests). `includeGlobal`
  *  adds the global pads (project_id null) to a project's list — the rail
@@ -145,6 +146,12 @@ export class ScratchpadsSection {
     this.list = document.createElement("div");
     this.list.className = "chappa-scratchpad-list";
     this.element.append(header, this.list);
+    makeCollapsibleSection({
+      header,
+      body: this.list,
+      storageKey: "project.scratchpads",
+      icon: "scratchpads",
+    });
   }
 
   /** Show the pads of `projectId` (null = the global pads; undefined = no
