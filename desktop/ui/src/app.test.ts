@@ -2441,7 +2441,8 @@ describe("App project terminals", () => {
     expect(root.querySelector(".chappa-subsection-count")?.textContent).toBe("2");
     // The rail still holds only the mount() shell.
     expect(root.querySelectorAll(".chappa-rail-list .chappa-rail-item").length).toBe(1);
-    expect(root.querySelector(".chappa-rail-header-label")?.textContent).toBe("TERMINALS 1");
+    expect(root.querySelector(".chappa-rail-header-label")?.textContent).toBe("TERMINALS");
+    expect(root.querySelector(".chappa-rail-header .chappa-subsection-count")?.textContent).toBe("1");
     panelDispose(app);
     root.remove();
   });
@@ -2887,10 +2888,10 @@ const activeTags = (root: HTMLElement): Array<string | null> =>
 describe("App ACTIVE area", () => {
   it("sits at the TOP of the rail, hidden while empty, shown when a process runs", async () => {
     const { root, app } = await multiProject();
-    // The section is the rail's FIRST child — "at the top of the rail,
-    // above the workspace TERMINALS".
+    // The section opens the workspace block: directly under its title.
     const rail = root.querySelector(".chappa-rail")!;
-    expect(rail.firstElementChild?.classList.contains("chappa-active-section")).toBe(true);
+    const active = rail.querySelector<HTMLElement>(".chappa-active-section")!;
+    expect(active.previousElementSibling?.classList.contains("chappa-workspace-header")).toBe(true);
     // Empty state: hidden ENTIRELY. The mount shell is running but carries
     // no badge — a plain live shell is not an ACTIVE row.
     expect(activeSection(root).style.display).toBe("none");
@@ -3453,9 +3454,11 @@ describe("App chappa.yml write-back — the full command menu", () => {
     ]);
     // "Copy link" and "Clear output" are deliberately absent.
     expect(menuLabels(root).some((l) => /Copy link|Clear output/.test(l))).toBe(false);
-    // The card button exists too, after the rows.
+    // The header-line add button exists too, on the COMMANDS header.
     const add = root.querySelector<HTMLButtonElement>(".chappa-process-add")!;
-    expect(add.textContent).toBe("+ Add command");
+    expect(add.textContent).toBe("＋");
+    expect(add.title).toBe("Add a command to chappa.yml");
+    expect(add.closest(".chappa-subsection-header")?.querySelector(".chappa-subsection-label")?.textContent).toBe("COMMANDS");
     expect(add.disabled).toBe(false);
     panelDispose(app);
     root.remove();
@@ -3521,7 +3524,7 @@ describe("App chappa.yml write-back — the full command menu", () => {
     root.remove();
   });
 
-  it("+ Add command (card button and Add ▸) opens an EMPTY editor and appends", async () => {
+  it("the COMMANDS header add button and Add ▸ open an EMPTY editor and append", async () => {
     const asked: Array<CommandForm | null> = [];
     let answer: CommandForm | null = null;
     const { api, calls } = projectApi();
@@ -4053,7 +4056,7 @@ describe("App agents", () => {
       dockerTool(5, { name: "claude host", model: null, runtime: { kind: "host" } }),
     ]);
     const btn = root.querySelector<HTMLButtonElement>(".chappa-new-agent")!;
-    expect(btn.textContent).toBe("New agent ▸");
+    expect(btn.textContent).toBe("＋");
     btn.click();
     const options = [...root.querySelectorAll<HTMLButtonElement>(".chappa-new-agent-option")];
     expect(options.map((o) => o.textContent)).toEqual(["worker · model-fast", "claude host"]);
@@ -4504,8 +4507,12 @@ describe("App project AGENTS section", () => {
   const agentRows = (root: HTMLElement): HTMLElement[] => [
     ...root.querySelectorAll<HTMLElement>(".chappa-project-agents .chappa-rail-item"),
   ];
+  /** The workspace rows: the TERMINALS list (shells) then the workspace
+   *  AGENTS list, in DOM order. */
   const railRows = (root: HTMLElement): HTMLElement[] => [
-    ...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item"),
+    ...root.querySelectorAll<HTMLElement>(
+      ".chappa-rail-list .chappa-rail-item, .chappa-workspace-agent-list .chappa-rail-item",
+    ),
   ];
 
   it("a bound agent renders under its open project with the N/M count and is absent from the workspace list", async () => {
@@ -4615,10 +4622,10 @@ describe("App project AGENTS section", () => {
     await app.openProject(1);
     await FLUSH();
 
-    // The section's own "New agent ▸": the same affordance, pick spawns with
+    // The section's own New agent: the same affordance, pick spawns with
     // the section's project id.
     const spawner = agentsSection(root).querySelector<HTMLButtonElement>(".chappa-new-agent")!;
-    expect(spawner.textContent).toBe("New agent ▸");
+    expect(spawner.textContent).toBe("＋");
     spawner.click();
     const sectionMenu = agentsSection(root).querySelector<HTMLElement>(".chappa-new-agent-menu")!;
     expect(sectionMenu.style.display).toBe("block");
@@ -4633,12 +4640,12 @@ describe("App project AGENTS section", () => {
     expect(agentRows(root).length).toBe(1);
     expect(agentsSection(root).querySelector(".chappa-subsection-count")?.textContent).toBe("1/1");
 
-    // One "New agent ▸" menu at a time: opening the workspace spawner's menu
+    // One New agent menu at a time: opening the workspace spawner's menu
     // closes the section's.
-    const wsSpawner = root.querySelector<HTMLButtonElement>(".chappa-rail-header .chappa-new-agent")!;
+    const wsSpawner = root.querySelector<HTMLButtonElement>(".chappa-workspace-agents .chappa-new-agent")!;
     wsSpawner.click();
     expect(agentsSection(root).querySelector<HTMLElement>(".chappa-new-agent-menu")!.style.display).toBe("none");
-    const wsMenu = root.querySelector<HTMLElement>(".chappa-rail-header .chappa-new-agent-menu")!;
+    const wsMenu = root.querySelector<HTMLElement>(".chappa-workspace-agents .chappa-new-agent-menu")!;
     expect(wsMenu.style.display).toBe("block");
     // The workspace spawner keeps the binding (the expanded project,
     // via its fallback chain) — the same id, a different code path.
@@ -4664,7 +4671,7 @@ describe("App project AGENTS section", () => {
     expect(section.querySelector(".chappa-subsection-count")?.textContent).toBe("0/0");
     // The spawner is live at 0/0 — discoverability is the point.
     const spawner = section.querySelector<HTMLButtonElement>(".chappa-new-agent")!;
-    expect(spawner.textContent).toBe("New agent ▸");
+    expect(spawner.textContent).toBe("＋");
     spawner.click();
     expect(section.querySelector<HTMLElement>(".chappa-new-agent-menu")!.style.display).toBe("block");
     // Zero rows under the header, and no empty-state text.
@@ -5064,11 +5071,11 @@ describe("App adopted backend terminals", () => {
   };
   const drive = (app: App): AppDriver => app as unknown as AppDriver;
   const railNames = (root: HTMLElement): (string | null)[] =>
-    [...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item .chappa-rail-name")].map(
+    [...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item .chappa-rail-name, .chappa-workspace-agent-list .chappa-rail-item .chappa-rail-name")].map(
       (e) => e.textContent,
     );
   const railCount = (root: HTMLElement): number =>
-    root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item").length;
+    root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item, .chappa-workspace-agent-list .chappa-rail-item").length;
 
   /** The one stored project the bound-agent tests open. */
   const PROJ: ipc.ProjectInfoDto = {
@@ -5122,9 +5129,12 @@ describe("App adopted backend terminals", () => {
     expect(railNames(root)).not.toContain("agent70");
     expect(root.querySelector(".chappa-project-agents .chappa-subsection-count")?.textContent).toBe("1/1");
 
-    // Unbound → workspace agents list (an agent row, not a plain shell).
+    // Unbound → the workspace AGENTS section (an agent row, not a plain
+    // shell), never the TERMINALS list.
     drive(app).applyCreated({ term_id: 71, name: "agent71", kind: "agent", project_id: null, agent_tool_id: 7, parent_process_id: null });
-    const railEls = [...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item")];
+    expect(root.querySelectorAll(".chappa-rail-list .chappa-rail-item").length).toBe(0);
+    expect(root.querySelector(".chappa-workspace-agents .chappa-subsection-count")?.textContent?.endsWith("/1")).toBe(true);
+    const railEls = [...root.querySelectorAll<HTMLElement>(".chappa-workspace-agents .chappa-rail-item")];
     const unbound = railEls.find((r) => r.querySelector(".chappa-rail-name")?.textContent === "agent71");
     expect(unbound).toBeDefined();
     expect(unbound!.classList.contains("agent")).toBe(true);
@@ -5253,11 +5263,11 @@ describe("App subagent nesting", () => {
   };
   const drive = (app: App): Driver => app as unknown as Driver;
   const railNames = (root: HTMLElement): (string | null)[] =>
-    [...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item .chappa-rail-name")].map(
+    [...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item .chappa-rail-name, .chappa-workspace-agent-list .chappa-rail-item .chappa-rail-name")].map(
       (e) => e.textContent,
     );
   const railCount = (root: HTMLElement): number =>
-    root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item").length;
+    root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item, .chappa-workspace-agent-list .chappa-rail-item").length;
   const agent = (id: number, name: string, parent: number | null, project: number | null): Created => ({
     term_id: id,
     name,
@@ -5267,7 +5277,7 @@ describe("App subagent nesting", () => {
     parent_process_id: parent,
   });
   const render = (root: HTMLElement): HTMLElement[] => [
-    ...root.querySelectorAll<HTMLElement>(".chappa-rail-list .chappa-rail-item"),
+    ...root.querySelectorAll<HTMLElement>(".chappa-workspace-agent-list .chappa-rail-item"),
   ];
 
   it("workspace rail nests a spawn child under its parent with the child connector", async () => {
@@ -5279,6 +5289,8 @@ describe("App subagent nesting", () => {
     drive(app).applyCreated(agent(41, "child", 40, null));
     drive(app).applyCreated(agent(42, "root2", null, null));
     expect(railNames(root)).toEqual(["parent", "child", "root2"]);
+    // The workspace AGENTS count is FLAT over the forest, like the project one.
+    expect(root.querySelector(".chappa-workspace-agents .chappa-subsection-count")?.textContent?.endsWith("/3")).toBe(true);
     const rows = render(root);
     const parentRow = rows.find((r) => r.querySelector(".chappa-rail-name")?.textContent === "parent")!;
     const childRow = rows.find((r) => r.querySelector(".chappa-rail-name")?.textContent === "child")!;

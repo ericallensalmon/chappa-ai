@@ -50,7 +50,7 @@ export function writeCollapsed(key: string, collapsed: boolean): void {
 
 /** The section-icon set. One 16-box, 1.5px stroke, `currentColor` so the icon
  *  tracks the header's muted grey and its hover brightening for free. */
-export type SectionIconName = "terminal" | "agents" | "commands" | "scratchpads";
+export type SectionIconName = "terminal" | "agents" | "commands" | "scratchpads" | "active";
 
 const ICON_PATHS: Record<SectionIconName, string[]> = {
   // A prompt: the `>` caret and the input underline.
@@ -61,6 +61,8 @@ const ICON_PATHS: Record<SectionIconName, string[]> = {
   commands: ["M8 2 L14 5.2 L8 8.4 L2 5.2 Z", "M2 8.2 L8 11.4 L14 8.2", "M2 11 L8 14.2 L14 11"],
   // A page with a folded corner and two text lines.
   scratchpads: ["M4 2 H9.5 L13 5.5 V14 H4 Z", "M9.5 2 V5.5 H13", "M6 9 H11", "M6 11.5 H11"],
+  // A bolt — what is running or wants attention right now.
+  active: ["M9 1.5 L4 9 H8 L7 14.5 L12 7 H8 Z"],
 };
 
 /** Build a section icon as an inline SVG (CSP-safe, no font or asset load). */

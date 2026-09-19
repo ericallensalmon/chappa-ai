@@ -140,6 +140,25 @@ export function agentForest<R>(rows: ForestAgent<R>[]): Array<[ForestAgent<R>, n
   return out;
 }
 
+/** The rows an AGENTS section renders: the forest of `rows` (children nested
+ *  under their spawning parent) with each row's depth and whether it is the
+ *  last child at that depth (the tree connector's vertical stops at its dot). */
+function forestRows(rows: Array<[number, RailEntry]>): Array<{
+  id: number;
+  entry: RailEntry;
+  depth: number;
+  lastChild: boolean;
+}> {
+  const forest = agentForest(rows.map(([id, e]) => ({ id, parentId: e.agent?.parentId ?? null, entry: e })));
+  const out: Array<{ id: number; entry: RailEntry; depth: number; lastChild: boolean }> = [];
+  for (let j = 0; j < forest.length; j++) {
+    const [fa, depth] = forest[j];
+    const lastChild = depth >= 1 && (j + 1 >= forest.length || forest[j + 1][1] < depth);
+    out.push({ id: fa.id, entry: fa.entry, depth, lastChild });
+  }
+  return out;
+}
+
 /** A bridge fault is `container-down` or `stale` — anything but `ok`. */
 export function bridgeFault(agent: AgentEntry | undefined): boolean {
   return agent !== undefined && agent.bridge !== "ok";
@@ -446,7 +465,7 @@ export class GlLru {
 export interface AppOptions {
   root: HTMLElement;
   api?: TerminalApi;
-  /** The agent-tool registry behind "New agent ▸" and the settings
+  /** The agent-tool registry behind New agent and the settings
    *  Agents section. Defaults to the app-wide store. */
   agentTools?: AgentToolsStore;
   /** The two scratchpad reads behind the read-only SCRATCHPADS subsection
@@ -522,7 +541,7 @@ export interface AppOptions {
 const APP_CSS = `
 .chappa-app{position:fixed;inset:0;display:flex;background:#0d0e10;color:#d6d8dc;font-family:system-ui,sans-serif;}
 .chappa-rail{width:260px;min-width:260px;border-right:1px solid #22252a;display:flex;flex-direction:column;background:#101216;}
-.chappa-rail-header{padding:10px 12px 6px;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;}
+.chappa-rail-header{padding:5px 10px 4px;border-top:1px solid #1c1f24;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;}
 .chappa-project-bar{position:relative;padding:8px 8px 4px;border-bottom:1px solid #1c1f24;}
 .chappa-project-switcher{display:block;width:100%;padding:6px 8px;border:1px solid #262a31;border-radius:6px;background:#16181d;color:#d6d8dc;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
 .chappa-project-switcher:hover{background:#1d2127;}
@@ -553,9 +572,8 @@ const APP_CSS = `
 /* Two rows (2026-08-31: the 42b sync button crammed the header and
    made the name unreadable): row 1 = the name alone, full width; row 2 =
    status pill left, S/A/P actions right. */
-.chappa-project-header{display:flex;flex-direction:column;gap:2px;padding:2px 2px 6px;}
-.chappa-project-header-sub{display:flex;align-items:center;gap:6px;}
-.chappa-project-name{font:13px system-ui,sans-serif;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chappa-project-header{display:flex;align-items:center;gap:6px;padding:2px 2px 6px;}
+.chappa-project-name{flex:1 1 auto;min-width:0;font:13px system-ui,sans-serif;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-project-pill{flex:1 1 auto;font:11px ui-monospace,monospace;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-project-pill.running{color:#3fb950;}
 .chappa-project-actions{display:flex;gap:4px;}
@@ -581,9 +599,10 @@ const APP_CSS = `
 .chappa-process-btn:hover:not(:disabled){background:#1d2127;color:#d6d8dc;}
 .chappa-process-btn:disabled{opacity:.35;cursor:default;}
 .chappa-rail-header{position:relative;display:flex;align-items:center;gap:6px;}
-.chappa-rail-header-label{flex:1 1 auto;}
-.chappa-new-term,.chappa-project-term-add,.chappa-project-term-more{flex:none;width:20px;height:20px;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;font:12px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
-.chappa-new-term:hover,.chappa-project-term-add:hover,.chappa-project-term-more:hover{background:#1d2127;color:#d6d8dc;}
+.chappa-rail-header-label{flex:1 1 auto;white-space:nowrap;}
+.chappa-new-term,.chappa-project-term-add,.chappa-project-term-more,.chappa-process-add,.chappa-workspace-cmd-add,.chappa-new-agent{flex:none;width:20px;height:20px;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;font:12px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
+.chappa-new-term:hover,.chappa-project-term-add:hover,.chappa-project-term-more:hover,.chappa-process-add:hover:not(:disabled),.chappa-workspace-cmd-add:hover,.chappa-new-agent:hover{background:#1d2127;color:#d6d8dc;}
+.chappa-process-add:disabled{opacity:.35;cursor:default;}
 .chappa-new-term-menu,.chappa-project-term-menu{position:absolute;top:22px;right:0;z-index:30;min-width:170px;max-height:240px;overflow-y:auto;background:#1b1d21;border:1px solid #2a2c31;border-radius:6px;padding:4px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
 .chappa-new-term-option,.chappa-project-term-option{display:block;width:100%;text-align:left;background:none;border:0;color:#d6d8dc;padding:6px 8px;border-radius:4px;font:13px system-ui,sans-serif;cursor:pointer;}
 .chappa-new-term-option:hover,.chappa-project-term-option:hover{background:#24272e;}
@@ -595,20 +614,31 @@ const APP_CSS = `
 .chappa-subsection-header{position:relative;display:flex;align-items:center;gap:6px;padding:5px 2px 4px;border-top:1px solid #1c1f24;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;}
 .chappa-subsection-label{flex:1 1 auto;}
 .chappa-subsection-count{flex:none;color:#6b7280;}
+.chappa-subsection-count.running{color:#3fb950;}
+/* The project COMMANDS subsection: the same house header, its count reading
+   running/total, the add affordance ON the header line like TERMINALS. */
+.chappa-project-processes{padding:0 0 4px;}
 .chappa-project-term-list{display:flex;flex-direction:column;}
-/* The workspace COMMANDS subsection: house header above the
-   workspace TERMINALS section, plus the small header-line Add-command button. */
-.chappa-workspace-cmds{padding:0 0 2px;}
-.chappa-workspace-cmd-add{flex:none;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;font:11px system-ui,sans-serif;letter-spacing:0;cursor:pointer;padding:1px 6px;}
-.chappa-workspace-cmd-add:hover{background:#1d2127;color:#d6d8dc;}
+/* The workspace block: a group title sets the workspace COMMANDS and
+   TERMINALS sections off from the expanded project's, so the two TERMINALS
+   lines read as different scopes. */
+.chappa-workspace-header{margin-top:8px;padding:6px 10px 2px;font:600 13px system-ui,sans-serif;color:#8b949e;}
+/* The workspace COMMANDS subsection: house header above the workspace
+   TERMINALS section, aligned with the project section's own headers. */
+.chappa-workspace-cmds{padding:0 8px 2px;}
+/* The workspace AGENTS subsection: the unbound agents (and those of a
+   non-expanded project), as a forest under the same house header. */
+.chappa-workspace-agents{padding:0 8px 4px;}
 /* The project AGENTS subsection (agents nest under their
    project). The header is the
    same house subsection header as TERMINALS (its N/M count reads
-   running/total); the row list and the "New agent ▸" spawner reuse the
+   running/total); the row list and the New agent spawner reuse the
    terminal-row / workspace-spawner classes, so no parallel widget CSS. */
 .chappa-project-agents{padding:0 0 4px;}
 .chappa-rail-list{flex:1 1 auto;overflow-y:auto;padding:0 6px 8px;}
-.chappa-rail-footer{flex:none;display:flex;align-items:center;gap:4px;border-top:1px solid #1c1f24;padding:6px;}
+/* margin-top:auto pins the footer to the rail's bottom edge even when the
+   workspace TERMINALS list above it is folded away (hidden = no flex spacer). */
+.chappa-rail-footer{flex:none;margin-top:auto;display:flex;align-items:center;gap:4px;border-top:1px solid #1c1f24;padding:6px;}
 .chappa-rail-gear{flex:1 1 auto;display:flex;align-items:center;gap:8px;min-width:0;padding:7px 8px;border:0;border-radius:6px;background:none;color:#8b949e;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
 .chappa-rail-gear:hover{background:#171a1f;color:#d6d8dc;}
 .chappa-rail-gear.open{background:#1d232b;color:#d6d8dc;}
@@ -631,11 +661,10 @@ const APP_CSS = `
 .chappa-rail-bell{flex:none;color:#f0b429;font-size:11px;line-height:1;}
 .chappa-exit-code{flex:none;font:11px ui-monospace,monospace;color:#8b949e;background:#1c1f24;border-radius:4px;padding:0 5px;}
 .chappa-rail-close{flex:none;border:0;background:none;color:#6b7280;font-size:14px;line-height:1;cursor:pointer;padding:0 2px;border-radius:4px;}
-/* Agents: "New agent ▸" header affordance + menu, the model tag,
-   the container dot (status-coloured), the bridge-fault attention ring, and
-   the close-verification toast. */
-.chappa-new-agent{flex:none;border:0;background:none;color:#8b949e;font:11px ui-monospace,monospace;letter-spacing:.04em;cursor:pointer;padding:0 4px;border-radius:4px;}
-.chappa-new-agent:hover{color:#d6d8dc;background:#1d2127;}
+/* Agents: the header-line ＋ spawner (both AGENTS headers) + its menu, the
+   model tag, the container dot (status-coloured), the bridge-fault attention
+   ring, and the close-verification toast. */
+.chappa-new-agent{display:inline-flex;align-items:center;justify-content:center;}
 .chappa-new-agent-menu{position:absolute;top:22px;right:0;z-index:31;min-width:200px;max-height:240px;overflow-y:auto;background:#1b1d21;border:1px solid #2a2c31;border-radius:6px;padding:4px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
 .chappa-new-agent-option{display:block;width:100%;text-align:left;background:none;border:0;color:#d6d8dc;padding:4px 8px;border-radius:4px;font:13px system-ui,sans-serif;cursor:pointer;}
 .chappa-new-agent-option:hover{background:#24272e;}
@@ -684,17 +713,14 @@ const APP_CSS = `
 .chappa-row-submenu{position:absolute;left:100%;top:0;display:none;min-width:180px;background:#1b1d21;border:1px solid #2a2c31;border-radius:6px;padding:4px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
 .chappa-row-submenu.open{display:block;}
 /* The full command menu: muted section label, disabled mutations,
-   the per-card favorite star, the trailing + Add command card, and the
-   chappa.yml load-error line that explains why editing is off. */
+   the per-card favorite star, and the chappa.yml load-error line that
+   explains why editing is off. */
 .chappa-row-menu-label{padding:6px 8px 2px;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.04em;}
 .chappa-row-menu-item:disabled{color:#565b64;cursor:default;}
 .chappa-row-menu-item:disabled:hover{background:none;}
 .chappa-process-star{flex:none;border:0;background:none;color:#565b64;font-size:12px;line-height:1;cursor:pointer;padding:0 2px;border-radius:3px;}
 .chappa-process-star:hover{color:#d6d8dc;}
 .chappa-process-star.on{color:#f0b429;}
-.chappa-process-add{display:block;width:100%;margin:4px 0 6px;padding:6px 8px;border:1px dashed #262a31;border-radius:6px;background:none;color:#8b949e;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
-.chappa-process-add:hover{background:#171a1f;color:#d6d8dc;}
-.chappa-process-add:disabled{color:#565b64;cursor:default;}
 .chappa-project-yml-error{display:none;margin:0 2px 8px;padding:6px 8px;border:1px solid #5c2f2f;border-radius:6px;background:#2a1717;color:#f0a0a0;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;}
 .chappa-panel-host{display:none;flex:1 1 auto;min-width:0;min-height:0;}
 .chappa-panel-host.active{display:block;}
@@ -705,10 +731,11 @@ const APP_CSS = `
 .chappa-process-empty-start{margin-top:4px;padding:6px 14px;border:1px solid #262a31;border-radius:6px;background:#16181d;color:#d6d8dc;font:13px system-ui,sans-serif;cursor:pointer;}
 .chappa-process-empty-start:hover{background:#1d232b;}
 /* ACTIVE section: running processes + badged live terminals across
-   ALL open projects, at the top of the rail. Hidden entirely when empty.
+   ALL open projects, the first section of the workspace block. Hidden
+   entirely when empty.
    Attention rows (undismissed bell/notify badge) sort first and carry the
    accent ring. */
-.chappa-active-section{padding:0 8px 4px;border-bottom:1px solid #1c1f24;}
+.chappa-active-section{padding:0 8px 4px;}
 .chappa-active-label{flex:1 1 auto;}
 .chappa-active-count{flex:none;color:#6b7280;}
 .chappa-active-row{position:relative;display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;border-radius:6px;background:none;color:#d6d8dc;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
@@ -790,6 +817,10 @@ function trashIcon(): SVGSVGElement {
  */
 const LAST_PROJECT_DIR_KEY = "chappa-ai.lastProjectDir";
 
+/** The header-line add glyph (fullwidth plus: it centres in a 20px square
+ *  where the ASCII plus sits low). */
+const PLUS_GLYPH = "＋";
+
 /** localStorage, or null where there is none (SSR/jsdom-without-storage) or
  *  where touching it throws (a webview with storage disabled). */
 function safeStorage(): Storage | null {
@@ -847,7 +878,7 @@ function injectAppStyles(): void {
   document.head.appendChild(el);
 }
 
-/** A "New agent ▸" spawner (the workspace TERMINALS header; the
+/** A New agent spawner (the workspace AGENTS header; the
  *  project AGENTS section shares it): the button plus its dropdown of the
  *  ENABLED agent tools. One builder renders both surfaces so the affordance
  *  is literally the same widget — same classes, same option anatomy, same
@@ -929,12 +960,17 @@ export class App {
   private readonly newTermMenuBtn: HTMLButtonElement;
   // --- agents (shares the spawner) -------------------------
   private readonly agentTools: AgentToolsStore;
-  /** The "New agent ▸" spawners (the workspace affordance, the
+  /** The New agent spawners (the workspace affordance, the
    *  project-section spawner): one shared builder, one option renderer —
    *  the affordance is the same widget on both surfaces, and at most one of
    *  the two menus is open at a time. */
   private readonly agentSpawners: AgentSpawner[] = [];
   private readonly newAgentSpawner!: AgentSpawner;
+  /** The workspace AGENTS subsection: header (label + running/total count +
+   *  the ＋ spawner) above the unbound-agent forest. */
+  private readonly wsAgentsEl: HTMLElement;
+  private readonly wsAgentList: HTMLElement;
+  private readonly wsAgentCount: HTMLElement;
   /** The close-verification toast stack (bottom-left, so it never fights the
    *  notification banners bottom-right). */
   private readonly toasts: HTMLElement;
@@ -951,8 +987,12 @@ export class App {
   private readonly projectMenu: HTMLElement;
   private readonly projectSection: HTMLElement;
   private readonly projectNameEl: HTMLElement;
-  private readonly projectPill: HTMLElement;
+  /** The project COMMANDS subsection: header (label + running/total count +
+   *  the header-line add button) above the command cards. */
   private readonly projectProcessesEl: HTMLElement;
+  private readonly projectCmdList: HTMLElement;
+  private readonly projectCmdCount: HTMLElement;
+  private readonly projectCmdAdd: HTMLButtonElement;
   // --- project terminals -----------------------------------------
   /** The TERMINALS subsection: header line (label + count + ＋ + ▾) and the
    *  bound-terminal rows. Built ONCE and updated in place — rebuilding it per
@@ -966,7 +1006,7 @@ export class App {
   // --- project agents --------------------------------------------
   /** The AGENTS subsection of the expanded project (agents nest under their
    *  project): header
-   *  line (label + N/M count + New agent ▸) and the bound agent rows. Built
+   *  line (label + N/M count + New agent) and the bound agent rows. Built
    *  ONCE and updated in place by renderProjectAgents — the projectTermsEl
    *  precedent. */
   private readonly projectAgentsEl: HTMLElement;
@@ -1129,9 +1169,9 @@ export class App {
     );
 
     // ACTIVE section: the cross-project running/needs-attention
-    // rows at the top of the rail. House header (uppercase muted + hairline
-    // + right count, the chappa-subsection pattern); the list is rebuilt behind
-    // the activeSig guard. Hidden entirely while empty.
+    // rows, first under the Workspace title. House header (uppercase muted +
+    // hairline + right count, the chappa-subsection pattern); the list is
+    // rebuilt behind the activeSig guard. Hidden entirely while empty.
     this.activeSection = document.createElement("section");
     this.activeSection.className = "chappa-active-section";
     this.activeSection.style.display = "none";
@@ -1150,6 +1190,12 @@ export class App {
     this.activeList = document.createElement("div");
     this.activeList.className = "chappa-active-list";
     this.activeSection.append(activeHeader, this.activeList);
+    makeCollapsibleSection({
+      header: activeHeader,
+      body: this.activeList,
+      storageKey: "workspace.active",
+      icon: "active",
+    });
 
     // Collapsed open projects: one-line summary rows, kept above
     // the expanded project's full section.
@@ -1161,10 +1207,37 @@ export class App {
     this.projectSection.style.display = "none";
     this.projectNameEl = document.createElement("span");
     this.projectNameEl.className = "chappa-project-name";
-    this.projectPill = document.createElement("span");
-    this.projectPill.className = "chappa-project-pill";
+    // COMMANDS subsection: the same house header as TERMINALS (its count
+    // reads running/total) with the add affordance ON the header line, then
+    // one card per command. Zero commands shows just the header.
     this.projectProcessesEl = document.createElement("div");
     this.projectProcessesEl.className = "chappa-project-processes";
+    const cmdsHeader = document.createElement("div");
+    cmdsHeader.className = "chappa-subsection-header";
+    const cmdsLabel = document.createElement("span");
+    cmdsLabel.className = "chappa-subsection-label";
+    cmdsLabel.textContent = "COMMANDS";
+    this.projectCmdCount = document.createElement("span");
+    this.projectCmdCount.className = "chappa-subsection-count";
+    this.projectCmdCount.textContent = "0/0";
+    this.projectCmdAdd = document.createElement("button");
+    this.projectCmdAdd.className = "chappa-process-add";
+    this.projectCmdAdd.textContent = PLUS_GLYPH;
+    this.projectCmdAdd.title = "Add a command to chappa.yml";
+    this.projectCmdAdd.addEventListener("mousedown", (e) => e.preventDefault());
+    this.projectCmdAdd.addEventListener("click", () => {
+      if (this.expandedProjectId !== null) void this.onAddCommand(this.expandedProjectId);
+    });
+    cmdsHeader.append(cmdsLabel, this.projectCmdCount, this.projectCmdAdd);
+    this.projectCmdList = document.createElement("div");
+    this.projectCmdList.className = "chappa-project-term-list chappa-project-cmd-list";
+    this.projectProcessesEl.append(cmdsHeader, this.projectCmdList);
+    makeCollapsibleSection({
+      header: cmdsHeader,
+      body: this.projectCmdList,
+      storageKey: "project.commands",
+      icon: "commands",
+    });
     const projectHeader = document.createElement("div");
     projectHeader.className = "chappa-project-header";
     projectHeader.title = "project header actions: Ctrl+Shift+S/A/P";
@@ -1182,13 +1255,10 @@ export class App {
     btnAll.addEventListener("click", () => void this.startAll());
     btnStop.addEventListener("click", () => void this.stopAll());
     headerActions.append(btnAuto, btnAll, btnStop);
-    // Row 1: the name alone (full width, readable). Row 2: pill + actions.
-    // The rail is visually quieter: the sync toggle and
-    // the notification-level picker moved into the Edit-project pane.
-    const headerSub = document.createElement("div");
-    headerSub.className = "chappa-project-header-sub";
-    headerSub.append(this.projectPill, headerActions);
-    projectHeader.append(this.projectNameEl, headerSub);
+    // One line: the name, then the actions. The running/total count lives
+    // on the COMMANDS header; the sync toggle and the notification-level
+    // picker live in the Edit-project pane.
+    projectHeader.append(this.projectNameEl, headerActions);
 
     // TERMINALS subsection. The project section has a TERMINALS
     // subsection between the header/picker and the COMMANDS rows:
@@ -1209,7 +1279,7 @@ export class App {
     this.projectTermCount.textContent = "0";
     const termsAdd = document.createElement("button");
     termsAdd.className = "chappa-project-term-add";
-    termsAdd.textContent = "＋";
+    termsAdd.textContent = PLUS_GLYPH;
     termsAdd.title = "New terminal in this project";
     termsAdd.addEventListener("mousedown", (e) => e.preventDefault());
     termsAdd.addEventListener("click", () => {
@@ -1253,7 +1323,7 @@ export class App {
     // SCRATCHPADS — agents nest under their project, where the work they
     // are doing lives. House header (uppercase muted +
     // hairline + right count) with the count reading running/total (`N/M`),
-    // and the SAME "New agent ▸" spawner the workspace header has — the
+    // and the SAME New agent spawner the workspace header has — the
     // shared builder, its pick spawning with THIS project's id. Rendered even
     // at 0/0: discoverability is the point (could not find agent
     // creation today); zero rows under it, no empty-state text.
@@ -1297,14 +1367,16 @@ export class App {
     header.className = "chappa-rail-header";
     const headerLabel = document.createElement("span");
     headerLabel.className = "chappa-rail-header-label";
+    headerLabel.textContent = "TERMINALS";
     this.railCount = document.createElement("span");
-    headerLabel.append("TERMINALS ", this.railCount);
+    this.railCount.className = "chappa-subsection-count";
+    this.railCount.textContent = "0";
     // New-terminal affordances: the ＋ is today's behaviour (the
     // platform default shell, empty command); the ▾ offers the ENABLED shell
     // profiles. Disabled profiles never appear.
     const newTerm = document.createElement("button");
     newTerm.className = "chappa-new-term";
-    newTerm.textContent = "＋";
+    newTerm.textContent = PLUS_GLYPH;
     newTerm.title = "New terminal (Ctrl+Shift+T)";
     newTerm.addEventListener("mousedown", (e) => e.preventDefault());
     newTerm.addEventListener("click", () => {
@@ -1320,23 +1392,16 @@ export class App {
     this.newTermMenu = document.createElement("div");
     this.newTermMenu.className = "chappa-new-term-menu";
     this.newTermMenu.style.display = "none";
-    // "New agent ▸": the same header-line affordance pattern (task
-    // 34), listing the ENABLED agent tools; a pick spawns into the expanded
-    // project (cwd + identity env) with an empty prompt. Built by
-    // the SHARED spawner builder — the project AGENTS section's spawner is
-    // the other instance — and the workspace one keeps its current binding
-    // behavior (the explicit project id is the section spawner's difference).
+    // The workspace New agent spawner (it rides the workspace AGENTS header
+    // built below): the ENABLED agent tools; a pick spawns into the expanded
+    // project (cwd + identity env) with an empty prompt. Built by the SHARED
+    // spawner builder — the project AGENTS section's spawner is the other
+    // instance — and the workspace one keeps its current binding behavior
+    // (the explicit project id is the section spawner's difference).
     this.newAgentSpawner = this.buildAgentSpawner((toolId) => void this.spawnAgent(toolId), () => {
       this.hideNewTermMenu();
     });
-    header.append(
-      headerLabel,
-      newTerm,
-      this.newTermMenuBtn,
-      this.newAgentSpawner.btn,
-      this.newTermMenu,
-      this.newAgentSpawner.menu,
-    );
+    header.append(headerLabel, this.railCount, newTerm, this.newTermMenuBtn, this.newTermMenu);
     this.toasts = document.createElement("div");
     this.toasts.className = "chappa-toast-stack";
     // Same capture-phase dismiss as the project menu (shared helper, task
@@ -1358,6 +1423,31 @@ export class App {
       body: this.railList,
       storageKey: "workspace.terminals",
       icon: "terminal",
+    });
+
+    // The workspace AGENTS subsection: the mirror of the project one. Every
+    // agent that is not in the expanded project's section renders here as a
+    // forest (children under their spawning parent); the header carries the
+    // running/total count and the ＋ spawner built above.
+    this.wsAgentsEl = document.createElement("div");
+    this.wsAgentsEl.className = "chappa-workspace-agents";
+    const wsAgentsHeader = document.createElement("div");
+    wsAgentsHeader.className = "chappa-subsection-header";
+    const wsAgentsLabel = document.createElement("span");
+    wsAgentsLabel.className = "chappa-subsection-label";
+    wsAgentsLabel.textContent = "AGENTS";
+    this.wsAgentCount = document.createElement("span");
+    this.wsAgentCount.className = "chappa-subsection-count";
+    this.wsAgentCount.textContent = "0/0";
+    wsAgentsHeader.append(wsAgentsLabel, this.wsAgentCount, this.newAgentSpawner.btn, this.newAgentSpawner.menu);
+    this.wsAgentList = document.createElement("div");
+    this.wsAgentList.className = "chappa-project-term-list chappa-workspace-agent-list";
+    this.wsAgentsEl.append(wsAgentsHeader, this.wsAgentList);
+    makeCollapsibleSection({
+      header: wsAgentsHeader,
+      body: this.wsAgentList,
+      storageKey: "workspace.agents",
+      icon: "agents",
     });
 
     // Rail footer: the gear, beneath the launcher hint.
@@ -1391,8 +1481,8 @@ export class App {
     footer.append(this.gear, this.bellBtn);
 
     // The workspace COMMANDS subsection. House header DIRECTLY ABOVE
-    // the workspace TERMINALS section (label + count + `+ Add command` on the
-    // header line, style), then the command-card rows. Zero rows still
+    // the workspace TERMINALS section (label + count + the header-line add
+    // button), then the command-card rows. Zero rows still
     // shows just the header — no empty-state text (same rule as TERMINALS).
     this.wsCmdsEl = document.createElement("div");
     this.wsCmdsEl.className = "chappa-project-terms chappa-workspace-cmds";
@@ -1406,7 +1496,8 @@ export class App {
     this.wsCmdCount.textContent = "0";
     const wsAdd = document.createElement("button");
     wsAdd.className = "chappa-workspace-cmd-add";
-    wsAdd.textContent = "+ Add command";
+    wsAdd.textContent = PLUS_GLYPH;
+    wsAdd.title = "Add a workspace command";
     wsAdd.addEventListener("mousedown", (e) => e.preventDefault());
     wsAdd.addEventListener("click", () => void this.addWorkspaceCommand());
     wsHeader.append(wsLabel, this.wsCmdCount, wsAdd);
@@ -1420,18 +1511,25 @@ export class App {
       icon: "commands",
     });
 
-    // ACTIVE sits at the TOP of the rail — above the project bar
-    // and (a fortiori) above the workspace TERMINALS. The workspace COMMANDS
-    // subsection sits directly ABOVE the workspace TERMINALS header
-    // (`header`), and TERMINALS ABOVE the rail list.
+    // The workspace block's group title: the workspace COMMANDS + TERMINALS
+    // sections sit under it, set off from the expanded project's sections.
+    const wsGroupHeader = document.createElement("div");
+    wsGroupHeader.className = "chappa-workspace-header";
+    wsGroupHeader.textContent = "Workspace";
+
+    // The workspace block, under its title: ACTIVE first (the cross-project
+    // overview), then COMMANDS directly ABOVE the workspace TERMINALS header
+    // (`header`) and its rail list, then AGENTS.
     rail.append(
-      this.activeSection,
       projectBar,
       this.projectSummariesEl,
       this.projectSection,
+      wsGroupHeader,
+      this.activeSection,
       this.wsCmdsEl,
       header,
       this.railList,
+      this.wsAgentsEl,
       footer,
     );
 
@@ -2720,21 +2818,18 @@ export class App {
 
   private renderRail(): void {
     this.railList.textContent = "";
-    // Only plain WORKSPACE shells get rail rows; project processes and
-    // project-bound terminals live in the project section (their
-    // panels are still in `entries` for activation/LRU). Adds the
-    // third exclusion: an agent bound to the EXPANDED project renders under
-    // that project's AGENTS subsection instead — the same predicate both
-    // sides use, so a row can never render twice or vanish (an agent of an
-    // open-but-collapsed, or never-opened, project stays here). // the workspace agents render as a FOREST (children nested under their
-    // spawning parent), interleaved with the shells at their insertion
-    // positions.
+    // Only plain WORKSPACE shells get rail rows: project processes and
+    // project-bound terminals live in the project section (their panels are
+    // still in `entries` for activation/LRU), and every agent renders in an
+    // AGENTS section — the expanded project's or the workspace's.
     let count = 0;
-    for (const placed of this.orderedWorkspaceRows()) {
+    for (const [id, entry] of this.entries) {
+      if (entry.kind === "process" || entry.kind === "project-shell" || entry.agent) continue;
       count += 1;
-      this.railList.appendChild(this.buildTerminalRow(placed.id, placed.entry, undefined, placed.depth, placed.lastChild));
+      this.railList.appendChild(this.buildTerminalRow(id, entry));
     }
     this.railCount.textContent = String(count);
+    this.renderWorkspaceAgents();
     // The project subsections are the rail's sibling surfaces: every state
     // change that repaints one repaints the others, so a bound terminal's or
     // agent's status / title / badge lands without duplicating the call sites.
@@ -2746,56 +2841,23 @@ export class App {
   }
 
   /**
-   * The workspace rail's ordered rows — shells in entry order, with
-   * the agent rows arranged as a forest (each agent's subtree rendered
-   * contiguously under it, at the root's insertion position; non-root agents
-   * ride their parent's subtree and are NOT emitted separately). Counts stay
-   * FLAT: every row on this surface is produced exactly once.
+   * The workspace AGENTS subsection: every agent row NOT in the expanded
+   * project's section (unbound agents, and agents of an open-but-collapsed or
+   * never-opened project) — the mirror image of that section's predicate, so
+   * a row can never render twice or vanish. Rendered as a forest with a FLAT
+   * running/total count, exactly like the project section.
    */
-  private orderedWorkspaceRows(): Array<{
-    id: number;
-    entry: RailEntry;
-    depth: number;
-    lastChild: boolean;
-  }> {
-    const agents: ForestAgent<RailEntry>[] = [];
-    const order: Array<{ id: number; entry: RailEntry; shell: boolean }> = [];
+  private renderWorkspaceAgents(): void {
+    const rows: Array<[number, RailEntry]> = [];
     for (const [id, entry] of this.entries) {
-      if (entry.kind === "process" || entry.kind === "project-shell") continue;
-      if (this.agentInExpandedSection(entry)) continue;
-      if (entry.agent) {
-        agents.push({ id, parentId: entry.agent.parentId, entry });
-        order.push({ id, entry, shell: false });
-      } else {
-        order.push({ id, entry, shell: true });
-      }
+      if (entry.agent && !this.agentInExpandedSection(entry)) rows.push([id, entry]);
     }
-    const forest = agentForest(agents);
-    const forestIndex = new Map<number, number>();
-    for (let i = 0; i < forest.length; i++) forestIndex.set(forest[i][0].id, i);
-    const consumed = new Set<number>();
-    const out: Array<{ id: number; entry: RailEntry; depth: number; lastChild: boolean }> = [];
-    for (const item of order) {
-      if (item.shell) {
-        out.push({ id: item.id, entry: item.entry, depth: 0, lastChild: false });
-        continue;
-      }
-      const start = forestIndex.get(item.id);
-      if (start === undefined || consumed.has(item.id)) continue;
-      consumed.add(item.id);
-      const baseDepth = forest[start][1];
-      // Emit the contiguous subtree rooted at `start` (the root + descendants).
-      for (let j = start; j < forest.length; j++) {
-        const [fa, depth] = forest[j];
-        if (j !== start && depth <= baseDepth) break;
-        consumed.add(fa.id);
-        // A "last child" (the tree connector's vertical stops at its dot) is a
-        // depth ≥ 1 row whose next forest row is shallower (or the end).
-        const lastChild = depth >= 1 && (j + 1 >= forest.length || forest[j + 1][1] < depth);
-        out.push({ id: fa.id, entry: fa.entry, depth, lastChild });
-      }
+    const running = rows.filter(([, e]) => isLive(e.status)).length;
+    this.wsAgentList.textContent = "";
+    for (const { id, entry, depth, lastChild } of forestRows(rows)) {
+      this.wsAgentList.appendChild(this.buildTerminalRow(id, entry, "chappa-workspace-agent-row", depth, lastChild));
     }
-    return out;
+    this.wsAgentCount.textContent = `${running}/${rows.length}`;
   }
 
   /** An agent row that renders in the EXPANDED project's AGENTS
@@ -3026,9 +3088,9 @@ export class App {
   // --- agents (shares the spawner) -------------------------
 
   /**
-   * Build a "New agent ▸" spawner: the button plus its dropdown of the
+   * Build a New agent spawner: the button plus its dropdown of the
    * ENABLED agent tools. ONE builder for both surfaces (the workspace
-   * TERMINALS header and the project AGENTS section) — the affordance
+   * AGENTS header and the project AGENTS section) — the affordance
    * is the same widget, not a copy: same classes, same option anatomy, same
    * dismiss discipline. `pick` is the only difference (the workspace spawner
    * keeps the binding, the section one names the project explicitly);
@@ -3038,8 +3100,8 @@ export class App {
   private buildAgentSpawner(pick: (toolId: number) => void, onOpen?: () => void): AgentSpawner {
     const btn = document.createElement("button");
     btn.className = "chappa-new-agent";
-    btn.textContent = "New agent ▸";
-    btn.title = "Spawn an agent from a registered tool";
+    btn.textContent = PLUS_GLYPH;
+    btn.title = "New agent";
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     const menu = document.createElement("div");
     menu.className = "chappa-new-agent-menu";
@@ -3050,7 +3112,7 @@ export class App {
     const spawner: AgentSpawner = { btn, menu, hide };
     btn.addEventListener("click", () => {
       if (menu.style.display === "none") {
-        // One "New agent ▸" menu at a time: opening one closes the other
+        // One New agent menu at a time: opening one closes the other
         // surface's (the workspace and project spawners are siblings in the
         // rail), the terminal-menu behaviour for the workspace one.
         for (const s of this.agentSpawners) if (s !== spawner) s.hide();
@@ -3082,7 +3144,7 @@ export class App {
     return spawner;
   }
 
-  /** Hide every "New agent ▸" menu (a pick closes the menus before it spawns). */
+  /** Hide every New agent menu (a pick closes the menus before it spawns). */
   private hideAgentMenus(): void {
     for (const s of this.agentSpawners) s.hide();
   }
@@ -4238,23 +4300,19 @@ export class App {
       ? `chappa.yml failed to load — editing disabled until it parses again:\n${state.ymlError}`
       : "";
     this.projectYmlErrorEl.style.display = state.ymlError ? "block" : "none";
-    this.projectProcessesEl.textContent = "";
+    this.projectCmdList.textContent = "";
     // Favorites first within COMMANDS; a stable sort keeps the file
     // order inside each group.
     const rows = [...state.processRows.values()].sort(
       (a, b) => Number(b.favorite) - Number(a.favorite),
     );
     for (const row of rows) {
-      this.projectProcessesEl.appendChild(this.buildProcessRow(row));
+      this.projectCmdList.appendChild(this.buildProcessRow(row));
     }
-    const add = document.createElement("button");
-    add.className = "chappa-process-add";
-    add.textContent = "+ Add command";
-    add.disabled = state.ymlError !== null;
-    add.title = state.ymlError ? `editing disabled: ${state.ymlError}` : "Add a command to chappa.yml";
-    add.addEventListener("mousedown", (e) => e.preventDefault());
-    add.addEventListener("click", () => void this.onAddCommand(state.id));
-    this.projectProcessesEl.appendChild(add);
+    this.projectCmdAdd.disabled = state.ymlError !== null;
+    this.projectCmdAdd.title = state.ymlError
+      ? `editing disabled: ${state.ymlError}`
+      : "Add a command to chappa.yml";
     this.refreshProjectHeader();
     // Open/expand runs through here without touching renderRail or
     // any process row — and opening a SECOND project is what turns the
@@ -4723,15 +4781,7 @@ export class App {
     // The rows render as a FOREST (children nested under their
     // spawning parent). The `render` list feeds both the signature (which
     // includes depth, so an orphan promotion repaints) and the DOM.
-    const forest = agentForest(
-      rows.map(([id, e]) => ({ id, parentId: e.agent?.parentId ?? null, entry: e })),
-    );
-    const render: Array<{ id: number; entry: RailEntry; depth: number; lastChild: boolean }> = [];
-    for (let j = 0; j < forest.length; j++) {
-      const [fa, depth] = forest[j];
-      const lastChild = depth >= 1 && (j + 1 >= forest.length || forest[j + 1][1] < depth);
-      render.push({ id: fa.id, entry: fa.entry, depth, lastChild });
-    }
+    const render = forestRows(rows);
     // Cheap signature over what a row actually renders (the
     // renderProjectTerminals precedent, plus the agent-only facts the row
     // shows: the typed attention tier and the bridge state that rings it,
@@ -4932,8 +4982,8 @@ export class App {
     const project = this.projects.get(this.expandedProjectId ?? -1);
     this.projectNameEl.textContent = project?.name ?? (this.expandedProjectId !== null ? `project ${this.expandedProjectId}` : "");
     const { running, total } = state ? this.runningCount(state) : { running: 0, total: 0 };
-    this.projectPill.textContent = `${running}/${total} Running`;
-    this.projectPill.classList.toggle("running", running > 0);
+    this.projectCmdCount.textContent = `${running}/${total}`;
+    this.projectCmdCount.classList.toggle("running", running > 0);
     this.editPane?.refresh();
   }
 
@@ -5346,7 +5396,7 @@ export class App {
     this.applyProcessList(projectId, rows);
   }
 
-  /** `+ Add command` (card button) / `Add ▸ + Add command` (menu). */
+  /** The COMMANDS header add button / `Add ▸ + Add command` (menu). */
   private async onAddCommand(projectId: number): Promise<void> {
     if (!this.openProjects.has(projectId)) return;
     const form = await this.ask(`add:${projectId}`, () => this.promptCommand(null, "Add command"));

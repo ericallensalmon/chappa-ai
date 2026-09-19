@@ -89,7 +89,9 @@ describe("ScratchpadsSection", () => {
     await FLUSH();
     expect(lists).toEqual([6, 7]);
     expect(section.element.querySelector(".chappa-subsection-count")?.textContent).toBe("0");
-    expect(section.element.querySelector(".chappa-scratchpad-empty")).not.toBeNull();
+    // Zero pads: the header alone, no rows and no empty-state text.
+    expect(section.element.querySelectorAll(".chappa-scratchpad-row").length).toBe(0);
+    expect(section.element.querySelector(".chappa-scratchpad-empty")).toBeNull();
     section.setProject(undefined);
     expect(section.element.style.display).toBe("none");
     section.dispose();

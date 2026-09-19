@@ -37,7 +37,7 @@ describe("sectionIcon", () => {
   });
 
   it("covers every section name", () => {
-    for (const name of ["terminal", "agents", "commands", "scratchpads"] as const) {
+    for (const name of ["terminal", "agents", "commands", "scratchpads", "active"] as const) {
       expect(sectionIcon(name).querySelectorAll("path").length).toBeGreaterThan(0);
     }
   });

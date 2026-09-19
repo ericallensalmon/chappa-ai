@@ -72,7 +72,6 @@ function injectStyles(): void {
 .chappa-scratchpad-row:hover{background:#171a1f;}
 .chappa-scratchpad-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-scratchpad-meta{font:11px ui-monospace,monospace;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.chappa-scratchpad-empty{padding:6px 8px;color:#6b7280;font:12px system-ui,sans-serif;}
 .chappa-scratchpad-global{flex:none;margin-left:6px;padding:0 5px;border:1px solid #2a2c31;border-radius:3px;color:#6b7280;font:10px ui-monospace,monospace;line-height:14px;vertical-align:middle;}
 .chappa-scratchpad-name{display:flex;align-items:center;min-width:0;}
 .chappa-scratchpad-name-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -194,13 +193,9 @@ export class ScratchpadsSection {
   private render(): void {
     this.list.textContent = "";
     this.count.textContent = String(this.rows.length);
-    if (this.rows.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "chappa-scratchpad-empty";
-      empty.textContent = "No scratchpads yet — agents write them through chappa-ai-mcp.";
-      this.list.appendChild(empty);
-      return;
-    }
+    // Zero pads shows just the header (the TERMINALS/AGENTS rule): no
+    // empty-state text under it.
+    if (this.rows.length === 0) return;
     const now = this.now();
     for (const row of this.rows) {
       const btn = document.createElement("button");
