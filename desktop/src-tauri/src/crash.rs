@@ -20,10 +20,10 @@
 //! - `panic-<unix-seconds>-<pid>.txt` — Rust panic.
 //!
 //! The handler writes the dump in-process. That is less robust than an
-//! out-of-process watcher, but it needs no helper executable, and the
-//! app's own allocations do not live in the OS heap (see the global
-//! allocator in lib.rs), so a corrupted OS heap does not take the handler
-//! down with it.
+//! out-of-process watcher — a badly corrupted heap could fail the handler's
+//! own allocations — but it needs no helper executable, and the module
+//! inventory is written at startup regardless, so the one fact that matters
+//! for an injected-DLL crash survives even if the dump does not.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

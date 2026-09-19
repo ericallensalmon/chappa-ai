@@ -19,16 +19,13 @@ pub mod timers;
 pub mod timers_http;
 pub mod workspace;
 
-/// All of the app's own allocations live in mimalloc's arenas, not in the
-/// OS process heap. DLLs that other software injects into the process
-/// (antivirus behavioral hooks are the usual case) allocate from the OS
-/// heap, and a bug in one of them corrupts whatever else lives there.
-/// Keeping our data out of that heap turns such a bug from a crash in
-/// unrelated code of ours into, at worst, a crash inside the OS component
-/// that shares the heap with the hook. See crash.rs for the evidence
-/// trail that is written when it happens anyway.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// A mimalloc global allocator was tried here to keep the app's allocations
+// off the OS process heap that injected hooks corrupt. It surfaced a
+// use-after-free in the Tauri/WebView2 FFI stack (an Rc cloned after free —
+// mimalloc reuses freed memory faster than the system allocator, which had
+// been masking a dangling pointer that crosses the Rust/C++ boundary), so it
+// was removed. The antivirus-hook corruption it was meant to blunt is handled
+// by an AV exception instead; crash.rs still records the evidence if it recurs.
 
 use agent_tools::AgentToolsState;
 use coordination::Coordination;
