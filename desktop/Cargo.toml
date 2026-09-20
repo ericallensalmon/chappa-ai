@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["term-core", "project-model", "src-tauri", "chappa-ai-mcp"]
+
+# Local copy of the Windows runtime with one fix: cloning the runtime handle
+# off the main thread must not touch the event loop's non-atomic refcounts
+# (see the comment on `DispatcherMainThreadContext`). Drop this once
+# the upstream crate ships the same change.
+[patch.crates-io]
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }

@@ -62,9 +62,21 @@ impl Module {
 /// Classify a module path against the OS and app directories. Pure so it
 /// can be tested without loading anything; the comparison is
 /// case-insensitive because Windows paths are.
+///
+/// Vendor driver packages are staged under the Windows directory
+/// (`System32\DriverStore\FileRepository`), but the DLLs some of them hook
+/// into every process are third-party code, so they count as foreign.
 pub fn classify(path: &str, windows_dir: &str, app_dir: &str) -> Origin {
     let lower = path.to_ascii_lowercase();
-    if starts_with_dir(&lower, &windows_dir.to_ascii_lowercase()) {
+    let windows_lower = windows_dir.to_ascii_lowercase();
+    if starts_with_dir(&lower, &windows_lower) {
+        let driver_store = format!(
+            "{}\\system32\\driverstore",
+            windows_lower.trim_end_matches(['\\', '/'])
+        );
+        if starts_with_dir(&lower, &driver_store) {
+            return Origin::Other;
+        }
         Origin::System
     } else if starts_with_dir(&lower, &app_dir.to_ascii_lowercase()) {
         Origin::App
@@ -162,7 +174,17 @@ pub fn install(dir: PathBuf) {
 fn install_panic_hook(dir: PathBuf) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let mut text = format!("panic: {info}\n\n");
+        let thread = std::thread::current();
+        let mut text = format!(
+            "panic: {info}\nthread: {}\n\n",
+            thread.name().unwrap_or("<unnamed>")
+        );
+        // Captured regardless of RUST_BACKTRACE: a panic report without the
+        // stack that raised it rarely says anything useful.
+        text.push_str(&format!(
+            "backtrace:\n{}\n\n",
+            std::backtrace::Backtrace::force_capture()
+        ));
         text.push_str(&render_module_inventory(&loaded_modules()));
         let _ = std::fs::write(dir.join(format!("panic-{}.txt", stamp())), text);
         previous(info);
@@ -372,6 +394,15 @@ mod tests {
         );
         assert_eq!(
             classify(r"C:\Program Files\Vendor\hook64.dll", win, app),
+            Origin::Other
+        );
+        // Driver packages are staged under Windows but are vendor code.
+        assert_eq!(
+            classify(
+                r"C:\WINDOWS\System32\DriverStore\FileRepository\vendor.inf_amd64_1\hook.dll",
+                win,
+                app
+            ),
             Origin::Other
         );
         // A sibling directory that merely shares the prefix is not inside.
