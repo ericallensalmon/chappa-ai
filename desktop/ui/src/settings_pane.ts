@@ -1,30 +1,32 @@
-// The settings overlay. A FULL-WINDOW view above the terminal
-// stack — deliberately NOT a second window: a window brings its own chrome,
-// its own webview and a whole focus-restoration problem for one screen of
-// controls.
+// The settings view. A FULL-WINDOW view above the terminal stack —
+// deliberately NOT a second window: a window brings its own chrome, its own
+// webview and a whole focus-restoration problem for one screen of controls.
 //
-// It started as a 420px right-side drawer; the host verification
-// killed that (the "Line height" label sat under its 9-option segmented
-// picker). Full-window + a centred 680px column is the fix: the rows breathe,
-// and the label owns a fixed 180px flex basis so a wide control right-aligns
-// or wraps beneath it instead of covering it.
+// Layout: a pinned header ("← Settings" back control, then the tab row) and,
+// beneath it, ONE tab's sections in a column that scrolls on its own. The
+// header never scrolls away, so the way out is always on screen — with a
+// scrolling page the close control disappeared as soon as a long tab was
+// scrolled, and reaching for it closed the window instead.
+//
+// Tabs: Terminal (behavior, appearance, shell profiles), Agents (the tool
+// registry and the agent knobs), Timers (the idle-timer knobs). Only tabs
+// with content exist; the last tab used is remembered.
 //
 // No Save button: every control change calls `store.update()` immediately and
 // the store adopts whatever Rust returns (it clamps). The pane then re-syncs
 // from that canonical value, so a rejected/clamped edit visibly snaps back.
 //
-// Dismiss is × or Escape only — "x returning to dashboard". There is
-// deliberately NO outside-click dismiss: a full-window view has no outside,
-// and the capture-phase listener that used to serve one only existed to be
-// defused by an inside-guard and an `anchor` exclusion for the gear.
+// Dismiss is the back control or Escape only. There is deliberately NO
+// outside-click dismiss: a full-window view has no outside.
 //
-// Deliberately NOT exposed here ):
-// letter spacing — it became the cell-quantization delta, so a
-// user multiplier would fight the shared-grid invariant every consumer
-// (PTY resize, mouse mapping, GL quads) depends on — and font-weight pickers.
+// Deliberately NOT exposed here: letter spacing — it became the
+// cell-quantization delta, so a user multiplier would fight the shared-grid
+// invariant every consumer (PTY resize, mouse mapping, GL quads) depends on —
+// and font-weight pickers.
 
 import { Segmented } from "./segmented";
 import { AgentsSection } from "./agents_section";
+import { TimersSection } from "./timers_section";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
 import {
   BUILTIN_EXEC_PROFILES,
@@ -38,60 +40,93 @@ import {
   type SettingsStore,
   type ShellProfile,
 } from "./settings";
+import {
+  CHECKBOX_CSS,
+  INPUT_CSS,
+  SELECT_CSS,
+  SMALL_BTN_CSS,
+  injectSettingsStyles,
+  settingsBlock,
+  settingsRow,
+  settingsSection,
+} from "./settings_widgets";
+
+export type SettingsTab = "terminal" | "agents" | "timers";
+
+const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
+  { id: "terminal", label: "Terminal" },
+  { id: "agents", label: "Agents" },
+  { id: "timers", label: "Timers" },
+];
+const DEFAULT_TAB: SettingsTab = "terminal";
+/** Where the last-used tab is remembered. localStorage: pure UI convenience,
+ *  nothing Rust needs to know. */
+const TAB_KEY = "chappa.settings.tab";
 
 // Full-window, not a drawer: top/right/bottom/left rather than `inset` so the
-// inline style round-trips through every engine (and jsdom) unshortened.
+// inline style round-trips through every engine (and jsdom) unshortened. The
+// pane itself never scrolls — the column below the header does.
 const PANE_CSS =
   "position:fixed;top:0;right:0;bottom:0;left:0;z-index:60;display:none;" +
-  "flex-direction:column;overflow-y:auto;background:#0d0e10;" +
+  "flex-direction:column;overflow:hidden;background:#0d0e10;" +
   "color:#d6d8dc;font:13px system-ui,sans-serif;";
-/** Full-width content (feedback: "settings should stretch
- *  to use the whole screen — particularly the X to close should always be in
- *  the top right"). No max-width column: the header spans the window so the
- *  × sits at the screen's top-right corner. */
-const COLUMN_CSS = "width:100%;padding:24px 32px 64px;box-sizing:border-box;";
-const HEADER_CSS =
-  "display:flex;align-items:center;gap:8px;padding:0 0 14px;border-bottom:1px solid #1c1f24;";
-const TITLE_CSS = "flex:1 1 auto;font:600 18px system-ui,sans-serif;";
-const CLOSE_CSS =
-  "flex:none;border:1px solid #262a31;background:#16181d;color:#8b949e;font-size:18px;" +
-  "line-height:1;cursor:pointer;padding:2px 9px;border-radius:6px;";
-const SECTION_CSS = "padding:16px 0 20px;border-bottom:1px solid #1c1f24;";
-const SECTION_LABEL_CSS =
-  "font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;padding-bottom:8px;";
-// `flex-wrap` + `space-between` is the label-overlap fix: the label owns a
-// stable 180px basis, the control right-aligns, and a control too wide for the
-// remainder (the 9-option line-height segmented) wraps to its own line rather
-// than sliding over the words.
-const ROW_CSS =
-  "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 14px;" +
-  "padding:9px 0;min-height:30px;";
-const ROW_LABEL_CSS = "flex:0 0 180px;min-width:0;";
-const HINT_CSS = "font:11px system-ui,sans-serif;color:#8b949e;padding:0 0 6px;line-height:1.45;";
-const INPUT_CSS =
-  "background:#0d0e10;color:#d6d8dc;border:1px solid #2a2c31;border-radius:4px;padding:3px 6px;" +
-  "font:12px ui-monospace,monospace;outline:none;min-width:0;";
-const SELECT_CSS =
-  "background:#16181d;color:#d6d8dc;border:1px solid #2a2c31;border-radius:4px;padding:3px 6px;" +
-  "font:12px system-ui,sans-serif;outline:none;";
+const HEADER_CSS = "flex:none;padding:12px 32px 0;border-bottom:1px solid #1c1f24;";
+const BACK_CSS =
+  "display:inline-flex;align-items:center;gap:10px;border:0;background:none;color:#8b949e;" +
+  "font:600 18px system-ui,sans-serif;cursor:pointer;padding:4px 0 10px;";
+const BACK_TITLE_CSS = "color:#d6d8dc;";
+const TABS_CSS = "display:flex;gap:4px;padding:0 0 10px;overflow-x:auto;";
+const TAB_CSS =
+  "flex:none;border:0;background:none;color:#8b949e;font:13px system-ui,sans-serif;" +
+  "padding:6px 12px;border-radius:6px;cursor:pointer;";
+/** Full-width content: no centred max-width column, so the header spans the
+ *  window and the sections use the whole screen. */
+const COLUMN_CSS =
+  "flex:1 1 auto;min-height:0;overflow-y:auto;width:100%;padding:6px 32px 64px;box-sizing:border-box;";
 const STEP_BTN_CSS =
   "width:22px;height:22px;border:1px solid #262a31;border-radius:4px;background:#16181d;" +
   "color:#d6d8dc;font:12px ui-monospace,monospace;cursor:pointer;padding:0;";
 const STEP_VALUE_CSS =
   "min-width:46px;text-align:center;font:12px ui-monospace,monospace;color:#d6d8dc;";
 const PROFILE_ROW_CSS = "display:flex;align-items:center;gap:6px;padding:4px 0;";
-const SMALL_BTN_CSS =
-  "flex:none;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;" +
-  "font:11px system-ui,sans-serif;cursor:pointer;padding:3px 8px;";
 
-/** Unique-id source for the `<label for>` associations (a pane can be built
- *  more than once per document in tests). */
-let rowIds = 0;
+/** localStorage, or null where there is none or where touching it throws. */
+function safeStorage(): Storage | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return window.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isTab(value: unknown): value is SettingsTab {
+  return TABS.some((t) => t.id === value);
+}
+
+/** The remembered tab; unknown or missing → Terminal. */
+function readTab(): SettingsTab {
+  try {
+    const stored = safeStorage()?.getItem(TAB_KEY);
+    return isTab(stored) ? stored : DEFAULT_TAB;
+  } catch {
+    return DEFAULT_TAB;
+  }
+}
+
+function writeTab(tab: SettingsTab): void {
+  try {
+    safeStorage()?.setItem(TAB_KEY, tab);
+  } catch {
+    // Storage full or disabled: the tab still switches, it just is not
+    // remembered. Not worth surfacing.
+  }
+}
 
 export interface SettingsPaneOptions {
   store: SettingsStore;
-  /** The agent-tool registry behind the Agents section. Defaults
-   *  to the app-wide store; tests inject one over a fake api. */
+  /** The agent-tool registry behind the Agents tab. Defaults to the app-wide
+   *  store; tests inject one over a fake api. */
   agentTools?: AgentToolsStore;
   /** Where the pane attaches. Defaults to document.body. */
   container?: HTMLElement;
@@ -110,6 +145,9 @@ export class SettingsPane {
   private readonly opts: SettingsPaneOptions;
   private readonly store: SettingsStore;
   private readonly wrap: HTMLDivElement;
+  private readonly tabButtons = new Map<SettingsTab, HTMLButtonElement>();
+  private readonly panels = new Map<SettingsTab, HTMLDivElement>();
+  private tab: SettingsTab = DEFAULT_TAB;
 
   private readonly copyToggle: HTMLInputElement;
   /** The clipboard-key toggles (both default ON). */
@@ -128,13 +166,15 @@ export class SettingsPane {
   private readonly addCommand: HTMLInputElement;
   private readonly addButton: HTMLButtonElement;
 
-  /** The Agents section: its own store, its own list/modal. */
+  /** The Agents tab: its own store, its own list/modal. */
   private readonly agents: AgentsSection;
+  /** The Timers tab. */
+  private readonly timers: TimersSection;
 
   private profileRows: ProfileRowRefs[] = [];
   /** The profile-name list the current rows were built from; rebuilding on
-   *  every store notify would drop focus mid-edit (the lesson), so a
-   *  rebuild only happens when the set of profiles actually changes. */
+   *  every store notify would drop focus mid-edit, so a rebuild only happens
+   *  when the set of profiles actually changes. */
   private profileSig = "\u0000never-rendered";
   private opened = false;
   private unsubscribe: (() => void) | null = null;
@@ -142,6 +182,7 @@ export class SettingsPane {
   constructor(opts: SettingsPaneOptions) {
     this.opts = opts;
     this.store = opts.store;
+    injectSettingsStyles();
 
     this.wrap = document.createElement("div");
     this.wrap.className = "chappa-settings-pane";
@@ -149,52 +190,97 @@ export class SettingsPane {
     this.wrap.setAttribute("role", "dialog");
     this.wrap.setAttribute("aria-label", "Settings");
 
+    // --- pinned header: back control + tab row --------------------------------
     const header = document.createElement("div");
+    header.className = "chappa-settings-header";
     header.style.cssText = HEADER_CSS;
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "chappa-settings-close";
+    back.title = "Back to the workspace (Esc)";
+    back.setAttribute("aria-label", "Back to the workspace");
+    back.style.cssText = BACK_CSS;
+    const arrow = document.createElement("span");
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "←";
     const title = document.createElement("span");
-    title.style.cssText = TITLE_CSS;
+    title.style.cssText = BACK_TITLE_CSS;
     title.textContent = "Settings";
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "chappa-settings-close";
-    close.textContent = "×";
-    close.title = "Close settings (Esc)";
-    close.style.cssText = CLOSE_CSS;
-    close.addEventListener("click", () => this.close());
-    header.append(title, close);
+    back.append(arrow, title);
+    back.addEventListener("click", () => this.close());
 
-    // --- Terminal section --------------------------------------------------
-    const terminal = this.section("TERMINAL");
+    const tabs = document.createElement("div");
+    tabs.className = "chappa-settings-tabs";
+    tabs.style.cssText = TABS_CSS;
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Settings sections");
+    for (const { id, label } of TABS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chappa-settings-tab";
+      btn.style.cssText = TAB_CSS;
+      btn.id = `chappa-settings-tab-${id}`;
+      btn.dataset.tab = id;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-controls", `chappa-settings-panel-${id}`);
+      btn.textContent = label;
+      btn.addEventListener("click", () => this.selectTab(id));
+      tabs.appendChild(btn);
+      this.tabButtons.set(id, btn);
 
+      const panel = document.createElement("div");
+      panel.className = "chappa-settings-panel";
+      panel.id = `chappa-settings-panel-${id}`;
+      panel.dataset.tab = id;
+      panel.setAttribute("role", "tabpanel");
+      panel.setAttribute("aria-labelledby", btn.id);
+      this.panels.set(id, panel);
+    }
+    // ←/→ (and Home/End) move between tabs — the tablist convention — and the
+    // moved-to tab takes focus so a keyboard user can keep going.
+    tabs.addEventListener("keydown", (e) => {
+      const idx = TABS.findIndex((t) => t.id === this.tab);
+      let next: number;
+      if (e.key === "ArrowRight") next = (idx + 1) % TABS.length;
+      else if (e.key === "ArrowLeft") next = (idx - 1 + TABS.length) % TABS.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = TABS.length - 1;
+      else return;
+      e.preventDefault();
+      this.selectTab(TABS[next].id);
+      this.tabButtons.get(TABS[next].id)?.focus();
+    });
+    header.append(back, tabs);
+
+    // --- Terminal tab --------------------------------------------------------
+    const terminal = this.panels.get("terminal")!;
+
+    const behavior = settingsSection("Behavior");
     this.copyToggle = this.toggle("copyOnSelect");
-    terminal.append(
-      this.row("Copy on select", this.copyToggle),
-    );
-
-    // The two clipboard keys, next to their clipboard sibling. Both
-    // default ON and are frontend-only consumers — the terminal input layer
-    // reads the live store (no actor/broadcast work, unlike wheel speed).
+    behavior.card.appendChild(settingsRow("Copy on select", this.copyToggle));
+    // The two clipboard keys, next to their clipboard sibling. Both default ON
+    // and are frontend-only consumers — the terminal input layer reads the
+    // live store.
     this.ctrlVToggle = this.toggle("ctrlVPastes");
-    terminal.append(this.row("Ctrl+V pastes", this.ctrlVToggle));
-    terminal.append(
-      this.hint(
-        "Ctrl+V (no Alt/Shift) pastes the clipboard into the terminal; " +
-          "otherwise it sends the raw 0x16 character (vim's literal-insert). " +
-          "On by default: while on, ^V never reaches a TUI — deliberate.",
+    behavior.card.appendChild(
+      settingsRow(
+        "Ctrl+V pastes",
+        this.ctrlVToggle,
+        "Ctrl+V (no Alt/Shift) pastes the clipboard into the terminal; otherwise it sends the raw 0x16 " +
+          "character (vim's literal-insert). On by default: while on, ^V never reaches a TUI — deliberate.",
       ),
     );
     this.ctrlCToggle = this.toggle("ctrlCCopyOnly");
-    terminal.append(this.row("Ctrl+C is copy-only", this.ctrlCToggle));
-    terminal.append(
-      this.hint(
-        "Ctrl+C never reaches the terminal; stop a process from its rail row. " +
-          "With a selection it copies; without one it does nothing. Cmd+C on " +
-          "macOS keeps its usual behavior either way. On by default: a " +
-          "reflexive ^C must not kill a long agent run — Escape and the rail " +
-          "stop are the remaining cancel paths. Deliberate.",
+    behavior.card.appendChild(
+      settingsRow(
+        "Ctrl+C is copy-only",
+        this.ctrlCToggle,
+        "Ctrl+C never reaches the terminal; stop a process from its rail row. With a selection it copies; " +
+          "without one it does nothing. Cmd+C on macOS keeps its usual behavior either way. On by default: " +
+          "a reflexive ^C must not kill a long agent run — Escape and the rail stop are the remaining " +
+          "cancel paths. Deliberate.",
       ),
     );
-
     this.wheelPicker = new Segmented<number>({
       label: "Scroll wheel speed",
       options: WHEEL_SPEEDS.map((n) => ({ value: n, label: `${n}x` })),
@@ -202,23 +288,26 @@ export class SettingsPane {
       onChange: (n) => void this.store.update({ scrollWheelSpeed: n }),
     });
     this.wheelPicker.element.dataset.setting = "scrollWheelSpeed";
-    terminal.append(this.row("Scroll wheel speed", this.wheelPicker.element));
-    terminal.append(
-      this.hint("Applies only while a TUI captures the mouse (vim, htop); plain scrollback stays at system speed."),
+    behavior.card.appendChild(
+      settingsRow(
+        "Scroll wheel speed",
+        this.wheelPicker.element,
+        "Applies only while a TUI captures the mouse (vim, htop); plain scrollback stays at system speed.",
+      ),
+    );
+    this.marksToggle = this.toggle("syntheticPromptMarks");
+    behavior.card.appendChild(
+      settingsRow(
+        "Synthetic prompt marks",
+        this.marksToggle,
+        "Guesses: every plain Enter outside a full-screen app plants a prompt mark, including an Enter " +
+          "that only cancels a dialog or answers a y/n. Off by default; turn it on for agent CLIs that " +
+          "emit no real OSC 133 marks. Full-screen (alt-screen) apps plant nothing — Claude Code needs " +
+          "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 to stay in normal scrollback.",
+      ),
     );
 
-    // Font size stepper (CSS px, 10–18). The buttons disable ON the bounds so
-    // the limits are visible rather than silently swallowed.
-    this.fontSizeDown = this.stepButton("−", "Smaller font", -1);
-    this.fontSizeUp = this.stepButton("+", "Larger font", 1);
-    this.fontSizeValue = document.createElement("span");
-    this.fontSizeValue.style.cssText = STEP_VALUE_CSS;
-    this.fontSizeValue.dataset.setting = "fontSize";
-    const stepper = document.createElement("div");
-    stepper.style.cssText = "display:flex;align-items:center;gap:4px;";
-    stepper.append(this.fontSizeDown, this.fontSizeValue, this.fontSizeUp);
-    terminal.append(this.row("Font size", stepper));
-
+    const appearance = settingsSection("Appearance", "The terminal face. The rest of the app uses the system font.");
     this.familySelect = document.createElement("select");
     this.familySelect.style.cssText = SELECT_CSS;
     this.familySelect.dataset.setting = "fontFamily";
@@ -231,8 +320,18 @@ export class SettingsPane {
     this.familySelect.addEventListener("change", () => {
       void this.store.update({ fontFamily: this.familySelect.value });
     });
-    terminal.append(this.row("Font family", this.familySelect));
-
+    appearance.card.appendChild(settingsRow("Font family", this.familySelect));
+    // Font size stepper (CSS px). The buttons disable ON the bounds so the
+    // limits are visible rather than silently swallowed.
+    this.fontSizeDown = this.stepButton("−", "Smaller font", -1);
+    this.fontSizeUp = this.stepButton("+", "Larger font", 1);
+    this.fontSizeValue = document.createElement("span");
+    this.fontSizeValue.style.cssText = STEP_VALUE_CSS;
+    this.fontSizeValue.dataset.setting = "fontSize";
+    const stepper = document.createElement("div");
+    stepper.style.cssText = "display:flex;align-items:center;gap:4px;";
+    stepper.append(this.fontSizeDown, this.fontSizeValue, this.fontSizeUp);
+    appearance.card.appendChild(settingsRow("Font size", stepper));
     this.lineHeightPicker = new Segmented<number>({
       label: "Line height",
       options: LINE_HEIGHTS.map((h) => ({ value: h, label: h.toFixed(1) })),
@@ -240,31 +339,19 @@ export class SettingsPane {
       onChange: (h) => void this.store.update({ lineHeight: h }),
     });
     this.lineHeightPicker.element.dataset.setting = "lineHeight";
-    terminal.append(this.row("Line height", this.lineHeightPicker.element));
+    appearance.card.appendChild(settingsRow("Line height", this.lineHeightPicker.element));
 
-    this.marksToggle = this.toggle("syntheticPromptMarks");
-    terminal.append(this.row("Synthetic prompt marks", this.marksToggle));
-    terminal.append(
-      this.hint(
-        "Guesses: every plain Enter outside a full-screen app plants a prompt mark, " +
-          "including an Enter that only cancels a dialog or answers a y/n. Off by default; " +
-          "turn it on for agent CLIs that emit no real OSC 133 marks. Full-screen (alt-" +
-          "screen) apps plant nothing — Claude Code needs " +
-          "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 to stay in normal scrollback.",
-      ),
+    const shells = settingsSection(
+      "Shell profiles",
+      "The shells the new-terminal menu offers. A disabled profile is hidden from the menu but stays available as the command runner.",
     );
-
-    // --- Shell profiles ----------------------------------------------------
-    const shells = this.section("SHELL PROFILES");
     this.profileList = document.createElement("div");
     this.profileList.className = "chappa-profile-list";
-    shells.append(this.profileList);
-
     this.addName = document.createElement("input");
     this.addName.type = "text";
     this.addName.placeholder = "Name";
     this.addName.spellcheck = false;
-    this.addName.style.cssText = `${INPUT_CSS}flex:0 1 130px;`;
+    this.addName.style.cssText = `${INPUT_CSS}flex:0 1 160px;`;
     this.addName.dataset.field = "newProfileName";
     this.addCommand = document.createElement("input");
     this.addCommand.type = "text";
@@ -281,34 +368,38 @@ export class SettingsPane {
     const addRow = document.createElement("div");
     addRow.style.cssText = PROFILE_ROW_CSS;
     addRow.append(this.addName, this.addCommand, this.addButton);
-    shells.append(addRow);
-
+    shells.card.appendChild(settingsBlock(this.profileList, addRow));
     this.execSelect = document.createElement("select");
     this.execSelect.style.cssText = SELECT_CSS;
     this.execSelect.dataset.setting = "defaultExecProfile";
     this.execSelect.addEventListener("change", () => {
       void this.store.update({ defaultExecProfile: this.execSelect.value });
     });
-    shells.append(this.row("Default execution profile", this.execSelect));
-    shells.append(this.hint("The shell that runs chappa.yml command lines."));
+    shells.card.appendChild(
+      settingsRow("Default execution profile", this.execSelect, "The shell that runs chappa.yml command lines."),
+    );
+    terminal.append(behavior.element, appearance.element, shells.element);
 
-    // --- Agents --------------------------------------------------
-    const agentsSection = this.section("AGENTS");
-    agentsSection.textContent = ""; // the section owns its own header line
+    // --- Agents tab ------------------------------------------------------------
     this.agents = new AgentsSection({
       store: opts.agentTools ?? agentToolsStore,
       settings: this.store,
       modalContainer: opts.container,
     });
-    agentsSection.appendChild(this.agents.element);
+    this.panels.get("agents")!.appendChild(this.agents.element);
+
+    // --- Timers tab ------------------------------------------------------------
+    this.timers = new TimersSection({ settings: this.store });
+    this.panels.get("timers")!.appendChild(this.timers.element);
 
     const column = document.createElement("div");
     column.className = "chappa-settings-column";
     column.style.cssText = COLUMN_CSS;
-    column.append(header, terminal, shells, agentsSection);
-    this.wrap.appendChild(column);
+    for (const { id } of TABS) column.appendChild(this.panels.get(id)!);
+    this.wrap.append(header, column);
     (opts.container ?? document.body).appendChild(this.wrap);
 
+    this.selectTab(readTab(), false);
     this.sync(this.store.get());
   }
 
@@ -321,12 +412,36 @@ export class SettingsPane {
     return this.opened;
   }
 
-  open(): void {
+  /** The tab currently shown. */
+  get activeTab(): SettingsTab {
+    return this.tab;
+  }
+
+  /** Show one tab: the others' panels hide, the pill and aria state follow,
+   *  and the choice is remembered for the next open. */
+  selectTab(tab: SettingsTab, remember = true): void {
+    this.tab = tab;
+    for (const { id } of TABS) {
+      const selected = id === tab;
+      const btn = this.tabButtons.get(id)!;
+      btn.setAttribute("aria-selected", String(selected));
+      btn.tabIndex = selected ? 0 : -1;
+      this.panels.get(id)!.hidden = !selected;
+    }
+    if (remember) writeTab(tab);
+  }
+
+  /** Open the pane — on `tab` when given (a deep link), else on the tab used
+   *  last time. */
+  open(tab?: SettingsTab): void {
+    if (tab) this.selectTab(tab);
+    else if (!this.opened) this.selectTab(readTab(), false);
     if (this.opened) return;
     this.opened = true;
     this.sync(this.store.get());
     this.unsubscribe = this.store.subscribe((s) => this.sync(s));
     this.agents.activate();
+    this.timers.activate();
     this.wrap.style.display = "flex";
     document.addEventListener("keydown", this.escape, true);
   }
@@ -339,6 +454,7 @@ export class SettingsPane {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.agents.deactivate();
+    this.timers.deactivate();
     this.opts.onClose?.();
   }
 
@@ -357,6 +473,7 @@ export class SettingsPane {
     this.wheelPicker.dispose();
     this.lineHeightPicker.dispose();
     this.agents.dispose();
+    this.timers.dispose();
     this.wrap.remove();
   }
 
@@ -394,46 +511,11 @@ export class SettingsPane {
 
   // --- builders ------------------------------------------------------------
 
-  private section(label: string): HTMLDivElement {
-    const el = document.createElement("div");
-    el.className = "chappa-settings-section";
-    el.style.cssText = SECTION_CSS;
-    const head = document.createElement("div");
-    head.style.cssText = SECTION_LABEL_CSS;
-    head.textContent = label;
-    el.appendChild(head);
-    return el;
-  }
-
-  /** One label/control line. The label is a `<label for=…>` (never a wrapping
-   *  `<label>`: a wrapper forwards its click to the first labelable descendant,
-   *  which for the segmented pickers and the font-size stepper would silently
-   *  press their first BUTTON — clicking the words "Scroll wheel speed" would
-   *  set 1x). */
-  private row(label: string, control: HTMLElement): HTMLDivElement {
-    const el = document.createElement("div");
-    el.style.cssText = ROW_CSS;
-    const text = document.createElement("label");
-    text.style.cssText = ROW_LABEL_CSS;
-    text.textContent = label;
-    if (!control.id) control.id = `chappa-set-${++rowIds}`;
-    text.htmlFor = control.id;
-    el.append(text, control);
-    return el;
-  }
-
-  private hint(text: string): HTMLDivElement {
-    const el = document.createElement("div");
-    el.style.cssText = HINT_CSS;
-    el.textContent = text;
-    return el;
-  }
-
   private toggle(setting: "copyOnSelect" | "ctrlVPastes" | "ctrlCCopyOnly" | "syntheticPromptMarks"): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.setting = setting;
-    input.style.cssText = "flex:none;accent-color:#5ea6ff;";
+    input.style.cssText = CHECKBOX_CSS;
     input.addEventListener("change", () => {
       void this.store.update({ [setting]: input.checked } as Partial<Settings>);
     });
@@ -489,7 +571,7 @@ export class SettingsPane {
       toggle.type = "checkbox";
       toggle.checked = p.enabled;
       toggle.title = "Offer this profile in the new-terminal menu";
-      toggle.style.cssText = "flex:none;accent-color:#5ea6ff;";
+      toggle.style.cssText = CHECKBOX_CSS;
       toggle.dataset.field = "enabled";
       toggle.addEventListener("change", () => {
         void this.patchProfile(index, { enabled: toggle.checked });
@@ -499,7 +581,7 @@ export class SettingsPane {
       name.type = "text";
       name.value = p.name;
       name.spellcheck = false;
-      name.style.cssText = `${INPUT_CSS}flex:0 1 130px;`;
+      name.style.cssText = `${INPUT_CSS}flex:0 1 160px;`;
       name.dataset.field = "name";
       // Commit on `change` (blur/Enter), not on every keystroke: a per-
       // keystroke set_settings would write the config file once per character
@@ -585,7 +667,7 @@ export class SettingsPane {
     // A stored value that names nothing we offer (a deleted profile) stays
     // visible as its own "(missing)" option — INSIDE the signature compare:
     // appended after it, the guard was permanently unequal and every store
-    // notification tore down and rebuilt the select (review finding).
+    // notification tore down and rebuilt the select.
     const missing = !wanted.includes(s.defaultExecProfile);
     if (missing) wanted.push(s.defaultExecProfile);
     const current = [...this.execSelect.options].map((o) => o.value);

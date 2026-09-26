@@ -20,7 +20,7 @@
 import { TerminalPanel, tauriApi, type PanelHost, type TerminalApi } from "./term/panel";
 import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
-import { SettingsPane } from "./settings_pane";
+import { SettingsPane, type SettingsTab } from "./settings_pane";
 import { EditPane, type ProjectEditInfo } from "./edit_pane";
 import {
   addProjectDialog,
@@ -668,7 +668,8 @@ const APP_CSS = `
 .chappa-new-agent-menu{position:absolute;top:22px;right:0;z-index:31;min-width:200px;max-height:240px;overflow-y:auto;background:#1b1d21;border:1px solid #2a2c31;border-radius:6px;padding:4px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
 .chappa-new-agent-option{display:block;width:100%;text-align:left;background:none;border:0;color:#d6d8dc;padding:4px 8px;border-radius:4px;font:13px system-ui,sans-serif;cursor:pointer;}
 .chappa-new-agent-option:hover{background:#24272e;}
-.chappa-new-agent-empty{padding:4px 8px;color:#6b7280;font:12px system-ui,sans-serif;}
+.chappa-new-agent-empty{display:block;width:100%;text-align:left;border:0;background:none;cursor:pointer;border-radius:4px;padding:4px 8px;color:#6b7280;font:12px system-ui,sans-serif;}
+.chappa-new-agent-empty:hover{background:#24272e;color:#d6d8dc;}
 .chappa-rail-model{flex:none;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#6b7280;font:11px ui-monospace,monospace;}
 .chappa-rail-container{width:7px;height:7px;border-radius:2px;flex:none;background:#565b64;}
 .chappa-rail-container.running{background:#3fb950;}
@@ -3011,7 +3012,7 @@ export class App {
    *  lazily and kept (its subscription is what re-syncs controls after a Rust
    *  clamp). The pane has no outside-click dismiss, so the gear
    *  no longer needs registering as its anchor. */
-  toggleSettings(): void {
+  private ensureSettingsPane(): SettingsPane {
     if (!this.settingsPane) {
       this.settingsPane = new SettingsPane({
         store: this.settings,
@@ -3022,8 +3023,21 @@ export class App {
         },
       });
     }
-    this.settingsPane.toggleOpen();
-    this.gear.classList.toggle("open", this.settingsPane.isOpen());
+    return this.settingsPane;
+  }
+
+  toggleSettings(): void {
+    const pane = this.ensureSettingsPane();
+    pane.toggleOpen();
+    this.gear.classList.toggle("open", pane.isOpen());
+  }
+
+  /** Open settings on one tab — the deep link the empty New agent menu
+   *  takes to the Agents tab. */
+  openSettings(tab?: SettingsTab): void {
+    const pane = this.ensureSettingsPane();
+    pane.open(tab);
+    this.gear.classList.add("open");
   }
 
   /** The settings overlay, once opened (tests drive its controls). */
@@ -3168,7 +3182,9 @@ export class App {
       menu.appendChild(btn);
     }
     if (tools.length === 0) {
-      const empty = document.createElement("div");
+      // A deep link, not a dead end: the line opens the Agents tab.
+      const empty = document.createElement("button");
+      empty.type = "button";
       empty.className = "chappa-new-agent-empty";
       empty.textContent = "No enabled agent tools — add one in Settings";
       menu.appendChild(empty);
@@ -3185,6 +3201,12 @@ export class App {
    * project explicitly; the workspace spawner omits it (the
    * fallback chain, unchanged).
    */
+      empty.title = "Open the Agents settings";
+      empty.addEventListener("mousedown", (e) => e.preventDefault());
+      empty.addEventListener("click", () => {
+        this.hideAgentMenus();
+        this.openSettings("agents");
+      });
   async spawnAgent(toolId: number, projectId?: number): Promise<ipc.SpawnAgentResponseDto | null> {
     const tool = this.agentTools.byId(toolId);
     if (!tool) return null;

@@ -261,25 +261,35 @@ describe("SettingsPane — full-window layout", () => {
     pane.dispose();
   });
 
-  it("stretches the content to the full window width (× at the top right)", async () => {
+  it("stretches the content to the full window width under a pinned header", async () => {
     const { pane } = await makePane();
     const column = pane.element.querySelector<HTMLElement>(".chappa-settings-column")!;
-    // Host round 2: no centred max-width column — full-width so the header
-    // (and its ×) reaches the screen's top-right corner.
+    // No centred max-width column — full-width, so the sections use the
+    // whole screen.
     expect(column.style.maxWidth).toBe("");
     expect(column.style.width).toBe("100%");
-    // Header, TERMINAL, SHELL PROFILES and AGENTS all live inside it.
-    expect(column.querySelectorAll(".chappa-settings-section").length).toBe(3);
-    expect(column.querySelector(".chappa-settings-close")).not.toBeNull();
+    // The header (with the back control) sits ABOVE the column and never
+    // scrolls: only the column scrolls, the pane itself does not.
+    expect(pane.element.querySelector(".chappa-settings-header .chappa-settings-close")).not.toBeNull();
+    expect(column.style.overflowY).toBe("auto");
+    expect(pane.element.style.overflow).toBe("hidden");
+    // One panel per tab, each with at least one section.
+    const panels = [...column.querySelectorAll<HTMLElement>(".chappa-settings-panel")];
+    expect(panels.map((p) => p.dataset.tab)).toEqual(["terminal", "agents", "timers"]);
+    for (const p of panels) expect(p.querySelectorAll(".chappa-settings-section").length).toBeGreaterThan(0);
     pane.dispose();
   });
 
-  it("gives the row label a stable basis so a wide control cannot cover it", async () => {
+  it("gives the row text a stable basis so a wide control wraps instead of covering it", async () => {
     const { pane } = await makePane();
     const lh = control<HTMLElement>(pane, "lineHeight");
-    const label = lh.parentElement!.querySelector("label")!;
-    expect(label.style.flex).toBe("0 0 180px");
-    expect(lh.parentElement!.style.flexWrap).toBe("wrap");
+    const row = lh.closest<HTMLElement>(".chappa-settings-row")!;
+    expect(row.querySelector<HTMLElement>(".chappa-settings-row-text")!.style.flex).toBe("1 1 240px");
+    expect(row.style.flexWrap).toBe("wrap");
+    // The title is a <label for>, never a wrapper (a wrapper would forward a
+    // click on the words to the picker's first button).
+    const label = row.querySelector<HTMLLabelElement>("label")!;
+    expect(label.htmlFor).toBe(lh.id);
     pane.dispose();
   });
 });
@@ -341,5 +351,87 @@ describe("SettingsPane — dismissal", () => {
     document.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(false);
     pane.dispose();
+  });
+});
+
+describe("SettingsPane — tabs", () => {
+  const TAB_KEY = "chappa.settings.tab";
+  const tabs = (pane: SettingsPane): HTMLButtonElement[] => [
+    ...pane.element.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  ];
+  const visiblePanels = (pane: SettingsPane): string[] =>
+    [...pane.element.querySelectorAll<HTMLElement>(".chappa-settings-panel")]
+      .filter((p) => !p.hidden)
+      .map((p) => p.dataset.tab!);
+
+  it("shows Terminal first and exactly one tab's panel at a time", async () => {
+    localStorage.removeItem(TAB_KEY);
+    const { pane } = await makePane();
+    expect(tabs(pane).map((t) => t.textContent)).toEqual(["Terminal", "Agents", "Timers"]);
+    expect(pane.activeTab).toBe("terminal");
+    expect(visiblePanels(pane)).toEqual(["terminal"]);
+    expect(tabs(pane).map((t) => t.getAttribute("aria-selected"))).toEqual(["true", "false", "false"]);
+    tabs(pane)[1].click();
+    expect(pane.activeTab).toBe("agents");
+    expect(visiblePanels(pane)).toEqual(["agents"]);
+    expect(tabs(pane).map((t) => t.getAttribute("aria-selected"))).toEqual(["false", "true", "false"]);
+    // The timer knobs live on their own tab, not under Agents.
+    expect(pane.element.querySelector('[data-tab="timers"] [data-setting="timerConfirmMs"]')).not.toBeNull();
+    expect(pane.element.querySelector('[data-tab="agents"] [data-setting="timerConfirmMs"]')).toBeNull();
+    pane.dispose();
+  });
+
+  it("Left/Right (and Home/End) move between tabs and focus the moved-to tab", async () => {
+    localStorage.removeItem(TAB_KEY);
+    const { pane } = await makePane();
+    const list = pane.element.querySelector<HTMLElement>('[role="tablist"]')!;
+    const key = (k: string) => list.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+    key("ArrowRight");
+    expect(pane.activeTab).toBe("agents");
+    expect(document.activeElement).toBe(tabs(pane)[1]);
+    key("ArrowRight");
+    key("ArrowRight"); // wraps
+    expect(pane.activeTab).toBe("terminal");
+    key("ArrowLeft"); // wraps the other way
+    expect(pane.activeTab).toBe("timers");
+    key("Home");
+    expect(pane.activeTab).toBe("terminal");
+    key("End");
+    expect(pane.activeTab).toBe("timers");
+    pane.dispose();
+  });
+
+  it("remembers the last tab across panes, and a bogus stored value falls back to Terminal", async () => {
+    localStorage.removeItem(TAB_KEY);
+    const first = await makePane();
+    tabs(first.pane)[2].click();
+    expect(localStorage.getItem(TAB_KEY)).toBe("timers");
+    first.pane.dispose();
+    const second = await makePane();
+    expect(second.pane.activeTab).toBe("timers");
+    second.pane.dispose();
+    localStorage.setItem(TAB_KEY, "account");
+    const third = await makePane();
+    expect(third.pane.activeTab).toBe("terminal");
+    third.pane.dispose();
+    localStorage.removeItem(TAB_KEY);
+  });
+
+  it("open(tab) deep-links to that tab", async () => {
+    localStorage.removeItem(TAB_KEY);
+    const harness = stubSettings();
+    await harness.store.load();
+    const pane = new SettingsPane({ store: harness.store });
+    pane.open("agents");
+    expect(pane.isOpen()).toBe(true);
+    expect(pane.activeTab).toBe("agents");
+    expect(visiblePanels(pane)).toEqual(["agents"]);
+    // The back control (the only close affordance besides Escape) closes it.
+    const back = pane.element.querySelector<HTMLButtonElement>(".chappa-settings-close")!;
+    expect(back.textContent).toContain("Settings");
+    back.click();
+    expect(pane.isOpen()).toBe(false);
+    pane.dispose();
+    localStorage.removeItem(TAB_KEY);
   });
 });

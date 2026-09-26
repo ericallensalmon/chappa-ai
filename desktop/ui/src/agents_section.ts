@@ -5,10 +5,8 @@
 // limits), the "Add from command…" paste box (Rust's command-string parser →
 // prefilled modal), and "Delete" with the live-reference refusal shown
 // inline. The agent settings (`agentReadyQuietMs`, `agentReadyMaxWaitMs`,
-// `agentStaleAfterS`) live here too — they are agent knobs, not terminal ones,
-// and so do the timer knobs (`idleThresholdMs`, `timerConfirmMs`,
-// `timerDeliveryTimeoutMs`, `timerDedupeMs`, `timerRetentionHours`): a timer
-// wakes an AGENT, and its idle rule is the agent-liveness rule.
+// `agentStaleAfterS`) live here too — they are agent knobs, not terminal ones.
+// The timer knobs have their own tab (timers_section.ts).
 //
 // Same house rules as the rest of the pane: no Save button for the list
 // (toggles persist immediately); the MODAL has Save/Cancel because a
@@ -31,19 +29,10 @@ import {
   AGENT_READY_QUIET_MIN,
   AGENT_STALE_AFTER_MAX,
   AGENT_STALE_AFTER_MIN,
-  IDLE_THRESHOLD_MAX,
-  IDLE_THRESHOLD_MIN,
-  TIMER_CONFIRM_MAX,
-  TIMER_CONFIRM_MIN,
-  TIMER_DEDUPE_MAX,
-  TIMER_DEDUPE_MIN,
-  TIMER_DELIVERY_TIMEOUT_MAX,
-  TIMER_DELIVERY_TIMEOUT_MIN,
-  TIMER_RETENTION_HOURS_MAX,
-  TIMER_RETENTION_HOURS_MIN,
   type Settings,
   type SettingsStore,
 } from "./settings";
+import { settingsBlock, settingsRow, settingsSection } from "./settings_widgets";
 
 const ROW_CSS = "display:flex;align-items:center;gap:8px;padding:5px 0;";
 const TAG_CSS =
@@ -60,61 +49,8 @@ const SELECT_CSS =
   "background:#16181d;color:#d6d8dc;border:1px solid #2a2c31;border-radius:4px;padding:3px 6px;" +
   "font:12px system-ui,sans-serif;outline:none;";
 const HINT_CSS = "font:11px system-ui,sans-serif;color:#8b949e;padding:0 0 6px;line-height:1.45;";
-const SUBHEADING_CSS =
-  "font:11px system-ui,sans-serif;color:#8b949e;letter-spacing:.08em;text-transform:uppercase;" +
-  "padding:14px 0 2px;border-top:1px solid #262a31;margin-top:8px;";
 const ERROR_CSS = "font:12px system-ui,sans-serif;color:#f0b429;padding:4px 0;white-space:pre-wrap;";
-/** The five timer knobs, as one table — label, settings key, range,
- *  and the hint under it. Ranges mirror `project_model::settings`; Rust clamps,
- *  so an out-of-range entry snaps back visibly. */
-type TimerSetting =
-  | "idleThresholdMs"
-  | "timerConfirmMs"
-  | "timerDeliveryTimeoutMs"
-  | "timerDedupeMs"
-  | "timerRetentionHours";
 
-const TIMER_SETTINGS: readonly [string, TimerSetting, number, number, string][] = [
-  [
-    "Idle threshold (ms)",
-    "idleThresholdMs",
-    IDLE_THRESHOLD_MIN,
-    IDLE_THRESHOLD_MAX,
-    "How long a process's pty byte stream must be silent before an idle timer calls it idle. Derived from bytes, never from render diffs; a timer can override it with idle_ms.",
-  ],
-  [
-    "Fire-time confirm (ms)",
-    "timerConfirmMs",
-    TIMER_CONFIRM_MIN,
-    TIMER_CONFIRM_MAX,
-    "A met idle condition is re-checked after this long instead of firing at once. A byte in the window re-arms the timer — this is what stops a flicker from waking an agent. 0 fires on the first observation.",
-  ],
-  [
-    "Delivery timeout (ms)",
-    "timerDeliveryTimeoutMs",
-    TIMER_DELIVERY_TIMEOUT_MIN,
-    TIMER_DELIVERY_TIMEOUT_MAX,
-    "How long a firing waits for its target's ready gate before recording delivered: false. The body is never silently dropped.",
-  ],
-  [
-    "Duplicate window (ms)",
-    "timerDedupeMs",
-    TIMER_DEDUPE_MIN,
-    TIMER_DEDUPE_MAX,
-    "An identical body to the same process inside this window is coalesced instead of typed again (timer_list shows coalesced_with). 0 disables it.",
-  ],
-  [
-    "Fired-timer retention (h)",
-    "timerRetentionHours",
-    TIMER_RETENTION_HOURS_MIN,
-    TIMER_RETENTION_HOURS_MAX,
-    "How long fired, cancelled and expired timers stay visible to timer_list(include_fired) with their delivery receipts.",
-  ],
-];
-
-const SETTING_ROW_CSS =
-  "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 14px;padding:9px 0;min-height:30px;";
-const SETTING_LABEL_CSS = "flex:0 0 180px;min-width:0;";
 // The modal: a backdrop over the pane, a 560px column of label/control rows.
 const BACKDROP_CSS =
   "position:fixed;top:0;right:0;bottom:0;left:0;z-index:70;display:flex;align-items:center;" +
@@ -129,6 +65,7 @@ const BUTTON_ROW_CSS = "display:flex;justify-content:flex-end;gap:8px;padding-to
 const OK_BTN_CSS =
   "border:1px solid #3b6fb0;border-radius:4px;background:#244a7a;color:#e6edf3;font:12px system-ui,sans-serif;cursor:pointer;padding:4px 12px;";
 
+/** Unique-id source for the modal's `<label for>` associations. */
 let ids = 0;
 
 export interface AgentsSectionOptions {
@@ -160,7 +97,6 @@ export class AgentsSection {
   private readonly maxWaitInput: HTMLInputElement;
   private readonly staleInput: HTMLInputElement;
   private readonly reapInput: HTMLInputElement;
-  private readonly timerInputs: { input: HTMLInputElement; key: TimerSetting }[] = [];
   private listSig = "\u0000never";
   private unsubscribe: (() => void) | null = null;
   private unsubscribeSettings: (() => void) | null = null;
@@ -174,28 +110,26 @@ export class AgentsSection {
 
     this.element = document.createElement("div");
     this.element.className = "chappa-agents-section";
-    const head = document.createElement("div");
-    head.style.cssText =
-      "font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;padding-bottom:8px;";
-    head.textContent = "AGENTS";
-    this.element.appendChild(head);
-    this.element.appendChild(
-      hint(
-        "Registered agent CLIs for the rail's “New agent ▸” menu and the spawn_agent MCP tool. " +
-          "Name is display only; program + args are the truth (never re-split). Docker runtimes run " +
-          "the program under a pid-recording wrapper so closing kills the container-side process.",
-      ),
+    // The registry: one card holding the list, the add line and the paste box.
+    const registry = settingsSection(
+      "AGENTS",
+      "Registered agent CLIs for the New agent menu and the spawn_agent MCP tool. Name is display " +
+        "only; program + args are the truth (never re-split). Docker runtimes run the program under a " +
+        "pid-recording wrapper so closing kills the container-side process.",
     );
+    const registryBody = settingsBlock();
+    registry.card.appendChild(registryBody);
+    this.element.appendChild(registry.element);
 
     this.list = document.createElement("div");
     this.list.className = "chappa-agent-list";
-    this.element.appendChild(this.list);
+    registryBody.appendChild(this.list);
 
     this.error = document.createElement("div");
     this.error.className = "chappa-agent-error";
     this.error.style.cssText = ERROR_CSS;
     this.error.style.display = "none";
-    this.element.appendChild(this.error);
+    registryBody.appendChild(this.error);
 
     // Add from template.
     const addRow = document.createElement("div");
@@ -222,7 +156,7 @@ export class AgentsSection {
       });
     });
     addRow.append(this.typeSelect, addBtn);
-    this.element.appendChild(addRow);
+    registryBody.appendChild(addRow);
 
     // Add from a command-style string.
     const pasteRow = document.createElement("div");
@@ -246,62 +180,49 @@ export class AgentsSection {
       }
     });
     pasteRow.append(this.pasteInput, pasteBtn);
-    this.element.appendChild(pasteRow);
-    this.element.appendChild(
+    registryBody.appendChild(pasteRow);
+    registryBody.appendChild(
       hint("Paste a tool command; the fields are detected (docker exec -u/-w/-it/-e, container, program, -m model)."),
     );
 
-    // The two agent settings.
+    // The agent knobs: the ready gate, bridge staleness, the orphan reaper.
+    const knobs = settingsSection("Agent behavior");
+    this.element.appendChild(knobs.element);
     this.quietInput = this.numberSetting(
+      knobs.card,
       "Prompt ready quiet (ms)",
       "agentReadyQuietMs",
       AGENT_READY_QUIET_MIN,
       AGENT_READY_QUIET_MAX,
-    );
-    this.element.appendChild(
-      hint(
-        "A queued prompt is written once the agent has produced output and then stayed silent this long — " +
-          "the portable ready signal; no app-specific prompt guessing.",
-      ),
+      "A queued prompt is written once the agent has produced output and then stayed silent this long — " +
+        "the portable ready signal; no app-specific prompt guessing.",
     );
     this.maxWaitInput = this.numberSetting(
+      knobs.card,
       "Prompt ready max wait (ms)",
       "agentReadyMaxWaitMs",
       AGENT_READY_MAX_WAIT_MIN,
       AGENT_READY_MAX_WAIT_MAX,
-    );
-    this.element.appendChild(
-      hint(
-        "A TUI that repaints continuously never goes quiet: this long after its first output the prompt is " +
-          "written anyway (receipt reason ready-by-timeout).",
-      ),
+      "A TUI that repaints continuously never goes quiet: this long after its first output the prompt is " +
+        "written anyway (receipt reason ready-by-timeout).",
     );
     this.staleInput = this.numberSetting(
+      knobs.card,
       "Bridge stale after (s)",
       "agentStaleAfterS",
       AGENT_STALE_AFTER_MIN,
       AGENT_STALE_AFTER_MAX,
-    );
-    this.element.appendChild(
-      hint("A docker agent silent this long whose winsize poke produces nothing is flagged stale."),
+      "A docker agent silent this long whose winsize poke produces nothing is flagged stale.",
     );
     // The orphan reaper (startup + probe sweeps). A boolean, not a
     // number — commit on toggle, adopt what Rust returns.
     this.reapInput = this.boolSetting(
+      knobs.card,
       "Reap orphaned docker agents",
       "agentReapOrphans",
       "Sweep containers for CHAPPA_AI_SPAWN_UUID marker processes no live row owns " +
         "(orphans of a hard restart or a mid-close docker hiccup) and kill them — at app start and on the bridge probe.",
     );
-
-    // Timer knobs. Same house rules: commit on change, adopt what
-    // Rust returns, no Save button.
-    this.element.appendChild(subheading("Timers"));
-    for (const [label, key, min, max, why] of TIMER_SETTINGS) {
-      const input = this.numberSetting(label, key, min, max);
-      this.timerInputs.push({ input, key });
-      this.element.appendChild(hint(why));
-    }
 
     this.sync(this.store.get());
     this.syncSettings(this.settings.get());
@@ -475,24 +396,19 @@ export class AgentsSection {
   // --- agent settings ---------------------------------------------------------
 
   private numberSetting(
+    card: HTMLElement,
     label: string,
-    setting: "agentReadyQuietMs" | "agentReadyMaxWaitMs" | "agentStaleAfterS" | TimerSetting,
+    setting: "agentReadyQuietMs" | "agentReadyMaxWaitMs" | "agentStaleAfterS",
     min: number,
     max: number,
+    why: string,
   ): HTMLInputElement {
-    const row = document.createElement("div");
-    row.style.cssText = SETTING_ROW_CSS;
-    const text = document.createElement("label");
-    text.style.cssText = SETTING_LABEL_CSS;
-    text.textContent = label;
     const input = document.createElement("input");
     input.type = "number";
     input.min = String(min);
     input.max = String(max);
     input.style.cssText = `${INPUT_CSS}width:90px;`;
     input.dataset.setting = setting;
-    input.id = `chappa-agent-set-${++ids}`;
-    text.htmlFor = input.id;
     // Commit on change (blur/Enter), never per keystroke: every write is a
     // full-struct set_settings.
     input.addEventListener("change", () => {
@@ -503,29 +419,19 @@ export class AgentsSection {
       }
       void this.settings.update({ [setting]: n } as Partial<Settings>);
     });
-    row.append(text, input);
-    this.element.appendChild(row);
+    card.appendChild(settingsRow(label, input, why));
     return input;
   }
 
-  private boolSetting(label: string, setting: keyof Settings, why: string): HTMLInputElement {
-    const row = document.createElement("div");
-    row.style.cssText = SETTING_ROW_CSS;
-    const text = document.createElement("label");
-    text.style.cssText = SETTING_LABEL_CSS;
-    text.textContent = label;
+  private boolSetting(card: HTMLElement, label: string, setting: keyof Settings, why: string): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.style.cssText = "flex:none;accent-color:#5ea6ff;";
     input.dataset.setting = setting;
-    input.id = `chappa-agent-set-${++ids}`;
-    text.htmlFor = input.id;
     input.addEventListener("change", () => {
       void this.settings.update({ [setting]: input.checked } as Partial<Settings>);
     });
-    row.append(text, input);
-    this.element.appendChild(row);
-    this.element.appendChild(hint(why));
+    card.appendChild(settingsRow(label, input, why));
     return input;
   }
 
@@ -534,9 +440,6 @@ export class AgentsSection {
     if (document.activeElement !== this.maxWaitInput) this.maxWaitInput.value = String(s.agentReadyMaxWaitMs);
     if (document.activeElement !== this.staleInput) this.staleInput.value = String(s.agentStaleAfterS);
     this.reapInput.checked = s.agentReapOrphans;
-    for (const { input, key } of this.timerInputs) {
-      if (document.activeElement !== input) input.value = String(s[key]);
-    }
   }
 
   // --- the edit modal --------------------------------------------------------
@@ -863,9 +766,3 @@ function hint(text: string): HTMLDivElement {
   return el;
 }
 
-function subheading(text: string): HTMLDivElement {
-  const el = document.createElement("div");
-  el.style.cssText = SUBHEADING_CSS;
-  el.textContent = text;
-  return el;
-}
