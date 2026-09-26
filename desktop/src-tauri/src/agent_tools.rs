@@ -76,12 +76,34 @@ impl ToolType {
         }
     }
 
-    /// The default program name for a type (what the template seeds and what
-    /// the importer uses to classify a bare program token).
+    /// The bare program name for a type (what the importer uses to classify
+    /// a program token; the template seeds [`ToolType::default_program`]).
     fn program(self) -> &'static str {
         match self {
             ToolType::Custom => "",
             other => other.as_str(),
+        }
+    }
+
+    /// Types whose Windows install is an npm shim: `<name>.cmd` beside a
+    /// POSIX sh script of the bare name. The others ship a real `.exe`.
+    fn npm_shipped(self) -> bool {
+        matches!(
+            self,
+            ToolType::Claude | ToolType::Codex | ToolType::Gemini | ToolType::Copilot | ToolType::Amp
+        )
+    }
+
+    /// The program a new tool of this type runs. On Windows the npm-shipped
+    /// CLIs name their `.cmd` shim: the process spawner resolves a bare name
+    /// to the sh script beside it and fails with error 193 ("not a valid
+    /// Win32 application"), where a shell would have picked the shim.
+    pub fn default_program(self, windows: bool) -> String {
+        let bare = self.program();
+        if windows && self.npm_shipped() {
+            format!("{bare}.cmd")
+        } else {
+            bare.to_owned()
         }
     }
 
@@ -217,7 +239,7 @@ impl AgentTool {
                 other => other.as_str().to_owned(),
             },
             tool_type,
-            program: tool_type.program().to_owned(),
+            program: tool_type.default_program(cfg!(windows)),
             args: Vec::new(),
             model: None,
             runtime: Runtime::Host,
@@ -941,11 +963,26 @@ mod tests {
     fn claude_template_ships_the_alt_screen_env_visibly() {
         let t = AgentTool::template(ToolType::Claude);
         assert_eq!(t.env.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").map(String::as_str), Some("1"));
-        assert_eq!(t.program, "claude");
+        assert_eq!(t.program, ToolType::Claude.default_program(cfg!(windows)));
         assert!(t.enabled);
         // Other templates carry no such default — it is claude's, not spawn's.
         assert!(AgentTool::template(ToolType::Opencode).env.is_empty());
         assert!(AgentTool::template(ToolType::Custom).program.is_empty());
+    }
+
+    #[test]
+    fn windows_templates_name_the_npm_cmd_shim() {
+        // npm-installed CLIs: the .cmd shim on Windows, the bare name elsewhere.
+        assert_eq!(ToolType::Claude.default_program(true), "claude.cmd");
+        assert_eq!(ToolType::Gemini.default_program(true), "gemini.cmd");
+        assert_eq!(ToolType::Claude.default_program(false), "claude");
+        // A real .exe resolves from its bare name; custom stays empty.
+        assert_eq!(ToolType::Opencode.default_program(true), "opencode");
+        assert_eq!(ToolType::Kimi.default_program(true), "kimi");
+        assert_eq!(ToolType::Custom.default_program(true), "");
+        // The shim still classifies as its type when pasted back in.
+        assert_eq!(ToolType::from_program("claude.cmd"), ToolType::Claude);
+        assert_eq!(ToolType::from_program(r"D:\tools\npm\gemini.cmd"), ToolType::Gemini);
     }
 
     #[test]

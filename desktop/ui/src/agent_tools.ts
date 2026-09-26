@@ -32,13 +32,37 @@ export const AGENT_TOOL_TYPES: readonly AgentToolType[] = [
 
 export const CLAUDE_ALT_SCREEN_ENV = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN";
 
+/** The OS the app runs on, as far as a program default cares. */
+export type HostOs = "windows" | "other";
+
+/** Read the host OS off the user agent (the Windows webview reports
+ *  "Windows NT"; jsdom does not, so tests pass the OS explicitly). */
+export function detectHostOs(
+  userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent,
+): HostOs {
+  return /Windows NT/i.test(userAgent) ? "windows" : "other";
+}
+
+/** Types whose Windows install is an npm shim: `<name>.cmd` beside a POSIX
+ *  sh script of the bare name. The bare name cannot be the default there —
+ *  the process spawner resolves it to the script and fails with error 193.
+ *  The others ship a real `.exe`, which a bare name resolves to. */
+const NPM_SHIPPED: ReadonlySet<AgentToolType> = new Set(["claude", "codex", "gemini", "copilot", "amp"]);
+
+/** The program a new tool of `toolType` runs, on `os`. Mirrors the Rust
+ *  template, which decides with the real target OS. */
+export function defaultProgram(toolType: AgentToolType, os: HostOs = detectHostOs()): string {
+  if (toolType === "custom") return "";
+  return os === "windows" && NPM_SHIPPED.has(toolType) ? `${toolType}.cmd` : toolType;
+}
+
 /** A new tool's defaults (the Rust template, mirrored). */
-export function templateFor(toolType: AgentToolType): AgentTool {
+export function templateFor(toolType: AgentToolType, os: HostOs = detectHostOs()): AgentTool {
   return {
     id: 0,
     name: toolType === "custom" ? "" : toolType,
     tool_type: toolType,
-    program: toolType === "custom" ? "" : toolType,
+    program: defaultProgram(toolType, os),
     args: [],
     model: null,
     runtime: { kind: "host" },

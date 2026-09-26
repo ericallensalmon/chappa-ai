@@ -101,6 +101,13 @@ describe("Agents settings section", () => {
   it("the claude template shows the alt-screen env row, and it survives an edit", async () => {
     const { api, host, section: s } = await section([]);
     expect(templateFor("claude").env[CLAUDE_ALT_SCREEN_ENV]).toBe("1");
+    // On Windows the npm-installed CLIs default to their .cmd shim (the bare
+    // name resolves to the POSIX script beside it); .exe tools stay bare.
+    expect(templateFor("claude", "windows").program).toBe("claude.cmd");
+    expect(templateFor("gemini", "windows").program).toBe("gemini.cmd");
+    expect(templateFor("opencode", "windows").program).toBe("opencode");
+    expect(templateFor("claude", "other").program).toBe("claude");
+    expect(templateFor("custom", "windows").program).toBe("");
     field<HTMLSelectElement>(host, "newAgentType").value = "claude";
     action(host, "addAgent").click();
     const modal = s.modalElement!;
