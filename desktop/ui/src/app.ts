@@ -21,6 +21,7 @@ import { TerminalPanel, tauriApi, type PanelHost, type TerminalApi } from "./ter
 import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
+import { projectBadge } from "./project_badge";
 import { EditPane, type ProjectEditInfo } from "./edit_pane";
 import {
   addProjectDialog,
@@ -550,7 +551,7 @@ const APP_CSS = `
 .chappa-project-option:hover,.chappa-project-add:hover{background:#24272e;}
 /* The switcher row is [open project | ✎ rename]. */
 .chappa-project-row{display:flex;align-items:center;gap:2px;}
-.chappa-project-row .chappa-project-option{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chappa-project-row .chappa-project-option{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-project-rename{flex:none;width:22px;height:22px;border:0;border-radius:4px;background:none;color:#6b7280;font:12px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
 .chappa-project-rename:hover{background:#24272e;color:#d6d8dc;}
 .chappa-project-remove{flex:none;display:flex;align-items:center;justify-content:center;width:22px;height:22px;border:0;border-radius:4px;background:none;color:#6b7280;font-size:12px;line-height:1;cursor:pointer;padding:0;}
@@ -573,6 +574,8 @@ const APP_CSS = `
    made the name unreadable): row 1 = the name alone, full width; row 2 =
    status pill left, S/A/P actions right. */
 .chappa-project-header{display:flex;align-items:center;gap:6px;padding:2px 2px 6px;}
+.chappa-project-header-badge{flex:none;display:flex;}
+.chappa-project-option-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-project-name{flex:1 1 auto;min-width:0;font:13px system-ui,sans-serif;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-project-pill{flex:1 1 auto;font:11px ui-monospace,monospace;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-project-pill.running{color:#3fb950;}
@@ -742,7 +745,6 @@ const APP_CSS = `
 .chappa-active-row{position:relative;display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;border-radius:6px;background:none;color:#d6d8dc;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
 .chappa-active-row:hover{background:#171a1f;}
 .chappa-active-row.attention{box-shadow:inset 0 0 0 1px #5ea6ff;}
-.chappa-active-project{flex:none;max-width:88px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11px ui-monospace,monospace;color:#6b7280;}
 .chappa-active-attention{flex:none;color:#f0b429;font-size:11px;line-height:1;}
 .chappa-active-activity{width:8px;height:8px;border-radius:50%;flex:none;background:#5ea6ff;}
 /* The rail footer's notification bell + unread count, NEXT TO the
@@ -988,6 +990,8 @@ export class App {
   private readonly projectMenu: HTMLElement;
   private readonly projectSection: HTMLElement;
   private readonly projectNameEl: HTMLElement;
+  /** The expanded project's badge, repainted with the header. */
+  private readonly projectBadgeEl: HTMLElement;
   /** The project COMMANDS subsection: header (label + running/total count +
    *  the header-line add button) above the command cards. */
   private readonly projectProcessesEl: HTMLElement;
@@ -1206,6 +1210,8 @@ export class App {
     this.projectSection = document.createElement("section");
     this.projectSection.className = "chappa-project-section";
     this.projectSection.style.display = "none";
+    this.projectBadgeEl = document.createElement("span");
+    this.projectBadgeEl.className = "chappa-project-header-badge";
     this.projectNameEl = document.createElement("span");
     this.projectNameEl.className = "chappa-project-name";
     // COMMANDS subsection: the same house header as TERMINALS (its count
@@ -1259,7 +1265,7 @@ export class App {
     // One line: the name, then the actions. The running/total count lives
     // on the COMMANDS header; the sync toggle and the notification-level
     // picker live in the Edit-project pane.
-    projectHeader.append(this.projectNameEl, headerActions);
+    projectHeader.append(this.projectBadgeEl, this.projectNameEl, headerActions);
 
     // TERMINALS subsection. The project section has a TERMINALS
     // subsection between the header/picker and the COMMANDS rows:
@@ -2937,6 +2943,14 @@ export class App {
     // bridge), and the attention ring on a bridge fault.
     if (entry.agent) {
       row.classList.add("agent");
+      // On the WORKSPACE surface a bound agent wears its project's badge:
+      // the row is there because its project is not the expanded one, so the
+      // title alone cannot say where it works.
+      if (extraClass === "chappa-workspace-agent-row" && entry.agent.projectId !== null) {
+        const project = this.badgeFor(entry.agent.projectId);
+        project.classList.add("chappa-rail-project");
+        row.append(project);
+      }
       if (entry.agent.model) {
         const model = document.createElement("span");
         model.className = "chappa-rail-model";
@@ -3187,6 +3201,12 @@ export class App {
       empty.type = "button";
       empty.className = "chappa-new-agent-empty";
       empty.textContent = "No enabled agent tools — add one in Settings";
+      empty.title = "Open the Agents settings";
+      empty.addEventListener("mousedown", (e) => e.preventDefault());
+      empty.addEventListener("click", () => {
+        this.hideAgentMenus();
+        this.openSettings("agents");
+      });
       menu.appendChild(empty);
     }
   }
@@ -3201,12 +3221,6 @@ export class App {
    * project explicitly; the workspace spawner omits it (the
    * fallback chain, unchanged).
    */
-      empty.title = "Open the Agents settings";
-      empty.addEventListener("mousedown", (e) => e.preventDefault());
-      empty.addEventListener("click", () => {
-        this.hideAgentMenus();
-        this.openSettings("agents");
-      });
   async spawnAgent(toolId: number, projectId?: number): Promise<ipc.SpawnAgentResponseDto | null> {
     const tool = this.agentTools.byId(toolId);
     if (!tool) return null;
@@ -3459,7 +3473,10 @@ export class App {
       const opt = document.createElement("button");
       opt.className = "chappa-project-option";
       opt.dataset.id = String(p.id);
-      opt.textContent = p.name;
+      const optName = document.createElement("span");
+      optName.className = "chappa-project-option-name";
+      optName.textContent = p.name;
+      opt.append(projectBadge(p), optName);
       opt.title = p.path;
       opt.addEventListener("mousedown", (e) => e.stopPropagation());
       opt.addEventListener("click", () => {
@@ -4510,7 +4527,7 @@ export class App {
     bellEl.className = "chappa-rail-bell";
     bellEl.append(bellIcon());
     bellEl.title = "bell or notification while collapsed";
-    expand.append(name, pill, activityEl, bellEl);
+    expand.append(this.badgeFor(state.id), name, pill, activityEl, bellEl);
     const close = document.createElement("button");
     close.className = "chappa-rail-close chappa-project-summary-close";
     close.textContent = "×";
@@ -4671,6 +4688,12 @@ export class App {
     return this.projects.get(id)?.name ?? `project ${id}`;
   }
 
+  /** A project's badge (initials on its colour), titled by the full name;
+   *  an unknown id derives both from the label fallback. */
+  private badgeFor(id: number): HTMLSpanElement {
+    return projectBadge(this.projects.get(id) ?? { name: this.projectLabel(id) });
+  }
+
   /** One ACTIVE row: status dot, name, owning-project tag (muted, only when
    *  more than one project is open), activity dot, attention marker. */
   private buildActiveRow(row: ActiveRow, showProjectTag: boolean): HTMLElement {
@@ -4693,10 +4716,8 @@ export class App {
     name.textContent = row.name;
     el.append(dot, name);
     if (showProjectTag && row.projectId !== null) {
-      const tag = document.createElement("span");
-      tag.className = "chappa-active-project";
-      tag.textContent = this.projectLabel(row.projectId);
-      tag.title = tag.textContent;
+      const tag = this.badgeFor(row.projectId);
+      tag.classList.add("chappa-active-project");
       el.append(tag);
     }
     // Marker classes are the section's OWN (chappa-active-*, never the rail's
@@ -5003,6 +5024,8 @@ export class App {
     const state = this.expandedState();
     const project = this.projects.get(this.expandedProjectId ?? -1);
     this.projectNameEl.textContent = project?.name ?? (this.expandedProjectId !== null ? `project ${this.expandedProjectId}` : "");
+    this.projectBadgeEl.textContent = "";
+    if (this.expandedProjectId !== null) this.projectBadgeEl.appendChild(this.badgeFor(this.expandedProjectId));
     const { running, total } = state ? this.runningCount(state) : { running: 0, total: 0 };
     this.projectCmdCount.textContent = `${running}/${total}`;
     this.projectCmdCount.classList.toggle("running", running > 0);
@@ -5049,6 +5072,8 @@ export class App {
     return {
       name: project.name,
       path: project.path,
+      initials: project.initials ?? null,
+      color: project.color ?? null,
       notificationLevel: project.notificationLevel,
       ymlError: state?.ymlError ?? null,
       running,
@@ -5069,6 +5094,7 @@ export class App {
           if (err) throw err;
         },
         setLevel: (pid, level) => this.setProjectLevel(pid, level),
+        setIdentity: (pid, initials, color) => this.setProjectIdentityApply(pid, initials, color),
       });
     }
     this.editPane.open(id);
@@ -5077,6 +5103,23 @@ export class App {
   /** The Edit-project pane, once opened (tests drive its controls). */
   get editPaneElement(): HTMLElement | null {
     return this.editPane?.element ?? null;
+  }
+
+  /** Persist a badge identity and repaint every surface that wears it: the
+   *  header, the collapsed summaries, the switcher, and (through renderRail)
+   *  the workspace agent rows and the ACTIVE list. */
+  private async setProjectIdentityApply(id: number, initials: string | null, color: string | null): Promise<void> {
+    const current = this.projects.get(id);
+    if (!current) return;
+    await this.api.setProjectIdentity(id, initials, color);
+    this.projects.set(id, { ...current, initials, color });
+    if (this.expandedProjectId === id) this.refreshProjectHeader();
+    this.renderProjectSummaries();
+    this.renderProjectMenu();
+    // The ACTIVE signature does not cover identity: force its repaint.
+    this.activeSig = "\u0000identity-changed";
+    this.renderRail();
+    this.editPane?.refresh();
   }
 
   /** Apply a rename (the ✎ flow's body). Returns an error string on failure

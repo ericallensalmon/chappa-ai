@@ -68,6 +68,7 @@ export interface TerminalApi {
   addProject(path: string, name?: string | null): Promise<ipc.ProjectInfoDto>;
   /** Rename a stored project (✎ in the switcher). */
   renameProject(id: number, name: string): Promise<void>;
+  setProjectIdentity(id: number, initials: string | null, color: string | null): Promise<void>;
   /** Forget a stored project (the switcher row's 🗑, 2026-08-31 — the
    *  command predates the affordance). Rust stops any live processes and
    *  drops the runtime; the folder and its chappa.yml stay on disk. */
@@ -172,6 +173,7 @@ export const tauriApi: TerminalApi = {
   listProjects: () => ipc.listProjects(),
   addProject: (path, name) => ipc.addProject(path, name),
   renameProject: (id, name) => ipc.renameProject(id, name),
+  setProjectIdentity: (id, initials, color) => ipc.setProjectIdentity(id, initials, color),
   removeProject: (id) => ipc.removeProject(id),
   pickDirectory: (title, start) => ipc.pickDirectory(title, start),
   openProject: (id) => ipc.openProject(id),

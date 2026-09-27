@@ -548,6 +548,10 @@ export interface ProjectInfoDto {
   name: string;
   path: string;
   icon: string | null;
+  /** The badge overrides — up to three letters and a palette colour key —
+   *  or null/absent when the badge derives from the name. */
+  initials?: string | null;
+  color?: string | null;
   /** RAW project-default notification level: "all" | "important" |
    *  "none", or null meaning "never set" — which resolves to 'all'. Kept raw
    *  (a plain string) so an unknown value from a hand-edited store degrades
@@ -723,6 +727,11 @@ export function addProject(
  *  project file. */
 export function renameProject(id: number, name: string): Promise<void> {
   return call("rename_project", { id, name });
+}
+
+/** Set a project's badge identity; a null half clears that override. */
+export function setProjectIdentity(id: number, initials: string | null, color: string | null): Promise<void> {
+  return call("set_project_identity", { id, initials, color });
 }
 
 /**

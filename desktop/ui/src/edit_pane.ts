@@ -22,6 +22,7 @@
 
 import { Segmented } from "./segmented";
 import { LEVELS, LEVEL_LABELS, resolveLevel, type Level } from "./notifications";
+import { PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
 
 const PANE_CSS =
   "position:fixed;top:0;right:0;bottom:0;left:0;z-index:60;display:none;" +
@@ -63,12 +64,20 @@ const INPUT_CSS =
 const SMALL_BTN_CSS =
   "flex:none;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;" +
   "font:11px system-ui,sans-serif;cursor:pointer;padding:3px 8px;";
+/** The colour swatches: a ring of the palette plus an "auto" (∅) first. The
+ *  chosen one carries a bright outline. */
+const SWATCH_CSS =
+  "flex:none;width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;" +
+  "display:inline-flex;align-items:center;justify-content:center;font:12px system-ui,sans-serif;color:#8b949e;";
 
 /** A live snapshot of the project being edited, as the pane should read it.
  *  The app derives these straight from its `projects`/`openProjects` state. */
 export interface ProjectEditInfo {
   name: string;
   path: string;
+  /** The badge overrides (initials, palette colour key), null when derived. */
+  initials: string | null;
+  color: string | null;
   /** RAW project-default notification level (a plain string; resolves
    *  through `resolveLevel`), mirroring `ProjectInfoDto.notificationLevel`. */
   notificationLevel: string | null;
@@ -88,6 +97,8 @@ export interface EditPaneOptions {
   /** Persist a project-default notification LEVEL (the pane passes a Level;
    *  the app maps "all" → a null clear, its existing contract). */
   setLevel: (id: number, level: Level) => void | Promise<void>;
+  /** Persist the badge identity; a null half clears that override. */
+  setIdentity: (id: number, initials: string | null, color: string | null) => void | Promise<void>;
   /** Where the pane attaches. Defaults to document.body. */
   container?: HTMLElement;
   /** Fired after a close so the caller can hand focus back. */
@@ -108,6 +119,9 @@ export class EditPane {
   // Settings controls.
   private readonly nameInput: HTMLInputElement;
   private readonly levelPicker: Segmented<Level>;
+  private readonly initialsInput: HTMLInputElement;
+  private readonly swatches = new Map<ProjectColor | "auto", HTMLButtonElement>();
+  private readonly badgePreview: HTMLSpanElement;
 
   private id = -1;
   private opened = false;
@@ -200,7 +214,56 @@ export class EditPane {
     this.nameInput.addEventListener("change", () => this.commitName());
     settings.append(this.settingRow("Name", "The project's display name (chappa.yml is not rewritten).", this.nameInput));
 
-    // 2. Notification level — the All | Important | None segmented picker,
+    // 2. Badge — the initials and colour every rail surface marks the
+    //    project with. Both derive from the name until overridden; a blank
+    //    field or the ∅ swatch hands that half back to the derivation.
+    this.badgePreview = document.createElement("span");
+    this.badgePreview.dataset.role = "badge-preview";
+    this.initialsInput = document.createElement("input");
+    this.initialsInput.type = "text";
+    this.initialsInput.maxLength = 3;
+    this.initialsInput.spellcheck = false;
+    this.initialsInput.style.cssText = `${INPUT_CSS}width:52px;text-align:center;text-transform:uppercase;`;
+    this.initialsInput.dataset.field = "initials";
+    this.initialsInput.addEventListener("change", () => void this.commitIdentity());
+    const swatchRow = document.createElement("div");
+    swatchRow.style.cssText = "display:flex;align-items:center;gap:4px;";
+    swatchRow.setAttribute("role", "radiogroup");
+    swatchRow.setAttribute("aria-label", "Badge colour");
+    const auto = document.createElement("button");
+    auto.type = "button";
+    auto.className = "chappa-edit-color";
+    auto.dataset.color = "auto";
+    auto.title = "Colour from the name";
+    auto.textContent = "∅";
+    auto.style.cssText = `${SWATCH_CSS}background:#16181d;`;
+    auto.addEventListener("click", () => void this.commitIdentity("auto"));
+    swatchRow.appendChild(auto);
+    this.swatches.set("auto", auto);
+    for (const c of PROJECT_COLORS) {
+      const swatch = document.createElement("button");
+      swatch.type = "button";
+      swatch.className = "chappa-edit-color";
+      swatch.dataset.color = c.key;
+      swatch.title = c.label;
+      swatch.setAttribute("aria-label", c.label);
+      swatch.style.cssText = `${SWATCH_CSS}background:${c.bg};`;
+      swatch.addEventListener("click", () => void this.commitIdentity(c.key));
+      swatchRow.appendChild(swatch);
+      this.swatches.set(c.key, swatch);
+    }
+    const badgeControls = document.createElement("div");
+    badgeControls.style.cssText = "display:flex;align-items:center;gap:10px;flex-wrap:wrap;";
+    badgeControls.append(this.badgePreview, this.initialsInput, swatchRow);
+    settings.append(
+      this.settingRow(
+        "Badge",
+        "Up to three letters and a colour, shown wherever this project's rows appear outside its own section. Blank derives them from the name.",
+        badgeControls,
+      ),
+    );
+
+    // 3. Notification level — the All | Important | None segmented picker,
     //    relocated from the rail row (the per-process overrides in the
     //    command context menu are untouched).
     this.levelPicker = new Segmented<Level>({
@@ -284,6 +347,16 @@ export class EditPane {
     this.ymlChip.style.border = `1px solid ${broken ? "#5c2f2f" : "#1f5a36"}`;
     this.ymlChip.title = info.ymlError ?? "";
     this.levelPicker.setValue(resolveLevel(null, info.notificationLevel));
+    if (document.activeElement !== this.initialsInput) this.initialsInput.value = info.initials ?? "";
+    this.initialsInput.placeholder = deriveInitials(info.name);
+    const chosen = info.color ?? "auto";
+    for (const [key, swatch] of this.swatches) {
+      const on = key === chosen;
+      swatch.setAttribute("aria-checked", String(on));
+      swatch.style.borderColor = on ? "#e6e8ec" : "transparent";
+    }
+    this.badgePreview.textContent = "";
+    this.badgePreview.appendChild(projectBadge(info));
     return true;
   }
 
@@ -307,6 +380,19 @@ export class EditPane {
       const cur = this.opts.info(this.id);
       if (cur) this.nameInput.value = cur.name;
     });
+  }
+
+  /** Write the badge identity: the typed initials (blank → derived) and
+   *  either the swatch just clicked or the colour already stored. */
+  private async commitIdentity(color?: ProjectColor | "auto"): Promise<void> {
+    const info = this.opts.info(this.id);
+    if (!info) return;
+    const typed = this.initialsInput.value.trim().toUpperCase();
+    const initials = typed === "" ? null : typed;
+    const nextColor = color === undefined ? info.color : color === "auto" ? null : color;
+    if (initials === (info.initials ?? null) && nextColor === (info.color ?? null)) return;
+    await Promise.resolve(this.opts.setIdentity(this.id, initials, nextColor)).catch(() => {});
+    this.sync();
   }
 
   private async commitLevel(level: Level): Promise<void> {

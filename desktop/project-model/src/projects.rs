@@ -65,6 +65,12 @@ pub struct Project {
     /// UI's job, this store only holds the RAW value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_level: Option<String>,
+    /// The rail badge's overrides: up to three letters, and a palette colour
+    /// key (see [`ProjectStore::COLORS`]). Absent = derived from the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initials: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// Per-process chappa-side state, `process name -> override record`
     /// (the level; the favorite + renaming toggle). Absent
     /// entirely when no process has anything set (an entry is dropped when it
@@ -259,6 +265,8 @@ impl ProjectStore {
             icon,
             trusted_hash: None,
             notification_level: None,
+            initials: None,
+            color: None,
             process_overrides: None,
             yml_backed_up: None,
             processes: None,
@@ -310,6 +318,44 @@ impl ProjectStore {
             .find(|p| p.id == id)
             .ok_or_else(|| format!("no such project: {id}"))?;
         project.name = name.to_owned();
+        self.save()
+    }
+
+    /// The palette keys a project colour may take. The UI paints them; the
+    /// store only checks that a stored key is one of these.
+    pub const COLORS: [&'static str; 8] = [
+        "gray", "blue", "green", "red", "purple", "teal", "orange", "pink",
+    ];
+
+    /// Set the badge identity. Blank initials or no colour CLEAR that
+    /// override (the badge derives from the name again); initials are at
+    /// most three characters and a colour must be a palette key. Validated
+    /// before anything mutates, so a rejection leaves the file untouched.
+    pub fn set_identity(
+        &mut self,
+        id: u32,
+        initials: Option<String>,
+        color: Option<String>,
+    ) -> Result<(), String> {
+        let initials = initials
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if let Some(i) = &initials {
+            if i.chars().count() > 3 {
+                return Err("initials are at most three characters".to_owned());
+            }
+        }
+        let color = color
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        if let Some(c) = &color {
+            if !Self::COLORS.contains(&c.as_str()) {
+                return Err(format!("unknown project colour: {c}"));
+            }
+        }
+        let project = self.project_mut(id)?;
+        project.initials = initials;
+        project.color = color;
         self.save()
     }
 
@@ -499,6 +545,44 @@ impl ProjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- badge identity ----------------------------------------------
+
+    /// Initials/colour persist as overrides, blanks clear them, and a bad
+    /// value is refused before the file changes.
+    #[test]
+    fn identity_overrides_round_trip_and_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("projects.json");
+        fs::write(
+            &store_path,
+            r#"[{"id":1,"name":"chappa-ai","path":"/chappa-ai"}]"#,
+        )
+        .unwrap();
+        let mut store = ProjectStore::new(store_path.clone());
+        // Untouched rows carry neither key.
+        assert!(store.get(1).unwrap().initials.is_none());
+        assert!(store.get(1).unwrap().color.is_none());
+        assert!(!fs::read_to_string(&store_path).unwrap().contains("initials"));
+
+        store.set_identity(1, Some(" CH ".into()), Some("Teal".into())).unwrap();
+        let reopened = ProjectStore::new(store_path.clone());
+        assert_eq!(reopened.get(1).unwrap().initials.as_deref(), Some("CH"));
+        assert_eq!(reopened.get(1).unwrap().color.as_deref(), Some("teal"));
+
+        // Too long / unknown colour: refused, nothing written.
+        assert!(store.set_identity(1, Some("FOUR".into()), None).is_err());
+        assert!(store.set_identity(1, None, Some("plaid".into())).is_err());
+        assert_eq!(store.get(1).unwrap().initials.as_deref(), Some("CH"));
+        assert_eq!(store.get(1).unwrap().color.as_deref(), Some("teal"));
+        assert!(store.set_identity(9, None, None).is_err());
+
+        // Blank clears: the row goes back to derived and the keys vanish.
+        store.set_identity(1, Some("".into()), None).unwrap();
+        assert!(store.get(1).unwrap().initials.is_none());
+        assert!(store.get(1).unwrap().color.is_none());
+        assert!(!fs::read_to_string(&store_path).unwrap().contains("color"));
+    }
 
     // ---- override records, favorites, renaming, backup flag -------
 

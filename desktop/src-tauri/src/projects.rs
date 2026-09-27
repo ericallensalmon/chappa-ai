@@ -983,6 +983,19 @@ pub fn rename_project(projects: State<'_, Projects>, id: u32, name: String) -> R
     inner.store.as_mut().unwrap().rename(id, name)
 }
 
+/// Set a project's badge identity (initials + palette colour). A blank or
+/// missing half clears that override back to the name-derived default.
+#[tauri::command]
+pub fn set_project_identity(
+    projects: State<'_, Projects>,
+    id: u32,
+    initials: Option<String>,
+    color: Option<String>,
+) -> Result<(), String> {
+    let mut inner = projects.store()?;
+    inner.store.as_mut().unwrap().set_identity(id, initials, color)
+}
+
 /// Forget a project. Never touches the directory; stops any live processes.
 #[tauri::command]
 pub fn remove_project(
@@ -1119,6 +1132,8 @@ pub fn open_project(
             name,
             path: root.display().to_string(),
             icon: icon.clone(),
+            initials: stored.initials.clone(),
+            color: stored.color.clone(),
             notification_level: stored.notification_level.clone(),
         },
         trust_pending,
@@ -2294,6 +2309,10 @@ pub struct ProjectInfoDto {
     pub name: String,
     pub path: String,
     pub icon: Option<String>,
+    /// The badge overrides (initials, palette colour key), or `null` when
+    /// the badge derives from the name.
+    pub initials: Option<String>,
+    pub color: Option<String>,
     /// The RAW project default (`"all" | "important" | "none"`), or
     /// `null` when unset. NOT resolved — resolution (per-process override →
     /// project default → 'all') lives in the UI.
@@ -2307,6 +2326,8 @@ impl From<&project_model::projects::Project> for ProjectInfoDto {
             name: p.name.clone(),
             path: p.path.display().to_string(),
             icon: p.icon.clone(),
+            initials: p.initials.clone(),
+            color: p.color.clone(),
             notification_level: p.notification_level.clone(),
         }
     }
@@ -2507,17 +2528,19 @@ mod tests {
             name: "chappa-ai".into(),
             path: "/chappa-ai".into(),
             icon: None,
+            initials: None,
+            color: None,
             notification_level: Some("important".into()),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["notificationLevel"], "important");
         assert!(json.get("notification_level").is_none());
-        // The wire DTO is exactly these five keys — no sync flag.
+        // The wire DTO is exactly these seven keys — no sync flag.
         let keys: std::collections::BTreeSet<&str> =
             json.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["id", "name", "path", "icon", "notificationLevel"]
+            ["id", "name", "path", "icon", "initials", "color", "notificationLevel"]
                 .into_iter()
                 .collect::<std::collections::BTreeSet<&str>>()
         );

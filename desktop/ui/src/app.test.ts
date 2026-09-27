@@ -146,6 +146,7 @@ function stubApi(): {
     listProjects: vi.fn(async () => []),
     addProject: vi.fn(async () => ({ id: 1, name: "p", path: "/p", icon: null, notificationLevel: null })),
     renameProject: vi.fn(async () => {}),
+    setProjectIdentity: vi.fn(async () => {}),
     removeProject: vi.fn(async () => {}),
     pickDirectory: vi.fn(async () => null),
     openProject: vi.fn(async () => ({
@@ -550,6 +551,7 @@ function projectApi(over: {
       calls.addProject.push([path, name]);
       return { id: 2, name: name ?? "other", path, icon: null, notificationLevel: null };
     }),
+    setProjectIdentity: vi.fn(async () => {}),
     renameProject: vi.fn(async (id: number, name: string) => {
       calls.renameProject.push([id, name]);
     }),
@@ -684,7 +686,9 @@ describe("App projects", () => {
     expect(menu.style.display).toBe("block");
     const options = root.querySelectorAll(".chappa-project-option");
     expect(options.length).toBe(1);
-    expect(options[0].textContent).toBe("chappa-ai");
+    expect(options[0].querySelector(".chappa-project-option-name")?.textContent).toBe("chappa-ai");
+    // The option wears the project badge before its name.
+    expect(options[0].querySelector(".chappa-project-badge")?.textContent).toBe("CA");
 
     // mousedown → click on the option: open_project runs and process rows land.
     click(options[0]);
@@ -1475,7 +1479,7 @@ describe("App add-project flow", () => {
     expect(root.querySelector(".chappa-project-switcher")?.textContent).toBe("chappa-ai notes");
     expect(root.querySelector(".chappa-project-name")?.textContent).toBe("chappa-ai notes");
     click(root.querySelector<HTMLButtonElement>(".chappa-project-switcher")!);
-    expect(root.querySelector(".chappa-project-option")?.textContent).toBe("chappa-ai notes");
+    expect(root.querySelector(".chappa-project-option-name")?.textContent).toBe("chappa-ai notes");
     panelDispose(app);
   });
 
@@ -1552,7 +1556,7 @@ describe("App add-project flow", () => {
     expect(shown.length).toBe(1);
     expect(shown[0]).toContain("no such project");
     click(root.querySelector<HTMLButtonElement>(".chappa-project-switcher")!);
-    expect(root.querySelector(".chappa-project-option")?.textContent).toBe("chappa-ai");
+    expect(root.querySelector(".chappa-project-option-name")?.textContent).toBe("chappa-ai");
     panelDispose(app);
   });
 
@@ -2883,7 +2887,7 @@ const activeNames = (root: HTMLElement): Array<string | undefined> =>
   activeRows(root).map((r) => r.querySelector(".chappa-rail-name")?.textContent ?? undefined);
 
 const activeTags = (root: HTMLElement): Array<string | null> =>
-  activeRows(root).map((r) => r.querySelector(".chappa-active-project")?.textContent ?? null);
+  activeRows(root).map((r) => r.querySelector<HTMLElement>(".chappa-active-project")?.title ?? null);
 
 describe("App ACTIVE area", () => {
   it("sits at the TOP of the rail, hidden while empty, shown when a process runs", async () => {
@@ -2953,7 +2957,7 @@ describe("App ACTIVE area", () => {
     await FLUSH();
     const chappaAiRow = activeRows(root)[0];
     expect(chappaAiRow.dataset.projectId).toBe("1");
-    expect(chappaAiRow.querySelector(".chappa-active-project")?.textContent).toBe("chappa-ai");
+    expect(chappaAiRow.querySelector<HTMLElement>(".chappa-active-project")?.title).toBe("chappa-ai");
     expect(chappaAiRow.querySelector(".chappa-status-dot")?.classList.contains("starting")).toBe(true);
     panelDispose(app);
     root.remove();
@@ -3005,7 +3009,7 @@ describe("App ACTIVE area", () => {
     await app.openProject(2); // health expanded, its `server` (term 2) active
     await FLUSH();
     const chappaAiRow = activeRows(root)[0];
-    expect(chappaAiRow.querySelector(".chappa-active-project")?.textContent).toBe("chappa-ai");
+    expect(chappaAiRow.querySelector<HTMLElement>(".chappa-active-project")?.title).toBe("chappa-ai");
     click(chappaAiRow);
     // ChappaAi expanded — from cache, NO IPC re-open (open_project resets the
     // runtime Rust-side) — and chappa-ai's own `server` panel took the activation,
@@ -3068,7 +3072,7 @@ describe("App ACTIVE area", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].dataset.kind).toBe("terminal");
     expect(rows[0].querySelector(".chappa-rail-name")?.textContent).toBe("shell");
-    expect(rows[0].querySelector(".chappa-active-project")?.textContent).toBe("chappa-ai");
+    expect(rows[0].querySelector<HTMLElement>(".chappa-active-project")?.title).toBe("chappa-ai");
     expect(rows[0].classList.contains("attention")).toBe(true);
     // Activity renders its own dot alongside the attention marker.
     expect(rows[0].querySelector(".chappa-active-activity")).not.toBeNull();
@@ -4608,6 +4612,13 @@ describe("App project AGENTS section", () => {
     expect(names).toContain("worker");
     expect(names).toContain("shell");
     expect(agentRows(root).length).toBe(0);
+    // The workspace row wears its project's badge (the id fallback here:
+    // project 99 is not a stored project, so the letters derive from it).
+    const worker = railRows(root).find((r) => r.querySelector(".chappa-rail-name")?.textContent === "worker")!;
+    const badge = worker.querySelector<HTMLElement>(".chappa-rail-project")!;
+    expect(badge.classList.contains("chappa-project-badge")).toBe(true);
+    expect(badge.title).toBe("project 99");
+    expect(badge.textContent).toBe("P9");
     expect(agentsSection(root).querySelector(".chappa-subsection-count")?.textContent).toBe("0/0");
     // The binding is still remembered on the entry (attribution untouched).
     const entries = (app as unknown as { entries: Map<number, RailEntry> }).entries;
@@ -5138,6 +5149,8 @@ describe("App adopted backend terminals", () => {
     const unbound = railEls.find((r) => r.querySelector(".chappa-rail-name")?.textContent === "agent71");
     expect(unbound).toBeDefined();
     expect(unbound!.classList.contains("agent")).toBe(true);
+    // Unbound: no project to name, so no tag.
+    expect(unbound!.querySelector(".chappa-rail-project")).toBeNull();
     panelDispose(app);
     root.remove();
   });
