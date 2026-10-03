@@ -2147,7 +2147,8 @@ mod tests {
         let mut host = AgentTool::template(ToolType::Claude);
         host.args = vec!["--verbose".into()];
         let plan = build_spawn_plan(&host, &["a b".into()], &env, Some(PathBuf::from("/p")), "u", false);
-        assert_eq!(plan.command, "claude");
+        // The template names the .cmd shim on Windows, the bare name elsewhere.
+        assert_eq!(plan.command, ToolType::Claude.default_program(cfg!(windows)));
         assert_eq!(plan.args, vec!["--verbose", "a b"]);
         assert_eq!(plan.cwd, Some(PathBuf::from("/p")));
     }
