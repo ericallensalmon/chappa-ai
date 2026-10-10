@@ -216,6 +216,7 @@ pub fn edit_process(
     if new_name != old_name && defs.contains_key(&new_name) {
         return Err(format!("a command named `{new_name}` already exists"));
     }
+    def.command = def.command.keeping_form_of(&defs[idx].command);
     if def.unknown.is_empty() {
         def.unknown = defs[idx].unknown.clone();
     }
@@ -675,7 +676,7 @@ processes:
 
     fn def(command: &str) -> ProcessDef {
         ProcessDef {
-            command: command.to_owned(),
+            command: command.into(),
             unknown: IndexMap::new(),
             ..ProcessDef::default()
         }

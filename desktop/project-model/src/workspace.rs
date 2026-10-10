@@ -48,7 +48,7 @@ pub struct WorkspaceFile {
 /// required, RELATIVE is refused. `unknown`-key passthrough is moot but
 /// harmless.
 pub fn validate_workspace_def(def: &ProcessDef) -> Result<(), String> {
-    if def.command.trim().is_empty() {
+    if def.command.is_blank() {
         return Err("command must not be blank".to_owned());
     }
     if let Some(key) = def.env.keys().find(|k| k.trim().is_empty()) {
@@ -185,7 +185,7 @@ mod tests {
 
     fn def(command: &str) -> ProcessDef {
         ProcessDef {
-            command: command.to_owned(),
+            command: command.into(),
             ..Default::default()
         }
     }

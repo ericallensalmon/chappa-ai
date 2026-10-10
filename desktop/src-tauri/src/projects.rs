@@ -43,7 +43,7 @@ use project_model::writeback;
 use project_model::settings::{split_command_line, Settings, EXEC_PROFILE_CMD, EXEC_PROFILE_SH};
 use project_model::status::{Lifecycle, ProcessEvent, RUNNING_AFTER_MS};
 use project_model::watcher::{ChangeMatcher, RecursiveMode, RestartWatcher};
-use project_model::yml::{ProcessDef, ProjectYml};
+use project_model::yml::{CommandLine, ProcessDef, ProjectYml};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
 use term_core::actor::epoch_ms;
@@ -360,6 +360,27 @@ pub(crate) fn execution_command(command: &str, settings: &Settings) -> (String, 
     }
 }
 
+/// Program, args and extra env for one project or workspace command. A list
+/// command runs its first word directly with the rest as arguments: no
+/// execution profile, no quote indirection, nothing re-parsed. A shell line
+/// goes through the execution profile, with the cmd.exe quote indirection
+/// applied when that profile is cmd.
+pub(crate) fn process_command(
+    command: &CommandLine,
+    settings: &Settings,
+) -> Result<(String, Vec<String>, Vec<(String, String)>), String> {
+    if let Some(words) = command.argv() {
+        let (program, args) = words
+            .split_first()
+            .filter(|(program, _)| !program.trim().is_empty())
+            .ok_or_else(|| "command must not be blank".to_owned())?;
+        return Ok((program.clone(), args.to_vec(), Vec::new()));
+    }
+    let (program, args) = execution_command(&command.display(), settings);
+    let (args, env) = cmd_quote_indirection(&program, args);
+    Ok((program, args, env))
+}
+
 /// Resolve a process's spawn spec: execution profile + contained working_dir +
 /// yml env merged over inherited (the actor applies `spec.env` last). A
 /// working_dir that escapes the project root fails THIS process, not the
@@ -369,8 +390,7 @@ fn build_spec(def: &ProcessDef, root: &Path, settings: &Settings) -> Result<PtyS
         Some(dir) => dir,
         None => root.to_path_buf(),
     };
-    let (command, args) = execution_command(&def.command, settings);
-    let (args, indirection_env) = cmd_quote_indirection(&command, args);
+    let (command, args, indirection_env) = process_command(&def.command, settings)?;
     Ok(PtySpec {
         command,
         args,
@@ -1097,7 +1117,7 @@ pub fn open_project(
     let trust_commands: Vec<String> = processes
         .values()
         .filter(|p| p.def.auto_start)
-        .map(|p| p.def.command.clone())
+        .map(|p| p.def.command.display())
         .collect();
 
     // Watch chappa.yml itself so an external edit (or our own
@@ -1293,7 +1313,7 @@ impl ProcessDefDto {
         (
             self.name,
             ProcessDef {
-                command: self.command.trim().to_owned(),
+                command: self.command.trim().into(),
                 working_dir,
                 auto_start: self.auto_start,
                 auto_restart: self.auto_restart,
@@ -1732,7 +1752,7 @@ fn reload_locked(
                         // it (the old command must not keep running under a
                         // definition the user never saw) and hold the restart
                         // until the gate is answered.
-                        held_back.push(proc.def.command.clone());
+                        held_back.push(proc.def.command.display());
                         let status = proc.lifecycle.on(ProcessEvent::Stop, now_ms());
                         proc.generation += 1;
                         if let Some(term_id) = proc.term_id.take() {
@@ -1793,7 +1813,7 @@ fn reload_locked(
     if !trusted {
         for name in &diff.added {
             if let Some(p) = processes.get(name).filter(|p| p.def.auto_start) {
-                trust_commands.push(p.def.command.clone());
+                trust_commands.push(p.def.command.display());
             }
         }
     }
@@ -2372,7 +2392,7 @@ impl ProjectProcessDto {
         let record = overrides.and_then(|m| m.get(name));
         Self {
             name: name.to_owned(),
-            command: p.def.command.clone(),
+            command: p.def.command.display(),
             status: p.lifecycle.status().as_str(),
             auto_start: p.def.auto_start,
             auto_restart: p.def.auto_restart,
@@ -2452,6 +2472,21 @@ mod tests {
         assert_eq!(args, vec!["-c".to_owned(), "py app/x.py".to_owned()]);
     }
 
+    #[test]
+    fn a_list_command_spawns_its_program_directly() {
+        let settings = settings_with("cmd", vec![]);
+        let argv = CommandLine::Argv(vec!["py".into(), "-c".into(), r#"print("a & b")"#.into()]);
+        let (program, args, env) = process_command(&argv, &settings).unwrap();
+        assert_eq!(program, "py");
+        assert_eq!(args, vec!["-c", r#"print("a & b")"#], "words pass through untouched");
+        assert!(env.is_empty(), "no cmd quote indirection for a list");
+        // A shell line still goes through the profile.
+        let (program, args, _) = process_command(&"py app/x.py".into(), &settings).unwrap();
+        assert_eq!((program.as_str(), args), ("cmd", vec!["/C".to_owned(), "py app/x.py".to_owned()]));
+        // An empty list is refused rather than panicking.
+        assert!(process_command(&CommandLine::Argv(vec![]), &settings).is_err());
+    }
+
     /// A profile-named exec target uses the profile's PROGRAM plus the flag
     /// this heuristic picks from the program name.
     #[test]
@@ -2502,7 +2537,7 @@ mod tests {
     fn process_runtime(command: &str) -> ProcessRuntime {
         ProcessRuntime {
             def: ProcessDef {
-                command: command.to_owned(),
+                command: command.into(),
                 ..Default::default()
             },
             lifecycle: Lifecycle::new(),

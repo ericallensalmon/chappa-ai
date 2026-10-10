@@ -20,8 +20,10 @@ Linux are untested.
   minimal kitty keyboard protocol, and mouse modes.
 - **Projects and processes.** A project is a directory. Its commands live in
   a `chappa.yml` beside the code, so they can be committed, reviewed and
-  shared like anything else in the repository. Commands can auto-start,
-  auto-restart, and restart on file changes.
+  shared like anything else in the repository. A command is either a shell
+  line (`command: npm run build && npm start`) or a list run directly with
+  no shell in between (`command: [cargo, test, --no-fail-fast]`). Commands
+  can auto-start, auto-restart, and restart on file changes.
 - **Agents as first-class processes.** Registered agent tools spawn a CLI
   agent into a project, on the host or through `docker exec`, with identity
   environment variables, readiness-gated first prompts, busy limits, and

@@ -20,6 +20,7 @@ pub mod projects;
 pub mod settings;
 pub mod status;
 pub mod watcher;
+pub mod words;
 pub mod workspace;
 pub mod writeback;
 pub mod yml;

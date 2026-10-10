@@ -31,6 +31,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
+pub use project_model::words::shell_words;
+use project_model::words::quote_word;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -339,78 +341,6 @@ pub fn docker_exec_prefix(runtime: &Runtime, env: &IndexMap<String, String>) -> 
     }
     words.push(container.clone());
     words
-}
-
-// ---- shell-words ------------------------------------------------------------
-
-/// Quote one word for display when it carries whitespace or quotes (double-
-/// quote style, `\"` and `\\` escaped inside; `render → parse` round-trips
-/// through [`shell_words`]). A bare word — Windows paths with backslashes
-/// included — is left alone: backslash is literal outside quotes.
-fn quote_word(word: &str) -> String {
-    if word.is_empty() || word.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
-        let escaped = word.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
-    } else {
-        word.to_owned()
-    }
-}
-
-/// Shell-words split for the paste box: whitespace separates, single quotes
-/// are literal, double quotes allow `\"` and `\\`. A backslash OUTSIDE quotes
-/// is a literal character on every platform — this is not a POSIX shell, and
-/// the strings pasted here are Windows command lines as often as not
-/// (`D:\tools\npm\claude.cmd`); eating the backslashes mangled every path.
-/// No expansion of any kind.
-pub fn shell_words(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_word = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                in_word = true;
-                for c in chars.by_ref() {
-                    if c == '\'' {
-                        break;
-                    }
-                    cur.push(c);
-                }
-            }
-            '"' => {
-                in_word = true;
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' => break,
-                        '\\' => match chars.next() {
-                            Some(n @ ('"' | '\\')) => cur.push(n),
-                            Some(n) => {
-                                cur.push('\\');
-                                cur.push(n);
-                            }
-                            None => cur.push('\\'),
-                        },
-                        other => cur.push(other),
-                    }
-                }
-            }
-            c if c.is_whitespace() => {
-                if in_word {
-                    out.push(std::mem::take(&mut cur));
-                    in_word = false;
-                }
-            }
-            other => {
-                in_word = true;
-                cur.push(other);
-            }
-        }
-    }
-    if in_word {
-        out.push(cur);
-    }
-    out
 }
 
 /// What the importer could and could not classify.

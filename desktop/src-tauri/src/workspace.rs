@@ -43,7 +43,7 @@ use term_core::actor::epoch_ms;
 use term_core::pty::PtySpec;
 use term_core::status::ProcessStatus;
 
-use crate::projects::{cmd_quote_indirection, execution_command, ProcessDefDto};
+use crate::projects::{process_command, ProcessDefDto};
 use crate::registry::{actor_config, ChannelSink, ExitHandler, Registry, TermId};
 use crate::settings::SettingsState;
 
@@ -160,8 +160,7 @@ fn now_ms() -> u64 {
 fn build_workspace_spec(def: &ProcessDef, settings: &Settings) -> Result<PtySpec, String> {
     validate_workspace_def(def)?;
     let cwd = def.working_dir.as_ref().map(|d| d.to_path_buf());
-    let (command, args) = execution_command(&def.command, settings);
-    let (args, indirection_env) = cmd_quote_indirection(&command, args);
+    let (command, args, indirection_env) = process_command(&def.command, settings)?;
     Ok(PtySpec {
         command,
         args,
@@ -466,7 +465,7 @@ impl WorkspaceCommandDto {
     fn from_proc(name: &str, p: &WsProc) -> Self {
         Self {
             name: name.to_owned(),
-            command: p.def.command.clone(),
+            command: p.def.command.display(),
             status: p.lifecycle.status().as_str(),
             auto_start: p.def.auto_start,
             auto_restart: p.def.auto_restart,
@@ -667,7 +666,7 @@ mod tests {
         #[cfg(not(windows))]
         let abs_dir = "/opt/ws";
         let abs = ProcessDef {
-            command: "echo hi".to_owned(),
+            command: "echo hi".into(),
             working_dir: Some(abs_dir.into()),
             ..Default::default()
         };
@@ -675,7 +674,7 @@ mod tests {
         assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new(abs_dir)));
 
         let home = ProcessDef {
-            command: "echo hi".to_owned(),
+            command: "echo hi".into(),
             working_dir: None,
             ..Default::default()
         };
@@ -683,7 +682,7 @@ mod tests {
         assert_eq!(spec.cwd, None, "empty working_dir = home, like a plain shell");
 
         let rel = ProcessDef {
-            command: "echo hi".to_owned(),
+            command: "echo hi".into(),
             working_dir: Some("relative/dir".into()),
             ..Default::default()
         };

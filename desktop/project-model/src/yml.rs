@@ -64,9 +64,10 @@ pub const CHAPPA_YML_NAME: &str = "chappa.yml";
 /// `PartialEq` only — `serde_yaml::Value` carries floats, so `Eq` is gone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessDef {
-    /// Required; run via the platform execution profile (`cmd /C` Windows,
-    /// `sh -c` elsewhere) — see src-tauri/src/projects.rs.
-    pub command: String,
+    /// Required. A string runs via the platform execution profile (`cmd /C`
+    /// Windows, `sh -c` elsewhere — see src-tauri/src/projects.rs); a list
+    /// runs its first word directly with the rest as arguments, no shell.
+    pub command: CommandLine,
     /// `None` = project root. Must resolve inside the project root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<PathBuf>,
@@ -89,7 +90,7 @@ pub struct ProcessDef {
 impl Default for ProcessDef {
     fn default() -> Self {
         Self {
-            command: String::new(),
+            command: CommandLine::default(),
             working_dir: None,
             auto_start: default_auto_start(),
             auto_restart: false,
@@ -102,6 +103,99 @@ impl Default for ProcessDef {
 
 fn default_auto_start() -> bool {
     true
+}
+
+/// A process's `command`, in either of its two spellings:
+///
+/// ```yaml
+/// command: npm run build && npm start     # Shell: one line for the shell
+/// command: [cargo, test, --no-fail-fast]  # Argv: program + args, no shell
+/// ```
+///
+/// A shell line is what most commands want (`&&`, pipes, redirects,
+/// `%VAR%`/`$VAR`). The list form is for commands that must not pass through
+/// a shell at all: every word reaches the program exactly as written, so
+/// nothing in it can be read as shell syntax. On Windows a `.cmd`/`.bat`
+/// program is still run by cmd.exe — that is how Windows runs batch files —
+/// so name an `.exe` where the guarantee matters.
+///
+/// Untagged: a string loads as `Shell`, a sequence as `Argv`, and each
+/// writes back in the spelling it was read in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommandLine {
+    Shell(String),
+    Argv(Vec<String>),
+}
+
+impl Default for CommandLine {
+    fn default() -> Self {
+        CommandLine::Shell(String::new())
+    }
+}
+
+impl CommandLine {
+    /// No program to run: a blank line, an empty list, or a blank first word.
+    pub fn is_blank(&self) -> bool {
+        match self {
+            CommandLine::Shell(line) => line.trim().is_empty(),
+            CommandLine::Argv(words) => words.first().map_or(true, |w| w.trim().is_empty()),
+        }
+    }
+
+    /// The words of a list command; `None` for a shell line.
+    pub fn argv(&self) -> Option<&[String]> {
+        match self {
+            CommandLine::Shell(_) => None,
+            CommandLine::Argv(words) => Some(words),
+        }
+    }
+
+    /// One line for display, copying and the trust prompt. A list renders as
+    /// its words, quoted where needed, so the line splits back into the same
+    /// list (see [`crate::words`]).
+    pub fn display(&self) -> String {
+        match self {
+            CommandLine::Shell(line) => line.clone(),
+            CommandLine::Argv(words) => crate::words::join_words(words),
+        }
+    }
+
+    /// An edit arrives from the editor as one line. When the command being
+    /// replaced was a list, the line is split back into a list, so editing a
+    /// list command in the app never quietly turns it into a shell line.
+    pub fn keeping_form_of(self, old: &CommandLine) -> CommandLine {
+        match (self, old) {
+            (CommandLine::Shell(line), CommandLine::Argv(_)) => {
+                CommandLine::Argv(crate::words::shell_words(&line))
+            }
+            (new, _) => new,
+        }
+    }
+}
+
+impl From<&str> for CommandLine {
+    fn from(line: &str) -> Self {
+        CommandLine::Shell(line.to_owned())
+    }
+}
+
+impl From<String> for CommandLine {
+    fn from(line: String) -> Self {
+        CommandLine::Shell(line)
+    }
+}
+
+impl PartialEq<str> for CommandLine {
+    fn eq(&self, other: &str) -> bool {
+        matches!(self, CommandLine::Shell(line) if line == other)
+    }
+}
+
+impl PartialEq<&str> for CommandLine {
+    fn eq(&self, other: &&str) -> bool {
+        self == *other
+    }
 }
 
 /// The parsed `chappa.yml`. `processes` preserves file order (IndexMap).
@@ -157,7 +251,7 @@ impl Default for ProjectYmlRaw {
 
 #[derive(Debug, Deserialize)]
 struct ProcessDefRaw {
-    command: String,
+    command: CommandLine,
     #[serde(default)]
     working_dir: Option<PathBuf>,
     #[serde(default = "default_auto_start")]
@@ -305,6 +399,7 @@ impl ProjectYml {
         if new_name != old_name && self.processes.contains_key(&new_name) {
             return Err(format!("a command named `{new_name}` already exists"));
         }
+        def.command = def.command.keeping_form_of(&self.processes[idx].command);
         def.validate(root)?;
         if def.unknown.is_empty() {
             def.unknown = self.processes[idx].unknown.clone();
@@ -393,7 +488,7 @@ impl ProcessDef {
     /// `working_dir` — the editor must not be able to store what the spawn
     /// would refuse. Invalid globs pass (they are ignored at runtime).
     pub fn validate(&self, project_root: &Path) -> Result<(), String> {
-        if self.command.trim().is_empty() {
+        if self.command.is_blank() {
             return Err("command must not be blank".to_owned());
         }
         if let Some(key) = self.env.keys().find(|k| k.trim().is_empty()) {
@@ -777,5 +872,42 @@ processes:
         let big = root.path().join(CHAPPA_YML_NAME);
         fs::write(&big, vec![b'x'; MAX_YML_BYTES + 1]).unwrap();
         assert!(ProjectYml::load(root.path()).is_none());
+    }
+
+    #[test]
+    fn a_list_command_loads_writes_back_and_stays_a_list_when_edited() {
+        let text = "processes:\n  test:\n    command: [cargo, test, \"a b\"]\n  dev:\n    command: npm run dev\n";
+        let mut yml = ProjectYml::from_str(text).unwrap();
+        let test = &yml.processes["test"].command;
+        assert_eq!(test.argv(), Some(&["cargo".to_owned(), "test".to_owned(), "a b".to_owned()][..]));
+        assert_eq!(test.display(), r#"cargo test "a b""#);
+        assert_eq!(yml.processes["dev"].command, "npm run dev", "a string stays a shell line");
+
+        // Write-back keeps each spelling.
+        let again = ProjectYml::from_str(&yml.to_yaml_string().unwrap()).unwrap();
+        assert_eq!(again, yml);
+
+        // The editor sends one line; a list command splits back into a list.
+        let root = tempfile::tempdir().unwrap();
+        let edited = ProcessDef { command: r#"cargo test "c d" --release"#.into(), ..ProcessDef::default() };
+        yml.edit_process(root.path(), "test", "test", edited).unwrap();
+        assert_eq!(
+            yml.processes["test"].command,
+            CommandLine::Argv(vec!["cargo".into(), "test".into(), "c d".into(), "--release".into()])
+        );
+        // A shell command edited stays a shell line.
+        let edited = ProcessDef { command: "npm run dev -- --port 1".into(), ..ProcessDef::default() };
+        yml.edit_process(root.path(), "dev", "dev", edited).unwrap();
+        assert_eq!(yml.processes["dev"].command, "npm run dev -- --port 1");
+    }
+
+    #[test]
+    fn an_empty_list_or_blank_program_is_a_blank_command() {
+        let root = tempfile::tempdir().unwrap();
+        for text in ["processes:\n  x:\n    command: []\n", "processes:\n  x:\n    command: [\" \", a]\n"] {
+            let yml = ProjectYml::from_str(text).unwrap();
+            assert!(yml.processes["x"].command.is_blank(), "{text}");
+            assert!(yml.processes["x"].validate(root.path()).is_err(), "{text}");
+        }
     }
 }
