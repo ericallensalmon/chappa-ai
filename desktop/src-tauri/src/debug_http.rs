@@ -1,7 +1,15 @@
-//! Debug-build parity-harness HTTP server.
+//! Debug-build test-harness HTTP server.
 //! Bound to 127.0.0.1:8323, JSON in/out, no auth. An external harness drives
 //! chappa-ai desktop over this surface and checks process semantics and
 //! terminal text.
+//!
+//! It can start any program, so it is guarded even in debug builds:
+//! - OFF unless `CHAPPA_DEBUG_HTTP=1` is set when the app starts — running
+//!   `tauri dev` alone does not open it;
+//! - a request that looks like it came from a web page is refused before
+//!   routing (see [`from_browser`]): a page could otherwise POST a spawn
+//!   here without a CORS preflight, or read terminal text through DNS
+//!   rebinding.
 //!
 //! Routes:
 //! - `GET    /debug/terminals`                     → `[{id, name, status, cols, rows, seq}]`
@@ -80,10 +88,40 @@ fn default_rows() -> u16 {
     24
 }
 
-/// Spawn the harness server on its own thread. Called once from `setup` in
-/// debug builds; a bind failure is loud but not fatal — the app still runs.
+/// The env var that opts in to the harness server.
+pub const ENABLE_VAR: &str = "CHAPPA_DEBUG_HTTP";
+
+/// Spawn the harness server on its own thread when [`ENABLE_VAR`] is `1`.
+/// Called once from `setup` in debug builds; a bind failure is loud but not
+/// fatal — the app still runs.
 pub fn start(registry: Registry) {
+    if std::env::var(ENABLE_VAR).as_deref() != Ok("1") {
+        return;
+    }
     std::thread::spawn(move || run(registry));
+}
+
+/// True when a request carries what a browser adds and a harness client
+/// never does: an `Origin` or `Sec-Fetch-*` header (cross-site fetches,
+/// including `no-cors` POSTs), or a `Host` naming anything but the loopback
+/// address (DNS rebinding — the page's own hostname resolved to 127.0.0.1).
+/// A request with no `Host` at all is a hand-rolled client, not a browser.
+pub fn from_browser(headers: &[tiny_http::Header]) -> bool {
+    headers.iter().any(|h| {
+        let field = h.field.as_str().as_str().to_ascii_lowercase();
+        if field == "origin" || field.starts_with("sec-fetch-") {
+            return true;
+        }
+        if field == "host" {
+            let value = h.value.as_str().trim().to_ascii_lowercase();
+            let host = match value.strip_prefix('[') {
+                Some(v6) => v6.split(']').next().unwrap_or(""),
+                None => value.rsplit_once(':').map_or(value.as_str(), |(host, _)| host),
+            };
+            return !matches!(host, "127.0.0.1" | "localhost" | "::1");
+        }
+        false
+    })
 }
 
 fn run(registry: Registry) {
@@ -109,9 +147,15 @@ pub fn serve(server: tiny_http::Server, registry: Registry) {
 }
 
 fn respond(registry: Registry, mut request: tiny_http::Request) {
+    // Read the body before any answer, a refusal included, so a kept-alive
+    // connection is left at the next request.
+    let body = read_body(&mut request.as_reader());
+    if from_browser(request.headers()) {
+        let _ = request.respond(json(403, json!({"error": "browser requests are refused"})));
+        return;
+    }
     let method = request.method().clone();
     let url = request.url().to_owned();
-    let body = read_body(&mut request.as_reader());
     let response = route(&registry, &method, &url, body);
     let _ = request.respond(response);
 }

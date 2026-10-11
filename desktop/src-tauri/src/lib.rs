@@ -155,7 +155,7 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
-                // Parity-harness surface, driven over HTTP.
+                // Test-harness surface over HTTP; opt-in, see debug_http.
                 debug_http::start(app.state::<Registry>().inner().clone());
             }
             Ok(())

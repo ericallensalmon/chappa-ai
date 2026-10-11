@@ -525,6 +525,49 @@ fn debug_routes_stay_tokenless() {
     assert_eq!(status, 404);
 }
 
+/// A web page must not reach the debug surface: no-cors POSTs carry
+/// `Origin`/`Sec-Fetch-*`, and DNS rebinding carries a foreign `Host`.
+#[cfg(debug_assertions)]
+#[test]
+fn debug_routes_refuse_browser_requests() {
+    use tiny_http::Header;
+    let h = |s: &str| s.parse::<Header>().unwrap();
+    let refused = [
+        vec![h("Host: 127.0.0.1:8323"), h("Origin: https://evil.example")],
+        vec![h("Host: 127.0.0.1:8323"), h("Sec-Fetch-Site: cross-site")],
+        vec![h("Host: rebind.example:8323")],
+        vec![h("Host: 127.0.0.1.evil.example")],
+    ];
+    for headers in refused {
+        assert!(app_lib::debug_http::from_browser(&headers), "{headers:?}");
+    }
+    let allowed = [
+        vec![h("Host: 127.0.0.1:8323")],
+        vec![h("Host: localhost")],
+        vec![h("Host: [::1]:8323")],
+        vec![],
+    ];
+    for headers in allowed {
+        assert!(!app_lib::debug_http::from_browser(&headers), "{headers:?}");
+    }
+
+    // End to end: the server answers 403 before routing.
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+    let addr = server.server_addr().to_string();
+    std::thread::spawn(move || app_lib::debug_http::serve(server, Registry::default()));
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let body = r#"{"command":"definitely-not-run"}"#;
+    let req = format!(
+        "POST /debug/terminals HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    assert!(raw.starts_with("HTTP/1.1 403"), "{raw}");
+}
+
 /// The checked-in doc is the emitter's output. `CONTROL_API_WRITE=1`
 /// regenerates it (also mirrored as a unit test in control_http.rs).
 #[test]
