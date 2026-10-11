@@ -31,7 +31,7 @@ use crate::agent_json::{
     event_json, machine_mode, AgentEvent, JsonAgent, JsonHooks, SpawnRecipe, TurnReceipt,
     TURN_RECEIPT_WAIT_DEFAULT_MS, TURN_RECEIPT_WAIT_MAX_MS,
 };
-use crate::agent_tools::{docker_exec_prefix, AgentTool, AgentToolsState, Runtime, ToolType, Transport};
+use crate::agent_tools::{docker_exec_prefix, AgentTool, EnvFlags, AgentToolsState, Runtime, ToolType, Transport};
 use crate::projects::Projects;
 use crate::registry::{
     emit_created, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, JsonEvent,
@@ -496,7 +496,8 @@ pub struct SpawnPlan {
     pub cwd: Option<PathBuf>,
     /// The env the CHILD sees (tool.env + identity; the pty layer applies it
     /// over the inherited process env). For docker every entry is also a
-    /// `-e` flag in `args` — the client alone is useless.
+    /// name-only `-e K` flag in `args`, which copies it from this env into
+    /// the container — the client alone is useless.
     pub env: IndexMap<String, String>,
     pub nspid: NsPid,
 }
@@ -521,9 +522,10 @@ pub fn build_spawn_plan(
             nspid: NsPid::Unresolved,
         },
         Runtime::DockerExec { .. } => {
-            // `exec -u U -it -w W -e K=V… CONTAINER` — the same words the
-            // display command line shows, minus the leading `docker`.
-            let mut args = docker_exec_prefix(&tool.runtime, env);
+            // `exec -u U -it -w W -e K… CONTAINER` — the display command
+            // line's words minus the leading `docker`, with env passed by
+            // name: the values reach docker through `env` below.
+            let mut args = docker_exec_prefix(&tool.runtime, env, EnvFlags::NamesOnly);
             let nspid = if with_wrapper {
                 args.push("sh".into());
                 args.push("-c".into());
@@ -2129,8 +2131,12 @@ mod tests {
         let idx = plan.args.iter().position(|a| a == "--prompt").unwrap();
         assert_eq!(plan.args[idx + 1], "two words here");
         assert_eq!(&plan.args[..2], &["exec".to_owned(), "-u".to_owned()]);
-        assert!(plan.args.windows(2).any(|w| w[0] == "-e" && w[1] == "CHAPPA_AI_PROCESS_ID=9"));
-        assert!(plan.args.windows(2).any(|w| w[0] == "-e" && w[1] == format!("{SPAWN_UUID_ENV}=abc")));
+        // Env reaches docker by name; the values ride in the client's env,
+        // never on its argv.
+        assert!(plan.args.windows(2).any(|w| w[0] == "-e" && w[1] == "CHAPPA_AI_PROCESS_ID"));
+        assert!(plan.args.windows(2).any(|w| w[0] == "-e" && w[1] == SPAWN_UUID_ENV));
+        assert!(!plan.args.iter().any(|a| a.contains('=') && a.starts_with("CHAPPA_")), "{:?}", plan.args);
+        assert_eq!(plan.env.get("CHAPPA_AI_PROCESS_ID").map(String::as_str), Some("9"));
         let c = plan.args.iter().position(|a| a == "dev-worker").unwrap();
         assert_eq!(&plan.args[c + 1..c + 4], &["sh".to_owned(), "-c".to_owned(), wrapper_script("abc")]);
         assert_eq!(plan.args[c + 4], "opencode");

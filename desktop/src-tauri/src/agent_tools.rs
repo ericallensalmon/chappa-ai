@@ -260,7 +260,7 @@ impl AgentTool {
         let mut words: Vec<String> = Vec::new();
         if self.runtime.is_docker() {
             words.push("docker".into());
-            words.extend(docker_exec_prefix(&self.runtime, &self.env));
+            words.extend(docker_exec_prefix(&self.runtime, &self.env, EnvFlags::WithValues));
         }
         words.push(self.program.clone());
         words.extend(self.args.iter().cloned());
@@ -310,11 +310,28 @@ impl AgentTool {
     }
 }
 
-/// The `docker exec` words after `docker`: `exec [-u U] -it|-i [-w W] [-e K=V…]
+/// How [`docker_exec_prefix`] spells an env entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvFlags {
+    /// `-e K=V`: the display line, which the paste box parses back.
+    WithValues,
+    /// `-e K`: the real spawn. docker copies the value from its own
+    /// environment (the spawn plan sets every entry there), so a secret
+    /// never sits on the `docker` argv, where any local user can read it
+    /// through the process list.
+    NamesOnly,
+}
+
+/// The `docker exec` words after `docker`: `exec [-u U] -it|-i [-w W] [-e K[=V]…]
 /// CONTAINER`. The ONE spelling shared by the display command line and the
 /// real spawn plan (`agents::build_spawn_plan`), so what the Agents pane
-/// shows is what runs. Empty for a Host runtime.
-pub fn docker_exec_prefix(runtime: &Runtime, env: &IndexMap<String, String>) -> Vec<String> {
+/// shows is what runs — apart from env values, which the spawn passes by
+/// name only (see [`EnvFlags`]). Empty for a Host runtime.
+pub fn docker_exec_prefix(
+    runtime: &Runtime,
+    env: &IndexMap<String, String>,
+    env_flags: EnvFlags,
+) -> Vec<String> {
     let Runtime::DockerExec {
         container,
         user,
@@ -337,7 +354,10 @@ pub fn docker_exec_prefix(runtime: &Runtime, env: &IndexMap<String, String>) -> 
     }
     for (k, v) in env {
         words.push("-e".into());
-        words.push(format!("{k}={v}"));
+        words.push(match env_flags {
+            EnvFlags::WithValues => format!("{k}={v}"),
+            EnvFlags::NamesOnly => k.clone(),
+        });
     }
     words.push(container.clone());
     words
@@ -883,10 +903,10 @@ mod tests {
         // The docker prefix is one spelling for the display line and the spawn.
         let tool = parse_command_line("docker exec -u dev -it -w /workspace/app dev-worker opencode").tool;
         assert_eq!(
-            docker_exec_prefix(&tool.runtime, &tool.env),
+            docker_exec_prefix(&tool.runtime, &tool.env, EnvFlags::WithValues),
             vec!["exec", "-u", "dev", "-it", "-w", "/workspace/app", "dev-worker"]
         );
-        assert!(docker_exec_prefix(&Runtime::Host, &IndexMap::new()).is_empty());
+        assert!(docker_exec_prefix(&Runtime::Host, &IndexMap::new(), EnvFlags::NamesOnly).is_empty());
     }
 
     #[test]
