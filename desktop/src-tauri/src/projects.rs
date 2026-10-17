@@ -1752,7 +1752,7 @@ fn reload_locked(
                         // it (the old command must not keep running under a
                         // definition the user never saw) and hold the restart
                         // until the gate is answered.
-                        held_back.push(proc.def.command.display());
+                        held_back.push(name.clone());
                         let status = proc.lifecycle.on(ProcessEvent::Stop, now_ms());
                         proc.generation += 1;
                         if let Some(term_id) = proc.term_id.take() {
@@ -1807,20 +1807,34 @@ fn reload_locked(
             registry.close(term_id);
         }
     }
-    // The gate lists what the untrusted content would run: the held-back
-    // restarts plus any newly added auto-start command.
-    let mut trust_commands = held_back;
-    if !trusted {
-        for name in &diff.added {
-            if let Some(p) = processes.get(name).filter(|p| p.def.auto_start) {
-                trust_commands.push(p.def.command.display());
-            }
-        }
-    }
+    let trust_commands = if trusted {
+        Vec::new()
+    } else {
+        reload_trust_commands(&processes, &held_back)
+    };
     inner.runtimes.get_mut(&id).unwrap().processes = processes;
     // The diff may have stopped, restarted, added or dropped processes.
     inner.notify_changed();
     emit_reloaded(app, id, None, !trusted, &trust_commands);
+}
+
+/// What the reload gate lists for untrusted content: every held-back restart
+/// and every auto-start command in the file, in file order. Confirming the
+/// gate trusts the whole file, and the next open starts every auto-start
+/// command in it without asking, so the list is everything that would then
+/// run without another click — not just what this reload changed. Listing
+/// only the changes let content through unseen: a new command on a STOPPED
+/// process, an `auto_start` flip, or a gate skipped on an earlier reload
+/// all produced an empty list, and an empty list is confirmed silently.
+fn reload_trust_commands(
+    processes: &IndexMap<String, ProcessRuntime>,
+    held_back: &[String],
+) -> Vec<String> {
+    processes
+        .iter()
+        .filter(|(name, p)| p.def.auto_start || held_back.contains(name))
+        .map(|(_, p)| p.def.command.display())
+        .collect()
 }
 
 /// The `chappa.yml` watcher: ONE file, non-recursive, the shared 500ms
@@ -2470,6 +2484,30 @@ mod tests {
         let (program, args) = execution_command("py app/x.py", &settings_with("sh", vec![]));
         assert_eq!(program, "sh");
         assert_eq!(args, vec!["-c".to_owned(), "py app/x.py".to_owned()]);
+    }
+
+    #[test]
+    fn the_reload_gate_lists_every_auto_start_command_and_held_back_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let def = |command: &str, auto_start: bool| ProcessDef {
+            command: command.into(),
+            auto_start,
+            ..ProcessDef::default()
+        };
+        let mut processes = IndexMap::new();
+        // Stopped, auto-start, unchanged by this reload: still listed — the
+        // next open would start it.
+        processes.insert("web".to_owned(), fresh_runtime(root.path(), def("npm run dev", true)));
+        // Not auto-start, not running: nothing runs it without a click.
+        processes.insert("lint".to_owned(), fresh_runtime(root.path(), def("npm run lint", false)));
+        // Not auto-start but was running and got held back: listed.
+        processes.insert("watch".to_owned(), fresh_runtime(root.path(), def("npm run watch", false)));
+        let listed = reload_trust_commands(&processes, &["watch".to_owned()]);
+        assert_eq!(listed, vec!["npm run dev", "npm run watch"]);
+        // Nothing auto-starts and nothing was held back: an empty list, which
+        // is safe to confirm silently because trusting it runs nothing.
+        processes.shift_remove("web");
+        assert!(reload_trust_commands(&processes, &[]).is_empty());
     }
 
     #[test]
