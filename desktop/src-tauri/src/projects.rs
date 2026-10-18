@@ -1117,7 +1117,7 @@ pub fn open_project(
     let trust_commands: Vec<String> = processes
         .values()
         .filter(|p| p.def.auto_start)
-        .map(|p| p.def.command.display())
+        .map(|p| trust_line(&p.def))
         .collect();
 
     // Watch chappa.yml itself so an external edit (or our own
@@ -1833,8 +1833,24 @@ fn reload_trust_commands(
     processes
         .iter()
         .filter(|(name, p)| p.def.auto_start || held_back.contains(name))
-        .map(|(_, p)| p.def.command.display())
+        .map(|(_, p)| trust_line(&p.def))
         .collect()
+}
+
+/// One entry of the Run/Skip trust prompt: the command, then an indented
+/// line for a working_dir and one per env variable. A harmless-looking
+/// command is only as harmless as its environment — `NODE_OPTIONS`, `PATH`
+/// or `GIT_SSH_COMMAND` can make `npm test` run anything — so the prompt
+/// shows everything the definition feeds the process, not just the line.
+fn trust_line(def: &ProcessDef) -> String {
+    let mut line = def.command.display();
+    if let Some(dir) = &def.working_dir {
+        line.push_str(&format!("\n    in {}", dir.display()));
+    }
+    for (key, value) in &def.env {
+        line.push_str(&format!("\n    env {key}={value}"));
+    }
+    line
 }
 
 /// The `chappa.yml` watcher: ONE file, non-recursive, the shared 500ms
@@ -2504,6 +2520,14 @@ mod tests {
         processes.insert("watch".to_owned(), fresh_runtime(root.path(), def("npm run watch", false)));
         let listed = reload_trust_commands(&processes, &["watch".to_owned()]);
         assert_eq!(listed, vec!["npm run dev", "npm run watch"]);
+        // The environment and working dir are part of what gets trusted.
+        let mut sneaky = def("npm test", true);
+        sneaky.working_dir = Some(PathBuf::from("tools"));
+        sneaky.env.insert("NODE_OPTIONS".to_owned(), "--require ./x.js".to_owned());
+        assert_eq!(
+            trust_line(&sneaky),
+            "npm test\n    in tools\n    env NODE_OPTIONS=--require ./x.js"
+        );
         // Nothing auto-starts and nothing was held back: an empty list, which
         // is safe to confirm silently because trusting it runs nothing.
         processes.shift_remove("web");
