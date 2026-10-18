@@ -181,9 +181,11 @@ impl Coordination {
     /// Open (creating + migrating) the database at `path`.
     pub fn open(&self, path: PathBuf) -> Result<()> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| CoordError::Internal(e.to_string()))?;
+            project_model::atomic::ensure_private_dir(dir)
+                .map_err(CoordError::Internal)?;
         }
         let conn = open_db(&path)?;
+        restrict_db_files(&path);
         let mut guard = self
             .inner
             .lock()
@@ -234,7 +236,38 @@ impl Coordination {
     }
 }
 
+/// Owner-only (0600) for the database and its WAL sidecars on Unix: the
+/// scratchpads and todos can hold anything an agent wrote down. Best
+/// effort; elsewhere the per-user app-data ACL already covers it.
+#[cfg(unix)]
+fn restrict_db_files(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        let _ = std::fs::set_permissions(
+            PathBuf::from(name),
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_db_files(_path: &Path) {}
+
 fn open_db(path: &Path) -> Result<Connection> {
+    // Create the file 0600 up front so it is never briefly group/world
+    // readable between SQLite creating it and the chmod above.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path);
+    }
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(2))?;
     // WAL: readers never block the writer; the value comes back as a string.
@@ -1973,6 +2006,27 @@ pub fn read_scratchpad(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn database_files_and_their_directory_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("coord-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let coord = Coordination::default();
+        coord.open(dir.join(DB_FILE)).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join(DB_FILE)), 0o600);
+        for side in ["-wal", "-shm"] {
+            let p = dir.join(format!("{DB_FILE}{side}"));
+            if p.exists() {
+                assert_eq!(mode(&p), 0o600, "{side}");
+            }
+        }
+        drop(coord);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const DOC: &str = "# Title\n\nintro\n\n## Alpha\n\na1\n\n### Alpha.child\n\nac\n\n## Beta\n\nb1\n\n## Alpha\n\ndup\n";
 

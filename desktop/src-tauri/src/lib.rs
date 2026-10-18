@@ -56,6 +56,12 @@ pub fn run() {
         .manage(Workspace::default())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().unwrap_or_default();
+            // The config dir holds secrets (agent tool env, the control
+            // token, the coordination db): owner-only before anything is
+            // written into it. Non-fatal; the stores report their own errors.
+            if let Err(err) = project_model::atomic::ensure_private_dir(&config_dir) {
+                log::error!("[config] cannot secure {}: {err}", config_dir.display());
+            }
             // Crash evidence first, before anything that could fail:
             // module inventory now, minidump + report on a native crash,
             // a report on a panic. All in the log directory.

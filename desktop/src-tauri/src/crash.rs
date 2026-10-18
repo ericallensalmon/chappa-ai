@@ -155,7 +155,8 @@ fn stamp() -> String {
 /// and (Windows) the native crash filter. Safe to call once per process;
 /// a second call keeps the first directory.
 pub fn install(dir: PathBuf) {
-    let _ = std::fs::create_dir_all(&dir);
+    // Reports and module inventories carry local paths and process memory.
+    let _ = project_model::atomic::ensure_private_dir(&dir);
     let dir = REPORT_DIR.get_or_init(|| dir).clone();
 
     let modules = loaded_modules();

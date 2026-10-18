@@ -564,7 +564,7 @@ pub fn load_or_create_token(config_dir: &Path) -> std::io::Result<String> {
             return Ok(trimmed.to_owned());
         }
     }
-    std::fs::create_dir_all(config_dir)?;
+    project_model::atomic::ensure_private_dir(config_dir).map_err(std::io::Error::other)?;
     let token = random_token()?;
     write_owner_only(&path, &token)?;
     Ok(token)
@@ -585,7 +585,7 @@ pub fn random_hex(n: usize) -> std::io::Result<String> {
 
 #[cfg(unix)]
 fn write_owner_only(path: &Path, token: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     // Mode set at CREATE time: the file is never world-readable, not even
     // for the instant between create and chmod.
     let mut file = std::fs::OpenOptions::new()
