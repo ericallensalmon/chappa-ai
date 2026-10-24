@@ -22,13 +22,13 @@ import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
 import { projectBadge } from "./project_badge";
+import type { ProjectsSettingsApi } from "./projects_section";
 import { EditPane, type ProjectEditInfo } from "./edit_pane";
 import {
   addProjectDialog,
   commandDialog,
   confirmDialog,
   parentDirectory,
-  promptDialog,
   type AddProjectAnswer,
   type CommandForm,
 } from "./dialog";
@@ -512,9 +512,6 @@ export interface AppOptions {
    * tests set it true and stub `api.pickDirectory`.
    */
   canBrowseDirectories?: boolean;
-  /** Rename prompt for the switcher's per-row ✎; null cancels.
-   *  Defaults to an in-app prompt pre-filled with the current name. */
-  promptRename?: (current: string) => Promise<string | null>;
   /** The command editor: `Edit command…` passes the row's current
    *  definition, `+ Add command` / `Add ▸` pass null. Resolves the form or
    *  null to cancel. Defaults to the in-app `commandDialog`. */
@@ -541,6 +538,16 @@ export interface AppOptions {
 
 const APP_CSS = `
 .chappa-app{position:fixed;inset:0;display:flex;background:#0d0e10;color:#d6d8dc;font-family:system-ui,sans-serif;}
+/* The badge bar: every stored project as its badge, down the left edge.
+   The expanded project wears a ring; a project that is not open is dimmed. */
+.chappa-badge-bar{flex:none;width:48px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 0;box-sizing:border-box;border-right:1px solid #22252a;background:#0b0c0e;}
+.chappa-badge-bar-list{display:flex;flex-direction:column;align-items:center;gap:8px;}
+.chappa-badge-bar-item{border:0;background:none;padding:2px;border-radius:10px;cursor:pointer;opacity:.5;line-height:0;}
+.chappa-badge-bar-item.open{opacity:1;}
+.chappa-badge-bar-item:hover{opacity:1;}
+.chappa-badge-bar-item.expanded{box-shadow:0 0 0 2px #e6e8ec;}
+.chappa-badge-bar-add{margin-top:auto;width:32px;height:32px;border:1px solid #262a31;border-radius:8px;background:#16181d;color:#8b949e;font:16px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
+.chappa-badge-bar-add:hover{background:#1d2127;color:#d6d8dc;}
 .chappa-rail{width:260px;min-width:260px;border-right:1px solid #22252a;display:flex;flex-direction:column;background:#101216;}
 .chappa-rail-header{padding:5px 10px 4px;border-top:1px solid #1c1f24;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;}
 .chappa-project-bar{position:relative;padding:8px 8px 4px;border-bottom:1px solid #1c1f24;}
@@ -944,7 +951,6 @@ export class App {
   private readonly promptAddProject: (
     browse: (() => Promise<string | null>) | null,
   ) => Promise<AddProjectAnswer | null>;
-  private readonly promptRename: (current: string) => Promise<string | null>;
   private readonly canBrowseDirectories: boolean;
   /** Keys of the modal dialogs currently on screen. The dialogs are async, so
    *  a second × press (or a Ctrl+Shift+W held down) would otherwise stack a
@@ -1008,6 +1014,10 @@ export class App {
   private readonly projectTermMenu: HTMLElement;
   private readonly projectTermMenuBtn: HTMLButtonElement;
   private projects = new Map<number, ipc.ProjectInfoDto>();
+  /** The badge bar down the left edge: one badge per stored project, the
+   *  expanded one ringed, plus the add button. */
+  private readonly badgeBar: HTMLElement;
+  private readonly badgeBarList: HTMLElement;
   // --- project agents --------------------------------------------
   /** The AGENTS subsection of the expanded project (agents nest under their
    *  project): header
@@ -1694,7 +1704,24 @@ export class App {
       }),
     );
 
+    // The badge bar, left of the rail: built once, repainted with the
+    // switcher (renderProjectBar).
+    this.badgeBar = document.createElement("nav");
+    this.badgeBar.className = "chappa-badge-bar";
+    this.badgeBar.setAttribute("aria-label", "Projects");
+    this.badgeBarList = document.createElement("div");
+    this.badgeBarList.className = "chappa-badge-bar-list";
+    const barAdd = document.createElement("button");
+    barAdd.type = "button";
+    barAdd.className = "chappa-badge-bar-add";
+    barAdd.textContent = PLUS_GLYPH;
+    barAdd.title = "Add project…";
+    barAdd.addEventListener("mousedown", (e) => e.preventDefault());
+    barAdd.addEventListener("click", () => void this.addProjectFlow());
+    this.badgeBar.append(this.badgeBarList, barAdd);
+
     this.root.append(
+      this.badgeBar,
       rail,
       this.stack,
       this.rowMenu,
@@ -1743,10 +1770,6 @@ export class App {
     this.canBrowseDirectories = opts.canBrowseDirectories ?? ipc.inTauri();
     this.promptAddProject =
       opts.promptAddProject ?? ((browse) => addProjectDialog({ browse }));
-    this.promptRename =
-      opts.promptRename ??
-      ((current) =>
-        promptDialog("Rename project:", { value: current, okLabel: "Rename" }));
     this.promptCommand =
       opts.promptCommand ?? ((initial, title) => commandDialog(initial, { title }));
     this.promptWorkspaceCommand =
@@ -3031,6 +3054,7 @@ export class App {
       this.settingsPane = new SettingsPane({
         store: this.settings,
         agentTools: this.agentTools,
+        projects: this.projectsSettingsApi(),
         onClose: () => {
           this.gear.classList.remove("open");
           if (this.activeId !== null) this.entries.get(this.activeId)?.panel.focusInput();
@@ -3038,6 +3062,30 @@ export class App {
       });
     }
     return this.settingsPane;
+  }
+
+  /** What the Settings Projects tab reads and calls: the stored list with
+   *  the open flag, and the app's own rename / identity / remove / add flows
+   *  (their validation, confirms and repaints included). */
+  private projectsSettingsApi(): ProjectsSettingsApi {
+    return {
+      list: () =>
+        [...this.projects.values()].map((p) => ({
+          id: p.id,
+          name: p.name,
+          path: p.path,
+          initials: p.initials ?? null,
+          color: p.color ?? null,
+          open: this.openProjects.has(p.id),
+        })),
+      rename: async (id, name) => {
+        const err = await this.renameProjectApply(id, name);
+        if (err) throw new Error(err);
+      },
+      setIdentity: (id, initials, color) => this.setProjectIdentityApply(id, initials, color),
+      remove: (id) => this.removeProjectFlow(id),
+      add: () => this.addProjectFlow(),
+    };
   }
 
   toggleSettings(): void {
@@ -3462,6 +3510,35 @@ export class App {
     this.renderProjectMenu();
   }
 
+  /** The badge bar: one badge per stored project in list order. A click
+   *  expands an open project, or opens (and so expands) a closed one. */
+  private renderProjectBar(): void {
+    this.badgeBarList.textContent = "";
+    for (const p of this.projects.values()) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "chappa-badge-bar-item";
+      item.dataset.id = String(p.id);
+      const open = this.openProjects.has(p.id);
+      item.classList.toggle("open", open);
+      item.classList.toggle("expanded", p.id === this.expandedProjectId);
+      item.title = open ? p.name : `${p.name} (closed)`;
+      item.setAttribute("aria-pressed", String(p.id === this.expandedProjectId));
+      item.appendChild(projectBadge(p, "bar"));
+      // preventDefault keeps the terminal textarea focused (the switcher's
+      // own pattern); the click still lands.
+      item.addEventListener("mousedown", (e) => e.preventDefault());
+      item.addEventListener("click", () => {
+        if (this.openProjects.has(p.id)) this.expandProject(p.id);
+        else void this.openProject(p.id);
+      });
+      item.addEventListener("contextmenu", (e) => {
+        if (this.openProjects.has(p.id)) this.showProjectCtxMenu(e, p.id);
+      });
+      this.badgeBarList.appendChild(item);
+    }
+  }
+
   private renderProjectMenu(): void {
     this.projectMenu.textContent = "";
     for (const p of this.projects.values()) {
@@ -3487,14 +3564,14 @@ export class App {
       rename.className = "chappa-project-rename";
       rename.dataset.id = String(p.id);
       rename.textContent = "✎";
-      rename.title = `Rename "${p.name}"`;
+      rename.title = `Edit "${p.name}"…`;
       rename.addEventListener("mousedown", (e) => e.stopPropagation());
       rename.addEventListener("click", (e) => {
         // The row is not a button, but the click still reaches the menu's own
         // handlers; stop it so ✎ never doubles as "open this project".
         e.stopPropagation();
         this.hideProjectMenu();
-        void this.renameProjectFlow(p.id);
+        this.openEditPane(p.id);
       });
       // Remove (2026-08-31: "no way to remove projects" — the Rust
       // command predates this affordance). Every row offers it; the flow
@@ -3539,6 +3616,10 @@ export class App {
       void this.addProjectFlow();
     });
     this.projectMenu.appendChild(add);
+    // The switcher is the "projects changed" repaint: the bar and the
+    // Settings Projects tab follow it.
+    this.renderProjectBar();
+    this.settingsPane?.refreshProjects();
   }
 
   private toggleProjectMenu(): void {
@@ -3589,18 +3670,6 @@ export class App {
     rememberProjectDir(path);
     this.renderProjectMenu();
     await this.openProject(p.id);
-  }
-
-  /** The switcher's per-row ✎: rename a STORED project. Store-only —
-   *  chappa.yml is never touched, and the open project's header follows. Shares
-   *  its validation/application with the Edit pane (renameProjectApply). */
-  private async renameProjectFlow(id: number): Promise<void> {
-    const current = this.projects.get(id);
-    if (!current) return;
-    const typed = await this.ask(`rename:${id}`, () => this.promptRename(current.name));
-    // null = cancelled, or a second ✎ on the same row while the first is up.
-    if (typed === null) return;
-    await this.renameProjectApply(id, typed);
   }
 
   /** Open a stored project: fresh chappa.yml → process rows (status stopped,
@@ -4483,6 +4552,8 @@ export class App {
       }
       this.projectSummariesEl.appendChild(this.buildSummaryRow(state));
     }
+    // Open/expand/close all pass through here: the bar's ring follows.
+    this.renderProjectBar();
   }
 
   /** One collapsed project's one-line summary row: name + running-count pill
@@ -5085,7 +5156,7 @@ export class App {
    *  pane; the context menu targets an OPEN project (expanded header or any
    *  collapsed summary row). */
   openEditPane(id: number): void {
-    if (this.projects.has(id) && !this.openProjects.has(id)) return;
+    if (!this.projects.has(id)) return;
     if (!this.editPane) {
       this.editPane = new EditPane({
         info: (pid) => this.editPaneInfo(pid),

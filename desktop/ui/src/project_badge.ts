@@ -72,13 +72,17 @@ const BADGE_CSS =
   "padding:0 4px;box-sizing:border-box;border-radius:4px;font:600 10px system-ui,sans-serif;" +
   "letter-spacing:.04em;line-height:1;white-space:nowrap;";
 
+/** The badge bar's larger cut of the same badge. */
+const BAR_BADGE_CSS = "min-width:32px;height:32px;padding:0 6px;border-radius:8px;font-size:12px;";
+
 /** Build a badge element. The colours are inline so the badge paints the
- *  same wherever it lands (and is observable without a layout engine). */
-export function projectBadge(src: ProjectIdentitySource): HTMLSpanElement {
+ *  same wherever it lands (and is observable without a layout engine).
+ *  `size` is "row" (inline with a rail row) or "bar" (the badge bar). */
+export function projectBadge(src: ProjectIdentitySource, size: "row" | "bar" = "row"): HTMLSpanElement {
   const { initials, color } = resolveIdentity(src);
   const el = document.createElement("span");
   el.className = "chappa-project-badge";
-  el.style.cssText = `${BADGE_CSS}background:${color.bg};color:${color.fg};`;
+  el.style.cssText = `${BADGE_CSS}${size === "bar" ? BAR_BADGE_CSS : ""}background:${color.bg};color:${color.fg};`;
   el.textContent = initials;
   el.title = src.name;
   el.dataset.color = color.key;

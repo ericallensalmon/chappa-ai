@@ -27,6 +27,7 @@
 import { Segmented } from "./segmented";
 import { AgentsSection } from "./agents_section";
 import { TimersSection } from "./timers_section";
+import { ProjectsSection, type ProjectsSettingsApi } from "./projects_section";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
 import {
   BUILTIN_EXEC_PROFILES,
@@ -51,10 +52,13 @@ import {
   settingsSection,
 } from "./settings_widgets";
 
-export type SettingsTab = "terminal" | "agents" | "timers";
+export type SettingsTab = "terminal" | "projects" | "agents" | "timers";
 
+/** Every tab in display order. Projects only renders when the app lends the
+ *  pane its project adapter (a bare pane has no projects to show). */
 const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "terminal", label: "Terminal" },
+  { id: "projects", label: "Projects" },
   { id: "agents", label: "Agents" },
   { id: "timers", label: "Timers" },
 ];
@@ -104,13 +108,13 @@ function isTab(value: unknown): value is SettingsTab {
   return TABS.some((t) => t.id === value);
 }
 
-/** The remembered tab; unknown or missing → Terminal. */
-function readTab(): SettingsTab {
+/** The remembered tab, or null when unknown or missing. */
+function readStoredTab(): SettingsTab | null {
   try {
     const stored = safeStorage()?.getItem(TAB_KEY);
-    return isTab(stored) ? stored : DEFAULT_TAB;
+    return isTab(stored) ? stored : null;
   } catch {
-    return DEFAULT_TAB;
+    return null;
   }
 }
 
@@ -132,6 +136,9 @@ export interface SettingsPaneOptions {
   container?: HTMLElement;
   /** Fired after a close so the caller can hand focus back to the terminal. */
   onClose?: () => void;
+  /** The app's project list + mutations, behind the Projects tab. Absent =
+   *  no Projects tab. */
+  projects?: ProjectsSettingsApi;
 }
 
 interface ProfileRowRefs {
@@ -145,6 +152,8 @@ export class SettingsPane {
   private readonly opts: SettingsPaneOptions;
   private readonly store: SettingsStore;
   private readonly wrap: HTMLDivElement;
+  /** The tabs this pane renders (TABS minus Projects when no adapter). */
+  private readonly tabs: ReadonlyArray<{ id: SettingsTab; label: string }>;
   private readonly tabButtons = new Map<SettingsTab, HTMLButtonElement>();
   private readonly panels = new Map<SettingsTab, HTMLDivElement>();
   private tab: SettingsTab = DEFAULT_TAB;
@@ -170,6 +179,8 @@ export class SettingsPane {
   private readonly agents: AgentsSection;
   /** The Timers tab. */
   private readonly timers: TimersSection;
+  /** The Projects tab, when the app lent its adapter. */
+  private readonly projectsSection: ProjectsSection | null;
 
   private profileRows: ProfileRowRefs[] = [];
   /** The profile-name list the current rows were built from; rebuilding on
@@ -182,6 +193,7 @@ export class SettingsPane {
   constructor(opts: SettingsPaneOptions) {
     this.opts = opts;
     this.store = opts.store;
+    this.tabs = TABS.filter((t) => t.id !== "projects" || opts.projects !== undefined);
     injectSettingsStyles();
 
     this.wrap = document.createElement("div");
@@ -214,7 +226,7 @@ export class SettingsPane {
     tabs.style.cssText = TABS_CSS;
     tabs.setAttribute("role", "tablist");
     tabs.setAttribute("aria-label", "Settings sections");
-    for (const { id, label } of TABS) {
+    for (const { id, label } of this.tabs) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "chappa-settings-tab";
@@ -239,16 +251,17 @@ export class SettingsPane {
     // ←/→ (and Home/End) move between tabs — the tablist convention — and the
     // moved-to tab takes focus so a keyboard user can keep going.
     tabs.addEventListener("keydown", (e) => {
-      const idx = TABS.findIndex((t) => t.id === this.tab);
+      const order = this.tabs;
+      const idx = order.findIndex((t) => t.id === this.tab);
       let next: number;
-      if (e.key === "ArrowRight") next = (idx + 1) % TABS.length;
-      else if (e.key === "ArrowLeft") next = (idx - 1 + TABS.length) % TABS.length;
+      if (e.key === "ArrowRight") next = (idx + 1) % order.length;
+      else if (e.key === "ArrowLeft") next = (idx - 1 + order.length) % order.length;
       else if (e.key === "Home") next = 0;
-      else if (e.key === "End") next = TABS.length - 1;
+      else if (e.key === "End") next = order.length - 1;
       else return;
       e.preventDefault();
-      this.selectTab(TABS[next].id);
-      this.tabButtons.get(TABS[next].id)?.focus();
+      this.selectTab(order[next].id);
+      this.tabButtons.get(order[next].id)?.focus();
     });
     header.append(back, tabs);
 
@@ -380,6 +393,14 @@ export class SettingsPane {
     );
     terminal.append(behavior.element, appearance.element, shells.element);
 
+    // --- Projects tab ----------------------------------------------------------
+    if (opts.projects) {
+      this.projectsSection = new ProjectsSection(opts.projects);
+      this.panels.get("projects")!.appendChild(this.projectsSection.element);
+    } else {
+      this.projectsSection = null;
+    }
+
     // --- Agents tab ------------------------------------------------------------
     this.agents = new AgentsSection({
       store: opts.agentTools ?? agentToolsStore,
@@ -395,12 +416,23 @@ export class SettingsPane {
     const column = document.createElement("div");
     column.className = "chappa-settings-column";
     column.style.cssText = COLUMN_CSS;
-    for (const { id } of TABS) column.appendChild(this.panels.get(id)!);
+    for (const { id } of this.tabs) column.appendChild(this.panels.get(id)!);
     this.wrap.append(header, column);
     (opts.container ?? document.body).appendChild(this.wrap);
 
-    this.selectTab(readTab(), false);
+    this.selectTab(this.rememberedTab(), false);
     this.sync(this.store.get());
+  }
+
+  /** The remembered tab when this pane renders it, else Terminal. */
+  private rememberedTab(): SettingsTab {
+    const stored = readStoredTab();
+    return stored !== null && this.tabs.some((t) => t.id === stored) ? stored : DEFAULT_TAB;
+  }
+
+  /** Repaint the Projects tab from the app's current list. */
+  refreshProjects(): void {
+    this.projectsSection?.refresh();
   }
 
   /** The pane's root element (tests drive the controls through it). */
@@ -420,8 +452,9 @@ export class SettingsPane {
   /** Show one tab: the others' panels hide, the pill and aria state follow,
    *  and the choice is remembered for the next open. */
   selectTab(tab: SettingsTab, remember = true): void {
+    if (!this.tabs.some((t) => t.id === tab)) tab = DEFAULT_TAB;
     this.tab = tab;
-    for (const { id } of TABS) {
+    for (const { id } of this.tabs) {
       const selected = id === tab;
       const btn = this.tabButtons.get(id)!;
       btn.setAttribute("aria-selected", String(selected));
@@ -435,10 +468,11 @@ export class SettingsPane {
    *  last time. */
   open(tab?: SettingsTab): void {
     if (tab) this.selectTab(tab);
-    else if (!this.opened) this.selectTab(readTab(), false);
+    else if (!this.opened) this.selectTab(this.rememberedTab(), false);
     if (this.opened) return;
     this.opened = true;
     this.sync(this.store.get());
+    this.projectsSection?.refresh();
     this.unsubscribe = this.store.subscribe((s) => this.sync(s));
     this.agents.activate();
     this.timers.activate();
@@ -474,6 +508,7 @@ export class SettingsPane {
     this.lineHeightPicker.dispose();
     this.agents.dispose();
     this.timers.dispose();
+    this.projectsSection?.dispose();
     this.wrap.remove();
   }
 

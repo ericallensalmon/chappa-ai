@@ -1449,7 +1449,7 @@ describe("App add-project flow", () => {
     panelDispose(app);
   });
 
-  it("renames a project from the switcher's ✎ and updates the local name", async () => {
+  it("the switcher's ✎ opens the Edit-project pane, whose name field renames", async () => {
     const { api, calls } = projectApi();
     const root = document.createElement("div");
     const app = new App({
@@ -1457,7 +1457,6 @@ describe("App add-project flow", () => {
       api,
       confirm: async () => false,
       confirmProjectTrust: async () => false,
-      promptRename: async (current) => `${current} notes`,
     });
     await app.mount();
     await app.openProject(1);
@@ -1466,11 +1465,19 @@ describe("App add-project flow", () => {
 
     click(root.querySelector<HTMLButtonElement>(".chappa-project-switcher")!);
     const pencil = root.querySelector<HTMLButtonElement>(".chappa-project-rename")!;
-    expect(pencil.title).toBe('Rename "chappa-ai"');
+    expect(pencil.title).toBe('Edit "chappa-ai"…');
     click(pencil);
+    // The pane opens on this project; the ✎ never doubles as "open this
+    // project" (the menu closes, nothing else opens).
+    expect(app.editPaneElement!.style.display).toBe("flex");
+    const nameField = app.editPaneElement!.querySelector<HTMLInputElement>('[data-field="name"]')!;
+    expect(nameField.value).toBe("chappa-ai");
+    nameField.value = "chappa-ai notes";
+    nameField.dispatchEvent(new Event("change"));
+    await FLUSH();
     await FLUSH();
 
-    // EXACT wire args, and the ✎ never doubles as "open this project".
+    // EXACT wire args.
     expect(calls.renameProject).toEqual([[1, "chappa-ai notes"]]);
     expect(calls.openProject).toEqual([1]);
     // Local state follows: the switcher, the SECTION HEADER (it kept the old
@@ -1570,17 +1577,23 @@ describe("App add-project flow", () => {
         api,
         confirm: async () => false,
         confirmProjectTrust: async () => false,
-        promptRename: async () => answer,
       });
       await app.mount();
+      // The ✎ reaches a CLOSED project too: the pane no longer needs the
+      // project open.
       click(root.querySelector<HTMLButtonElement>(".chappa-project-switcher")!);
       click(root.querySelector<HTMLButtonElement>(".chappa-project-rename")!);
+      const nameField = app.editPaneElement!.querySelector<HTMLInputElement>('[data-field="name"]')!;
+      nameField.value = answer;
+      nameField.dispatchEvent(new Event("change"));
       await FLUSH();
       expect(calls.renameProject, JSON.stringify(answer)).toEqual([]);
+      expect(nameField.value).toBe("chappa-ai"); // reverted, not stored blank
       panelDispose(app);
     }
+  });
 
-    // …and a cancelled prompt (null) is likewise a no-op.
+  it("the badge bar lists every stored project, rings the expanded one, and opens a closed one on click", async () => {
     const { api, calls } = projectApi();
     const root = document.createElement("div");
     const app = new App({
@@ -1588,13 +1601,25 @@ describe("App add-project flow", () => {
       api,
       confirm: async () => false,
       confirmProjectTrust: async () => false,
-      promptRename: async () => null,
     });
     await app.mount();
-    click(root.querySelector<HTMLButtonElement>(".chappa-project-switcher")!);
-    click(root.querySelector<HTMLButtonElement>(".chappa-project-rename")!);
+    const items = () => [...root.querySelectorAll<HTMLButtonElement>(".chappa-badge-bar-item")];
+    // The bar sits left of the rail and lists the stored project, dimmed
+    // (not open) and unringed.
+    expect(root.firstElementChild?.classList.contains("chappa-badge-bar")).toBe(true);
+    expect(items().map((i) => i.dataset.id)).toEqual(["1"]);
+    expect(items()[0].querySelector(".chappa-project-badge")?.textContent).toBe("CA");
+    expect(items()[0].classList.contains("open")).toBe(false);
+    expect(items()[0].classList.contains("expanded")).toBe(false);
+    expect(root.querySelector(".chappa-badge-bar-add")).not.toBeNull();
+    // A click opens it; the repaint rings it.
+    click(items()[0]);
     await FLUSH();
-    expect(calls.renameProject).toEqual([]);
+    await FLUSH();
+    expect(calls.openProject).toEqual([1]);
+    expect(items()[0].classList.contains("open")).toBe(true);
+    expect(items()[0].classList.contains("expanded")).toBe(true);
+    expect(items()[0].getAttribute("aria-pressed")).toBe("true");
     panelDispose(app);
   });
 });

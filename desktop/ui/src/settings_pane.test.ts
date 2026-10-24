@@ -435,3 +435,46 @@ describe("SettingsPane — tabs", () => {
     localStorage.removeItem(TAB_KEY);
   });
 });
+
+describe("SettingsPane — Projects tab", () => {
+  const TAB_KEY = "chappa.settings.tab";
+  const adapter = () => ({
+    list: () => [
+      { id: 1, name: "chappa-ai", path: "/p/chappa-ai", initials: null, color: null, open: true },
+      { id: 2, name: "notes", path: "/p/notes", initials: "NT", color: "pink", open: false },
+    ],
+    rename: async () => {},
+    setIdentity: async () => {},
+    remove: async () => {},
+    add: async () => {},
+  });
+
+  it("renders only when the app lends its project adapter, between Terminal and Agents", async () => {
+    localStorage.removeItem(TAB_KEY);
+    const bare = await makePane();
+    expect([...bare.pane.element.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual([
+      "Terminal", "Agents", "Timers",
+    ]);
+    bare.pane.dispose();
+
+    const harness = stubSettings();
+    await harness.store.load();
+    const pane = new SettingsPane({ store: harness.store, projects: adapter() });
+    pane.open("projects");
+    expect([...pane.element.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual([
+      "Terminal", "Projects", "Agents", "Timers",
+    ]);
+    expect(pane.activeTab).toBe("projects");
+    const rows = [...pane.element.querySelectorAll<HTMLElement>('[data-tab="projects"] .chappa-projects-row')];
+    expect(rows.map((r) => r.dataset.projectId)).toEqual(["1", "2"]);
+    expect(rows[1].querySelector('[data-role="badge"]')?.textContent).toBe("NT");
+    pane.dispose();
+
+    // A remembered "projects" tab on a pane WITHOUT the adapter falls back.
+    localStorage.setItem(TAB_KEY, "projects");
+    const again = await makePane();
+    expect(again.pane.activeTab).toBe("terminal");
+    again.pane.dispose();
+    localStorage.removeItem(TAB_KEY);
+  });
+});
