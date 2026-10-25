@@ -151,6 +151,12 @@ fn stamp() -> String {
     format!("{secs}-{}", std::process::id())
 }
 
+/// Set to `1` to include heap memory and global data in native crash
+/// dumps. Off by default because those dumps contain secrets.
+pub const RICH_DUMPS_VAR: &str = "CHAPPA_RICH_CRASH_DUMPS";
+
+static RICH_DUMPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Install everything: the module inventory file, the panic report hook,
 /// and (Windows) the native crash filter. Safe to call once per process;
 /// a second call keeps the first directory.
@@ -158,6 +164,12 @@ pub fn install(dir: PathBuf) {
     // Reports and module inventories carry local paths and process memory.
     let _ = project_model::atomic::ensure_private_dir(&dir);
     let dir = REPORT_DIR.get_or_init(|| dir).clone();
+    // Read once here, not inside the crash filter, where touching the
+    // environment is not safe.
+    RICH_DUMPS.store(
+        std::env::var(RICH_DUMPS_VAR).as_deref() == Ok("1"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let modules = loaded_modules();
     let inventory = render_module_inventory(&modules);
@@ -265,14 +277,19 @@ mod platform {
             ExceptionPointers: info as *mut EXCEPTION_POINTERS,
             ClientPointers: 0,
         };
-        // Enough for a symbolized stack on every thread plus the memory
-        // those stacks point at; a full-memory dump would be hundreds of
-        // megabytes and mostly web view.
-        let kind = MiniDumpWithDataSegs
-            | MiniDumpWithHandleData
-            | MiniDumpWithIndirectlyReferencedMemory
-            | MiniDumpWithThreadInfo
-            | MiniDumpWithUnloadedModules;
+        // By default: a symbolized stack on every thread, thread and handle
+        // info and the module list. That is enough to say WHERE it crashed,
+        // and a dump like this is safe to attach to a ticket. The memory the
+        // stacks point at and the global data segments are left out: they
+        // hold whatever the app had in hand — the control token, terminal
+        // text, agent tool env (API keys). `CHAPPA_RICH_CRASH_DUMPS=1` adds
+        // them back for debugging a crash locally; such a dump must be
+        // treated as secret. (A full-memory dump would be hundreds of
+        // megabytes and mostly web view either way.)
+        let mut kind = MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules;
+        if RICH_DUMPS.load(std::sync::atomic::Ordering::Relaxed) {
+            kind |= MiniDumpWithDataSegs | MiniDumpWithIndirectlyReferencedMemory;
+        }
         MiniDumpWriteDump(
             GetCurrentProcess(),
             GetCurrentProcessId(),
