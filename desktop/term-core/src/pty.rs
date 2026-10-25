@@ -71,6 +71,11 @@ impl PtySession {
     /// the inherited environment. Fails loudly (Err carrying the OS
     /// message) rather than returning a half-open session.
     pub fn spawn(spec: &PtySpec) -> Result<Self> {
+        // Every pty child goes through here, so this is the one place a
+        // batch-file program is checked for arguments cmd.exe would parse.
+        #[cfg(windows)]
+        guard_batch_args(spec)?;
+
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: spec.rows,
@@ -185,6 +190,251 @@ impl Write for SharedWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.lock().unwrap().flush()
+    }
+}
+
+// --- Batch-file argument guard -------------------------------------------
+//
+// CreateProcess runs a `.cmd`/`.bat` program as `cmd.exe /c <command line>`,
+// so cmd.exe re-parses the whole line with its own rules. portable-pty
+// quotes each argument for the C runtime (`\"` inside double quotes), which
+// cmd.exe does not understand: an argument like `x"&calc&"` closes the
+// quotes as far as cmd.exe is concerned and the `&` starts a second
+// command. Agent programs are commonly npm `.cmd` shims and their extra
+// arguments are user-configurable, so any argument cmd.exe could interpret
+// is refused before the spawn rather than escaped by guesswork, the same
+// stance Rust's std takes for arguments it cannot pass to a batch file.
+
+/// Whether `path` names a batch script that Windows would run through
+/// cmd.exe. Trailing dots and spaces are ignored because Windows strips
+/// them when opening the file, so `run.cmd.` still runs `run.cmd`.
+pub fn is_batch_file(path: &std::path::Path) -> bool {
+    let name = path.to_string_lossy();
+    let name = name.trim_end_matches(['.', ' ']);
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
+
+/// The first character in `arg` that cmd.exe would treat as syntax when
+/// the argument reaches it on a batch file's command line, or `None` when
+/// the argument passes through literally.
+///
+/// Refused:
+/// - `"`: portable-pty escapes it as `\"`, which cmd.exe reads as a quote
+///   toggle, exposing everything after it to command parsing.
+/// - `&` `|` `<` `>`: command chaining, pipes and redirection.
+/// - `^`: cmd.exe's escape character; it would alter what follows.
+/// - `%`: variable expansion, which happens even inside double quotes.
+/// - `!`: delayed expansion, likewise active inside quotes when enabled.
+/// - CR, LF and every other ASCII control character except tab: a line
+///   break ends the command line early and the rest is undefined for cmd.
+///
+/// Allowed: everything else, including spaces (portable-pty wraps the
+/// argument in double quotes, which cmd.exe honours once `"` itself is
+/// excluded), `( )`, `, ; =`, `*`, `?`, `:`, `/`, `\` and non-ASCII text.
+/// Bare parentheses can at worst cause a syntax error inside a script's
+/// parenthesised block; starting another command still needs one of the
+/// refused characters, and refusing them would block common arguments such
+/// as tool-permission patterns like `Bash(git:*)`.
+pub fn batch_unsafe_char(arg: &str) -> Option<char> {
+    arg.chars().find(|&c| {
+        matches!(c, '"' | '&' | '|' | '<' | '>' | '^' | '%' | '!')
+            || (c.is_ascii_control() && c != '\t')
+    })
+}
+
+/// Checks every argument of a batch-file spawn; returns an `InvalidInput`
+/// error naming the first offending argument (1-based, counting after the
+/// program) and character.
+pub fn check_batch_args(program: &std::path::Path, args: &[String]) -> Result<()> {
+    for (index, arg) in args.iter().enumerate() {
+        if let Some(c) = batch_unsafe_char(arg) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to run batch file `{}`: argument {} contains {:?}, which \
+                     cmd.exe would interpret instead of passing through; batch files \
+                     cannot receive it safely",
+                    program.display(),
+                    index + 1,
+                    c
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolves `exe` the way portable-pty does on Windows, so the guard sees
+/// the same file CreateProcess will launch: each PATH directory is tried
+/// with the name as given, then with each PATHEXT extension *replacing*
+/// any extension the name had. A name found nowhere is used as-is (an
+/// absolute path joins to itself, so it is found in the first directory
+/// when it exists). Unlike CreateProcess's own search, a bare name never
+/// gains `.cmd`/`.bat` outside PATH, so as-is is the right answer.
+#[cfg(windows)]
+fn resolve_program(
+    exe: &std::ffi::OsStr,
+    path: Option<&std::ffi::OsStr>,
+    pathext: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if let Some(path) = path {
+        let extensions = pathext.unwrap_or(std::ffi::OsStr::new(".EXE"));
+        for dir in std::env::split_paths(path) {
+            let candidate = dir.join(exe);
+            if candidate.exists() {
+                return candidate;
+            }
+            for ext in std::env::split_paths(extensions) {
+                let Some(ext) = ext.to_str().and_then(|e| e.strip_prefix('.')) else {
+                    continue;
+                };
+                let candidate = dir.join(exe).with_extension(ext);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    PathBuf::from(exe)
+}
+
+/// The value of `key` the child would see: the last matching `spec.env`
+/// entry (Windows variable names are case-insensitive), else the
+/// inherited one.
+#[cfg(windows)]
+fn effective_env(spec: &PtySpec, key: &str) -> Option<std::ffi::OsString> {
+    spec.env
+        .iter()
+        .rev()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| std::ffi::OsString::from(v))
+        .or_else(|| std::env::var_os(key))
+}
+
+#[cfg(windows)]
+fn guard_batch_args(spec: &PtySpec) -> Result<()> {
+    let path = effective_env(spec, "PATH");
+    let pathext = effective_env(spec, "PATHEXT");
+    let program = resolve_program(
+        std::ffi::OsStr::new(&spec.command),
+        path.as_deref(),
+        pathext.as_deref(),
+    );
+    if is_batch_file(&program) {
+        check_batch_args(&program, &spec.args)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn batch_extensions_are_recognised_case_insensitively() {
+        for name in [
+            "claude.cmd",
+            "C:\\tools\\gemini.CMD",
+            "build.bat",
+            "x.Bat",
+            "run.cmd.",
+            "run.bat . ",
+        ] {
+            assert!(is_batch_file(Path::new(name)), "{name}");
+        }
+        for name in [
+            "claude",
+            "claude.exe",
+            "cmd.exe",
+            "script.ps1",
+            "a.cmdx",
+            "batch",
+            "x.bat.exe",
+        ] {
+            assert!(!is_batch_file(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn plain_arguments_pass() {
+        for arg in [
+            "",
+            "--model",
+            "hello world",
+            "--flag=a:b/c\\d.e",
+            "x,y;z",
+            "Bash(git log:*)",
+            "tab\there",
+            "naïve ünïcode",
+            "*.rs",
+        ] {
+            assert_eq!(batch_unsafe_char(arg), None, "{arg:?}");
+        }
+    }
+
+    #[test]
+    fn cmd_metacharacters_are_refused() {
+        for (arg, bad) in [
+            ("x\"&calc&\"", '"'),
+            ("a&b", '&'),
+            ("a|b", '|'),
+            ("a<b", '<'),
+            ("a>b", '>'),
+            ("a^b", '^'),
+            ("%PATH%", '%'),
+            ("!x!", '!'),
+            ("line\rbreak", '\r'),
+            ("line\nbreak", '\n'),
+            ("bell\x07", '\x07'),
+        ] {
+            assert_eq!(batch_unsafe_char(arg), Some(bad), "{arg:?}");
+        }
+    }
+
+    #[test]
+    fn error_names_the_argument_index() {
+        let args = vec![
+            "--ok".to_string(),
+            "fine too".to_string(),
+            "x&y".to_string(),
+        ];
+        let err = check_batch_args(Path::new("tool.cmd"), &args).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let msg = err.to_string();
+        assert!(msg.contains("argument 3"), "{msg}");
+        assert!(msg.contains("'&'"), "{msg}");
+        assert!(check_batch_args(Path::new("tool.cmd"), &args[..2]).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolution_follows_path_and_pathext() {
+        let dir = std::env::temp_dir().join(format!(
+            "term-core-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shim.cmd"), "").unwrap();
+        let path = std::env::join_paths([dir.as_path()]).unwrap();
+        let pathext = std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD");
+
+        let found = resolve_program("shim".as_ref(), Some(&path), Some(pathext));
+        // PATHEXT supplies the extension's case: `shim.CMD`, same file.
+        assert_eq!(found, dir.join("shim.CMD"));
+        assert!(found.exists());
+        assert!(is_batch_file(&found));
+
+        let missing = resolve_program("nothing-here".as_ref(), Some(&path), Some(pathext));
+        assert_eq!(missing, PathBuf::from("nothing-here"));
+        assert!(!is_batch_file(&missing));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
