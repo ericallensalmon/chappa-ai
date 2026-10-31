@@ -153,6 +153,7 @@ function stubApi(): {
       project: { id: 1, name: "p", path: "/p", icon: null, notificationLevel: null },
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [],
     })),
     confirmProjectTrust: vi.fn(async () => {}),
@@ -465,6 +466,7 @@ function projectApi(over: {
     project: projects[0],
     trustPending: false,
     trustCommands: [],
+    trustHash: "h",
     processes: [
       {
         name: "import + summarize on open",
@@ -758,6 +760,7 @@ describe("App projects", () => {
         project: { id: 1, name: "chappa-ai", path: "/p/chappa-ai", icon: null, notificationLevel: null },
         trustPending: true,
         trustCommands: ["py app/summarize.py"],
+        trustHash: "h",
         processes: [
           { name: "s", command: "py app/summarize.py", status: "stopped", autoStart: true, autoRestart: false, restartWhenChanged: [], termId: null, exitCode: null, notificationLevel: null, workingDir: null, env: {}, favorite: false, disableAutoRename: false },
         ],
@@ -782,6 +785,7 @@ describe("App projects", () => {
         project: { id: 1, name: "bare", path: "/p/bare", icon: null, notificationLevel: null },
         trustPending: true,
         trustCommands: [],
+        trustHash: "h",
         processes: [],
       },
     });
@@ -811,6 +815,7 @@ describe("App projects", () => {
         project: { id: 1, name: "chappa-ai", path: "/p/chappa-ai", icon: null, notificationLevel: null },
         trustPending: true,
         trustCommands: ["py app/summarize.py", "py app/design_sync.py"],
+        trustHash: "h",
         processes: [
           { name: "import + summarize on open", command: "py app/summarize.py", status: "stopped", autoStart: true, autoRestart: false, restartWhenChanged: [], termId: null, exitCode: null, notificationLevel: null, workingDir: null, env: {}, favorite: false, disableAutoRename: false },
           { name: "chappa-ai tui", command: "py app/tui.py", status: "stopped", autoStart: false, autoRestart: false, restartWhenChanged: [], termId: null, exitCode: null, notificationLevel: null, workingDir: null, env: {}, favorite: false, disableAutoRename: false },
@@ -833,8 +838,35 @@ describe("App projects", () => {
     // The confirm listed exactly the auto-start commands.
     expect(shown).toEqual([["py app/summarize.py", "py app/design_sync.py"]]);
     expect(calls.confirmTrust).toEqual([[1, true]]);
+    // Run trusts the content the prompt was built from, by its hash.
+    expect(api.confirmProjectTrust).toHaveBeenCalledWith(1, true, "h");
     // Only the auto_start process spawned (chappa-ai tui is not auto_start).
     expect(calls.startProcess).toEqual([[1, "import + summarize on open"]]);
+    panelDispose(app);
+  });
+
+  it("trust gate: Run starts nothing when the file changed under the prompt", async () => {
+    const { api, calls } = projectApi({
+      openResult: {
+        project: { id: 1, name: "chappa-ai", path: "/p/chappa-ai", icon: null, notificationLevel: null },
+        trustPending: true,
+        trustCommands: ["py app/summarize.py"],
+        trustHash: "h",
+        processes: [
+          { name: "s", command: "py app/summarize.py", status: "stopped", autoStart: true, autoRestart: false, restartWhenChanged: [], termId: null, exitCode: null, notificationLevel: null, workingDir: null, env: {}, favorite: false, disableAutoRename: false },
+        ],
+      },
+    });
+    // Rust refuses: the hash the prompt showed is no longer the file's.
+    api.confirmProjectTrust = vi.fn(async () => {
+      throw new Error("chappa.yml changed after the prompt was shown; nothing was trusted");
+    });
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => false, confirmProjectTrust: async () => true });
+    await app.mount();
+    await app.openProject(1);
+    await FLUSH();
+    expect(calls.startProcess).toEqual([]);
     panelDispose(app);
   });
 
@@ -2271,6 +2303,7 @@ async function projectTerminals(
       project: projects.find((p) => p.id === id)!,
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [TERM_COMMAND],
     };
   });
@@ -2563,6 +2596,7 @@ async function multiProject(opts: {
       project: projects.find((p) => p.id === id)!,
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: opts.processes ?? COLLIDING_PROCESSES,
     };
   });
@@ -4204,6 +4238,7 @@ describe("App agents", () => {
       project: projects.find((p) => p.id === id)!,
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [TERM_COMMAND],
     }));
     const asked: string[][] = [];
@@ -4519,6 +4554,7 @@ describe("App project AGENTS section", () => {
       project: PROJECTS.find((p) => p.id === id)!,
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [],
     }));
     const store = new AgentToolsStore(toolsApi([dockerTool(3)]));
@@ -5129,6 +5165,7 @@ describe("App adopted backend terminals", () => {
       project: PROJ,
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [],
     }));
     const root = document.createElement("div");
@@ -5378,6 +5415,7 @@ describe("App subagent nesting", () => {
       project: { id: 1, name: "p1", path: "/p/p1", icon: null, notificationLevel: null },
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [],
     }));
     const app = new App({ root, api, confirm: async () => true });

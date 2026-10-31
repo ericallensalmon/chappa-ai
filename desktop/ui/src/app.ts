@@ -2453,7 +2453,7 @@ export class App {
     // this fetch was in flight: its snapshot is stale — drop it.
     if (this.openProjects.get(p.project_id)?.reloadSeq !== seq) return;
     this.applyProcessList(p.project_id, rows);
-    if (p.trust_pending) void this.reloadTrustGate(p.project_id, p.trust_commands ?? []);
+    if (p.trust_pending) void this.reloadTrustGate(p.project_id, p.trust_commands ?? [], p.trust_hash);
   }
 
   /** The trust gate re-armed by a reload of UNTRUSTED content (
@@ -2461,7 +2461,7 @@ export class App {
    *  gated exactly like an open). Rust already stopped the affected running
    *  processes; Run records the hash — the user starts them by hand (a reload
    *  never auto-starts). An empty list is recorded silently, as at open. */
-  private async reloadTrustGate(id: number, commands: string[]): Promise<void> {
+  private async reloadTrustGate(id: number, commands: string[], hash?: string): Promise<void> {
     if (!this.openProjects.has(id)) return;
     let run: boolean | null = true;
     if (commands.length > 0) {
@@ -2469,9 +2469,11 @@ export class App {
       if (run === null) return; // the same gate is already on screen
     }
     try {
-      await this.api.confirmProjectTrust(id, run);
+      await this.api.confirmProjectTrust(id, run, hash);
     } catch {
-      // Transient IPC failure: the gate re-arms on the next reload/open.
+      // The file changed while the dialog was open (its own reload brings a
+      // fresh prompt), or a transient IPC failure: nothing was trusted and
+      // the gate re-arms on the next reload/open.
     }
   }
 
@@ -3752,7 +3754,7 @@ export class App {
       // adding a project with a bare chappa.yml). Record the hash as trusted so
       // the gate doesn't re-arm on every open; there are no commands to start.
       try {
-        await this.api.confirmProjectTrust(id, true);
+        await this.api.confirmProjectTrust(id, true, result.trustHash);
       } catch {
         /* transient — the gate re-arms on the next open */
       }
@@ -3763,14 +3765,20 @@ export class App {
       // null = the same project's gate is already on screen; the live dialog
       // owns the decision, so this open must not answer it a second time.
       if (run === null) return;
+      let trusted = false;
       try {
-        await this.api.confirmProjectTrust(id, run);
+        await this.api.confirmProjectTrust(id, run, result.trustHash);
+        trusted = run;
       } catch {
-        // Transient IPC failure: the gate re-arms on the next open.
+        // Nothing was trusted: the file changed while the dialog was open
+        // (its reload brings a fresh prompt for the new content), or a
+        // transient IPC failure (the gate re-arms on the next open). Either
+        // way nothing auto-starts — the loaded definitions may not be the
+        // ones the prompt listed.
       }
       // The gate's Run targets the project THIS open answered for, even if
       // another project was expanded while the dialog sat on screen.
-      if (run) void this.startAuto(id);
+      if (trusted) void this.startAuto(id);
     } else {
       void this.startAuto(id);
     }

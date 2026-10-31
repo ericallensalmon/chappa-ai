@@ -168,6 +168,7 @@ export function stubApi(): ApiHarness {
       project: { id: 1, name: "p", path: "/p", icon: null, notificationLevel: null },
       trustPending: false,
       trustCommands: [],
+      trustHash: "h",
       processes: [],
     })),
     confirmProjectTrust: vi.fn(async () => {}),

@@ -76,7 +76,7 @@ export interface TerminalApi {
   /** Native folder picker; null = cancelled, or not in Tauri. */
   pickDirectory(title?: string, start?: string): Promise<string | null>;
   openProject(id: number): Promise<ipc.OpenProjectResult>;
-  confirmProjectTrust(id: number, run: boolean): Promise<void>;
+  confirmProjectTrust(id: number, run: boolean, hash?: string): Promise<void>;
   listProjectProcesses(id: number): Promise<ipc.ProjectProcessDto[]>;
   startProjectProcess(
     id: number,

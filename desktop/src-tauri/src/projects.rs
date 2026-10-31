@@ -1071,21 +1071,15 @@ pub fn open_project(
             stored.icon.clone(),
         )
     } else {
-        let yml = ProjectYml::load(&root).ok_or_else(|| {
+        // Parse and hash ONE read of the file: the hash the trust prompt
+        // carries must describe exactly the definitions it lists.
+        let (yml, yml_hash) = ProjectYml::load_result_with_hash(&root).map_err(|e| {
             format!(
-                "cannot load {} in {}",
+                "cannot load {} in {}: {e}",
                 project_model::yml::CHAPPA_YML_NAME,
                 root.display()
             )
         })?;
-        let yml_hash = hash::file_content_hash(&project_file)
-            .ok_or_else(|| {
-                format!(
-                    "cannot hash {} in {}",
-                    project_model::yml::CHAPPA_YML_NAME,
-                    root.display()
-                )
-            })?;
         // Trust is read here, while `store`'s borrow of `inner` is still live —
         // below we need `inner` mutably for the runtime swap.
         let trust_pending = !store.is_trusted(id, &yml_hash);
@@ -1130,6 +1124,7 @@ pub fn open_project(
         _ => None,
     };
 
+    let trust_hash = yml_hash.clone();
     inner.runtimes.insert(
         id,
         ProjectRuntime {
@@ -1158,6 +1153,7 @@ pub fn open_project(
         },
         trust_pending,
         trust_commands,
+        trust_hash,
         processes: inner
             .runtimes
             .get(&id)
@@ -1169,15 +1165,24 @@ pub fn open_project(
     })
 }
 
-/// The trust-gate answer. `run = true` records the CURRENT yml hash as trusted
-/// (the frontend then starts the auto-start processes); `false` just declines
-/// — the gate re-arms on the next open.
+/// The trust-gate answer. `run = true` records the yml hash as trusted (the
+/// frontend then starts the auto-start processes); `false` just declines —
+/// the gate re-arms on the next open.
+///
+/// `hash` is the `trust_hash` the prompt was built from. Run trusts exactly
+/// that content: if the file or the loaded definitions have moved on since
+/// the prompt was shown, nothing is trusted and this errs — otherwise
+/// whatever landed on disk while the dialog sat open would be trusted (and
+/// auto-started) unseen. The reload that the change triggers brings its own
+/// prompt.
 #[tauri::command]
 pub fn confirm_project_trust(
     projects: State<'_, Projects>,
     id: u32,
     run: bool,
+    hash: Option<String>,
 ) -> Result<(), String> {
+    let shown = hash;
     let mut inner = projects.store()?;
     let root = inner
         .runtimes
@@ -1201,15 +1206,27 @@ pub fn confirm_project_trust(
                     root.display()
                 )
             })?;
-        // Keep the runtime's hash in sync so a later hash comparison (if the
-        // file changed again mid-session) sees the trusted value.
-        if let Some(runtime) = inner.runtimes.get_mut(&id) {
-            runtime.yml_hash = hash.clone();
-        }
+        let loaded = inner.runtimes.get(&id).map(|r| r.yml_hash.as_str());
+        trust_answer_matches(shown.as_deref(), loaded, &hash)?;
         inner.store.as_mut().unwrap().mark_trusted(id, hash)
     } else {
         Ok(())
     }
+}
+
+/// Whether a Run answer may trust `on_disk`: it must be the content the
+/// prompt showed (`shown`, when the caller sent it) and the content the open
+/// runtime has loaded (`loaded`, when the project is open), since those are
+/// the definitions the frontend is about to auto-start.
+fn trust_answer_matches(shown: Option<&str>, loaded: Option<&str>, on_disk: &str) -> Result<(), String> {
+    let stale = shown.is_some_and(|h| h != on_disk) || loaded.is_some_and(|h| h != on_disk);
+    if stale {
+        return Err(format!(
+            "{} changed after the prompt was shown; nothing was trusted",
+            project_model::yml::CHAPPA_YML_NAME
+        ));
+    }
+    Ok(())
 }
 
 /// Current process statuses for the loaded project (reconcile / refresh).
@@ -1657,6 +1674,7 @@ fn emit_reloaded(
     error: Option<&str>,
     trust_pending: bool,
     trust_commands: &[String],
+    trust_hash: &str,
 ) {
     let _ = app.emit(
         "project://yml_reloaded",
@@ -1665,6 +1683,7 @@ fn emit_reloaded(
             "error": error,
             "trust_pending": trust_pending,
             "trust_commands": trust_commands,
+            "trust_hash": trust_hash,
         }),
     );
 }
@@ -1700,18 +1719,17 @@ fn reload_locked(
     let settings = inner.settings.snapshot();
     // The process source is chappa.yml, always — load it, hash it,
     // and gate on trust.
-    let yml = match ProjectYml::load_result(&root) {
-        Ok(yml) => yml,
+    let (yml, new_hash) = match ProjectYml::load_result_with_hash(&root) {
+        Ok(loaded) => loaded,
         Err(e) => {
             if let Some(runtime) = inner.runtimes.get_mut(&id) {
                 runtime.load_error = Some(e.clone());
             }
-            emit_reloaded(app, id, Some(&e), false, &[]);
+            emit_reloaded(app, id, Some(&e), false, &[], "");
             return;
         }
     };
-    let new_hash = hash::file_content_hash(&root.join(project_model::yml::CHAPPA_YML_NAME))
-        .unwrap_or_default();
+    let trust_hash = new_hash.clone();
     // Trust is per CONTENT HASH, not a one-time
     // gate at open. Content we have not confirmed — an external edit, an
     // editor, a git pull — must never be EXECUTED by a reload; the gate
@@ -1815,7 +1833,7 @@ fn reload_locked(
     inner.runtimes.get_mut(&id).unwrap().processes = processes;
     // The diff may have stopped, restarted, added or dropped processes.
     inner.notify_changed();
-    emit_reloaded(app, id, None, !trusted, &trust_commands);
+    emit_reloaded(app, id, None, !trusted, &trust_commands, &trust_hash);
 }
 
 /// What the reload gate lists for untrusted content: every held-back restart
@@ -2447,6 +2465,9 @@ pub struct OpenProjectResult {
     pub project: ProjectInfoDto,
     pub trust_pending: bool,
     pub trust_commands: Vec<String>,
+    /// The content hash the trust prompt describes; Run sends it back so
+    /// exactly that content is trusted (see [`confirm_project_trust`]).
+    pub trust_hash: String,
     pub processes: Vec<ProjectProcessDto>,
 }
 
@@ -2500,6 +2521,18 @@ mod tests {
         let (program, args) = execution_command("py app/x.py", &settings_with("sh", vec![]));
         assert_eq!(program, "sh");
         assert_eq!(args, vec!["-c".to_owned(), "py app/x.py".to_owned()]);
+    }
+
+    #[test]
+    fn run_trusts_only_the_content_the_prompt_showed() {
+        assert!(trust_answer_matches(Some("a"), Some("a"), "a").is_ok());
+        // Closed project, or a caller that sent no hash: the file decides.
+        assert!(trust_answer_matches(None, None, "a").is_ok());
+        // The file changed while the dialog was open.
+        assert!(trust_answer_matches(Some("a"), Some("a"), "b").is_err());
+        // The runtime already reloaded newer content than the prompt showed.
+        assert!(trust_answer_matches(Some("a"), Some("b"), "b").is_err());
+        assert!(trust_answer_matches(None, Some("a"), "b").is_err());
     }
 
     #[test]

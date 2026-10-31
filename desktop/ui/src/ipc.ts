@@ -587,6 +587,9 @@ export interface OpenProjectResult {
   project: ProjectInfoDto;
   trustPending: boolean;
   trustCommands: string[];
+  /** The content hash the trust prompt describes; pass it back to
+   *  `confirmProjectTrust` so Run trusts exactly that content. */
+  trustHash: string;
   processes: ProjectProcessDto[];
 }
 
@@ -760,11 +763,13 @@ export function openProject(id: number): Promise<OpenProjectResult> {
   return call("open_project", { id });
 }
 
-/** The trust-gate answer. `run = true` records the current chappa.yml hash as
- *  trusted and the caller proceeds to start the auto-start processes; `false`
- *  declines (the gate re-arms on the next open). */
-export function confirmProjectTrust(id: number, run: boolean): Promise<void> {
-  return call("confirm_project_trust", { id, run });
+/** The trust-gate answer. `run = true` trusts the chappa.yml content `hash`
+ *  names (the hash the prompt was built from) and the caller proceeds to
+ *  start the auto-start processes; it rejects, trusting nothing, when the
+ *  file changed after the prompt was shown. `false` declines (the gate
+ *  re-arms on the next open). */
+export function confirmProjectTrust(id: number, run: boolean, hash?: string): Promise<void> {
+  return call("confirm_project_trust", { id, run, hash: hash ?? null });
 }
 
 export function listProjectProcesses(id: number): Promise<ProjectProcessDto[]> {
@@ -849,6 +854,8 @@ export interface ProjectYmlReloadedEvent {
    *  would execute. Answer through `confirmProjectTrust`. */
   trust_pending?: boolean;
   trust_commands?: string[];
+  /** The reloaded content's hash, for `confirmProjectTrust`. */
+  trust_hash?: string;
 }
 
 /**
