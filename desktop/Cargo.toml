@@ -6,5 +6,13 @@ members = ["term-core", "project-model", "src-tauri", "chappa-ai-mcp"]
 # off the main thread must not touch the event loop's non-atomic refcounts
 # (see the comment on `DispatcherMainThreadContext`). Drop this once
 # the upstream crate ships the same change.
+#
+# The copy is upstream tauri-runtime-wry 2.11.4 plus that one change, and
+# while it is patched in, upstream fixes to this crate (security fixes
+# included) do NOT arrive with a tauri update. On every tauri bump: diff
+# this directory against the matching upstream tauri-runtime-wry release,
+# port anything relevant (or re-vendor the new release and re-apply the
+# change), and update the version named here. If cargo warns this patch
+# was not used, the upstream crate is in use again and the fix is gone.
 [patch.crates-io]
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
