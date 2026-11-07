@@ -528,10 +528,12 @@ fn todo_lock_leases_by_actor() {
     // The holder edits freely; a foreign unlock is refused too.
     store.todo_update("b", t.todo_id, &TodoPatch { title: Some("by b".into()), ..Default::default() }).unwrap();
     assert!(matches!(store.todo_unlock("a", t.todo_id).unwrap_err(), CoordError::Locked { .. }));
-    // An EXPIRED lock does not block: lease of 1 ms, then wait.
-    let short = store.todo_lock("b", t.todo_id, Some(1)).unwrap();
+    // An EXPIRED lock does not block: a short lease, then wait it out. The
+    // lease must outlive the lock call's own read-back of the row, or a busy
+    // machine sees it expired before the first assertion.
+    let short = store.todo_lock("b", t.todo_id, Some(250)).unwrap();
     assert!(short.lock_expires_at.is_some());
-    std::thread::sleep(Duration::from_millis(20));
+    std::thread::sleep(Duration::from_millis(400));
     let row = store.todo_get(t.todo_id).unwrap();
     assert_eq!(row.locked_by, None, "an expired lease reads as no lock");
     store.todo_update("a", t.todo_id, &TodoPatch { body: Some("a again".into()), ..Default::default() }).unwrap();
