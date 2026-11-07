@@ -29,8 +29,10 @@ import { AgentsSection } from "./agents_section";
 import { TimersSection } from "./timers_section";
 import { ProjectsSection, type ProjectsSettingsApi } from "./projects_section";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
+import type { ClipboardWritesMode } from "./ipc";
 import {
   BUILTIN_EXEC_PROFILES,
+  CLIPBOARD_WRITES_MODES,
   BUNDLED_FONTS,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
@@ -164,6 +166,8 @@ export class SettingsPane {
   private readonly ctrlCToggle: HTMLInputElement;
   private readonly marksToggle: HTMLInputElement;
   private readonly wheelPicker: Segmented<number>;
+  /** OSC 52 clipboard writes from terminal output: Off | Ask | Allow. */
+  private readonly clipboardWritesPicker: Segmented<ClipboardWritesMode>;
   private readonly lineHeightPicker: Segmented<number>;
   private readonly fontSizeValue: HTMLSpanElement;
   private readonly fontSizeDown: HTMLButtonElement;
@@ -292,6 +296,26 @@ export class SettingsPane {
           "without one it does nothing. Cmd+C on macOS keeps its usual behavior either way. On by default: " +
           "a reflexive ^C must not kill a long agent run — Escape and the rail stop are the remaining " +
           "cancel paths. Deliberate.",
+      ),
+    );
+    this.clipboardWritesPicker = new Segmented<ClipboardWritesMode>({
+      label: "Programs can set the clipboard",
+      options: CLIPBOARD_WRITES_MODES.map((m) => ({
+        value: m,
+        label: m === "off" ? "Off" : m === "ask" ? "Ask" : "Allow",
+      })),
+      value: "ask",
+      onChange: (m) => void this.store.update({ clipboardWrites: m }),
+    });
+    this.clipboardWritesPicker.element.dataset.setting = "clipboardWrites";
+    behavior.card.appendChild(
+      settingsRow(
+        "Programs can set the clipboard",
+        this.clipboardWritesPicker.element,
+        "What happens when terminal output asks to replace the clipboard (OSC 52, used by tmux and vim " +
+          "over ssh). Any output can carry that request, including a file you cat or text an agent echoes, " +
+          "so Ask confirms the first one from each terminal and remembers your answer for it. Every " +
+          "write that lands shows a notice. Programs can never read the clipboard.",
       ),
     );
     this.wheelPicker = new Segmented<number>({
@@ -505,6 +529,7 @@ export class SettingsPane {
   dispose(): void {
     this.close();
     this.wheelPicker.dispose();
+    this.clipboardWritesPicker.dispose();
     this.lineHeightPicker.dispose();
     this.agents.dispose();
     this.timers.dispose();
@@ -521,6 +546,7 @@ export class SettingsPane {
     this.ctrlCToggle.checked = s.ctrlCCopyOnly;
     this.marksToggle.checked = s.syntheticPromptMarks;
     this.wheelPicker.setValue(s.scrollWheelSpeed);
+    this.clipboardWritesPicker.setValue(s.clipboardWrites);
     // An off-ladder stored value (hand-edited config; Rust round-trips those)
     // displays as its nearest step — the store keeps the exact number.
     this.lineHeightPicker.setValue(nearestLineHeight(s.lineHeight));

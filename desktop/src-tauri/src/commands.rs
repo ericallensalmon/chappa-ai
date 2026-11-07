@@ -439,6 +439,24 @@ pub fn copy_selection(
     Ok(text)
 }
 
+/// Put `text` on the OS clipboard. The frontend calls this to apply a
+/// terminal's OSC 52 store once the `clipboardWrites` setting (and, in `ask`
+/// mode, the user) has allowed it. It grants nothing the webview could not
+/// already do through `navigator.clipboard`, but works without a user gesture
+/// or window focus, which an `allow`-mode write from a background terminal
+/// has neither of.
+#[tauri::command]
+pub fn write_clipboard_text(app: AppHandle, text: String) -> Result<(), String> {
+    if text.len() > crate::registry::OSC52_MAX_BYTES {
+        return Err(format!(
+            "clipboard text is {} bytes; the cap is {}",
+            text.len(),
+            crate::registry::OSC52_MAX_BYTES
+        ));
+    }
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn search(
     registry: State<'_, Registry>,

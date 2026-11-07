@@ -100,7 +100,22 @@ export function defaultSettings(): Settings {
     // On by default — orphans of a hard restart / mid-close docker
     // hiccup are exactly the leak this reaps (matches `project_model`).
     agentReapOrphans: true,
+    // Ask by default: terminal output must not replace the clipboard
+    // unseen, but tools that use OSC 52 on purpose keep working after one
+    // confirmation (matches `project_model`).
+    clipboardWrites: "ask",
   };
+}
+
+/** The three clipboard-write modes, in picker order. */
+export const CLIPBOARD_WRITES_MODES = ["off", "ask", "allow"] as const;
+
+/** Anything but a known mode is the default — a hand-edited or newer
+ *  value must never fall through to "allow". */
+export function clampClipboardWrites(v: unknown): ipc.ClipboardWritesMode {
+  return (CLIPBOARD_WRITES_MODES as readonly unknown[]).includes(v)
+    ? (v as ipc.ClipboardWritesMode)
+    : "ask";
 }
 
 function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
@@ -212,6 +227,7 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     // Default TRUE — a missing/garbage value lands on the ON
     // default, mirroring the ctrl-v/ctrl-c deliberate-upgrade shape.
     agentReapOrphans: s.agentReapOrphans !== false,
+    clipboardWrites: clampClipboardWrites(s.clipboardWrites),
   };
 }
 

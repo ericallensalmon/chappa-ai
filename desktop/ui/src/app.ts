@@ -33,6 +33,7 @@ import {
   type CommandForm,
 } from "./dialog";
 import { settingsStore, type Settings, type SettingsStore } from "./settings";
+import { ClipboardGate } from "./clipboard_gate";
 import {
   decide,
   LEVELS,
@@ -493,6 +494,14 @@ export interface AppOptions {
    *  when nothing is running; `running` lists what additionally stops.
    *  Resolve true = remove. Defaults to an in-app modal. */
   confirmProjectRemove?: (name: string, running: string[]) => Promise<boolean>;
+  /** The OSC 52 confirm (`clipboardWrites: ask`): a terminal's output asked
+   *  to set the clipboard. `label` names the terminal, `preview` is the
+   *  sanitized start of the text, `chars` its full length. Resolve true =
+   *  allow (remembered for that terminal). Defaults to an in-app modal. */
+  confirmClipboardWrite?: (label: string, preview: string, chars: number) => Promise<boolean>;
+  /** Applies an allowed OSC 52 store. Defaults to the Rust clipboard
+   *  command (works without focus or a user gesture). */
+  writeClipboard?: (text: string) => Promise<void>;
   /**
    * The "Add project…" modal. Resolves `{path, name}` or null to
    * cancel. `browse` is the native folder picker the modal should offer, or
@@ -948,6 +957,8 @@ export class App {
   private readonly confirmTrust: (commands: string[]) => Promise<boolean>;
   private readonly confirmProjectClose: (name: string, running: string[]) => Promise<boolean>;
   private readonly confirmProjectRemove: (name: string, running: string[]) => Promise<boolean>;
+  /** OSC 52 stores from terminal output go through this (see clipboard_gate.ts). */
+  private readonly clipboardGate: ClipboardGate;
   private readonly promptAddProject: (
     browse: (() => Promise<string | null>) | null,
   ) => Promise<AddProjectAnswer | null>;
@@ -1767,6 +1778,22 @@ export class App {
             (running.length > 0 ? `\n\nThis stops:\n${running.join("\n")}` : ""),
           { okLabel: "Remove" },
         ));
+    this.clipboardGate = new ClipboardGate({
+      mode: () => this.settings.get().clipboardWrites,
+      confirm:
+        opts.confirmClipboardWrite ??
+        ((label, preview, chars) =>
+          confirmDialog(
+            `"${label}" wants to set the clipboard to:\n\n${preview}\n\n` +
+              `(${chars} characters.) Allow this terminal to set the clipboard? ` +
+              `The answer holds until it closes.`,
+            // Deny holds focus and a stray Enter denies: this prompt can open
+            // while the user is typing into the terminal that caused it.
+            { okLabel: "Allow", cancelLabel: "Deny", safeDefault: true },
+          )),
+      write: opts.writeClipboard ?? ((text) => ipc.writeClipboardText(text)),
+      notice: (message) => this.showToast(message),
+    });
     this.canBrowseDirectories = opts.canBrowseDirectories ?? ipc.inTauri();
     this.promptAddProject =
       opts.promptAddProject ?? ((browse) => addProjectDialog({ browse }));
@@ -2269,6 +2296,8 @@ export class App {
     // The row is gone, so its last sample is too — a recycled term id
     // must never inherit the previous terminal's `N%`.
     this.stats.forget(id);
+    // Likewise its clipboard answer: "allowed" is for that terminal only.
+    this.clipboardGate.forget(id);
     entry.host.remove();
     if (this.activeId === id) {
       this.activeId = null;
@@ -2394,6 +2423,9 @@ export class App {
     // OSC 9/777/99 notifications: the Rust pump no longer toasts on its own
     // — everything routes through the decision function.
     on<ipc.TerminalEventDto>("term://notify", (p) => this.applyNotify(p));
+    // OSC 52 clipboard stores: the pump forwards them unapplied; the gate
+    // applies the clipboardWrites setting.
+    on<ipc.TerminalEventDto>("term://clipboard", (p) => this.applyClipboard(p));
     // Project process rows: the process-row lifecycle source. The
     // registry's term://status stays the per-terminal source; this carries
     // the project-scoped status, exit code and (for respawns) stable term id.
@@ -2643,6 +2675,14 @@ export class App {
     const title = typeof p.title === "string" && p.title.trim() !== "" ? p.title : this.entryLabel(entry);
     const d = decide("notify", this.levelForEntry(entry), p.term_id === this.activeId, this.windowFocused, body);
     this.routeDecision(p.term_id, entry, "notify", d, title, body);
+  }
+
+  /** `term://clipboard` — an OSC 52 store. A terminal with no rail row is
+   *  not one the user can see or attribute, so its store is dropped. */
+  private applyClipboard(p: ipc.TerminalEventDto): void {
+    const entry = this.entries.get(p.term_id);
+    if (!entry || typeof p.text !== "string") return;
+    void this.clipboardGate.handle(p.term_id, this.entryLabel(entry), p.text);
   }
 
   /**
@@ -4064,6 +4104,7 @@ export class App {
       this.entries.delete(row.termId);
       this.lru.release(row.termId);
       this.stats.forget(row.termId);
+      this.clipboardGate.forget(row.termId);
       if (wasActive) {
         this.activeId = null;
         const ids = [...this.entries.keys()];
@@ -4367,6 +4408,7 @@ export class App {
       this.entries.delete(row.termId);
       this.lru.release(row.termId);
       this.stats.forget(row.termId);
+      this.clipboardGate.forget(row.termId);
       if (wasActive) {
         this.activeId = null;
         const ids = [...this.entries.keys()];
@@ -5411,9 +5453,9 @@ export class App {
     }
   }
 
-  /** "Copy command" → the OS clipboard. There is no Rust clipboard-write
-   *  command exposed to the frontend (OSC 52 writes are handled inside the
-   *  pump), so this is `navigator.clipboard`, the documented fallback. */
+  /** "Copy command" → the OS clipboard. A menu click is a user gesture, so
+   *  `navigator.clipboard` works here; `write_clipboard_text` exists for the
+   *  OSC 52 path, which has no gesture to lean on. */
   private async onRowMenuCopy(): Promise<void> {
     const target = this.rowMenuFor;
     this.hideRowMenu();

