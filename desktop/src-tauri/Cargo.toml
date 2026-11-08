@@ -33,6 +33,10 @@ tauri-plugin-dialog = "2"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 term-core = { path = "../term-core" }
 project-model = { path = "../project-model" }
+# The control surface's identity proof and the client that checks it are
+# defined once, in the MCP crate; the app computes the same proof and reuses
+# the checker to tell a live sibling instance from a stale endpoint file.
+chappa-ai-mcp = { path = "../chappa-ai-mcp" }
 indexmap = { version = "2", features = ["serde"] }
 
 # The debug-only HTTP server AND the all-builds control surface

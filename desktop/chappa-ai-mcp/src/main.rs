@@ -1,6 +1,7 @@
 //! `chappa-ai-mcp` — stdio MCP server for the chappa-ai desktop app.
 //! Register with Claude Code: `claude mcp add chappa-ai -- chappa-ai-mcp`.
-//! Environment: CHAPPA_AI_CONTROL_URL (default http://127.0.0.1:8324),
+//! Environment: CHAPPA_AI_CONTROL_URL (default: the address in the app's
+//! `control_endpoint` file, or CHAPPA_AI_CONTROL_ENDPOINT_FILE),
 //! CHAPPA_AI_CONTROL_TOKEN or CHAPPA_AI_CONTROL_TOKEN_FILE (default: the
 //! app-config `control_token`). All logic lives in the library; this is the
 //! loop.
@@ -11,10 +12,15 @@ fn main() {
         eprintln!(
             "chappa-ai-mcp {} — stdio MCP server proxying to the chappa-ai control surface.\n\
              Usage: claude mcp add chappa-ai -- chappa-ai-mcp\n\
-             Env: CHAPPA_AI_CONTROL_URL, CHAPPA_AI_CONTROL_TOKEN, CHAPPA_AI_CONTROL_TOKEN_FILE\n\
-             Default token file: {}",
+             Env: CHAPPA_AI_CONTROL_URL, CHAPPA_AI_CONTROL_ENDPOINT_FILE,\n\
+             CHAPPA_AI_CONTROL_TOKEN, CHAPPA_AI_CONTROL_TOKEN_FILE\n\
+             Default token file: {}\n\
+             Default endpoint file: {}",
             chappa_ai_mcp::SERVER_VERSION,
-            chappa_ai_mcp::default_token_path().display()
+            chappa_ai_mcp::default_token_path().display(),
+            chappa_ai_mcp::default_config_dir()
+                .join(chappa_ai_mcp::ENDPOINT_FILE)
+                .display()
         );
         return;
     }

@@ -11,7 +11,17 @@
 //! A random 32-byte token is generated at first launch into
 //! `<app-config>/control_token` (0600 on unix; on Windows inheritance is
 //! stripped and only the current user is granted access via `icacls`).
-//! EVERY request must carry `Authorization: Bearer <token>` — `GET /` too.
+//! EVERY request must carry `Authorization: Bearer <token>` — `GET /` too —
+//! except `GET /identity`.
+//!
+//! ## Identity
+//! The port is fixed, so another local program can hold it first. After a
+//! successful bind the app writes `<app-config>/control_endpoint` (owner-only,
+//! like the token) with the bound address and a per-run nonce, and answers
+//! the tokenless `GET /identity?challenge=…` with a proof keyed by the token.
+//! `chappa-ai-mcp` checks that proof (and that it names the endpoint file's
+//! address and run) before it sends the token. The construction and the
+//! reasoning live in `chappa_ai_mcp::identity`.
 //!
 //! ## Single-source route table
 //! [`ROUTES`] is the ONE definition of the surface: the dispatcher walks it,
@@ -52,6 +62,10 @@ use crate::timers_http as timers;
 
 pub const BIND: &str = "127.0.0.1:8324";
 pub const TOKEN_FILE: &str = "control_token";
+/// `<app-config>/control_endpoint` (written on each successful bind) and the
+/// one tokenless route. Defined in the MCP crate, which owns the client side
+/// of the identity check; see `chappa_ai_mcp::identity` for the scheme.
+pub use chappa_ai_mcp::{ENDPOINT_FILE, IDENTITY_PATH};
 /// The request header carrying the writing actor's process id.
 pub const ACTOR_HEADER: &str = "X-Chappa-Actor";
 
@@ -99,6 +113,53 @@ pub struct ControlState {
     /// on, so the webview can adopt a backend-spawned terminal into the rail.
     /// `None` in tests/harness with no Tauri runtime (a silent no-op).
     pub app: Option<AppHandle>,
+    /// What `GET /identity` proves. [`serve`] fills it from the bound
+    /// address when left `None`.
+    pub identity: Option<Arc<ServerIdentity>>,
+}
+
+/// This run's identity: the address actually bound, a fresh random nonce,
+/// and the token the proof is keyed by. Deliberately not `Debug` (it holds
+/// the token).
+pub struct ServerIdentity {
+    pub addr: String,
+    pub nonce: String,
+    token: Arc<str>,
+}
+
+impl ServerIdentity {
+    /// A new identity for `addr` with a fresh nonce from the OS RNG.
+    pub fn new(addr: impl Into<String>, token: &str) -> std::io::Result<Self> {
+        Ok(Self {
+            addr: addr.into(),
+            nonce: random_hex(16)?,
+            token: token.into(),
+        })
+    }
+
+    /// The identity for a bound server (its real address, never [`BIND`]
+    /// assumed). Fails for a non-IP listener.
+    pub fn for_server(server: &tiny_http::Server, token: &str) -> std::io::Result<Self> {
+        let addr = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| std::io::Error::other("control server is not bound to an IP address"))?;
+        Self::new(addr.to_string(), token)
+    }
+
+    /// The proof for a client's challenge.
+    pub fn prove(&self, challenge: &str) -> String {
+        chappa_ai_mcp::identity_proof(&self.token, challenge, &self.addr, &self.nonce)
+    }
+
+    /// What the endpoint file records about this run.
+    pub fn endpoint(&self) -> chappa_ai_mcp::Endpoint {
+        chappa_ai_mcp::Endpoint {
+            addr: self.addr.clone(),
+            nonce: self.nonce.clone(),
+            pid: Some(u64::from(std::process::id())),
+        }
+    }
 }
 
 pub type Resp = tiny_http::Response<std::io::Cursor<Vec<u8>>>;
@@ -125,6 +186,13 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "This route table as JSON (discoverability), plus `instance` {pid, config_dir} — which running chappa-ai answered, so two instances (or a stale one holding the port) are diagnosable.",
         handler: route_table,
+    },
+    Route {
+        method: "GET",
+        path: IDENTITY_PATH,
+        fields: &["challenge"],
+        description: "The ONE route that needs no token: it lets a client check that this server is the app BEFORE sending the token to it (anything else can bind this port first). `challenge` = 32 random bytes as lowercase hex. Answers {addr, nonce, proof}: addr = the address this server bound, nonce = a random value fresh for this run (both also in the owner-only `<app-config>/control_endpoint`, written after each successful bind), proof = hex BLAKE3 keyed hash of `challenge 0x00 addr 0x00 nonce` under the key BLAKE3-derive_key(\"chappa-ai control-surface identity proof v1\", token). A client recomputes the proof from its own token, checks addr/nonce against the endpoint file, and only then sends its authenticated request on the same keep-alive connection.",
+        handler: identity_route,
     },
     Route {
         method: "GET",
@@ -674,6 +742,49 @@ pub fn token_path(config_dir: &Path) -> PathBuf {
     config_dir.join(TOKEN_FILE)
 }
 
+/// The endpoint file path for a config dir (what the MCP crate reads to find
+/// and verify this instance).
+pub fn endpoint_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(ENDPOINT_FILE)
+}
+
+/// Record a successfully bound server's address and nonce for clients, with
+/// the same owner-only writer as the token. Owner-only is not what keeps the
+/// token safe (the challenge does), but it keeps another user from pointing
+/// clients somewhere else or deleting the record.
+pub fn publish_endpoint(config_dir: &Path, identity: &ServerIdentity) -> std::io::Result<()> {
+    project_model::atomic::ensure_private_dir(config_dir).map_err(std::io::Error::other)?;
+    write_owner_only(&endpoint_path(config_dir), &identity.endpoint().to_json())
+}
+
+/// After a failed bind: an existing endpoint file is either a live sibling
+/// instance's (same config dir, it holds the port; keep it, its clients are
+/// fine) or a dead run's (remove it, so clients report "not running" instead
+/// of a confusing identity failure). Told apart by running the same identity
+/// check a client does, which never sends the token. Either way a stale file
+/// could not have been trusted: the dead run's nonce cannot be proved by
+/// anything that lacks the token.
+pub fn retire_stale_endpoint(config_dir: &Path, token: &str) -> bool {
+    let path = endpoint_path(config_dir);
+    if !path.exists() {
+        return false;
+    }
+    match chappa_ai_mcp::identity::probe_endpoint(&path, token, Duration::from_secs(2)) {
+        Ok(ep) => {
+            log::warn!(
+                "[control_http] {ENDPOINT_FILE} belongs to a live instance (pid {:?} at {}); leaving it",
+                ep.pid,
+                ep.addr
+            );
+            false
+        }
+        Err(why) => {
+            log::warn!("[control_http] removing stale {ENDPOINT_FILE}: {why}");
+            std::fs::remove_file(&path).is_ok()
+        }
+    }
+}
+
 // ---- server -----------------------------------------------------------------
 
 /// App entry point: load/create the token and serve on [`BIND`] from its own
@@ -693,6 +804,7 @@ pub fn start(mut state: ControlState, config_dir: PathBuf) {
         let server = match tiny_http::Server::http(BIND) {
             Ok(server) => server,
             Err(err) => {
+                retire_stale_endpoint(&config_dir, &token);
                 // LOUD (review): the overwhelmingly likely cause is a SECOND
                 // chappa-ai already holding 8324 — in which case every agent
                 // tool call lands in the OTHER instance, which looks like the
@@ -708,6 +820,25 @@ pub fn start(mut state: ControlState, config_dir: PathBuf) {
                 return;
             }
         };
+        // Bound: publish who we are. Without the endpoint file clients refuse
+        // to talk to us (they cannot tell us from an impostor), so a failure
+        // here is loud; any older file is removed rather than left to name
+        // a previous run.
+        let identity = match ServerIdentity::for_server(&server, &token) {
+            Ok(identity) => Arc::new(identity),
+            Err(err) => {
+                log::error!("[control_http] cannot create the instance identity: {err}");
+                return;
+            }
+        };
+        if let Err(err) = publish_endpoint(&config_dir, &identity) {
+            let _ = std::fs::remove_file(endpoint_path(&config_dir));
+            log::error!(
+                "[control_http] cannot write {ENDPOINT_FILE}: {err} — chappa-ai-mcp will refuse \
+                 to connect to this instance"
+            );
+        }
+        state.identity = Some(identity);
         eprintln!("[control_http] control surface on http://{BIND}");
         serve(server, state, token);
     });
@@ -716,7 +847,14 @@ pub fn start(mut state: ControlState, config_dir: PathBuf) {
 /// Serve forever on an already-bound server (tests bind an ephemeral port),
 /// from a fixed pool of [`WORKERS`] threads — this thread is one of them, so
 /// `serve` still blocks for the life of the server.
-pub fn serve(server: tiny_http::Server, state: ControlState, token: String) {
+pub fn serve(server: tiny_http::Server, mut state: ControlState, token: String) {
+    if state.identity.is_none() {
+        match ServerIdentity::for_server(&server, &token) {
+            Ok(identity) => state.identity = Some(Arc::new(identity)),
+            // `GET /identity` then answers 500; every other route still works.
+            Err(err) => log::error!("[control_http] cannot create the instance identity: {err}"),
+        }
+    }
     let server = Arc::new(server);
     let token: Arc<str> = token.into();
     let mut pool = Vec::with_capacity(WORKERS - 1);
@@ -757,7 +895,12 @@ fn respond(state: &ControlState, token: &str, mut request: tiny_http::Request) {
         .find(|h| h.field.equiv(ACTOR_HEADER))
         .map(|h| h.value.as_str().trim().to_owned())
         .filter(|a| !a.is_empty());
-    let response = if authorized {
+    // The identity challenge is answered without a token: its whole point is
+    // that a client checks the server BEFORE handing the token over.
+    let public = method == "GET" && url.split('?').next() == Some(IDENTITY_PATH);
+    let response = if public {
+        guarded(|| dispatch_as(state, None, &method, &url, ""))
+    } else if authorized {
         let body = read_body(&mut request.as_reader());
         guarded(|| dispatch_as(state, actor.as_deref(), &method, &url, &body))
     } else {
@@ -891,6 +1034,27 @@ fn route_table(state: &ControlState, _: &Params, _: &str, _: &str) -> Resp {
                 "config_dir": state.config_dir.display().to_string(),
             },
             "routes": route_table_json(),
+        }),
+    )
+}
+
+fn identity_route(state: &ControlState, _: &Params, query: &str, _: &str) -> Resp {
+    let Some(identity) = state.identity.as_deref() else {
+        return json(500, json!({"error": "this server has no instance identity"}));
+    };
+    let challenge = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("challenge="))
+        .unwrap_or("");
+    if !chappa_ai_mcp::identity::is_valid_challenge(challenge) {
+        return json(400, json!({"error": "challenge must be 32 random bytes as lowercase hex"}));
+    }
+    json(
+        200,
+        json!({
+            "addr": identity.addr,
+            "nonce": identity.nonce,
+            "proof": identity.prove(challenge),
         }),
     )
 }
@@ -1449,6 +1613,14 @@ pub fn render_api_doc() -> String {
          `<app-config>` is Tauri's app config dir for `com.chappa-ai.desktop`, e.g.\n\
          `%APPDATA%\\com.chappa-ai.desktop` on Windows). Responses are JSON; errors are\n\
          `{{\"error\": \"…\"}}` with a 4xx/5xx status. `GET /` returns this same table.\n\n\
+         The one exception to the token rule is `GET /identity`: anything can bind this\n\
+         port before the app does, so a client should verify the server before it sends\n\
+         the token. After each successful bind the app writes the owner-only\n\
+         `<app-config>/control_endpoint` = `{{\"addr\", \"nonce\", \"pid\"}}`; a client reads it,\n\
+         connects to `addr`, sends `GET /identity?challenge=<fresh random hex>` with no\n\
+         credentials, checks the proof against its own token and the returned\n\
+         addr/nonce against the file, and only then sends its authenticated request on\n\
+         the same connection (`chappa-ai-mcp` does exactly this and refuses otherwise).\n\n\
          Path placeholders: `{{id}}` = terminal id, `{{project}}` = project id, `{{name}}` =\n\
          percent-encoded process name, `{{rid}}` = scratchpad / todo / comment id.\n\
          Fields marked `?` are optional; POST fields are JSON body keys, GET fields are\n\

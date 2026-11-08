@@ -585,3 +585,163 @@ fn control_api_doc_is_in_sync() {
         "desktop/CONTROL_API.md is stale — run `CONTROL_API_WRITE=1 cargo test -p chappa-ai-desktop --test control control_api_doc`"
     );
 }
+
+// ---- instance identity --------------------------------------------------------
+
+/// Bind an ephemeral port, publish its endpoint file into `dir` exactly as
+/// the app does after a successful bind, and serve.
+fn start_published(dir: &Path, token: &str) -> (String, std::sync::Arc<control_http::ServerIdentity>) {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+    let identity = std::sync::Arc::new(control_http::ServerIdentity::for_server(&server, token).unwrap());
+    control_http::publish_endpoint(dir, &identity).unwrap();
+    let addr = identity.addr.clone();
+    let state = ControlState {
+        identity: Some(identity.clone()),
+        ..ControlState::default()
+    };
+    let t = token.to_owned();
+    std::thread::spawn(move || control_http::serve(server, state, t));
+    (addr, identity)
+}
+
+/// A plain tiny_http server that does not know the token: answers every
+/// request 200 with an empty object and records each request's headers.
+fn start_impostor() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+    let addr = server.server_addr().to_string();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let mut line = format!("{} {}", request.method(), request.url());
+            for h in request.headers() {
+                line.push_str(&format!("\n{}: {}", h.field, h.value));
+            }
+            log.lock().unwrap().push(line);
+            let _ = request.respond(tiny_http::Response::from_string("{}"));
+        }
+    });
+    (addr, seen)
+}
+
+#[test]
+fn the_endpoint_file_names_this_run_and_is_owner_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, identity) = start_published(dir.path(), "t0ken");
+    let path = control_http::endpoint_path(dir.path());
+    let ep = chappa_ai_mcp::identity::read_endpoint_file(&path).unwrap();
+    assert_eq!(ep.addr, addr);
+    assert_eq!(ep.nonce, identity.nonce);
+    assert_eq!(ep.pid, Some(u64::from(std::process::id())));
+    assert!(!ep.nonce.is_empty());
+    // A second run gets a different nonce.
+    let (_, other) = start_published(tempfile::tempdir().unwrap().path(), "t0ken");
+    assert_ne!(other.nonce, identity.nonce);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[test]
+fn the_identity_route_needs_no_token_and_proves_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = "t0ken-for-identity";
+    let (addr, identity) = start_published(dir.path(), token);
+    let challenge = "ab".repeat(32);
+    let (status, body) = http(&addr, "GET", &format!("/identity?challenge={challenge}"), None, "");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["addr"], addr);
+    assert_eq!(body["nonce"], identity.nonce);
+    assert_eq!(body["proof"], chappa_ai_mcp::identity_proof(token, &challenge, &addr, &identity.nonce));
+    // Everything else still requires the token.
+    let (status, _) = http(&addr, "GET", "/", None, "");
+    assert_eq!(status, 401);
+    // A malformed challenge is refused rather than signed.
+    let (status, _) = http(&addr, "GET", "/identity?challenge=short", None, "");
+    assert_eq!(status, 400);
+    let (status, _) = http(&addr, "GET", "/identity", None, "");
+    assert_eq!(status, 400);
+}
+
+#[test]
+fn chappa_ai_mcp_verifies_the_real_app_through_its_endpoint_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = "t0ken-end-to-end";
+    start_published(dir.path(), token);
+    let client = chappa_ai_mcp::Client::from_endpoint_file(
+        control_http::endpoint_path(dir.path()),
+        chappa_ai_mcp::TokenSource::Literal(token.into()),
+    );
+    let out = chappa_ai_mcp::call_tool(&client, "list_processes", &json!({})).unwrap();
+    assert_eq!(out, json!([]));
+}
+
+#[test]
+fn an_impostor_holding_the_port_is_refused_and_never_sees_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = "t0ken-not-for-impostors";
+    // The real app ran here once; its port now belongs to something else.
+    let (_, identity) = start_published(dir.path(), token);
+    let (impostor, seen) = start_impostor();
+    let stale = chappa_ai_mcp::Endpoint {
+        addr: impostor.clone(),
+        nonce: identity.nonce.clone(),
+        pid: Some(1),
+    };
+    std::fs::write(control_http::endpoint_path(dir.path()), stale.to_json()).unwrap();
+    let via_file = chappa_ai_mcp::Client::from_endpoint_file(
+        control_http::endpoint_path(dir.path()),
+        chappa_ai_mcp::TokenSource::Literal(token.into()),
+    );
+    let via_url = chappa_ai_mcp::Client::new(
+        format!("http://{impostor}"),
+        chappa_ai_mcp::TokenSource::Literal(token.into()),
+    );
+    for client in [via_file, via_url] {
+        let err = chappa_ai_mcp::call_tool(&client, "list_processes", &json!({})).unwrap_err();
+        assert!(matches!(err, chappa_ai_mcp::ToolError::Untrusted(_)), "{err:?}");
+    }
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "the impostor was challenged");
+    for request in seen.iter() {
+        assert!(request.starts_with("GET /identity?challenge="), "{request}");
+        assert!(!request.contains(token), "token leaked: {request}");
+        assert!(!request.to_ascii_lowercase().contains("authorization"), "{request}");
+    }
+}
+
+/// After a failed bind the app keeps an endpoint file that a live instance
+/// can still prove, and removes one that names a dead run or an impostor —
+/// without ever sending the token to find out.
+#[test]
+fn a_failed_bind_retires_only_a_stale_endpoint_file() {
+    let token = "t0ken-retire";
+    // Live sibling: kept.
+    let live = tempfile::tempdir().unwrap();
+    start_published(live.path(), token);
+    assert!(!control_http::retire_stale_endpoint(live.path(), token));
+    assert!(control_http::endpoint_path(live.path()).exists());
+
+    // Nothing listening any more: removed.
+    let dead = tempfile::tempdir().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let ep = chappa_ai_mcp::Endpoint { addr: format!("127.0.0.1:{port}"), nonce: "old".into(), pid: None };
+    std::fs::write(control_http::endpoint_path(dead.path()), ep.to_json()).unwrap();
+    assert!(control_http::retire_stale_endpoint(dead.path(), token));
+    assert!(!control_http::endpoint_path(dead.path()).exists());
+
+    // Something else holds the port: removed, and it never saw the token.
+    let squatted = tempfile::tempdir().unwrap();
+    let (impostor, seen) = start_impostor();
+    let ep = chappa_ai_mcp::Endpoint { addr: impostor, nonce: "old".into(), pid: None };
+    std::fs::write(control_http::endpoint_path(squatted.path()), ep.to_json()).unwrap();
+    assert!(control_http::retire_stale_endpoint(squatted.path(), token));
+    assert!(!control_http::endpoint_path(squatted.path()).exists());
+    assert!(seen.lock().unwrap().iter().all(|r| !r.contains(token)));
+
+    // No file: nothing to do.
+    assert!(!control_http::retire_stale_endpoint(dead.path(), token));
+}

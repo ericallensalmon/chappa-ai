@@ -4,7 +4,8 @@
 //!
 //! Stateless per request — every call opens one HTTP connection and closes
 //! it, holding nothing across calls except the token (read once, re-read only
-//! when the app answers 401 to it). A restarted app just starts answering
+//! when the app rejects it). Before the token goes out on a connection, the
+//! server on the other end must prove it is the app (see [`identity`]). A restarted app just starts answering
 //! again; an unreachable app is a clean tool error naming the fix, never a
 //! hang or a queue (connect timeout 2s).
 //!
@@ -16,16 +17,22 @@
 //! nagging for approval on harmless calls.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
+pub mod identity;
+pub use identity::{identity_proof, Endpoint, ENDPOINT_FILE, IDENTITY_PATH};
+
 pub const SERVER_NAME: &str = "chappa-ai";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// The address the app binds. Informational: clients find it through the
+/// endpoint file rather than assuming it, since whoever holds this port is
+/// not necessarily the app.
 pub const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:8324";
 /// Tauri's app identifier — the app-config dir is named after it.
 pub const APP_IDENTIFIER: &str = "com.chappa-ai.desktop";
@@ -50,6 +57,9 @@ pub enum ToolError {
     Http { status: u16, message: String },
     /// Bad tool name or arguments (client-side).
     Invalid(String),
+    /// The program at the control address did not prove it is the app; the
+    /// token was NOT sent to it.
+    Untrusted(String),
 }
 
 impl std::fmt::Display for ToolError {
@@ -67,6 +77,11 @@ impl std::fmt::Display for ToolError {
             ),
             ToolError::Http { status, message } => write!(f, "chappa-ai answered {status}: {message}"),
             ToolError::Invalid(detail) => write!(f, "invalid tool call: {detail}"),
+            ToolError::Untrusted(detail) => write!(
+                f,
+                "refusing to use the chappa-ai control surface: {detail}. The control token was not sent. \
+                 Restart the chappa-ai desktop app; if this persists, check what is listening on its port."
+            ),
         }
     }
 }
@@ -80,7 +95,7 @@ impl std::fmt::Display for ToolError {
 /// the app actually rejects it.
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub base_url: String,
+    pub target: Target,
     pub token: TokenSource,
     /// The last token read from `token`. Shared across clones so the reload
     /// after a 401 benefits every handle.
@@ -93,6 +108,20 @@ pub struct Client {
     pub project_id: Option<u64>,
 }
 
+/// Where to reach the app.
+#[derive(Debug, Clone)]
+pub enum Target {
+    /// The default: the endpoint file the app writes on each successful
+    /// bind. Read per request (so an app restart is picked up), and the
+    /// answering server must prove it is the run the file describes.
+    EndpointFile(PathBuf),
+    /// An explicit `http://host:port[/prefix]` (`CHAPPA_AI_CONTROL_URL`, e.g.
+    /// a proxy in front of a container's app). The server must still prove it
+    /// knows the token before the token is sent, but its address is not
+    /// checked: behind a proxy it is the app's address, not the URL's.
+    Url(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum TokenSource {
     /// A literal token (tests, `CHAPPA_AI_CONTROL_TOKEN`).
@@ -102,9 +131,19 @@ pub enum TokenSource {
 }
 
 impl Client {
+    /// A client for an explicit control URL.
     pub fn new(base_url: impl Into<String>, token: TokenSource) -> Self {
+        Self::with_target(Target::Url(base_url.into()), token)
+    }
+
+    /// A client that finds the app through its endpoint file.
+    pub fn from_endpoint_file(path: impl Into<PathBuf>, token: TokenSource) -> Self {
+        Self::with_target(Target::EndpointFile(path.into()), token)
+    }
+
+    pub fn with_target(target: Target, token: TokenSource) -> Self {
         Self {
-            base_url: base_url.into(),
+            target,
             token,
             cached: Arc::new(Mutex::new(None)),
             actor: None,
@@ -119,9 +158,10 @@ impl Client {
         self
     }
 
-    /// `CHAPPA_AI_CONTROL_URL` (default `http://127.0.0.1:8324`);
-    /// `CHAPPA_AI_CONTROL_TOKEN` > `CHAPPA_AI_CONTROL_TOKEN_FILE` > the
-    /// platform app-config token path. Identity from
+    /// `CHAPPA_AI_CONTROL_URL` if set; otherwise the endpoint file
+    /// (`CHAPPA_AI_CONTROL_ENDPOINT_FILE`, else `control_endpoint` beside the
+    /// token file). `CHAPPA_AI_CONTROL_TOKEN` > `CHAPPA_AI_CONTROL_TOKEN_FILE`
+    /// > the platform app-config token path. Identity from
     /// `CHAPPA_AI_PROCESS_ID` / `CHAPPA_AI_PROJECT_ID`, read from THIS
     /// process's environment — the agent that spawned us inherits them from
     /// the app's spawn_agent, so the app can attribute our writes.
@@ -133,16 +173,26 @@ impl Client {
         let project_id = std::env::var("CHAPPA_AI_PROJECT_ID")
             .ok()
             .and_then(|p| p.trim().parse().ok());
-        let base_url =
-            std::env::var("CHAPPA_AI_CONTROL_URL").unwrap_or_else(|_| DEFAULT_CONTROL_URL.to_owned());
+        let token_file = std::env::var_os("CHAPPA_AI_CONTROL_TOKEN_FILE").map(PathBuf::from);
+        let target = if let Ok(url) = std::env::var("CHAPPA_AI_CONTROL_URL") {
+            Target::Url(url)
+        } else if let Some(p) = std::env::var_os("CHAPPA_AI_CONTROL_ENDPOINT_FILE") {
+            Target::EndpointFile(PathBuf::from(p))
+        } else {
+            let dir = token_file
+                .as_ref()
+                .and_then(|p| p.parent().map(PathBuf::from))
+                .unwrap_or_else(default_config_dir);
+            Target::EndpointFile(dir.join(ENDPOINT_FILE))
+        };
         let token = if let Ok(t) = std::env::var("CHAPPA_AI_CONTROL_TOKEN") {
             TokenSource::Literal(t)
-        } else if let Ok(p) = std::env::var("CHAPPA_AI_CONTROL_TOKEN_FILE") {
-            TokenSource::File(PathBuf::from(p))
+        } else if let Some(p) = token_file {
+            TokenSource::File(p)
         } else {
             TokenSource::File(default_token_path())
         };
-        Self::new(base_url, token).with_identity(actor.as_deref(), project_id)
+        Self::with_target(target, token).with_identity(actor.as_deref(), project_id)
     }
 
     /// The bearer token to send, plus whether it came from the cache.
@@ -167,22 +217,53 @@ impl Client {
 
     /// One request, one connection. `body` is serialized as JSON for POSTs.
     ///
-    /// A 401 answered to a CACHED token means the app regenerated its token
-    /// file (fresh install, deleted file) since we read it, so the file is
-    /// re-read once and the request retried — the one place staleness can
-    /// bite. A 401 on a freshly-read token is a real error and is returned.
+    /// The app rejecting a CACHED token (a 401, or an identity proof that
+    /// does not verify: the proof is keyed by the token, so a regenerated
+    /// token fails it) means the app regenerated its token file (fresh
+    /// install, deleted file) since we read it, so the file is re-read once
+    /// and the request retried: the one place staleness can bite. A rejection
+    /// of a freshly-read token is a real error and is returned.
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ToolError> {
         let (token, from_cache) = self.token(false)?;
-        let (status, value) = self.send(method, path, body, &token)?;
-        if status == 401 && from_cache {
+        let first = self.send(method, path, body, &token);
+        let rejected = matches!(first, Ok((401, _)) | Err(ToolError::Untrusted(_)));
+        if rejected && from_cache {
             let (token, _) = self.token(true)?;
             let (status, value) = self.send(method, path, body, &token)?;
             return outcome(status, value);
         }
+        let (status, value) = first?;
         outcome(status, value)
     }
 
-    /// One HTTP/1.1 round trip on a fresh connection.
+    /// The target as (socket address, Host header, path prefix, the endpoint
+    /// record the answering server must match).
+    fn resolve(&self) -> Result<(SocketAddr, String, String, Option<Endpoint>), ToolError> {
+        match &self.target {
+            Target::EndpointFile(path) => {
+                let ep = identity::read_endpoint_file(path)?;
+                let addr: SocketAddr = ep
+                    .addr
+                    .parse()
+                    .map_err(|_| ToolError::Untrusted(format!("bad endpoint addr {}", ep.addr)))?;
+                Ok((addr, ep.addr.clone(), String::new(), Some(ep)))
+            }
+            Target::Url(url) => {
+                let (host, port, prefix) =
+                    parse_http_url(url).ok_or_else(|| ToolError::Invalid(format!("bad control url: {url}")))?;
+                let addr = (host.as_str(), port)
+                    .to_socket_addrs()
+                    .map_err(|e| ToolError::Unreachable(e.to_string()))?
+                    .next()
+                    .ok_or_else(|| ToolError::Unreachable(format!("{host}:{port} did not resolve")))?;
+                Ok((addr, format!("{host}:{port}"), prefix, None))
+            }
+        }
+    }
+
+    /// One verified HTTP/1.1 round trip on a fresh connection: the identity
+    /// challenge first (no credentials), then, only if the server proved
+    /// itself, the real request on the SAME connection.
     fn send(
         &self,
         method: &str,
@@ -190,17 +271,12 @@ impl Client {
         body: Option<&Value>,
         token: &str,
     ) -> Result<(u16, Value), ToolError> {
-        let (host, port, prefix) = parse_http_url(&self.base_url)
-            .ok_or_else(|| ToolError::Invalid(format!("bad control url: {}", self.base_url)))?;
-        let addr = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|e| ToolError::Unreachable(e.to_string()))?
-            .next()
-            .ok_or_else(|| ToolError::Unreachable(format!("{host}:{port} did not resolve")))?;
+        let (addr, host, prefix, expected) = self.resolve()?;
         let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
             .map_err(|e| ToolError::Unreachable(format!("{addr}: {e}")))?;
-        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
+        identity::verify_connection(&mut stream, &host, &prefix, token, expected.as_ref())?;
+        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         let payload = body.map(|b| b.to_string()).unwrap_or_default();
         // A path PREFIX in CHAPPA_AI_CONTROL_URL is honoured (e.g. a reverse
         // proxy in front of a container's app at `http://host:8324/chappa`);
@@ -212,7 +288,7 @@ impl Client {
             .map(|a| format!("{ACTOR_HEADER}: {a}\r\n"))
             .unwrap_or_default();
         let req = format!(
-            "{method} {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {token}\r\n{actor}\
+            "{method} {target} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n{actor}\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
         );
@@ -285,6 +361,11 @@ fn cap_text(text: &str) -> String {
 /// `$XDG_CONFIG_HOME/<id>/control_token` (or `~/.config/…`) elsewhere —
 /// Tauri v2's `app_config_dir` for this identifier.
 pub fn default_token_path() -> PathBuf {
+    default_config_dir().join(TOKEN_FILE)
+}
+
+/// The app-config dir (see [`default_token_path`]).
+pub fn default_config_dir() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -294,7 +375,7 @@ pub fn default_token_path() -> PathBuf {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     };
-    base.unwrap_or_default().join(APP_IDENTIFIER).join(TOKEN_FILE)
+    base.unwrap_or_default().join(APP_IDENTIFIER)
 }
 
 /// `http://host:port[/…]` → (host, port, path-prefix). Only plain http: the
@@ -326,7 +407,7 @@ fn parse_http_response(raw: &[u8]) -> Option<(u16, &[u8])> {
     Some((status, &raw[split + 4..]))
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)

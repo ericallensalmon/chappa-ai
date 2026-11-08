@@ -12,6 +12,10 @@ path = "src/main.rs"
 # Deliberately dependency-light: JSON-RPC over stdio and HTTP/1.1 to
 # localhost are both hand-rolled on std — no async runtime, no MCP SDK, no
 # HTTP client crate. Everything on the wire is `serde_json::Value`, so serde
-# itself is not a direct dependency (no derives here).
+# itself is not a direct dependency (no derives here). The two crypto deps
+# are for verifying the app's identity before the token is sent: blake3's
+# keyed mode is the MAC, getrandom supplies the unpredictable challenge.
 [dependencies]
 serde_json = "1.0"
+blake3 = "1"
+getrandom = "0.3"

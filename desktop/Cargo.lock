@@ -574,6 +574,7 @@ checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 name = "chappa-ai-desktop"
 version = "0.1.0"
 dependencies = [
+ "chappa-ai-mcp",
  "getrandom 0.3.4",
  "indexmap 2.14.0",
  "log",
@@ -599,6 +600,8 @@ dependencies = [
 name = "chappa-ai-mcp"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "getrandom 0.3.4",
  "serde_json",
 ]
 

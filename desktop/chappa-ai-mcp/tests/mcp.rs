@@ -2,13 +2,17 @@
 //! tool round-trips against a `FakeControlServer` (canned HTTP), the token is
 //! attached, the unreachable-app error names the fix, submit atomicity (ONE
 //! request carrying text + submit — the app writes text+\r as one payload),
-//! and a tool-schema snapshot including annotations.
+//! a tool-schema snapshot including annotations, and the identity check: the
+//! token goes only to a server that proved it is the app.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use chappa_ai_mcp::{call_tool, handle_message, tools, Client, ToolError, TokenSource};
+use chappa_ai_mcp::{
+    call_tool, handle_message, identity_proof, tools, Client, Endpoint, ToolError, TokenSource,
+    ENDPOINT_FILE,
+};
 use serde_json::{json, Value};
 
 /// One recorded request.
@@ -24,92 +28,123 @@ struct Req {
 
 /// A canned control surface: records every request, answers 200 with a
 /// per-path JSON body (or 404 for unknown paths, 401 without the token).
+/// `GET /identity` is answered like the app does (a proof keyed by the
+/// accepted token) on a keep-alive connection, and recorded separately in
+/// `identity_requests`.
 struct FakeControlServer {
     addr: String,
     requests: Arc<Mutex<Vec<Req>>>,
+    identity_requests: Arc<Mutex<Vec<Req>>>,
     /// The token this server currently accepts — swappable, so the
     /// token-cache test can make the app "regenerate" it mid-session.
     accepted: Arc<Mutex<String>>,
 }
 
 const TOKEN: &str = "fake-token-123";
+const NONCE: &str = "fake-nonce";
+
+/// Read one request (headers + Content-Length body) off a connection,
+/// keeping any bytes past it in `pending`. `None` = the peer hung up.
+fn read_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<Req> {
+    let mut buf = [0u8; 4096];
+    let (head_end, len) = loop {
+        if let Some(pos) = find(pending, b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&pending[..pos]).to_string();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            if pending.len() >= pos + 4 + len {
+                break (pos, len);
+            }
+        }
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            return None;
+        }
+        pending.extend_from_slice(&buf[..n]);
+    };
+    let raw: Vec<u8> = pending.drain(..head_end + 4 + len).collect();
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+    let body = String::from_utf8_lossy(&raw[head_end + 4..]).to_string();
+    let mut lines = head.lines();
+    let mut parts = lines.next().unwrap_or("").split_whitespace();
+    let method = parts.next().unwrap_or("").to_owned();
+    let path = parts.next().unwrap_or("").to_owned();
+    let header_lines: Vec<&str> = lines.collect();
+    let header = |name: &str| {
+        header_lines
+            .iter()
+            .find_map(|l| l.strip_prefix(name))
+            .map(str::to_owned)
+    };
+    Some(Req {
+        method,
+        path,
+        auth: header("Authorization: "),
+        actor: header("X-Chappa-Actor: "),
+        body: serde_json::from_str(&body).unwrap_or(Value::Null),
+    })
+}
+
+fn write_reply(stream: &mut TcpStream, status: u16, reply: &Value, close: bool) {
+    let payload = reply.to_string();
+    let connection = if close { "Connection: close\r\n" } else { "" };
+    let response = format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{connection}\r\n{payload}",
+        payload.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
 
 impl FakeControlServer {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let requests: Arc<Mutex<Vec<Req>>> = Arc::default();
-        let log = requests.clone();
+        let identity_requests: Arc<Mutex<Vec<Req>>> = Arc::default();
+        let (log, id_log) = (requests.clone(), identity_requests.clone());
         let accepted = Arc::new(Mutex::new(TOKEN.to_owned()));
         let expect = accepted.clone();
+        let bound = addr.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let mut stream = match stream {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let mut raw = Vec::new();
-                let mut buf = [0u8; 4096];
-                // Read headers, then the Content-Length body.
-                loop {
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    if n == 0 {
-                        break;
+                let mut pending = Vec::new();
+                while let Some(req) = read_request(&mut stream, &mut pending) {
+                    if let Some(query) = req.path.strip_prefix("/identity?") {
+                        let challenge = query.strip_prefix("challenge=").unwrap_or("").to_owned();
+                        id_log.lock().unwrap().push(req);
+                        let token = expect.lock().unwrap().clone();
+                        let proof = identity_proof(&token, &challenge, &bound, NONCE);
+                        write_reply(
+                            &mut stream,
+                            200,
+                            &json!({"addr": bound, "nonce": NONCE, "proof": proof}),
+                            false,
+                        );
+                        continue;
                     }
-                    raw.extend_from_slice(&buf[..n]);
-                    if let Some(pos) = find(&raw, b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&raw[..pos]).to_string();
-                        let len: usize = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("Content-Length: "))
-                            .and_then(|v| v.trim().parse().ok())
-                            .unwrap_or(0);
-                        if raw.len() >= pos + 4 + len {
-                            break;
-                        }
-                    }
+                    log.lock().unwrap().push(req.clone());
+                    let want = format!("Bearer {}", expect.lock().unwrap());
+                    let (status, reply) = if req.auth.as_deref() != Some(&want) {
+                        (401, json!({"error": "unauthorized"}))
+                    } else {
+                        canned(&req.method, &req.path)
+                    };
+                    write_reply(&mut stream, status, &reply, true);
+                    break;
                 }
-                let text = String::from_utf8_lossy(&raw).to_string();
-                let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-                let mut lines = head.lines();
-                let request_line = lines.next().unwrap_or("");
-                let mut parts = request_line.split_whitespace();
-                let method = parts.next().unwrap_or("").to_owned();
-                let path = parts.next().unwrap_or("").to_owned();
-                let header_lines: Vec<&str> = lines.collect();
-                let auth = header_lines
-                    .iter()
-                    .find_map(|l| l.strip_prefix("Authorization: "))
-                    .map(str::to_owned);
-                let actor = header_lines
-                    .iter()
-                    .find_map(|l| l.strip_prefix("X-Chappa-Actor: "))
-                    .map(str::to_owned);
-                let body_value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                log.lock().unwrap().push(Req {
-                    method: method.clone(),
-                    path: path.clone(),
-                    auth: auth.clone(),
-                    actor,
-                    body: body_value,
-                });
-                let want = format!("Bearer {}", expect.lock().unwrap());
-                let (status, reply) = if auth.as_deref() != Some(&want) {
-                    (401, json!({"error": "unauthorized"}))
-                } else {
-                    canned(&method, &path)
-                };
-                let payload = reply.to_string();
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                    payload.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
             }
         });
         Self {
             addr,
             requests,
+            identity_requests,
             accepted,
         }
     }
@@ -120,6 +155,10 @@ impl FakeControlServer {
 
     fn requests(&self) -> Vec<Req> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn identity_requests(&self) -> Vec<Req> {
+        self.identity_requests.lock().unwrap().clone()
     }
 
     /// The app regenerated its control token.
@@ -580,10 +619,11 @@ fn unreachable_app_is_a_clean_error_naming_the_fix() {
 
 /// Cleanup: the token file is read ONCE and cached (an MCP session
 /// makes many calls; the file does not change while the app runs), and the
-/// cache is refreshed exactly when the app rejects it — a 401 on a cached
-/// token re-reads the file and retries once, transparently.
+/// cache is refreshed exactly when the app rejects it. A regenerated token
+/// shows up as an identity proof the cached token cannot verify, so the stale
+/// token is never even sent: the file is re-read and the call retried once.
 #[test]
-fn the_token_is_cached_and_re_read_only_after_a_401() {
+fn the_token_is_cached_and_re_read_only_after_a_rejection() {
     let server = FakeControlServer::start();
     let path = std::env::temp_dir().join(format!(
         "chappa-ai-mcp-token-{}-{:?}",
@@ -603,29 +643,229 @@ fn the_token_is_cached_and_re_read_only_after_a_401() {
     std::fs::remove_file(&path).unwrap();
     call_tool(&client, "list_processes", &json!({})).unwrap();
     assert_eq!(server.requests().len(), 2);
+    assert_eq!(server.identity_requests().len(), 2, "one identity check per connection");
 
-    // The app regenerates its token: the cached one now 401s, so the client
-    // re-reads the file once and retries — the tool call still succeeds.
+    // The app regenerates its token: the cached one cannot verify the proof,
+    // so the client re-reads the file once and retries — the tool call still
+    // succeeds, and the old token never went out.
     std::fs::write(&path, "second-token").unwrap();
     server.accept_only("second-token");
     call_tool(&client, "list_processes", &json!({})).unwrap();
     let requests = server.requests();
-    assert_eq!(requests.len(), 4, "the rejected attempt plus one retry");
-    assert_eq!(requests[2].auth.as_deref(), Some("Bearer fake-token-123"));
-    assert_eq!(requests[3].auth.as_deref(), Some("Bearer second-token"));
+    assert_eq!(requests.len(), 3, "only the verified attempt sends a request");
+    assert_eq!(requests[2].auth.as_deref(), Some("Bearer second-token"));
+    assert_eq!(server.identity_requests().len(), 4, "the failed check plus one retry");
 
     // And the refreshed token is what the NEXT call uses (one request).
     call_tool(&client, "list_processes", &json!({})).unwrap();
     let requests = server.requests();
-    assert_eq!(requests.len(), 5);
-    assert_eq!(requests[4].auth.as_deref(), Some("Bearer second-token"));
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[3].auth.as_deref(), Some("Bearer second-token"));
 
-    // A 401 the reload cannot fix is a plain error, not a retry loop.
+    // A rejection the reload cannot fix is a plain error, not a retry loop.
     server.accept_only("third-token");
     let err = call_tool(&client, "list_processes", &json!({})).unwrap_err();
-    assert!(matches!(err, ToolError::Http { status: 401, .. }), "{err:?}");
-    assert_eq!(server.requests().len(), 7, "one retry only");
+    assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
+    assert_eq!(server.requests().len(), 4, "nothing token-bearing was sent");
+    assert_eq!(server.identity_requests().len(), 7, "one retry only");
     let _ = std::fs::remove_file(&path);
+}
+
+// ---- identity check -----------------------------------------------------------
+
+/// A per-test directory holding an endpoint file.
+fn endpoint_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "chappa-ai-mcp-endpoint-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_endpoint(dir: &std::path::Path, addr: &str, nonce: &str) -> std::path::PathBuf {
+    let path = dir.join(ENDPOINT_FILE);
+    let ep = Endpoint { addr: addr.into(), nonce: nonce.into(), pid: Some(1) };
+    std::fs::write(&path, ep.to_json()).unwrap();
+    path
+}
+
+/// A program squatting on a port: records every byte it is sent and answers
+/// each connection with `reply` (raw HTTP), never knowing the token.
+struct Impostor {
+    addr: String,
+    received: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Impostor {
+    fn start(reply: impl Fn(&str) -> String + Send + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let received: Arc<Mutex<Vec<u8>>> = Arc::default();
+        let log = received.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut pending = Vec::new();
+                // Answer the first request, then keep reading whatever else
+                // the client sends on the connection until it hangs up.
+                let first = read_request(&mut stream, &mut pending);
+                let mut seen = format!("{first:?}").into_bytes();
+                if let Some(req) = &first {
+                    let _ = stream.write_all(reply(&req.path).as_bytes());
+                }
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                seen.extend_from_slice(&pending);
+                log.lock().unwrap().extend_from_slice(&seen);
+            }
+        });
+        Self { addr, received }
+    }
+
+    fn saw(&self, needle: &str) -> bool {
+        let got = self.received.lock().unwrap();
+        find(&got, needle.as_bytes()).is_some()
+    }
+}
+
+fn http_reply(status: u16, body: &Value) -> String {
+    let payload = body.to_string();
+    format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n{payload}", payload.len())
+}
+
+#[test]
+fn an_honest_server_named_by_the_endpoint_file_is_verified_and_used() {
+    let server = FakeControlServer::start();
+    let dir = endpoint_dir("honest");
+    let path = write_endpoint(&dir, &server.addr, NONCE);
+    let client = Client::from_endpoint_file(&path, TokenSource::Literal(TOKEN.into()));
+    let out = call_tool(&client, "list_processes", &json!({})).unwrap();
+    assert!(out.to_string().contains("shell"), "{out}");
+    let ids = server.identity_requests();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0].auth, None, "the identity check carries no credentials");
+    assert_eq!(server.requests()[0].auth.as_deref(), Some(&*format!("Bearer {TOKEN}")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_impostor_on_the_port_never_receives_the_token() {
+    // Three kinds of squatter: a plain server that wants auth (as an app too
+    // old to answer the challenge would), one that answers with a made-up
+    // proof, and one that echoes back a proof-shaped value.
+    let impostors = [
+        Impostor::start(|_| http_reply(401, &json!({"error": "unauthorized"}))),
+        Impostor::start(|_| http_reply(200, &json!({"addr": "x", "nonce": NONCE, "proof": "00".repeat(32)}))),
+        Impostor::start(|path| {
+            let challenge = path.split("challenge=").nth(1).unwrap_or("").to_owned();
+            http_reply(200, &json!({"addr": "x", "nonce": NONCE, "proof": challenge}))
+        }),
+    ];
+    for impostor in &impostors {
+        for client in [
+            Client::new(format!("http://{}", impostor.addr), TokenSource::Literal(TOKEN.into())),
+            {
+                let dir = endpoint_dir("impostor");
+                Client::from_endpoint_file(
+                    write_endpoint(&dir, &impostor.addr, NONCE),
+                    TokenSource::Literal(TOKEN.into()),
+                )
+            },
+        ] {
+            let err = call_tool(&client, "list_processes", &json!({})).unwrap_err();
+            assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
+            assert!(err.to_string().contains("token was not sent"), "{err}");
+        }
+        // Give the impostor's reader a moment to drain the closed sockets.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(impostor.saw("/identity?challenge="), "the impostor was asked to prove itself");
+        assert!(!impostor.saw(TOKEN), "the token leaked to an impostor");
+        assert!(!impostor.saw("Authorization"), "credentials leaked to an impostor");
+    }
+}
+
+/// A squatter that relays the challenge to a real instance listening
+/// elsewhere gets a valid proof — but for the real instance's address, which
+/// is not the address the client connected to.
+#[test]
+fn a_relayed_proof_for_another_address_is_refused() {
+    let real = FakeControlServer::start();
+    let real_addr = real.addr.clone();
+    let impostor = Impostor::start(move |path| {
+        let mut upstream = TcpStream::connect(&real_addr).unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        upstream.write_all(req.as_bytes()).unwrap();
+        let _ = upstream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        // The fake keeps identity connections open; read until the body is in.
+        while let Ok(n) = upstream.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(pos) = find(&raw, b"\r\n\r\n") {
+                let body = &raw[pos + 4..];
+                if serde_json::from_slice::<Value>(body).is_ok() {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    });
+    let dir = endpoint_dir("relay");
+    // The endpoint file names the impostor's port with the real run's nonce
+    // (a stale file whose port was taken over).
+    let path = write_endpoint(&dir, &impostor.addr, NONCE);
+    let client = Client::from_endpoint_file(&path, TokenSource::Literal(TOKEN.into()));
+    let err = call_tool(&client, "list_processes", &json!({})).unwrap_err();
+    assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
+    assert!(err.to_string().contains("relayed"), "{err}");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!impostor.saw(TOKEN), "the token leaked through a relay");
+    assert!(real.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stale_or_missing_endpoint_file_is_refused_before_anything_is_sent() {
+    let server = FakeControlServer::start();
+    let dir = endpoint_dir("stale");
+
+    // Missing: nothing to connect to, a clean "not running" naming the file.
+    let missing = Client::from_endpoint_file(dir.join(ENDPOINT_FILE), TokenSource::Literal(TOKEN.into()));
+    let err = call_tool(&missing, "list_processes", &json!({})).unwrap_err();
+    assert!(matches!(err, ToolError::Unreachable(_)), "{err:?}");
+    assert!(err.to_string().contains(ENDPOINT_FILE), "{err}");
+
+    // Stale: the right address, but a previous run's nonce.
+    let path = write_endpoint(&dir, &server.addr, "an-earlier-run");
+    let stale = Client::from_endpoint_file(&path, TokenSource::Literal(TOKEN.into()));
+    let err = call_tool(&stale, "list_processes", &json!({})).unwrap_err();
+    assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
+    assert!(err.to_string().contains("stale"), "{err}");
+
+    // Garbage in the file.
+    std::fs::write(&path, "not json").unwrap();
+    let err = call_tool(&stale, "list_processes", &json!({})).unwrap_err();
+    assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
+
+    assert!(server.requests().is_empty(), "no token-bearing request was sent");
+
+    // The file is read per request: once it names the live run, the same
+    // client works without being rebuilt.
+    write_endpoint(&dir, &server.addr, NONCE);
+    call_tool(&stale, "list_processes", &json!({})).unwrap();
+    assert_eq!(server.requests().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -645,9 +885,12 @@ fn http_errors_surface_the_apps_message() {
     let client = server.client();
     let err = call_tool(&client, "get_process_status", &json!({"id": 404})).unwrap_err();
     assert_eq!(err, ToolError::Http { status: 404, message: "no such terminal: 404".into() });
+    // A wrong token cannot verify the server's proof, so it is never sent.
+    let before = server.requests().len();
     let bad = Client::new(format!("http://{}", server.addr), TokenSource::Literal("wrong".into()));
     let err = call_tool(&bad, "list_processes", &json!({})).unwrap_err();
-    assert!(matches!(err, ToolError::Http { status: 401, .. }), "{err:?}");
+    assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
+    assert_eq!(server.requests().len(), before);
 }
 
 #[test]
