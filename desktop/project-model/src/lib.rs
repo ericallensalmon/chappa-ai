@@ -17,6 +17,7 @@ pub mod backoff;
 pub mod hash;
 pub mod native;
 pub mod projects;
+pub mod records;
 pub mod settings;
 pub mod status;
 pub mod watcher;

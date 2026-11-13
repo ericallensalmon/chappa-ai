@@ -94,6 +94,7 @@ fn agent_entry(registry: &Registry, meta: AgentMeta) -> u32 {
             id,
             meta,
             false,
+            None,
         )
         .expect("pty spawn")
 }
@@ -264,11 +265,13 @@ fn spawn_agent_passes_extra_args_verbatim_and_delivers_the_prompt_when_ready() {
     let registry = Registry::with_docker(FakeDocker::new());
     let settings = SettingsState::default();
     let projects = Projects::default();
+    let records = app_lib::records::Records::default();
     let ctx = SpawnContext {
         registry: &registry,
         tools: &tools,
         settings: &settings,
         projects: &projects,
+        records: &records,
         actor: None,
     };
     let resp = app_lib::agents::spawn_agent_headless(
@@ -567,6 +570,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
     let registry = Registry::with_docker(FakeDocker::new());
     let settings = SettingsState::default();
     let projects = Projects::default();
+    let records = app_lib::records::Records::default();
     let missing = tools
         .upsert(AgentTool {
             id: 0,
@@ -583,6 +587,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
         tools: &tools,
         settings: &settings,
         projects: &projects,
+        records: &records,
         actor: None,
     };
     let err = app_lib::agents::spawn_agent_headless(
@@ -688,12 +693,14 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
     let registry = Registry::with_docker(FakeDocker::new());
     let settings = SettingsState::default();
     let projects = Projects::default();
+    let records = app_lib::records::Records::default();
     let resp = app_lib::agents::spawn_agent_headless(
         SpawnContext {
             registry: &registry,
             tools: &tools,
             settings: &settings,
             projects: &projects,
+            records: &records,
             actor: None,
         },
         SpawnAgentRequest {
@@ -758,12 +765,14 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
     let registry = Registry::with_docker(FakeDocker::new());
     let settings = SettingsState::default();
     let projects = Projects::default();
+    let records = app_lib::records::Records::default();
     let resp = app_lib::agents::spawn_agent_headless(
         SpawnContext {
             registry: &registry,
             tools: &tools,
             settings: &settings,
             projects: &projects,
+            records: &records,
             actor: None,
         },
         SpawnAgentRequest {
@@ -821,6 +830,7 @@ fn json_docker_agent_close_kills_the_container_side_before_the_piped_client() {
             id,
             meta,
             false,
+            None,
         )
         .unwrap();
     let agent = app_lib::agent_json::JsonAgent::new(

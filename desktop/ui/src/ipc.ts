@@ -100,6 +100,10 @@ export type SelectionOpDto =
 export interface CreateTerminalOptions {
   spec: PtySpecDto;
   scrollback?: number;
+  /** The project a shell is opened under. Its record then lives with that
+   *  project (and comes back under it after a restart) instead of in the
+   *  workspace bucket. */
+  projectId?: number;
   /** Fired for every binary frame arriving on the channel. */
   onFrame: (buf: ArrayBuffer) => void;
 }
@@ -115,6 +119,7 @@ export function createTerminal(opts: CreateTerminalOptions): Promise<number> {
   return call<number>("create_terminal", {
     spec: opts.spec,
     scrollback: opts.scrollback,
+    projectId: opts.projectId,
     frames,
   });
 }
@@ -387,8 +392,13 @@ export interface SpawnAgentRequestDto {
    *  nesting; null/absent = nest under the spawning actor. */
   parent_process_id?: number | null;
   /** Control/MCP-only. Close the row automatically when the child
-   *  exits (an orchestrator firing short-lived workers). */
+   *  exits (an orchestrator firing short-lived workers). Implies
+   *  `ephemeral`. */
   close_on_exit?: boolean;
+  /** Spawn WITHOUT a durable record: the row vanishes on close and
+   *  keeps no run history. Default false — an agent normally outlives its
+   *  terminal as a stopped row that can be started again. */
+  ephemeral?: boolean;
 }
 
 export interface PromptReceiptDto {
@@ -401,6 +411,9 @@ export interface PromptReceiptDto {
 export interface SpawnAgentResponseDto {
   process_id: number;
   term_id: number;
+  /** The agent's durable record; null for an ephemeral spawn. Always
+   *  sent by Rust; optional only so older fixtures still type. */
+  record_id?: string | null;
   name: string;
   agent_instructions: string;
   prompt_receipt?: PromptReceiptDto;
@@ -460,6 +473,122 @@ export function spawnAgent(
   return call("spawn_agent", { req, frames });
 }
 
+// --- durable records ------------------------------------------------
+
+/** The record kinds: a project or workspace command, an agent, a shell. */
+export type RecordKind = "command" | "agent" | "terminal";
+
+/** What a run's automatic tail holds: screen text lines, or the typed
+ *  events of a json-transport agent. */
+export type TailKind = "text" | "events";
+
+/** One run's head: `last_run` minus the tail itself (the tail is fetched
+ *  through `getRecordRuns`, never pushed with a row). `status` is the run's
+ *  resting status: running while live; exited / failed once the exit was
+ *  observed; stopped when the row was closed first. `summary` and
+ *  `session` are reserved slots, absent today. */
+export interface RunHeadDto {
+  run_uuid: string;
+  status: string;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  exit_code: number | null;
+  success: boolean | null;
+  tail_kind: TailKind;
+  tail_len: number;
+  summary?: unknown;
+  session?: unknown;
+}
+
+/** One run WITH its tail (`getRecordRuns`): `tail` holds strings for
+ *  `tail_kind: "text"` and AgentEventDto-shaped objects for `"events"`. */
+export interface RunDto {
+  run_uuid: string;
+  status: string;
+  started_at_ms: number;
+  ended_at_ms?: number | null;
+  exit_code?: number | null;
+  success?: boolean | null;
+  tail_kind: TailKind;
+  tail?: unknown[];
+  summary?: unknown;
+  session?: unknown;
+}
+
+/** One stored record with its live binding (`listRecords`). `status` is
+ *  the attached terminal's while one is live, else the last run's outcome
+ *  (exited / failed) or stopped. `agent` / `terminal` carry the kind's
+ *  durable facts; a command record's facts are its process row. */
+export interface RecordDto {
+  record_id: string;
+  kind: RecordKind;
+  name: string;
+  project_id: number | null;
+  status: string;
+  term_id: number | null;
+  last_run: RunHeadDto | null;
+  agent?: {
+    tool_id: number;
+    /** The RECORD id of the agent that spawned this one; the stopped-row
+     *  forest nests by it. */
+    parent_record_id: string | null;
+    favorite: boolean;
+    disable_auto_rename: boolean;
+    notification_level: string | null;
+    extra_args: string[];
+    /** Kept for display; starting the record never replays it. */
+    prompt: string | null;
+  };
+  terminal?: {
+    shell_profile: string | null;
+    cwd: string | null;
+  };
+}
+
+/** What `startRecord` answers: the new terminal and run (a project command
+ *  started from the control surface may still be `pending`). */
+export interface StartRecordDto {
+  record_id: string;
+  kind: RecordKind;
+  term_id: number | null;
+  run_uuid: string | null;
+  pending: boolean;
+}
+
+export interface RemoveRecordDto {
+  record_id: string;
+  kind: RecordKind;
+  removed: boolean;
+  runs_deleted: number;
+}
+
+/** Every stored record (project ones first) with its live binding. */
+export function listRecords(): Promise<RecordDto[]> {
+  return call("list_records");
+}
+
+/** A record's run history, newest first, each run with its tail. */
+export function getRecordRuns(recordId: string, limit?: number): Promise<RunDto[]> {
+  return call("get_record_runs", { recordId, limit });
+}
+
+/** Start a stopped record into this webview: a fresh terminal on `frames`
+ *  and a new run. An agent gets a NEW session (no prompt replay). The
+ *  `term://created` broadcast that follows carries the record id, so the
+ *  row that already shows the record binds the terminal in place. */
+export function startRecord(
+  recordId: string,
+  frames: Channel<ArrayBuffer | number[]>,
+): Promise<StartRecordDto> {
+  return call("start_record", { recordId, frames });
+}
+
+/** Remove a record and its run history (its terminal is closed first). For
+ *  a command record this deletes the command definition. */
+export function removeRecord(recordId: string): Promise<RemoveRecordDto> {
+  return call("remove_record", { recordId });
+}
+
 // --- rail / multi-terminal ----------------------------------------
 
 /** One live terminal's rail row (list_terminals snapshot). `status` uses
@@ -480,6 +609,11 @@ export interface TerminalInfoDto {
   /** The spawning process's registry id — the rail nests this row
    *  under it; null for a root. */
   parent_process_id?: number | null;
+  /** The durable record this row runs for, and its current run minus the
+   *  tail. Both null for an ephemeral row (debug harness, control
+   *  spawn_terminal, an opted-out agent). */
+  record_id?: string | null;
+  last_run?: RunHeadDto | null;
 }
 
 export function listTerminals(): Promise<TerminalInfoDto[]> {
@@ -501,6 +635,12 @@ export interface TerminalCreatedEvent {
   /** The spawning process's registry id — the rail nests this row
    *  under it; null for a root. */
   parent_process_id: number | null;
+  /** The record this spawn belongs to: a row already shown as a stopped
+   *  record binds the new terminal to it instead of adding a second row.
+   *  Null for an ephemeral spawn. Always sent by Rust; optional only so
+   *  older fixtures still type. */
+  record_id?: string | null;
+  last_run?: RunHeadDto | null;
 }
 
 /** A `term://closed` broadcast payload: `{term_id, reason}` where
@@ -597,6 +737,12 @@ export interface ProjectProcessDto {
   /** Chappa-side toggles (projects.json, never the yml). */
   favorite: boolean;
   disableAutoRename: boolean;
+  /** The command's durable record (assigned when the project opens) and
+   *  the stored head of its run ledger. The head keeps the shared
+   *  snake_case `RunHeadDto` shape inside this camelCase row. Always sent
+   *  by Rust; optional only so older fixtures still type. */
+  recordId?: string | null;
+  lastRun?: RunHeadDto | null;
 }
 
 /** The `open_project` answer: header + process rows + trust-gate state. */
@@ -992,6 +1138,11 @@ export interface WorkspaceCommandDto {
   /** Absolute path, or null = the user's home dir (empty in the editor). */
   workingDir: string | null;
   env: Record<string, string>;
+  /** The command's durable record and the stored head of its run ledger
+   *  (the same pair the project rows carry). Always sent by Rust; optional
+   *  only so older fixtures still type. */
+  recordId?: string | null;
+  lastRun?: RunHeadDto | null;
 }
 
 /** A `workspace://status` event payload (the card-status source for the

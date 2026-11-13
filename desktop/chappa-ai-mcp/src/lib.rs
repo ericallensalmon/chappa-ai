@@ -457,13 +457,13 @@ pub fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "list_processes",
-            "description": "Every live terminal/process in chappa-ai: id, name, status (starting|running|stopped|exited|failed), exit_code, cols, rows, seq, plus byte-stream liveness: output_bytes, last_output_at (unix ms), has_output (false = still booting, distinct from dead), child_alive. `agent.parent_process_id` = the process that spawned it, null for a root; `agent.close_on_exit` is the /processes row's close_on_exit for agents.",
+            "description": "Every live terminal/process in chappa-ai: id, name, status (starting|running|stopped|exited|failed), exit_code, cols, rows, seq, plus byte-stream liveness: output_bytes, last_output_at (unix ms), has_output (false = still booting, distinct from dead), child_alive. `agent.parent_process_id` = the process that spawned it, null for a root; `close_on_exit` is the row's self-reap flag. `record_id` + `last_run` {run_uuid, status, started_at_ms, ended_at_ms, exit_code, success, tail_kind, tail_len} name the durable record a row belongs to: a stopped row with a record_id can be started again (start_record) and its history read (get_record_runs); both null for an ephemeral row.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations(true, false, true),
         }),
         json!({
             "name": "get_process_status",
-            "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text.",
+            "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text. A row whose child exited keeps its record: a stopped row with a record_id can be started again with start_record.",
             "inputSchema": schema(json!({"id": id}), &["id"]),
             "annotations": annotations(true, false, true),
         }),
@@ -503,7 +503,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "spawn_agent",
-            "description": "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM — an element containing spaces reaches the child as ONE argument, so pass [\"--prompt\", \"two words here\"], never a pre-joined string. The child gets CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID / CHAPPA_AI_AGENT_TOOL_ID in its env and the reply carries agent_instructions to prepend to your first message. `prompt` is queued until the TUI is ready (first output, then agent_ready_quiet_ms of silence — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout) and delivered as one atomic write with Enter; prompt_receipt tells you whether it landed (delivered=false, reason=exited when the child died first). Busy guards refuse when the tool's max_busy or the container's max_busy_in_container is reached, naming the busy processes; force=true overrides. Docker-exec replies include container {status, uptime_s, mem_bytes, mem_limit_bytes} so you can decline the next spawn with evidence. The reply's `agent.parent_process_id` is the process that spawned you (null for a root) — the rail nests this row under it. close_on_exit=true makes the row close itself when the child exits; a bash-hosted tool (chappa-a/b) never exits on its own, so end its command line with `; exit` (or spawn with extra_args [\"-lc\", \"<command>\"]) and the row reaps when the run returns.",
+            "description": "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM — an element containing spaces reaches the child as ONE argument, so pass [\"--prompt\", \"two words here\"], never a pre-joined string. The child gets CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID / CHAPPA_AI_AGENT_TOOL_ID in its env and the reply carries agent_instructions to prepend to your first message. `prompt` is queued until the TUI is ready (first output, then agent_ready_quiet_ms of silence — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout) and delivered as one atomic write with Enter; prompt_receipt tells you whether it landed (delivered=false, reason=exited when the child died first). Busy guards refuse when the tool's max_busy or the container's max_busy_in_container is reached, naming the busy processes; force=true overrides. Docker-exec replies include container {status, uptime_s, mem_bytes, mem_limit_bytes} so you can decline the next spawn with evidence. The reply's `agent.parent_process_id` is the process that spawned you (null for a root) — the rail nests this row under it. The spawn creates a durable agent RECORD (`record_id` in the reply): the row survives exit and close as a stopped row that can be started again (start_record) and keeps a run history (get_record_runs). ephemeral=true opts out (no record; the row vanishes on close). close_on_exit=true implies ephemeral and makes the row close itself when the child exits; a bash-hosted tool never exits on its own, so end its command line with `; exit` (or spawn with extra_args [\"-lc\", \"<command>\"]) and the row reaps when the run returns.",
             "inputSchema": schema(json!({
                 "agent_tool_id": {"type": "integer", "minimum": 1, "description": "Tool id from list_agent_tools."},
                 "project_id": {"type": "integer", "minimum": 0, "description": "Project id from list_projects (cwd = its root; identity env carries it)."},
@@ -512,7 +512,8 @@ pub fn tools() -> Vec<Value> {
                 "prompt": {"type": "string", "description": "First input, written once the TUI is ready (one atomic write + Enter)."},
                 "force": {"type": "boolean", "description": "Override the busy guards (logged)."},
                 "parent_process_id": {"type": ["integer", "null"], "minimum": 0, "description": "Explicit parent for rail nesting — overrides the X-Chappa-Actor default. Validated against a live process; null/absent = nest under the caller (or a root)."},
-                "close_on_exit": {"type": "boolean", "description": "Close this row automatically when the child exits (default false). Note: a bash-hosted tool never exits on its own — end the command with `; exit` or spawn with extra_args [\"-lc\", \"<command>\"] so the row reaps when the run returns."},
+                "close_on_exit": {"type": "boolean", "description": "Close this row automatically when the child exits (default false; implies ephemeral). Note: a bash-hosted tool never exits on its own — end the command with `; exit` or spawn with extra_args [\"-lc\", \"<command>\"] so the row reaps when the run returns."},
+                "ephemeral": {"type": "boolean", "description": "Spawn without a durable record (default false): the row vanishes on close and keeps no run history."},
                 "cols": {"type": "integer", "minimum": 1, "maximum": 4096, "description": "Columns (default 80)."},
                 "rows": {"type": "integer", "minimum": 1, "maximum": 4096, "description": "Rows (default 24)."},
             }), &["agent_tool_id"]),
@@ -595,6 +596,33 @@ pub fn tools() -> Vec<Value> {
                 "id": id,
                 "confirm": {"type": "boolean", "description": "Must be true."},
             }), &["id", "confirm"]),
+            "annotations": annotations(false, true, true),
+        }),
+        json!({
+            "name": "get_record_runs",
+            "description": "A record's run history, newest first: {record_id, runs: [{run_uuid, status: running | exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, tail, summary?, session?}]}. `tail` is the automatic tail captured when the run's child exited — the last 200 screen lines, or the last 200 typed events for a json-transport agent — so a stopped row's output stays readable after its pane is gone. The ledger keeps the last 20 runs per record.",
+            "inputSchema": schema(json!({
+                "record_id": {"type": "string", "description": "Record id from a process row's record_id (list_processes / get_process_status / spawn_agent)."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Newest N runs (default and max 20)."},
+            }), &["record_id"]),
+            "annotations": annotations(true, false, true),
+        }),
+        json!({
+            "name": "start_record",
+            "description": "Start a stopped record again: a fresh terminal and a NEW run (new run_uuid; the previous run stays in the ledger). An agent starts a new session — its original prompt is never replayed, send your own with send_input. A project command is started by the app's frontend like start_process (waits up to wait_ms, answers pending=true if it has not registered yet); a workspace command cannot be started from here (409). A record whose terminal is still live is a no-op answering that terminal. Answers {record_id, kind: command | agent | terminal, term_id, run_uuid, pending}.",
+            "inputSchema": schema(json!({
+                "record_id": {"type": "string", "description": "Record id from a process row's record_id."},
+                "wait_ms": wait("How long to wait for a project command's spawn to register", 3000, 15000),
+            }), &["record_id"]),
+            "annotations": annotations(false, false, true),
+        }),
+        json!({
+            "name": "remove_record",
+            "description": "Remove a record and its run history. Requires confirm=true — there is no undo. An attached terminal is closed first; for a command record this deletes the command definition itself. Answers {record_id, kind, removed, runs_deleted}.",
+            "inputSchema": schema(json!({
+                "record_id": {"type": "string", "description": "Record id from a process row's record_id."},
+                "confirm": {"type": "boolean", "description": "Must be true."},
+            }), &["record_id", "confirm"]),
             "annotations": annotations(false, true, true),
         }),
         json!({
@@ -1050,6 +1078,16 @@ fn opt_u64(args: &Value, key: &str) -> Result<Option<u64>, ToolError> {
     }
 }
 
+/// A record id: a non-empty string. Its exact form (32 hex chars today) is
+/// the app's business; the proxy only refuses an empty one.
+fn record_id_arg(args: &Value) -> Result<String, ToolError> {
+    let id = arg_str(args, "record_id")?;
+    if id.trim().is_empty() {
+        return Err(ToolError::Invalid("`record_id` must not be empty".into()));
+    }
+    Ok(id)
+}
+
 fn arg_str(args: &Value, key: &str) -> Result<String, ToolError> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1116,7 +1154,7 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
             }
             let mut body = pick(
                 args,
-                &["project_id", "name", "extra_args", "prompt", "force", "cols", "rows", "parent_process_id", "close_on_exit"],
+                &["project_id", "name", "extra_args", "prompt", "force", "cols", "rows", "parent_process_id", "close_on_exit", "ephemeral"],
             );
             body["agent_tool_id"] = json!(tool);
             client.request("POST", "/agents", Some(&body))
@@ -1162,6 +1200,29 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
                 &format!("/projects/{project}/processes/{}/{action}", encode_segment(&pname)),
                 Some(&body),
             )
+        }
+        "get_record_runs" => {
+            let record_id = record_id_arg(args)?;
+            let qs = match opt_u64(args, "limit")? {
+                Some(limit) => format!("?limit={limit}"),
+                None => String::new(),
+            };
+            client.request("GET", &format!("/records/{}/runs{qs}", encode_segment(&record_id)), None)
+        }
+        "start_record" => {
+            let record_id = record_id_arg(args)?;
+            let body = pick(args, &["wait_ms"]);
+            client.request("POST", &format!("/records/{}/start", encode_segment(&record_id)), Some(&body))
+        }
+        "remove_record" => {
+            let record_id = record_id_arg(args)?;
+            let confirm = args.get("confirm").and_then(Value::as_bool).unwrap_or(false);
+            if !confirm {
+                return Err(ToolError::Invalid(
+                    "remove_record requires confirm=true (it deletes the record and its run history; no undo)".into(),
+                ));
+            }
+            client.request("POST", &format!("/records/{}/remove", encode_segment(&record_id)), Some(&json!({"confirm": true})))
         }
         "close_terminal" => {
             let id = req_u64(args, "id")?;

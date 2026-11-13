@@ -5221,6 +5221,20 @@ describe("App adopted backend terminals", () => {
     panelDispose(app);
   });
 
+  it("adopts a shell bound to the expanded project into that project's TERMINALS section, not the workspace rail", async () => {
+    const { root, app } = mountedProject();
+    await app.mount();
+    await app.openProject(1);
+    await FLUSH();
+    drive(app).applyCreated({ term_id: 60, name: "pwsh", kind: "terminal", project_id: 1, agent_tool_id: null, parent_process_id: null });
+    const rows = [...root.querySelectorAll<HTMLElement>(".chappa-project-term-row")];
+    expect(rows.map((r) => r.querySelector(".chappa-rail-name")?.textContent)).toEqual(["pwsh"]);
+    expect(railNames(root)).not.toContain("pwsh");
+    expect(drive(app).entries.get(60)?.kind).toBe("project-shell");
+    panelDispose(app);
+    root.remove();
+  });
+
   it("adopts a bound agent into that project's AGENTS section and an unbound one into the workspace list", async () => {
     const { root, app } = mountedProject();
     await app.mount();

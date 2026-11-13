@@ -170,6 +170,7 @@ fn parent_surfaces_on_rail_row_and_control_row() {
             child,
             agent_meta(None, Some(parent)),
             false,
+            None,
         )
         .expect("child agent spawn");
 
@@ -201,6 +202,7 @@ fn parent_surfaces_on_rail_row_and_control_row() {
             root,
             agent_meta(None, None),
             false,
+            None,
         )
         .expect("root agent spawn");
     let root_row = registry.list_rows().into_iter().find(|r| r.base.id == root).unwrap();
@@ -227,6 +229,7 @@ fn close_on_exit_closes_after_exit_with_reason_close_on_exit() {
             id,
             agent_meta(None, None),
             true,
+            None,
         )
         .expect("agent spawn");
     // The child exits → the pump's exit branch closes the entry (off-thread)
@@ -287,6 +290,7 @@ fn spawn_records_parent_from_explicit_then_actor_else_none() {
     let registry = Registry::default();
     let settings = SettingsState::default();
     let projects = Projects::default();
+    let records = app_lib::records::Records::default();
     let parent = parent_entry(&registry);
 
     let spawn = |req_parent: Option<u32>, actor: Option<u32>| {
@@ -295,6 +299,7 @@ fn spawn_records_parent_from_explicit_then_actor_else_none() {
             tools: &tools,
             settings: &settings,
             projects: &projects,
+            records: &records,
             actor,
         };
         app_lib::agents::spawn_agent_headless(

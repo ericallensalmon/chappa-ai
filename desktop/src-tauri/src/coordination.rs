@@ -42,8 +42,9 @@ pub const DB_FILE: &str = "coordination.db";
 /// The schema this build writes. Migrations only ever ADD from here on.
 /// 1 = scratchpads + todos; 2 = timers (`timers`,
 /// `timer_firings`); 3 = timer hardening (uuid-pinned timer targets, the
-/// `timer_firings(process_id, at)` index). Every bump is additive.
-pub const SCHEMA_VERSION: i64 = 3;
+/// `timer_firings(process_id, at)` index); 4 = the `runs` ledger behind
+/// durable row records. Every bump is additive.
+pub const SCHEMA_VERSION: i64 = 4;
 /// Default todo lock lease (the MCP default is 300 s).
 pub const DEFAULT_LEASE_MS: u64 = 300_000;
 pub const MAX_LEASE_MS: u64 = 24 * 3_600_000;
@@ -395,6 +396,34 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE timers ADD COLUMN delivery_uuid TEXT NULL;
             ALTER TABLE timers ADD COLUMN watch_uuids TEXT NOT NULL DEFAULT '[]';
             CREATE INDEX IF NOT EXISTS timer_firings_process ON timer_firings(process_id, at);",
+        )?;
+    }
+    // The run ledger behind the durable row records (`records.rs`): one row
+    // per run of a record, keyed by the run uuid, the last 20 per record
+    // kept. `record_id` is the record's own uuid, so this table needs no
+    // project identity; `project_id` is informational. `tail` is a JSON
+    // array of lines or events (`tail_kind`); `summary`, `summary_source`
+    // and `session` are reserved for later writers. ADDITIVE: one table and
+    // one index.
+    if version < 4 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS runs (
+                run_uuid TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL,
+                project_id INTEGER NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER NULL,
+                exit_code INTEGER NULL,
+                success INTEGER NULL,
+                tail_kind TEXT NOT NULL DEFAULT 'text',
+                tail TEXT NOT NULL DEFAULT '[]',
+                summary TEXT NULL,
+                summary_source TEXT NULL,
+                session TEXT NULL
+            );
+            CREATE INDEX IF NOT EXISTS runs_record ON runs(record_id, started_at_ms);",
         )?;
     }
     if version < SCHEMA_VERSION {

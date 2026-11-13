@@ -13,6 +13,7 @@ pub mod crash;
 pub mod debug_http;
 pub mod open_path;
 pub mod projects;
+pub mod records;
 pub mod registry;
 pub mod settings;
 pub mod stats;
@@ -31,6 +32,7 @@ pub mod workspace;
 use agent_tools::AgentToolsState;
 use coordination::Coordination;
 use projects::Projects;
+use records::Records;
 use registry::{AppClosedBroadcast, Registry};
 use settings::SettingsState;
 use workspace::Workspace;
@@ -55,6 +57,7 @@ pub fn run() {
         .manage(AgentToolsState::default())
         .manage(Coordination::default())
         .manage(Workspace::default())
+        .manage(Records::default())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             // The config dir holds secrets (agent tool env, the control
@@ -87,12 +90,24 @@ pub fn run() {
             // The workspace command store + runtime, initialized
             // AFTER settings load (auto_start commands start at launch, and a
             // spawn resolves the execution profile out of settings).
+            let coordination = app.state::<Coordination>().inner().clone();
             app.state::<Workspace>()
-                .init(app.handle(), config_dir.clone(), settings.inner().clone());
+                .init(app.handle(), config_dir.clone(), settings.inner().clone(), coordination.clone());
             // Point the projects store at the app-config dir and start the
             // 500ms-alive ticker. Idempotent: setup runs once.
             app.state::<Projects>()
-                .init(app.handle(), config_dir.clone(), settings.inner().clone());
+                .init(app.handle(), config_dir.clone(), settings.inner().clone(), coordination.clone());
+            // The durable row records over both stores + the run ledger,
+            // AFTER the stores loaded (it reconciles runs a crash left open),
+            // and the registry reports every run's end to it.
+            let records = app.state::<Records>();
+            records.init(
+                app.state::<Projects>().inner().clone(),
+                app.state::<Workspace>().inner().clone(),
+                coordination,
+            );
+            app.state::<Registry>()
+                .set_run_recorder(std::sync::Arc::new(records.inner().clone()));
             // The timer scheduler. Started BEFORE the control
             // surface so a `timer_set` cannot arrive at an inert service, and
             // after the coordination store so `restore` can read the
@@ -111,6 +126,7 @@ pub fn run() {
                     settings: settings.inner().clone(),
                     agent_tools: app.state::<AgentToolsState>().inner().clone(),
                     coordination: app.state::<Coordination>().inner().clone(),
+                    records: app.state::<Records>().inner().clone(),
                     timers,
                     // The webview adoption broadcast rides this.
                     app: Some(app.handle().clone()),
@@ -230,6 +246,10 @@ pub fn run() {
         agents::get_agent_events,
         coordination::list_scratchpads,
         coordination::read_scratchpad,
+        records::list_records,
+        records::get_record_runs,
+        records::start_record,
+        records::remove_record,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -287,6 +307,10 @@ pub fn run() {
         agents::get_agent_events,
         coordination::list_scratchpads,
         coordination::read_scratchpad,
+        records::list_records,
+        records::get_record_runs,
+        records::start_record,
+        records::remove_record,
         workspace::list_workspace_commands,
         workspace::save_workspace_command,
         workspace::delete_workspace_command,
@@ -308,6 +332,9 @@ pub fn run() {
             let projects = app_handle.state::<Projects>();
             let workspace = app_handle.state::<Workspace>();
             let registry = app_handle.state::<Registry>();
+            // Every open run is `stopped` NOW, before the actors go: a clean
+            // quit must not read as a crash at the next launch.
+            app_handle.state::<Records>().stop_open_runs(&registry);
             projects.shutdown(&registry);
             workspace.shutdown(&registry);
             registry.shutdown_all();

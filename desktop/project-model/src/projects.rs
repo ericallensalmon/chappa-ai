@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::records::{
+    new_record_id, reconcile_runs, update_run, AgentRecord, RecordKind, RecordRef, Run, RunUpdate,
+    StoredRecord, TerminalRecord,
+};
 use crate::yml::ProcessDef;
 
 /// The notification-level vocabulary. On the wire and on disk these
@@ -93,6 +97,13 @@ pub struct Project {
     /// disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processes: Option<IndexMap<String, ProcessDef>>,
+    /// The project's agent records (durable rows; see `records.rs`), in
+    /// creation order. Absent from the file while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentRecord>,
+    /// The project's terminal (shell) records, likewise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminals: Vec<TerminalRecord>,
 }
 
 /// Everything chappa-ai stores about one project process OUTSIDE the yml
@@ -100,14 +111,20 @@ pub struct Project {
 /// `process_overrides.<name>`:
 ///
 /// ```json
-/// {"notification_level": "none", "favorite": true, "disable_auto_rename": true}
+/// {"notification_level": "none", "favorite": true, "disable_auto_rename": true,
+///  "record_id": "…", "last_run": {…}}
 /// ```
 ///
 /// Absent fields are their defaults, and a record with nothing set is pruned.
 /// LEGACY: earlier builds stored a bare level string (`"server": "none"`); that shape
 /// still deserializes (into `notification_level`) and is rewritten as the
 /// record on the next save.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// A command IS a durable record, so its record state lives here too:
+/// `record_id` (assigned the first time the command is opened or started,
+/// then stable for the command's life — it moves with a rename and goes with
+/// a delete) and `last_run`, the head of its run ledger.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(from = "ProcessOverrideRepr")]
 pub struct ProcessOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +135,10 @@ pub struct ProcessOverride {
     /// `Disable automatic renaming`: OSC title events stop renaming the row.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_auto_rename: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<Run>,
 }
 
 impl ProcessOverride {
@@ -140,6 +161,10 @@ enum ProcessOverrideRepr {
         favorite: bool,
         #[serde(default)]
         disable_auto_rename: bool,
+        #[serde(default)]
+        record_id: Option<String>,
+        #[serde(default)]
+        last_run: Option<Run>,
     },
 }
 
@@ -154,10 +179,14 @@ impl From<ProcessOverrideRepr> for ProcessOverride {
                 notification_level,
                 favorite,
                 disable_auto_rename,
+                record_id,
+                last_run,
             } => ProcessOverride {
                 notification_level,
                 favorite,
                 disable_auto_rename,
+                record_id,
+                last_run,
             },
         }
     }
@@ -270,6 +299,8 @@ impl ProjectStore {
             process_overrides: None,
             yml_backed_up: None,
             processes: None,
+            agents: Vec::new(),
+            terminals: Vec::new(),
         };
         self.projects.push(project.clone());
         self.save()?;
@@ -515,6 +546,182 @@ impl ProjectStore {
         }
     }
 
+    // ---- durable records ----------------------------------------------
+    //
+    // A command's record state rides its override (above); agent and
+    // terminal records are their own lists on the project row. Every method
+    // here addresses a record by its id, whatever its kind, so the services
+    // above never care which list a record sits in.
+
+    /// The record id of command `process` in project `id`, assigning one on
+    /// first use (and persisting it). A command gets its id when it is first
+    /// opened or started, never earlier, so a file whose commands were never
+    /// touched by this build stays byte-identical.
+    pub fn ensure_command_record_id(&mut self, id: u32, process: &str) -> Result<String, String> {
+        if let Some(existing) = self.command_record_id(id, process) {
+            return Ok(existing);
+        }
+        let record_id = new_record_id()?;
+        let project = self.project_mut(id)?;
+        let assigned = record_id.clone();
+        Self::edit_override(project, process, |o| o.record_id = Some(assigned));
+        self.save()?;
+        Ok(record_id)
+    }
+
+    /// Assign record ids to every listed command that lacks one, in ONE
+    /// save (a project open touches every command at once). Nothing is
+    /// written when every command already has its id.
+    pub fn ensure_command_record_ids(&mut self, id: u32, processes: &[String]) -> Result<(), String> {
+        let missing: Vec<&String> = processes
+            .iter()
+            .filter(|name| self.command_record_id(id, name).is_none())
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = missing.iter().map(|_| new_record_id()).collect::<Result<_, _>>()?;
+        let project = self.project_mut(id)?;
+        for (name, record_id) in missing.into_iter().zip(ids) {
+            Self::edit_override(project, name, |o| o.record_id = Some(record_id));
+        }
+        self.save()
+    }
+
+    /// The record id of command `process`, if one was assigned.
+    pub fn command_record_id(&self, id: u32, process: &str) -> Option<String> {
+        self.get(id)
+            .and_then(|p| p.process_override(process))
+            .and_then(|o| o.record_id.clone())
+    }
+
+    /// Store a new agent record under project `id`.
+    pub fn add_agent_record(&mut self, id: u32, record: AgentRecord) -> Result<(), String> {
+        self.project_mut(id)?.agents.push(record);
+        self.save()
+    }
+
+    /// Store a new terminal record under project `id`.
+    pub fn add_terminal_record(&mut self, id: u32, record: TerminalRecord) -> Result<(), String> {
+        self.project_mut(id)?.terminals.push(record);
+        self.save()
+    }
+
+    /// Locate a record by id: the owning project and what kind of record
+    /// it is (a command is named by its process key).
+    pub fn find_record(&self, record_id: &str) -> Option<(u32, RecordRef)> {
+        self.projects.iter().find_map(|p| {
+            if let Some((name, _)) = p
+                .process_overrides
+                .as_ref()
+                .and_then(|m| m.iter().find(|(_, o)| o.record_id.as_deref() == Some(record_id)))
+            {
+                return Some((p.id, RecordRef { kind: RecordKind::Command, name: name.clone() }));
+            }
+            if let Some(a) = p.agents.iter().find(|a| a.record_id == record_id) {
+                return Some((p.id, RecordRef { kind: RecordKind::Agent, name: a.name.clone() }));
+            }
+            p.terminals
+                .iter()
+                .find(|t| t.record_id == record_id)
+                .map(|t| (p.id, RecordRef { kind: RecordKind::Terminal, name: t.name.clone() }))
+        })
+    }
+
+    /// One record with its full state, and the project that owns it.
+    pub fn record(&self, record_id: &str) -> Option<(u32, StoredRecord)> {
+        self.projects
+            .iter()
+            .find_map(|p| records_of(p).into_iter().find(|r| r.record_id == record_id).map(|r| (p.id, r)))
+    }
+
+    /// Every record of project `id`: commands with a record id first (in
+    /// override-map order), then agents, then terminals.
+    pub fn records_of(&self, id: u32) -> Vec<StoredRecord> {
+        self.get(id).map(records_of).unwrap_or_default()
+    }
+
+    /// Every record in the store, tagged with its project.
+    pub fn all_records(&self) -> Vec<(u32, StoredRecord)> {
+        self.projects
+            .iter()
+            .flat_map(|p| records_of(p).into_iter().map(move |r| (p.id, r)))
+            .collect()
+    }
+
+    /// Start a new run on a record: `last_run` becomes `run` whatever it held
+    /// before (the ledger keeps the previous run). `Ok(false)` when no record
+    /// has that id.
+    pub fn begin_run(&mut self, record_id: &str, run: Run) -> Result<bool, String> {
+        let Some(slot) = self.run_slot(record_id) else {
+            return Ok(false);
+        };
+        *slot = Some(run);
+        self.save()?;
+        Ok(true)
+    }
+
+    /// Apply a late fact to the record's CURRENT run, under the run-uuid
+    /// rule (`records::update_run`). Saves only when something applied.
+    pub fn update_run(
+        &mut self,
+        record_id: &str,
+        run_uuid: &str,
+        edit: impl FnOnce(&mut Run),
+    ) -> Result<RunUpdate, String> {
+        let Some(slot) = self.run_slot(record_id) else {
+            return Ok(RunUpdate::NotFound);
+        };
+        let outcome = update_run(slot.as_mut(), run_uuid, edit);
+        if outcome == RunUpdate::Applied {
+            self.save()?;
+        }
+        Ok(outcome)
+    }
+
+    /// Delete an agent or terminal record. A command record is its
+    /// definition: deleting the command (`remove_process_override` on the
+    /// way) is how a command record goes, so a command id answers `None`
+    /// here and nothing changes.
+    pub fn remove_record(&mut self, record_id: &str) -> Result<Option<(u32, RecordKind)>, String> {
+        let removed = self.projects.iter_mut().find_map(|p| {
+            let agents = p.agents.len();
+            p.agents.retain(|a| a.record_id != record_id);
+            if p.agents.len() != agents {
+                return Some((p.id, RecordKind::Agent));
+            }
+            let terminals = p.terminals.len();
+            p.terminals.retain(|t| t.record_id != record_id);
+            (p.terminals.len() != terminals).then_some((p.id, RecordKind::Terminal))
+        });
+        if removed.is_some() {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
+    /// Every record id project `id` owns — what a project removal prunes
+    /// from the ledger.
+    pub fn record_ids_of(&self, id: u32) -> Vec<String> {
+        self.records_of(id).into_iter().map(|r| r.record_id).collect()
+    }
+
+    /// At launch: every run still `running` was cut off by a crash or a hard
+    /// kill. Reconcile them (see `Run::reconcile_crash`) and persist; returns
+    /// the run uuids that changed so the ledger can follow.
+    pub fn reconcile_crashed_runs(&mut self) -> Result<Vec<String>, String> {
+        let changed = reconcile_runs(self.projects.iter_mut().flat_map(runs_of_mut));
+        if !changed.is_empty() {
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
+    /// The `last_run` slot of the record `record_id`, whatever its kind.
+    fn run_slot(&mut self, record_id: &str) -> Option<&mut Option<Run>> {
+        self.projects.iter_mut().find_map(|p| run_slot_in(p, record_id))
+    }
+
     /// True when `hash` is the trusted hash on record for `id` — i.e. the
     /// current chappa.yml was already confirmed, so auto-start needs no gate.
     pub fn is_trusted(&self, id: u32, hash: &str) -> bool {
@@ -542,9 +749,75 @@ impl ProjectStore {
     }
 }
 
+/// The records of one project row (see [`ProjectStore::records_of`]).
+fn records_of(p: &Project) -> Vec<StoredRecord> {
+    let commands = p
+        .process_overrides
+        .iter()
+        .flat_map(|m| m.iter())
+        .filter_map(|(name, o)| {
+            o.record_id.as_ref().map(|record_id| StoredRecord {
+                record_id: record_id.clone(),
+                kind: RecordKind::Command,
+                name: name.clone(),
+                last_run: o.last_run.clone(),
+                agent: None,
+                terminal: None,
+            })
+        });
+    let agents = p.agents.iter().map(|a| StoredRecord {
+        record_id: a.record_id.clone(),
+        kind: RecordKind::Agent,
+        name: a.name.clone(),
+        last_run: a.last_run.clone(),
+        agent: Some(a.clone()),
+        terminal: None,
+    });
+    let terminals = p.terminals.iter().map(|t| StoredRecord {
+        record_id: t.record_id.clone(),
+        kind: RecordKind::Terminal,
+        name: t.name.clone(),
+        last_run: t.last_run.clone(),
+        agent: None,
+        terminal: Some(t.clone()),
+    });
+    commands.chain(agents).chain(terminals).collect()
+}
+
+/// The `last_run` slot of `record_id` inside one project row.
+fn run_slot_in<'a>(p: &'a mut Project, record_id: &str) -> Option<&'a mut Option<Run>> {
+    if let Some(o) = p
+        .process_overrides
+        .as_mut()
+        .and_then(|m| m.values_mut().find(|o| o.record_id.as_deref() == Some(record_id)))
+    {
+        return Some(&mut o.last_run);
+    }
+    if let Some(a) = p.agents.iter_mut().find(|a| a.record_id == record_id) {
+        return Some(&mut a.last_run);
+    }
+    p.terminals
+        .iter_mut()
+        .find(|t| t.record_id == record_id)
+        .map(|t| &mut t.last_run)
+}
+
+/// Every stored run of one project row, mutably (the crash reconcile).
+fn runs_of_mut(p: &mut Project) -> impl Iterator<Item = &mut Run> {
+    let commands = p
+        .process_overrides
+        .iter_mut()
+        .flat_map(|m| m.values_mut())
+        .filter_map(|o| o.last_run.as_mut());
+    let agents = p.agents.iter_mut().filter_map(|a| a.last_run.as_mut());
+    let terminals = p.terminals.iter_mut().filter_map(|t| t.last_run.as_mut());
+    commands.chain(agents).chain(terminals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::records::TailKind;
 
     // ---- badge identity ----------------------------------------------
 
@@ -1002,6 +1275,149 @@ mod tests {
                 .unwrap()
                 .notification_level,
             None
+        );
+    }
+
+    // ---- durable records ------------------------------------------
+
+    /// A command's record id is assigned once, rides its override record,
+    /// moves with a rename and goes with the delete; `last_run` persists
+    /// through a reopen and a sparse `last_run` loads with defaults.
+    #[test]
+    fn command_records_ride_the_override_and_survive_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("projects.json");
+        let mut store = ProjectStore::new(store_path.clone());
+        store.add("/code/app".into(), "app".into(), None).unwrap();
+        assert_eq!(store.command_record_id(1, "server"), None);
+
+        let id = store.ensure_command_record_id(1, "server").unwrap();
+        assert_eq!(id.len(), 32);
+        assert_eq!(store.ensure_command_record_id(1, "server").unwrap(), id);
+        assert!(store.ensure_command_record_id(9, "server").is_err());
+        assert_eq!(
+            store.find_record(&id),
+            Some((1, RecordRef { kind: RecordKind::Command, name: "server".into() }))
+        );
+        // An override that only carries a record id is not "empty": it stays.
+        assert!(store.get(1).unwrap().process_override("server").is_some());
+
+        assert!(store.begin_run(&id, Run::begin("run-1", 100, Default::default())).unwrap());
+        assert_eq!(
+            store.update_run(&id, "run-1", |r| r.finish(200, Some(2), false, vec![serde_json::json!("boom")])).unwrap(),
+            RunUpdate::Applied
+        );
+        let reopened = ProjectStore::new(store_path.clone());
+        let run = reopened.get(1).unwrap().process_override("server").unwrap().last_run.clone().unwrap();
+        assert_eq!(run.status, term_core::status::ProcessStatus::Failed);
+        assert_eq!(run.tail, vec![serde_json::json!("boom")]);
+        assert_eq!(reopened.records_of(1)[0].record_id, id);
+
+        store.rename_process_override(1, "server", "api").unwrap();
+        assert_eq!(store.command_record_id(1, "api").as_deref(), Some(id.as_str()));
+        assert_eq!(store.record_ids_of(1), vec![id.clone()]);
+        assert_eq!(store.remove_record(&id).unwrap(), None, "a command record is its definition");
+        store.remove_process_override(1, "api").unwrap();
+        assert_eq!(store.find_record(&id), None);
+        assert_eq!(store.get(1).unwrap().process_overrides, None);
+
+        // A sparse last_run from an older writer loads, never errors.
+        fs::write(
+            &store_path,
+            r#"[{"id":1,"name":"app","path":"/code/app","process_overrides":{"x":{"record_id":"abc","last_run":{"run_uuid":"r","status":"stopped","started_at_ms":1}}}}]"#,
+        )
+        .unwrap();
+        let sparse = ProjectStore::new(store_path);
+        let run = sparse.get(1).unwrap().process_override("x").unwrap().last_run.clone().unwrap();
+        assert_eq!(run.ended_at_ms, None);
+        assert!(run.tail.is_empty());
+    }
+
+    /// Agent and terminal records live under their project, round-trip
+    /// through the file, follow the run-uuid rule, reconcile a crash at load
+    /// and are removed with their project row's bookkeeping intact.
+    #[test]
+    fn agent_and_terminal_records_live_under_their_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("projects.json");
+        let mut store = ProjectStore::new(store_path.clone());
+        store.add("/code/a".into(), "a".into(), None).unwrap();
+        store.add("/code/b".into(), "b".into(), None).unwrap();
+        let before = fs::read_to_string(&store_path).unwrap();
+        assert!(!before.contains("agents") && !before.contains("terminals"));
+
+        store
+            .add_agent_record(
+                2,
+                AgentRecord {
+                    record_id: "agent-1".into(),
+                    name: "worker".into(),
+                    tool_id: 4,
+                    favorite: true,
+                    disable_auto_rename: false,
+                    notification_level: Some("none".into()),
+                    parent_record_id: None,
+                    extra_args: vec![],
+                    prompt: Some("do the thing".into()),
+                    last_run: Some(Run::begin("run-a", 5, TailKind::Events)),
+                },
+            )
+            .unwrap();
+        store
+            .add_terminal_record(
+                1,
+                TerminalRecord {
+                    record_id: "term-1".into(),
+                    name: "pwsh".into(),
+                    shell_profile: Some("PowerShell".into()),
+                    cwd: Some("/code/a".into()),
+                    last_run: None,
+                },
+            )
+            .unwrap();
+        assert!(store.add_agent_record(9, AgentRecord {
+            record_id: "x".into(), name: "x".into(), tool_id: 1, favorite: false,
+            disable_auto_rename: false, notification_level: None, parent_record_id: None,
+            extra_args: vec![], prompt: None, last_run: None,
+        }).is_err());
+
+        let reopened = ProjectStore::new(store_path.clone());
+        let (owner, agent) = reopened.record("agent-1").unwrap();
+        assert_eq!((owner, agent.kind), (2, RecordKind::Agent));
+        assert_eq!(agent.agent.as_ref().unwrap().prompt.as_deref(), Some("do the thing"));
+        assert_eq!(agent.last_run.as_ref().unwrap().tail_kind, TailKind::Events);
+        let (owner, terminal) = reopened.record("term-1").unwrap();
+        assert_eq!((owner, terminal.kind), (1, RecordKind::Terminal));
+        assert_eq!(terminal.terminal.unwrap().shell_profile.as_deref(), Some("PowerShell"));
+        assert_eq!(reopened.all_records().len(), 2);
+        assert_eq!(reopened.record_ids_of(2), vec!["agent-1".to_owned()]);
+
+        // Late facts: stale uuid dropped, current applied; a crash reconcile
+        // on a fresh load closes the still-open run.
+        assert_eq!(store.update_run("agent-1", "run-z", |r| r.stop(6)).unwrap(), RunUpdate::Stale);
+        let mut crashed = ProjectStore::new(store_path.clone());
+        assert_eq!(crashed.reconcile_crashed_runs().unwrap(), vec!["run-a".to_owned()]);
+        let run = crashed.record("agent-1").unwrap().1.last_run.unwrap();
+        assert_eq!(run.status, term_core::status::ProcessStatus::Exited);
+        assert_eq!((run.exit_code, run.success), (None, None));
+        // After the reconcile the run is closed: a late exit for it is stale.
+        assert_eq!(
+            crashed.update_run("agent-1", "run-a", |r| r.finish(7, Some(0), true, vec![])).unwrap(),
+            RunUpdate::Stale
+        );
+        // A new run replaces the head.
+        assert!(crashed.begin_run("agent-1", Run::begin("run-b", 8, TailKind::Events)).unwrap());
+        assert_eq!(crashed.record("agent-1").unwrap().1.last_run.unwrap().run_uuid, "run-b");
+
+        assert_eq!(crashed.remove_record("agent-1").unwrap(), Some((2, RecordKind::Agent)));
+        assert_eq!(crashed.remove_record("term-1").unwrap(), Some((1, RecordKind::Terminal)));
+        assert_eq!(crashed.remove_record("term-1").unwrap(), None);
+        let after = fs::read_to_string(&store_path).unwrap();
+        assert!(!after.contains("agents") && !after.contains("terminals"), "{after}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&after).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&before).unwrap(),
+            "the row is back to what it was before any record"
         );
     }
 

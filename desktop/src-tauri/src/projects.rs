@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use project_model::backoff::RestartBackoff;
 use project_model::hash;
 use project_model::projects::{ProcessOverride, ProjectStore};
+use project_model::records::{RecordKind, Run, RunHead, TailKind};
 use project_model::writeback;
 use project_model::settings::{split_command_line, Settings, EXEC_PROFILE_CMD, EXEC_PROFILE_SH};
 use project_model::status::{Lifecycle, ProcessEvent, RUNNING_AFTER_MS};
@@ -50,9 +51,11 @@ use term_core::actor::epoch_ms;
 use term_core::pty::PtySpec;
 use term_core::status::ProcessStatus;
 
+use crate::coordination::Coordination;
+use crate::records::RunLedger;
 use crate::registry::{
     actor_config, emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, ExitHandler,
-    Registry, TermId,
+    RecordBinding, Registry, TermId,
 };
 use crate::settings::SettingsState;
 
@@ -129,6 +132,11 @@ struct Inner {
     /// — `set_settings` takes settings → registry, never projects.
     settings: SettingsState,
     shutting_down: bool,
+    /// The run ledger (coordination.db) a command's runs are written to.
+    /// Held here because the record head is written under THIS lock (the
+    /// records service cannot be called back into from here); the ledger
+    /// has its own connection mutex. Inert by default (tests).
+    ledger: RunLedger,
 }
 
 impl Default for Inner {
@@ -140,6 +148,7 @@ impl Default for Inner {
             app: None,
             settings: SettingsState::default(),
             shutting_down: false,
+            ledger: RunLedger::default(),
         }
     }
 }
@@ -213,7 +222,7 @@ impl From<String> for ControlError {
 impl Projects {
     /// Called once from setup: point the store at the app-config dir, keep the
     /// handle for events, and start the 500ms-alive ticker.
-    pub fn init(&self, app: &AppHandle, config_dir: PathBuf, settings: SettingsState) {
+    pub fn init(&self, app: &AppHandle, config_dir: PathBuf, settings: SettingsState, coordination: Coordination) {
         // First-launch migration: every stored project materializes
         // `chappa.yml` from its store definitions, so the new project file
         // exists and nothing is lost — no user action and no behavior change
@@ -236,8 +245,30 @@ impl Projects {
             guard.store = Some(store);
             guard.app = Some(app.clone());
             guard.settings = settings;
+            guard.ledger = RunLedger::new(coordination);
         }
         spawn_ticker(inner);
+    }
+
+    /// A projects state over an explicit store and no app handle (tests,
+    /// headless services): store operations work, anything that needs the
+    /// window (starts, status events) answers a clear error.
+    pub fn with_store(store: ProjectStore) -> Self {
+        let this = Self::default();
+        this.inner.lock().unwrap().store = Some(store);
+        this
+    }
+
+    /// Run `f` against the store under the projects lock. The records
+    /// service reaches the per-project records through this; `f` must not
+    /// call back into `Projects`.
+    pub fn store_access<T>(&self, f: impl FnOnce(&mut ProjectStore) -> T) -> Result<T, String> {
+        let mut inner = self.store()?;
+        let store = inner
+            .store
+            .as_mut()
+            .ok_or_else(|| "projects store not initialized".to_owned())?;
+        Ok(f(store))
     }
 
     /// App-exit: stop every project process, cancel all pending restarts, and
@@ -464,11 +495,47 @@ fn emit_status(
     );
 }
 
+/// Begin a run for command `name` of project `id`: the command's record id
+/// (assigned on first use), a fresh run uuid, the store head and the ledger
+/// row — all BEFORE the terminal exists, so the binding handed to the
+/// registry names a run the store already knows. Callers hold the projects
+/// lock. `None` (logged) when the store cannot be written: the command still
+/// runs, this run just leaves no record.
+fn begin_command_run(inner: &mut Inner, id: u32, name: &str) -> Option<RecordBinding> {
+    let store = inner.store.as_mut()?;
+    let record_id = match store.ensure_command_record_id(id, name) {
+        Ok(record_id) => record_id,
+        Err(e) => {
+            log::warn!("`{name}`: no record for this run: {e}");
+            return None;
+        }
+    };
+    let run_uuid = match crate::control_http::random_hex(16) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            log::warn!("`{name}`: no record for this run: cannot generate a run uuid: {e}");
+            return None;
+        }
+    };
+    let run = Run::begin(run_uuid.clone(), now_ms(), TailKind::Text);
+    if let Err(e) = store.begin_run(&record_id, run.clone()) {
+        log::warn!("`{name}`: run {run_uuid} not recorded: {e}");
+        return None;
+    }
+    if let Err(e) = inner.ledger.insert(&record_id, Some(id), RecordKind::Command, &run) {
+        log::warn!("`{name}`: ledger row for run {run_uuid} not written: {e}");
+    }
+    Some(RecordBinding { record_id, run_uuid })
+}
+
 /// Wire one process's terminal spawn up with its auto_restart / watcher hooks.
 /// `root` is an OWNED clone of the project root so the caller never holds a
 /// `&ProjectRuntime` alongside the `&mut ProcessRuntime` it also passes
 /// (borrow discipline). `term_id` is the registry key to (re)use — the first
-/// spawn allocates it, respawns reuse it. Callers hold the projects lock.
+/// spawn allocates it, respawns reuse it. `record` is this run's binding
+/// ([`begin_command_run`], taken before `proc` was borrowed). Callers hold
+/// the projects lock.
+#[allow(clippy::too_many_arguments)]
 fn spawn_process(
     registry: &Registry,
     app: &AppHandle,
@@ -478,6 +545,7 @@ fn spawn_process(
     root: PathBuf,
     settings: &Settings,
     proc: &mut ProcessRuntime,
+    record: Option<RecordBinding>,
 ) -> Result<TermId, String> {
     let spec = build_spec(&proc.def, &root, settings)?;
     let channel = proc
@@ -506,6 +574,7 @@ fn spawn_process(
         project_id,
         name.to_owned(),
     );
+    let record_id = record.as_ref().map(|r| r.record_id.clone());
     let term_id = match proc.term_id {
         Some(id) => registry.respawn_terminal(
             id,
@@ -514,6 +583,7 @@ fn spawn_process(
             Some(app.clone()),
             name.to_owned(),
             Some(on_exit),
+            record,
         )?,
         None => registry.create_terminal_with_exit(
             cfg,
@@ -521,6 +591,7 @@ fn spawn_process(
             Some(app.clone()),
             name.to_owned(),
             Some(on_exit),
+            record,
         )?,
     };
     proc.term_id = Some(term_id);
@@ -540,6 +611,8 @@ fn spawn_process(
             project_id: Some(project_id),
             agent_tool_id: None,
             parent_process_id: None,
+            record_id,
+            last_run: registry.run_head(term_id),
         },
     );
     if start_watcher {
@@ -667,13 +740,12 @@ fn respawn_process(
     // Settings are re-read on every respawn, so an exec-profile change takes
     // effect on the next restart without reopening the project.
     let settings = inner.settings.snapshot();
-    let proc = match inner
+    let Some(proc) = inner
         .runtimes
-        .get_mut(&project_id)
-        .and_then(|r| r.processes.get_mut(process_name))
-    {
-        Some(proc) => proc,
-        None => return,
+        .get(&project_id)
+        .and_then(|r| r.processes.get(process_name))
+    else {
+        return;
     };
     if proc.generation != generation {
         return; // superseded by a user action
@@ -684,6 +756,16 @@ fn respawn_process(
     if proc.term_id.is_none() {
         return; // never started: nothing to respawn
     }
+    // Every respawn is a NEW run of the same record, begun before the
+    // terminal (and before `proc` is borrowed mutably).
+    let record = begin_command_run(&mut inner, project_id, process_name);
+    let Some(proc) = inner
+        .runtimes
+        .get_mut(&project_id)
+        .and_then(|r| r.processes.get_mut(process_name))
+    else {
+        return;
+    };
     let _ = spawn_process(
         registry,
         app,
@@ -693,6 +775,7 @@ fn respawn_process(
         root,
         &settings,
         proc,
+        record,
     );
     // A fresh term_id / generation for a process someone may be waiting on.
     inner.notify_changed();
@@ -1035,6 +1118,12 @@ pub fn remove_project(
         }
         inner.notify_changed();
     }
+    // The project's records go with its row; their run history goes with
+    // them (the one removal path every record takes).
+    let record_ids = inner.store.as_ref().unwrap().record_ids_of(id);
+    if let Err(e) = inner.ledger.delete_records(&record_ids) {
+        log::warn!("remove project {id}: run history not pruned: {e}");
+    }
     inner.store.as_mut().unwrap().remove(id)
 }
 
@@ -1125,6 +1214,12 @@ pub fn open_project(
     };
 
     let trust_hash = yml_hash.clone();
+    // Every command is a durable record from the moment it is opened, so
+    // the rows carry a record id before their first start.
+    let names: Vec<String> = processes.keys().cloned().collect();
+    if let Err(e) = inner.store.as_mut().unwrap().ensure_command_record_ids(id, &names) {
+        log::warn!("open project {id}: command record ids not assigned: {e}");
+    }
     inner.runtimes.insert(
         id,
         ProjectRuntime {
@@ -1140,7 +1235,7 @@ pub fn open_project(
     inner.notify_changed();
     // The notification fields come off the STORED row (projects.json),
     // never the yml — "chappa.yml is NEVER touched for this".
-    let overrides = stored.process_overrides.clone();
+    let overrides = inner.store.as_ref().unwrap().get(id).and_then(|p| p.process_overrides.clone());
     Ok(OpenProjectResult {
         project: ProjectInfoDto {
             id,
@@ -1406,21 +1501,53 @@ pub fn delete_project_process(
     id: u32,
     name: String,
 ) -> Result<Vec<ProjectProcessDto>, String> {
-    let mut inner = projects.store()?;
-    refuse_while_load_error(&inner, id)?;
-    let was_trusted = currently_trusted(&inner, id);
-    project_model::native::mutate(inner.store.as_mut().unwrap(), id, |defs| {
-        project_model::native::remove_process(defs, &name)
-    })
-    .map_err(|e| refused_write(&mut inner, &registry, &app, projects.arc(), id, e))?;
-    // Refused deletes never reach here, so the process is only stopped once
-    // the definition is actually gone — delete still stops a running process.
-    stop_locked(&mut inner, &registry, &app, id, &name);
-    if let Err(e) = inner.store.as_mut().unwrap().remove_process_override(id, &name) {
-        log::warn!("delete `{name}`: override record not pruned: {e}");
+    projects.delete_process(&app, &registry, id, &name)
+}
+
+impl Projects {
+    /// The delete behind the editor's command and a record removal (a
+    /// command record IS its definition). The command's record state and its
+    /// run history go with it.
+    pub fn delete_process(
+        &self,
+        app: &AppHandle,
+        registry: &Registry,
+        id: u32,
+        name: &str,
+    ) -> Result<Vec<ProjectProcessDto>, String> {
+        let mut inner = self.store()?;
+        refuse_while_load_error(&inner, id)?;
+        let was_trusted = currently_trusted(&inner, id);
+        project_model::native::mutate(inner.store.as_mut().unwrap(), id, |defs| {
+            project_model::native::remove_process(defs, name)
+        })
+        .map_err(|e| refused_write(&mut inner, registry, app, self.arc(), id, e))?;
+        // Refused deletes never reach here, so the process is only stopped once
+        // the definition is actually gone — delete still stops a running process.
+        stop_locked(&mut inner, registry, app, id, name);
+        if let Some(record_id) = inner.store.as_ref().unwrap().command_record_id(id, name) {
+            if let Err(e) = inner.ledger.delete_records(&[record_id]) {
+                log::warn!("delete `{name}`: run history not pruned: {e}");
+            }
+        }
+        if let Err(e) = inner.store.as_mut().unwrap().remove_process_override(id, name) {
+            log::warn!("delete `{name}`: override record not pruned: {e}");
+        }
+        after_own_write(&mut inner, registry, app, self.arc(), id, was_trusted);
+        Ok(process_dtos(&inner, id))
     }
-    after_own_write(&mut inner, &registry, &app, projects.arc(), id, was_trusted);
-    Ok(process_dtos(&inner, id))
+
+    /// The frontend's start (a frames channel in hand) for a record start.
+    pub fn start_with_frames(
+        &self,
+        app: &AppHandle,
+        registry: &Registry,
+        id: u32,
+        name: String,
+        frames: Channel<InvokeResponseBody>,
+    ) -> Result<TermId, ControlError> {
+        start_process(app, registry, self, id, name, frames)
+    }
 }
 
 /// `Duplicate to ▸` (one name) / `Duplicate all commands to ▸` (`names`
@@ -1791,6 +1918,7 @@ fn reload_locked(
                             Ok(_) => {
                                 proc.lifecycle.on(ProcessEvent::Stop, now_ms());
                                 proc.generation += 1;
+                                let record = begin_command_run(inner, id, &name);
                                 if let Err(e) = spawn_process(
                                     registry,
                                     app,
@@ -1800,6 +1928,7 @@ fn reload_locked(
                                     root.clone(),
                                     &settings,
                                     &mut proc,
+                                    record,
                                 ) {
                                     log::warn!("reload: restart of `{name}` failed: {e}");
                                     proc.lifecycle.on(ProcessEvent::SpawnFailed, now_ms());
@@ -1830,6 +1959,11 @@ fn reload_locked(
     } else {
         reload_trust_commands(&processes, &held_back)
     };
+    // Commands the file added are records too (no write when nothing is new).
+    let names: Vec<String> = processes.keys().cloned().collect();
+    if let Err(e) = inner.store.as_mut().unwrap().ensure_command_record_ids(id, &names) {
+        log::warn!("reload project {id}: command record ids not assigned: {e}");
+    }
     inner.runtimes.get_mut(&id).unwrap().processes = processes;
     // The diff may have stopped, restarted, added or dropped processes.
     inner.notify_changed();
@@ -2163,7 +2297,7 @@ impl Projects {
         self.control_start(id, name, wait_ms)
     }
 
-    fn app_handle(&self) -> Result<AppHandle, ControlError> {
+    pub fn app_handle(&self) -> Result<AppHandle, ControlError> {
         self.store()?
             .app
             .clone()
@@ -2247,6 +2381,14 @@ fn start_process(
     // Read the execution profile + per-actor controls fresh at every
     // start (same borrow discipline — owned clone before `&mut proc`).
     let settings = inner.settings.snapshot();
+    // The run begins only for a spec that can spawn; a failed attempt leaves
+    // the record's previous run as it was.
+    let spec = build_spec(&def, &root, &settings);
+    let record = if spec.is_ok() {
+        begin_command_run(&mut inner, id, &name)
+    } else {
+        None
+    };
 
     let proc = inner
         .runtimes
@@ -2260,7 +2402,7 @@ fn start_process(
     if let Some(term_id) = proc.term_id.take() {
         registry.close(term_id);
     }
-    let result = match build_spec(&def, &root, &settings) {
+    let result = match spec {
         Ok(_) => {
             proc.term_id = None; // force a fresh id on this start
             let spawn = spawn_process(
@@ -2272,6 +2414,7 @@ fn start_process(
                 root,
                 &settings,
                 proc,
+                record,
             );
             match spawn {
                 Ok(term_id) => {
@@ -2426,6 +2569,13 @@ pub struct ProjectProcessDto {
     /// Chappa-side toggles (projects.json, never the yml).
     pub favorite: bool,
     pub disable_auto_rename: bool,
+    /// The command's durable record (assigned when the project is opened)
+    /// and the head of its run ledger — the stored view, which the live
+    /// terminal's own status refines while one is attached. Wire keys
+    /// `recordId` / `lastRun`; the head's own keys stay snake_case (the one
+    /// `RunHead` shape every surface shares).
+    pub record_id: Option<String>,
+    pub last_run: Option<RunHead>,
 }
 
 impl ProjectProcessDto {
@@ -2452,6 +2602,8 @@ impl ProjectProcessDto {
             env: p.def.env.clone(),
             favorite: record.map_or(false, |r| r.favorite),
             disable_auto_rename: record.map_or(false, |r| r.disable_auto_rename),
+            record_id: record.and_then(|r| r.record_id.clone()),
+            last_run: record.and_then(|r| r.last_run.as_ref().map(Run::head)),
         }
     }
 }

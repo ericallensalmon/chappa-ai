@@ -193,6 +193,10 @@ fn canned(method: &str, path: &str) -> (u16, Value) {
         ("POST", "/projects/2/processes/import%20%2B%20summarize/stop") => (200, json!({"status": "stopped"})),
         ("POST", "/projects/2/processes/import%20%2B%20summarize/restart") => (200, json!({"status": "starting"})),
         ("GET", "/processes/404") => (404, json!({"error": "no such terminal: 404"})),
+        // ---- records ----
+        ("GET", "/records/abc123/runs") => (200, json!({"record_id": "abc123", "runs": [{"run_uuid": "r1", "status": "exited", "started_at_ms": 1, "ended_at_ms": 2, "exit_code": 0, "success": true, "tail_kind": "text", "tail": ["done"]}]})),
+        ("POST", "/records/abc123/start") => (200, json!({"record_id": "abc123", "kind": "agent", "term_id": 13, "run_uuid": "r2", "pending": false})),
+        ("POST", "/records/abc123/remove") => (200, json!({"record_id": "abc123", "kind": "agent", "removed": true, "runs_deleted": 2})),
         // ---- coordination ----
         ("GET", "/scratchpads") => (200, json!({"scratchpads": [{"scratchpad_id": 5, "name": "pad", "revision": 3, "updated_by": "12"}], "total": 1})),
         ("POST", "/scratchpads") => (200, json!({"scratchpad_id": 5, "project_id": 6, "revision": 1, "name": "pad"})),
@@ -284,6 +288,11 @@ fn every_tool_round_trips_with_the_token_attached() {
         ("get_agent_events", json!({"id": 12}), "GET", "/processes/12/agent_events?since=0", Value::Null, json!({"id": 12, "since": 40, "events": [{"id": 12, "seq": 41, "kind": "awaiting_input", "payload": {"after": "result"}}]})),
         // The orphan reaper.
         ("reap_orphans", json!({}), "POST", "/agents/reap", json!({}), json!({"results": [{"container": "dev-worker", "user": "dev", "pid": 42, "uuid": "orphan-uuid", "verdict": "gone"}]})),
+        // Durable records: history with its tail, a fresh start, a confirmed removal.
+        ("get_record_runs", json!({"record_id": "abc123"}), "GET", "/records/abc123/runs", Value::Null, json!({"record_id": "abc123", "runs": [{"run_uuid": "r1", "status": "exited", "started_at_ms": 1, "ended_at_ms": 2, "exit_code": 0, "success": true, "tail_kind": "text", "tail": ["done"]}]})),
+        ("get_record_runs", json!({"record_id": "abc123", "limit": 5}), "GET", "/records/abc123/runs?limit=5", Value::Null, json!({"record_id": "abc123", "runs": [{"run_uuid": "r1", "status": "exited", "started_at_ms": 1, "ended_at_ms": 2, "exit_code": 0, "success": true, "tail_kind": "text", "tail": ["done"]}]})),
+        ("start_record", json!({"record_id": "abc123", "wait_ms": 500}), "POST", "/records/abc123/start", json!({"wait_ms": 500}), json!({"record_id": "abc123", "kind": "agent", "term_id": 13, "run_uuid": "r2", "pending": false})),
+        ("remove_record", json!({"record_id": "abc123", "confirm": true}), "POST", "/records/abc123/remove", json!({"confirm": true}), json!({"record_id": "abc123", "kind": "agent", "removed": true, "runs_deleted": 2})),
     ];
     let tool_names: Vec<String> = tools().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
     for (tool, args, method, path, body, expect) in cases {
@@ -305,6 +314,7 @@ fn every_tool_round_trips_with_the_token_attached() {
         "list_projects", "get_project", "spawn_terminal", "send_input", "send_bytes",
         "start_process", "stop_process", "restart_process", "close_terminal",
         "list_agent_tools", "spawn_agent", "get_agent_events", "reap_orphans",
+        "get_record_runs", "start_record", "remove_record",
     ].into_iter().collect();
     let listed: std::collections::BTreeSet<&str> = tool_names
         .iter()
@@ -935,7 +945,7 @@ fn tool_schema_snapshot_including_annotations() {
         "scratchpad_read", "scratchpad_list", "scratchpad_find", "scratchpad_tail", "scratchpad_tags_list",
         "todo_list", "todo_get", "todo_comment_list", "todo_tags_list", "timer_list",
     ];
-    const DESTRUCTIVE: [&str; 5] = ["close_terminal", "scratchpad_clear", "scratchpad_delete", "todo_delete", "todo_comment_delete"];
+    const DESTRUCTIVE: [&str; 6] = ["close_terminal", "remove_record", "scratchpad_clear", "scratchpad_delete", "todo_delete", "todo_comment_delete"];
     for tool in tools() {
         let name = tool["name"].as_str().unwrap();
         let read_only = name.starts_with("list_") || name.starts_with("get_") || READS.contains(&name);

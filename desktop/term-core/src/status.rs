@@ -8,10 +8,11 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-/// Process status vocabulary, shared by the rail and the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Process status vocabulary, shared by the rail and the wire. Also the
+/// resting status a stored run keeps on disk, hence `Deserialize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessStatus {
     Starting,

@@ -20,9 +20,12 @@ use term_core::actor::{Point, SearchNavDir, SelectionKind, SelectionOp};
 use term_core::keys::{Key, KeyEvent, Mods, MouseEvent, MouseKind};
 use term_core::pty::PtySpec;
 
+use project_model::records::{new_record_id, RecordKind, Run, TailKind, TerminalRecord};
+
+use crate::records::{RecordError, Records, Scope};
 use crate::registry::{
-    actor_config, emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, RailRow, Registry,
-    TermId,
+    actor_config, emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink,
+    RailRow, RecordBinding, Registry, RunRecorder, TermId,
 };
 use crate::settings::SettingsState;
 
@@ -295,26 +298,60 @@ fn handle_for(registry: &Registry, id: TermId) -> Result<term_core::actor::TermH
 
 /// Spawn a terminal and wire up its event pump. Binary frames arrive on
 /// `frames`; JSON events go out under the `term://*` global event names.
+///
+/// A shell with no explicit `command` is a durable TERMINAL record (its
+/// profile and cwd are enough to open the same shell again). It is filed
+/// under `project_id` when the webview opened it from a project's terminals
+/// section, else in the workspace bucket. A terminal running an explicit
+/// command (the harness, a one-off) has no record: its restart recipe is
+/// not a shell's.
 #[tauri::command]
 pub fn create_terminal(
     app: AppHandle,
     registry: State<'_, Registry>,
     settings: State<'_, SettingsState>,
+    records: State<'_, Records>,
     spec: PtySpecDto,
     scrollback: Option<usize>,
+    project_id: Option<u32>,
     frames: Channel<InvokeResponseBody>,
 ) -> Result<TermId, String> {
     // Both live-settable actor controls are also seeded at SPAWN, so
     // a terminal opened after a settings change starts out correct.
     let settings = settings.snapshot();
-    let name = if !spec.command.is_empty() {
-        spec.command.clone()
-    } else {
-        // A profile spawn labels the rail row with the profile name; a plain
-        // default-shell spawn keeps the historical "shell".
-        spec.profile.clone().unwrap_or_else(|| "shell".to_owned())
-    };
-    let cfg = actor_config(to_pty_spec(spec, &settings), scrollback, Some(&settings));
+    let scope = project_id.map_or(Scope::Workspace, Scope::Project);
+    if spec.command.is_empty() {
+        let record = TerminalRecord {
+            record_id: new_record_id()?,
+            // A profile spawn labels the rail row with the profile name; a
+            // plain default-shell spawn keeps the historical "shell".
+            name: spec.profile.clone().unwrap_or_else(|| "shell".to_owned()),
+            shell_profile: spec.profile.clone(),
+            cwd: spec.cwd.clone(),
+            last_run: None,
+        };
+        if let Err(e) = records.add_terminal_record(scope, record.clone()) {
+            log::warn!("[terminals] shell \"{}\" leaves no record: {e}", record.name);
+            return spawn_plain_terminal(&app, &registry, &settings, spec, scrollback, frames);
+        }
+        let sink: Arc<dyn EventSink> = Arc::new(ChannelSink::new(frames, app.clone()));
+        return spawn_terminal_record_with(&registry, &settings, &records, scope, &record, scrollback, sink, Some(&app))
+            .map_err(String::from);
+    }
+    spawn_plain_terminal(&app, &registry, &settings, spec, scrollback, frames)
+}
+
+/// A record-less terminal running an explicit command.
+fn spawn_plain_terminal(
+    app: &AppHandle,
+    registry: &Registry,
+    settings: &Settings,
+    spec: PtySpecDto,
+    scrollback: Option<usize>,
+    frames: Channel<InvokeResponseBody>,
+) -> Result<TermId, String> {
+    let name = spec.command.clone();
+    let cfg = actor_config(to_pty_spec(spec, settings), scrollback, Some(settings));
     let id = registry.create_terminal(
         cfg,
         Arc::new(ChannelSink::new(frames, app.clone())),
@@ -330,13 +367,98 @@ pub fn create_terminal(
         &AppCreatedBroadcast(app.clone()),
         CreatedEvent {
             term_id: id,
-            name: name.clone(),
+            name,
             kind: "terminal",
             project_id: None,
             agent_tool_id: None,
             parent_process_id: None,
+            record_id: None,
+            last_run: None,
         },
     );
+    Ok(id)
+}
+
+/// Run a terminal record: a fresh run on the record (store head + ledger
+/// row, before the terminal exists), the shell its profile and cwd name,
+/// then `term://created` so the webview binds the terminal to the record's
+/// row. `frames` is the webview's channel when the frontend asked; a
+/// headless start reads back through the control surface.
+pub(crate) fn spawn_terminal_record(
+    registry: &Registry,
+    settings: &Settings,
+    records: &Records,
+    scope: Scope,
+    record: &TerminalRecord,
+    frames: Option<Channel<InvokeResponseBody>>,
+    app: Option<&AppHandle>,
+) -> Result<TermId, RecordError> {
+    let sink: Arc<dyn EventSink> = match (frames, app) {
+        (Some(frames), Some(app)) => Arc::new(ChannelSink::new(frames, app.clone())),
+        _ => Arc::new(NullSink),
+    };
+    spawn_terminal_record_with(registry, settings, records, scope, record, None, sink, app)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_terminal_record_with(
+    registry: &Registry,
+    settings: &Settings,
+    records: &Records,
+    scope: Scope,
+    record: &TerminalRecord,
+    scrollback: Option<usize>,
+    sink: Arc<dyn EventSink>,
+    app: Option<&AppHandle>,
+) -> Result<TermId, RecordError> {
+    let run_uuid = crate::control_http::random_hex(16).map_err(|e| format!("cannot generate a run uuid: {e}"))?;
+    let run = Run::begin(run_uuid.clone(), term_core::actor::epoch_ms(), TailKind::Text);
+    records.begin_run(scope, RecordKind::Terminal, &record.record_id, &run)?;
+    let spec = to_pty_spec(
+        PtySpecDto {
+            command: String::new(),
+            args: None,
+            cwd: record.cwd.clone(),
+            env: None,
+            cols: None,
+            rows: None,
+            profile: record.shell_profile.clone(),
+        },
+        settings,
+    );
+    let cfg = actor_config(spec, scrollback, Some(settings));
+    let binding = RecordBinding {
+        record_id: record.record_id.clone(),
+        run_uuid: run_uuid.clone(),
+    };
+    let id = match registry.create_recorded_terminal(cfg, sink, app.cloned(), record.name.clone(), binding) {
+        Ok(id) => id,
+        Err(e) => {
+            // The run began in the store but no terminal ever ran it.
+            records.run_stopped(&record.record_id, &run_uuid, term_core::actor::epoch_ms());
+            return Err(RecordError::Internal(e));
+        }
+    };
+    // A project's shell is attributed to the project on the live entry too,
+    // so the terminal list and the mount reconcile file its row there.
+    if let Scope::Project(project_id) = scope {
+        registry.set_project_shell(id, project_id);
+    }
+    if let Some(app) = app {
+        emit_created(
+            &AppCreatedBroadcast(app.clone()),
+            CreatedEvent {
+                term_id: id,
+                name: record.name.clone(),
+                kind: "terminal",
+                project_id: scope.project_id(),
+                agent_tool_id: None,
+                parent_process_id: None,
+                record_id: Some(record.record_id.clone()),
+                last_run: registry.run_head(id),
+            },
+        );
+    }
     Ok(id)
 }
 
@@ -589,6 +711,7 @@ pub fn spawn_shell(
     app: AppHandle,
     registry: State<'_, Registry>,
     settings: State<'_, SettingsState>,
+    records: State<'_, Records>,
     cwd: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -599,6 +722,7 @@ pub fn spawn_shell(
         app,
         registry,
         settings,
+        records,
         PtySpecDto {
             command: String::new(),
             args: None,
@@ -608,6 +732,7 @@ pub fn spawn_shell(
             rows,
             profile,
         },
+        None,
         None,
         frames,
     )

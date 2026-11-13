@@ -21,7 +21,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use project_model::records::{RunHead, TailKind, TAIL_LINES};
 use project_model::settings::Settings;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -205,6 +206,46 @@ pub struct ControlSnapshot {
     /// `agent.parent_process_id` (the spawner) rides on the `agent` block, so
     /// the `/processes` row exposes both nesting facts.
     pub close_on_exit: bool,
+    /// The durable record this row belongs to, `null` for a record-less
+    /// (ephemeral) row. A stopped row with a record id can be started again.
+    pub record_id: Option<String>,
+    /// The current run minus its tail (the tail is fetched through the
+    /// records routes); `null` for an ephemeral row.
+    pub last_run: Option<RunHead>,
+}
+
+/// Which durable record a spawn belongs to, and which run it is. Passed INTO
+/// the spawn so the binding exists before the pump can observe an exit (a
+/// command that exits instantly must still land on its record), and so the
+/// run's uuid is the one the caller already wrote to the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordBinding {
+    pub record_id: String,
+    pub run_uuid: String,
+}
+
+/// The facts of a finished run, captured by the pump at exit: the outcome
+/// plus the automatic tail — the last [`TAIL_LINES`] screen lines, or for a
+/// json-transport agent the last [`TAIL_LINES`] typed events.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunExit {
+    pub ended_at_ms: u64,
+    pub exit_code: Option<i32>,
+    pub success: bool,
+    pub tail_kind: TailKind,
+    pub tail: Vec<Value>,
+}
+
+/// Where a record-bound entry reports its run's end. Set once at app setup
+/// to the records service; tests record into a fake. Both calls carry the
+/// run uuid so the receiver can drop a fact for a run the record has since
+/// left behind.
+pub trait RunRecorder: Send + Sync + 'static {
+    /// The child exited (tail captured). Called on the pump thread BEFORE the
+    /// exit handler, which may respawn into the same terminal id.
+    fn run_exited(&self, record_id: &str, run_uuid: &str, exit: RunExit);
+    /// The row was closed before any exit was observed.
+    fn run_stopped(&self, record_id: &str, run_uuid: &str, ended_at_ms: u64);
 }
 
 /// The byte-stream liveness of one entry, read for many ids under ONE
@@ -239,6 +280,11 @@ pub struct CreatedEvent {
     /// The creating process's registry id — what the rail nests this
     /// row under (the child of a spawned agent). `None` for a root.
     pub parent_process_id: Option<TermId>,
+    /// The record this spawn belongs to — a webview that already shows the
+    /// record as a stopped row binds the new terminal to it instead of
+    /// adding a second row. `None` for an ephemeral spawn.
+    pub record_id: Option<String>,
+    pub last_run: Option<RunHead>,
 }
 
 /// The `term://created` broadcast seam. The real impl forwards to
@@ -352,6 +398,10 @@ pub struct RailRow {
     /// Mirror of the created-event/agent parent — the rail nests this
     /// row under whichever live row has this id (a spawned agent's child).
     pub parent_process_id: Option<TermId>,
+    /// The record this row belongs to and its current run (minus the tail);
+    /// both `None` for an ephemeral row.
+    pub record_id: Option<String>,
+    pub last_run: Option<RunHead>,
 }
 
 /// The registry's projection of one agent for the pure guards:
@@ -408,6 +458,10 @@ struct Entry {
     /// The owning project, when a project process is started into a project
     /// ([`Registry::set_project`]); agents carry theirs in `agent`.
     project_id: Option<u32>,
+    /// A plain shell opened under a project ([`Registry::set_project_shell`]):
+    /// it keeps the `"terminal"` row kind, where a project process is a
+    /// `"process"` (its project's command card).
+    project_shell: bool,
     /// The SHARED sink state the pump reads on every event, so a
     /// mid-life swap ([`Registry::attach_terminal`]) takes effect for the very
     /// next event the actor emits. This is the dock-window primitive:
@@ -425,6 +479,14 @@ struct Entry {
     /// lifecycle instruction, not an agent fact), surfaced read-only on the
     /// `/processes` row.
     close_on_exit: bool,
+    /// The durable record this entry runs for (`uuid` is then the run's
+    /// uuid). `None` for an ephemeral row: the debug harness, a control
+    /// `spawn_terminal`, or a spawn that opted out.
+    record: Option<String>,
+    /// The run's timeline for the live row's `last_run` head.
+    started_at_ms: u64,
+    ended_at_ms: Option<u64>,
+    success: Option<bool>,
 }
 
 struct Inner {
@@ -471,6 +533,10 @@ pub struct Registry {
     /// swap in a recording fake; the default ([`NullClosedBroadcast`]) stays
     /// silent so harness/test closes emit nothing.
     closed_broadcast: Arc<Mutex<Arc<dyn ClosedBroadcast>>>,
+    /// Where record-bound entries report their runs' ends (set once at app
+    /// setup to the records service). `None` = nothing is recorded, which is
+    /// what the harness and most tests want.
+    run_recorder: Arc<Mutex<Option<Arc<dyn RunRecorder>>>>,
 }
 
 impl Default for Registry {
@@ -490,6 +556,7 @@ impl Registry {
             spawn_guard: Arc::default(),
             json_agents: Arc::default(),
             closed_broadcast: Arc::new(Mutex::new(Arc::new(NullClosedBroadcast) as Arc<dyn ClosedBroadcast>)),
+            run_recorder: Arc::default(),
         }
     }
 
@@ -498,6 +565,15 @@ impl Registry {
     /// project stop, `close_on_exit`) broadcasts through it automatically.
     pub fn set_closed_broadcast(&self, broadcast: Arc<dyn ClosedBroadcast>) {
         *self.closed_broadcast.lock().unwrap_or_else(|e| e.into_inner()) = broadcast;
+    }
+
+    /// Point run reporting at the records service (once, at setup).
+    pub fn set_run_recorder(&self, recorder: Arc<dyn RunRecorder>) {
+        *self.run_recorder.lock().unwrap_or_else(|e| e.into_inner()) = Some(recorder);
+    }
+
+    fn run_recorder(&self) -> Option<Arc<dyn RunRecorder>> {
+        self.run_recorder.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn docker(&self) -> Arc<dyn DockerCli> {
@@ -522,7 +598,9 @@ impl Registry {
 
     /// Spawn an agent terminal into a reserved id with its metadata attached
     /// before the pump starts. Wakes the bridge probe for
-    /// docker-exec runtimes.
+    /// docker-exec runtimes. `record` is the agent's record id when the
+    /// spawn is durable (its run uuid is the spawn uuid).
+    #[allow(clippy::too_many_arguments)]
     pub fn create_agent_terminal(
         &self,
         cfg: ActorConfig,
@@ -532,9 +610,11 @@ impl Registry {
         id: TermId,
         meta: AgentMeta,
         close_on_exit: bool,
+        record: Option<String>,
     ) -> Result<TermId, String> {
         let docker = meta.runtime.is_docker();
-        let id = self.create_terminal_full(cfg, sink, on_notify, name, Some(id), None, Some(meta), false, close_on_exit)?;
+        let binding = agent_binding(&meta, record);
+        let id = self.create_terminal_full(cfg, sink, on_notify, name, Some(id), None, Some(meta), false, close_on_exit, binding)?;
         if docker {
             self.bridge_waker.wake();
         }
@@ -546,6 +626,7 @@ impl Registry {
     /// actor by hand (`TermHandle::note_output` / `note_child_exit`). Returns
     /// the handle the [`JsonAgent`] drives; `attach_json_agent` registers
     /// the agent so close/shutdown and the send/events routes find it.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_json_agent_terminal(
         &self,
         cfg: ActorConfig,
@@ -555,9 +636,11 @@ impl Registry {
         id: TermId,
         meta: AgentMeta,
         close_on_exit: bool,
+        record: Option<String>,
     ) -> Result<TermHandle, String> {
         let docker = meta.runtime.is_docker();
-        let id = self.create_terminal_full(cfg, sink, on_notify, name, Some(id), None, Some(meta), true, close_on_exit)?;
+        let binding = agent_binding(&meta, record);
+        let id = self.create_terminal_full(cfg, sink, on_notify, name, Some(id), None, Some(meta), true, close_on_exit, binding)?;
         if docker {
             self.bridge_waker.wake();
         }
@@ -602,11 +685,25 @@ impl Registry {
         on_notify: Option<AppHandle>,
         name: String,
     ) -> Result<TermId, String> {
-        self.create_terminal_inner(cfg, sink, on_notify, name, None, None)
+        self.create_terminal_inner(cfg, sink, on_notify, name, None, None, None)
+    }
+
+    /// A shell that runs for a terminal record: same as
+    /// [`Registry::create_terminal`] with the record binding attached before
+    /// the pump starts.
+    pub fn create_recorded_terminal(
+        &self,
+        cfg: ActorConfig,
+        sink: Arc<dyn EventSink>,
+        on_notify: Option<AppHandle>,
+        name: String,
+        record: RecordBinding,
+    ) -> Result<TermId, String> {
+        self.create_terminal_inner(cfg, sink, on_notify, name, None, None, Some(record))
     }
 
     /// Same as [`Registry::create_terminal`], plus an exit handler (project
-    /// processes; see [`ExitHandler`]).
+    /// processes; see [`ExitHandler`]) and the command's record binding.
     pub fn create_terminal_with_exit(
         &self,
         cfg: ActorConfig,
@@ -614,8 +711,9 @@ impl Registry {
         on_notify: Option<AppHandle>,
         name: String,
         on_exit: Option<ExitHandler>,
+        record: Option<RecordBinding>,
     ) -> Result<TermId, String> {
-        self.create_terminal_inner(cfg, sink, on_notify, name, None, on_exit)
+        self.create_terminal_inner(cfg, sink, on_notify, name, None, on_exit, record)
     }
 
     /// Respawn a process terminal into a SPECIFIC id (auto_restart):
@@ -623,6 +721,9 @@ impl Registry {
     /// actor reuses the same registry key and frames channel. Any entry under
     /// that id is closed first. The old pump is joined before the new spawn,
     /// so the old actor's `Exited` cannot race the fresh one's `Starting`.
+    /// Every respawn is a NEW run of the same record: the term id is a
+    /// pointer, the record binding's run uuid is the identity.
+    #[allow(clippy::too_many_arguments)]
     pub fn respawn_terminal(
         &self,
         id: TermId,
@@ -631,11 +732,13 @@ impl Registry {
         on_notify: Option<AppHandle>,
         name: String,
         on_exit: Option<ExitHandler>,
+        record: Option<RecordBinding>,
     ) -> Result<TermId, String> {
         self.close(id);
-        self.create_terminal_inner(cfg, sink, on_notify, name, Some(id), on_exit)
+        self.create_terminal_inner(cfg, sink, on_notify, name, Some(id), on_exit, record)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_terminal_inner(
         &self,
         cfg: ActorConfig,
@@ -644,8 +747,9 @@ impl Registry {
         name: String,
         at: Option<TermId>,
         on_exit: Option<ExitHandler>,
+        record: Option<RecordBinding>,
     ) -> Result<TermId, String> {
-        self.create_terminal_full(cfg, sink, on_notify, name, at, on_exit, None, false, false)
+        self.create_terminal_full(cfg, sink, on_notify, name, at, on_exit, None, false, false, record)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -660,14 +764,18 @@ impl Registry {
         agent: Option<AgentMeta>,
         nopty: bool,
         close_on_exit: bool,
+        record: Option<RecordBinding>,
     ) -> Result<TermId, String> {
         // The stable identity, before anything else can fail: an agent keeps
-        // its spawn uuid (one identity end to end), a shell gets a fresh one.
-        let uuid = match agent.as_ref() {
-            Some(meta) => meta.spawn_uuid.clone(),
-            None => crate::control_http::random_hex(16)
+        // its spawn uuid (one identity end to end), a recorded spawn the run
+        // uuid its caller already wrote to the store, a bare shell a fresh one.
+        let uuid = match (agent.as_ref(), record.as_ref()) {
+            (Some(meta), _) => meta.spawn_uuid.clone(),
+            (None, Some(binding)) => binding.run_uuid.clone(),
+            (None, None) => crate::control_http::random_hex(16)
                 .map_err(|e| format!("cannot generate a process uuid: {e}"))?,
         };
+        let record = record.map(|binding| binding.record_id);
         let project_id = agent.as_ref().and_then(|meta| meta.project_id);
         let (events_tx, events_rx) = std::sync::mpsc::channel();
         let handle = if nopty {
@@ -707,11 +815,16 @@ impl Registry {
             on_exit,
             input_journal: VecDeque::with_capacity(INPUT_JOURNAL_CAP),
             agent,
-            uuid,
+            uuid: uuid.clone(),
             project_id,
+            project_shell: false,
             sink: sink.clone(),
             sink_awaiting_full: sink_awaiting_full.clone(),
             close_on_exit,
+            record: record.clone(),
+            started_at_ms: epoch_ms(),
+            ended_at_ms: None,
+            success: None,
         };
         inner.entries.insert(id, entry);
         // Entry in place before the pump starts, so the pump can never race a
@@ -724,6 +837,7 @@ impl Registry {
             self.inner.clone(),
             on_notify,
             self.clone(),
+            record.map(|record_id| RecordBinding { record_id, run_uuid: uuid }),
         ));
         drop(inner);
         // There is something to sample now: release a parked stats poller.
@@ -752,12 +866,72 @@ impl Registry {
         }
     }
 
+    /// Attribute a plain shell to the project it was opened under. Unlike
+    /// [`Registry::set_project`] the row stays a `"terminal"`, so the frontend
+    /// files it in the project's terminals section, not as a command card.
+    pub fn set_project_shell(&self, id: TermId, project_id: u32) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.project_id = Some(project_id);
+                entry.project_shell = true;
+            }
+        }
+    }
+
     /// The stable uuid of one entry, `None` when unknown.
     pub fn uuid_of(&self, id: TermId) -> Option<String> {
         self.inner
             .lock()
             .ok()
             .and_then(|inner| inner.entries.get(&id).map(|e| e.uuid.clone()))
+    }
+
+    /// The record id entry `id` runs for; `None` for an unknown id or an
+    /// ephemeral row. How a spawner's terminal id becomes a child's
+    /// `parent_record_id`.
+    pub fn record_of(&self, id: TermId) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.entries.get(&id).and_then(|e| e.record.clone()))
+    }
+
+    /// The entry currently bound to `record_id` (live or exited-but-open),
+    /// with its run head. `None` when the record has no terminal attached.
+    pub fn term_of_record(&self, record_id: &str) -> Option<(TermId, RunHead)> {
+        let inner = self.inner.lock().ok()?;
+        inner
+            .entries
+            .iter()
+            .find(|(_, e)| e.record.as_deref() == Some(record_id))
+            .map(|(id, e)| (*id, run_head(e)))
+    }
+
+    /// The current run of entry `id` minus its tail; `None` for an unknown
+    /// id or an ephemeral row.
+    pub fn run_head(&self, id: TermId) -> Option<RunHead> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.entries.get(&id).filter(|e| e.record.is_some()).map(run_head))
+    }
+
+    /// Every record-bound entry whose run is still open: `(record_id,
+    /// run_uuid)`. App exit marks these `stopped` synchronously before the
+    /// actors are killed, so a clean quit never reads as a crash at the next
+    /// launch.
+    pub fn open_runs(&self) -> Vec<(String, String)> {
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .entries
+                    .values()
+                    .filter(|e| e.ended_at_ms.is_none())
+                    .filter_map(|e| e.record.clone().map(|r| (r, e.uuid.clone())))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Byte-stream liveness for MANY ids under one lock (the timer tick reads
@@ -1258,12 +1432,19 @@ fn spawn_pump(
     // can dispatch a real `Registry::close` (which needs the whole registry,
     // not just the inner lock) OFF the registry lock and OFF this thread.
     registry_owned: Registry,
+    // The record + run this entry runs for, when durable. Captured at spawn
+    // because the entry is already gone from the registry by the time the
+    // pump sees its channel close.
+    record: Option<RecordBinding>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut seq = 0u64;
         // term://activity rate limiter: at most one emit per second.
         let started_at = Instant::now();
         let mut activity = ActivityLimiter::new(Duration::from_secs(1));
+        // True once this run's exit reached the recorder, so the pump's end
+        // (a close) does not also report a stop for it.
+        let mut exit_recorded = false;
         while let Ok(event) = rx.recv() {
             seq += 1;
             // Read the CURRENT sink once per event. A mid-life swap
@@ -1439,17 +1620,46 @@ fn spawn_pump(
                     // Read the spawn's `close_on_exit` flag in the
                     // same lock — the close itself happens OFF the lock and
                     // OFF this thread, below.
-                    let (on_exit, close_on_exit) = match registry.lock() {
+                    let ended_at_ms = epoch_ms();
+                    let (on_exit, close_on_exit, handle) = match registry.lock() {
                         Ok(mut inner) => {
                             if let Some(entry) = inner.entries.get_mut(&term_id) {
                                 entry.exit_code = status.code;
-                                (entry.on_exit.clone(), entry.close_on_exit)
+                                entry.ended_at_ms = Some(ended_at_ms);
+                                entry.success = Some(status.success);
+                                (entry.on_exit.clone(), entry.close_on_exit, Some(entry.handle.clone()))
                             } else {
-                                (None, false)
+                                (None, false, None)
                             }
                         }
-                        Err(_) => (None, false), // poisoned: nothing to report
+                        Err(_) => (None, false, None), // poisoned: nothing to report
                     };
+                    // The record's run ends HERE, before `on_exit`: a project
+                    // command's exit handler may respawn into this same
+                    // terminal id, replacing the actor whose screen holds
+                    // the tail. The actor outlives its child, so the dump is
+                    // an ordinary request; a json agent's output is its event
+                    // ring, not a screen.
+                    if let (Some(binding), Some(handle)) = (record.as_ref(), handle) {
+                        if let Some(recorder) = registry_owned.run_recorder() {
+                            let (tail_kind, tail) = match registry_owned.json_agent(term_id) {
+                                Some(agent) => (TailKind::Events, events_tail(agent.events_since(0))),
+                                None => (TailKind::Text, text_tail(handle.dump_text(TAIL_LINES))),
+                            };
+                            recorder.run_exited(
+                                &binding.record_id,
+                                &binding.run_uuid,
+                                RunExit {
+                                    ended_at_ms,
+                                    exit_code: status.code,
+                                    success: status.success,
+                                    tail_kind,
+                                    tail,
+                                },
+                            );
+                        }
+                        exit_recorded = true;
+                    }
                     if let Some(on_exit) = on_exit {
                         on_exit(term_id, status.code, status.success);
                     }
@@ -1480,6 +1690,49 @@ fn spawn_pump(
                 }
             }
         }
+        // The channel closed: the entry was closed (or the app is shutting
+        // down) while the run was still open, so the run ends as `stopped`.
+        // Reported from a detached thread: whoever closed us may be holding
+        // its own store lock while it joins this pump, and the recorder
+        // needs that lock. The run-uuid rule makes the delay harmless — a
+        // restart that lands first simply makes this stop stale.
+        if let (Some(binding), false) = (record, exit_recorded) {
+            if let Some(recorder) = registry_owned.run_recorder() {
+                std::thread::spawn(move || {
+                    recorder.run_stopped(&binding.record_id, &binding.run_uuid, epoch_ms());
+                });
+            }
+        }
+    })
+}
+
+/// The automatic text tail: the dump is history + the whole screen, oldest
+/// first, so trailing blank screen rows (below the cursor) are dropped and
+/// the last [`TAIL_LINES`] of what remains are kept.
+pub fn text_tail(mut rows: Vec<String>) -> Vec<Value> {
+    while rows.last().is_some_and(|row| row.trim().is_empty()) {
+        rows.pop();
+    }
+    let skip = rows.len().saturating_sub(TAIL_LINES);
+    rows.into_iter().skip(skip).map(Value::String).collect()
+}
+
+/// The automatic events tail: the last [`TAIL_LINES`] typed events of a
+/// json-transport agent, serialized as the `/agent_events` rows are.
+pub fn events_tail(events: Vec<crate::agent_json::AgentEvent>) -> Vec<Value> {
+    let skip = events.len().saturating_sub(TAIL_LINES);
+    events
+        .into_iter()
+        .skip(skip)
+        .filter_map(|event| serde_json::to_value(event).ok())
+        .collect()
+}
+
+/// An agent's binding: its record id with the spawn uuid as the run uuid.
+fn agent_binding(meta: &AgentMeta, record: Option<String>) -> Option<RecordBinding> {
+    record.map(|record_id| RecordBinding {
+        record_id,
+        run_uuid: meta.spawn_uuid.clone(),
     })
 }
 
@@ -1579,7 +1832,7 @@ fn rail_row(id: TermId, entry: &Entry) -> RailRow {
         base: snapshot_of(id, entry),
         kind: if entry.agent.is_some() {
             "agent"
-        } else if entry_project(entry).is_some() {
+        } else if entry_project(entry).is_some() && !entry.project_shell {
             "process"
         } else {
             "terminal"
@@ -1587,6 +1840,8 @@ fn rail_row(id: TermId, entry: &Entry) -> RailRow {
         project_id: entry_project(entry),
         agent_tool_id: entry.agent.as_ref().map(|meta| meta.tool_id),
         parent_process_id: entry.agent.as_ref().and_then(|meta| meta.parent_process_id),
+        record_id: entry.record.clone(),
+        last_run: entry.record.as_ref().map(|_| run_head(entry)),
     }
 }
 
@@ -1603,6 +1858,29 @@ fn control_snapshot(id: TermId, entry: &Entry) -> ControlSnapshot {
         uuid: entry.uuid.clone(),
         project_id: entry_project(entry),
         close_on_exit: entry.close_on_exit,
+        record_id: entry.record.clone(),
+        last_run: entry.record.as_ref().map(|_| run_head(entry)),
+    }
+}
+
+/// The live row's view of its current run: the registry knows the run uuid
+/// (the entry's), when it started, and — once observed — how it ended. The
+/// tail is never on a row (`tail_len: 0` here; the stored head has it).
+fn run_head(entry: &Entry) -> RunHead {
+    RunHead {
+        run_uuid: entry.uuid.clone(),
+        status: entry.status,
+        started_at_ms: entry.started_at_ms,
+        ended_at_ms: entry.ended_at_ms,
+        exit_code: entry.exit_code,
+        success: entry.success,
+        tail_kind: match entry.agent.as_ref().map(|meta| meta.transport) {
+            Some(crate::agent_tools::Transport::Json) => TailKind::Events,
+            _ => TailKind::Text,
+        },
+        tail_len: 0,
+        summary: None,
+        session: None,
     }
 }
 
@@ -1669,5 +1947,21 @@ mod tests {
     fn debug_ring_keeps_other_events_whole() {
         let title = event("term://title", json_map(&[("title", json!("build"))]));
         assert_eq!(ring_copy(&title).data, title.data);
+    }
+
+    /// The text tail drops the blank screen rows below the cursor, keeps
+    /// blank lines INSIDE the output, and caps at the tail length from the
+    /// end (the newest lines win).
+    #[test]
+    fn text_tail_trims_trailing_blanks_and_keeps_the_newest_lines() {
+        let rows: Vec<String> = ["one", "", "three", "   ", ""].iter().map(|s| s.to_string()).collect();
+        assert_eq!(text_tail(rows), vec![json!("one"), json!(""), json!("three")]);
+        assert!(text_tail(vec![String::new(); 5]).is_empty());
+
+        let many: Vec<String> = (0..TAIL_LINES + 5).map(|i| format!("line {i}")).collect();
+        let tail = text_tail(many);
+        assert_eq!(tail.len(), TAIL_LINES);
+        assert_eq!(tail[0], json!("line 5"));
+        assert_eq!(tail[TAIL_LINES - 1], json!(format!("line {}", TAIL_LINES + 4)));
     }
 }

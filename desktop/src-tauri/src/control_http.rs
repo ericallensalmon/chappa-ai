@@ -53,6 +53,7 @@ use crate::commands::default_shell;
 use crate::coordination::Coordination;
 use crate::coordination_http as coord;
 use crate::projects::{ControlError, Projects};
+use crate::records::{self, Records};
 use crate::registry::{
     actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, NullSink, Registry, TermId,
 };
@@ -116,6 +117,10 @@ pub struct ControlState {
     /// What `GET /identity` proves. [`serve`] fills it from the bound
     /// address when left `None`.
     pub identity: Option<Arc<ServerIdentity>>,
+    /// The durable row records (projects.json / workspace.json + the run
+    /// ledger). The default is inert: spawns through it are ephemeral and the
+    /// record routes answer a clear error.
+    pub records: Records,
 }
 
 /// This run's identity: the address actually bound, a fresh random nonce,
@@ -170,7 +175,8 @@ pub struct Route {
     pub method: &'static str,
     /// Path pattern; `{id}` = terminal id (u32), `{project}` = project id
     /// (u32), `{name}` = percent-encoded process name, `{rid}` = a
-    /// coordination record id (scratchpad / todo / comment, i64).
+    /// coordination record id (scratchpad / todo / comment, i64),
+    /// `{record_id}` = a durable row record's uuid.
     pub path: &'static str,
     /// Request fields: JSON body keys for POST, query keys for GET. `?` marks
     /// optional.
@@ -198,14 +204,14 @@ pub const ROUTES: &[Route] = &[
         method: "GET",
         path: "/processes",
         fields: &[],
-        description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). Stats fields will ride along here.",
+        description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`); both are null for an ephemeral row. Stats fields will ride along here.",
         handler: list_processes,
     },
     Route {
         method: "POST",
         path: "/processes",
         fields: &["command?", "args?", "cwd?", "name?", "cols?", "rows?", "env?"],
-        description: "Spawn a terminal. `command` + `args` reach the OS verbatim (never re-split); no command = the default shell; `env` = {NAME: value} applied over the inherited environment. cols/rows 1..=4096. Returns {id, name}.",
+        description: "Spawn a terminal. `command` + `args` reach the OS verbatim (never re-split); no command = the default shell; `env` = {NAME: value} applied over the inherited environment. cols/rows 1..=4096. Returns {id, name}. Ephemeral: the row has no record and vanishes on close.",
         handler: spawn_terminal,
     },
     Route {
@@ -267,8 +273,8 @@ pub const ROUTES: &[Route] = &[
     Route {
         method: "POST",
         path: "/agents",
-        fields: &["agent_tool_id", "project_id?", "name?", "extra_args?", "prompt?", "force?", "cols?", "rows?", "parent_process_id?", "close_on_exit?"],
-        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `prompt` queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), then ONE atomic write of text+\\r; prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. `close_on_exit=true` closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too) and broadcasts `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
+        fields: &["agent_tool_id", "project_id?", "name?", "extra_args?", "prompt?", "force?", "cols?", "rows?", "parent_process_id?", "close_on_exit?", "ephemeral?"],
+        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `prompt` queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), then ONE atomic write of text+\\r; prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
         handler: spawn_agent,
     },
     Route {
@@ -312,6 +318,28 @@ pub const ROUTES: &[Route] = &[
         fields: &["wait_ms?"],
         description: "Restart = stop (no-op if not running) then start.",
         handler: restart_process,
+    },
+    // ---- records ----
+    Route {
+        method: "GET",
+        path: "/records/{record_id}/runs",
+        fields: &["limit?"],
+        description: "A record's run history, newest first: {record_id, runs: [{run_uuid, status: running | exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, tail: [...], summary?, session?}]}. `tail` is the automatic tail captured at exit — the last 200 screen lines, or the last 200 typed events for a json-transport agent. The ledger keeps the last 20 runs per record (`limit`, default and max 20). 404 for an unknown record.",
+        handler: records::route_record_runs,
+    },
+    Route {
+        method: "POST",
+        path: "/records/{record_id}/start",
+        fields: &["wait_ms?"],
+        description: "Start a stopped record: a fresh terminal and a NEW run (new run_uuid; the previous run stays in the ledger). An agent starts a new session — its stored prompt is never replayed. A project command is started by the app's frontend like start_process (waits up to wait_ms, default 3000, else pending=true); a workspace command answers 409 (it starts from the app). A record whose terminal is still live is a no-op answering that terminal. Answers {record_id, kind, term_id, run_uuid, pending}; the webview receives `term://created` carrying the record_id.",
+        handler: records::route_start_record,
+    },
+    Route {
+        method: "POST",
+        path: "/records/{record_id}/remove",
+        fields: &["confirm"],
+        description: "Remove a record and its run history (requires confirm=true). An attached terminal is closed first; for a command record this deletes the command definition itself. Answers {record_id, kind, removed, runs_deleted}.",
+        handler: records::route_remove_record,
     },
     // ---- scratchpads ----
     Route {
@@ -951,6 +979,8 @@ pub struct Params {
     pub name: Option<String>,
     /// `{rid}`: a coordination record id.
     pub record: Option<i64>,
+    /// `{record_id}`: a durable row record's uuid.
+    pub record_id: Option<String>,
     /// The writing actor: `X-Chappa-Actor` or `"user"`.
     pub actor: String,
 }
@@ -962,6 +992,7 @@ impl Default for Params {
             project: None,
             name: None,
             record: None,
+            record_id: None,
             actor: crate::coordination::USER_ACTOR.to_owned(),
         }
     }
@@ -981,6 +1012,7 @@ fn match_route(pattern: &str, path: &str) -> Option<Params> {
             "{project}" => params.project = Some(g.parse().ok()?),
             "{name}" => params.name = Some(percent_decode(g)),
             "{rid}" => params.record = Some(g.parse().ok()?),
+            "{record_id}" => params.record_id = Some(percent_decode(g)),
             literal if literal == *g => {}
             _ => return None,
         }
@@ -1157,6 +1189,8 @@ fn spawn_terminal(state: &ControlState, _: &Params, _: &str, body: &str) -> Resp
                         project_id: None,
                         agent_tool_id: None,
                         parent_process_id: None,
+                        record_id: None,
+                        last_run: None,
                     },
                 );
             }
@@ -1428,6 +1462,7 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
         tools: &state.agent_tools,
         settings: &state.settings,
         projects: &state.projects,
+        records: &state.records,
         actor,
     };
     match spawn_agent_headless(ctx, req) {
@@ -1438,7 +1473,7 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
             // exact invisibility the adopt path exists to fix) never broadcast.
             // Emit here off the control server's app handle, mirroring
             // spawn_terminal above. Found live: an orchestrating agent's
-            // first post-47 spawn still drew no rail row.
+            // first spawn after the adopt path landed still drew no rail row.
             if let Some(app) = &state.app {
                 emit_created(
                     &AppCreatedBroadcast(app.clone()),
@@ -1449,6 +1484,8 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
                         project_id: resp.agent.project_id,
                         agent_tool_id: Some(resp.agent.tool_id),
                         parent_process_id: resp.agent.parent_process_id,
+                        record_id: resp.record_id.clone(),
+                        last_run: state.registry.run_head(resp.process_id),
                     },
                 );
             }
@@ -1622,7 +1659,8 @@ pub fn render_api_doc() -> String {
          addr/nonce against the file, and only then sends its authenticated request on\n\
          the same connection (`chappa-ai-mcp` does exactly this and refuses otherwise).\n\n\
          Path placeholders: `{{id}}` = terminal id, `{{project}}` = project id, `{{name}}` =\n\
-         percent-encoded process name, `{{rid}}` = scratchpad / todo / comment id.\n\
+         percent-encoded process name, `{{rid}}` = scratchpad / todo / comment id, `{{record_id}}` =\n\
+         a durable row record's uuid.\n\
          Fields marked `?` are optional; POST fields are JSON body keys, GET fields are\n\
          query parameters (comma-separated for list fields).\n\n\
          This is the MCP server's transport (`chappa-ai-mcp`) and a curl interface —\n\
@@ -1722,6 +1760,8 @@ pub fn render_api_doc() -> String {
     );
     out.push_str("\n## Timers\n\n");
     out.push_str(crate::timers_http::DOC);
+    out.push_str("\n## Records\n\n");
+    out.push_str(records::DOC);
     out
 }
 

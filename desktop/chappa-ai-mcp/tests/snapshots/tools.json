@@ -6,7 +6,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Every live terminal/process in chappa-ai: id, name, status (starting|running|stopped|exited|failed), exit_code, cols, rows, seq, plus byte-stream liveness: output_bytes, last_output_at (unix ms), has_output (false = still booting, distinct from dead), child_alive. `agent.parent_process_id` = the process that spawned it, null for a root; `agent.close_on_exit` is the /processes row's close_on_exit for agents.",
+    "description": "Every live terminal/process in chappa-ai: id, name, status (starting|running|stopped|exited|failed), exit_code, cols, rows, seq, plus byte-stream liveness: output_bytes, last_output_at (unix ms), has_output (false = still booting, distinct from dead), child_alive. `agent.parent_process_id` = the process that spawned it, null for a root; `close_on_exit` is the row's self-reap flag. `record_id` + `last_run` {run_uuid, status, started_at_ms, ended_at_ms, exit_code, success, tail_kind, tail_len} name the durable record a row belongs to: a stopped row with a record_id can be started again (start_record) and its history read (get_record_runs); both null for an ephemeral row.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
@@ -22,7 +22,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text.",
+    "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text. A row whose child exited keeps its record: a stopped row with a record_id can be started again with start_record.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -160,7 +160,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM — an element containing spaces reaches the child as ONE argument, so pass [\"--prompt\", \"two words here\"], never a pre-joined string. The child gets CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID / CHAPPA_AI_AGENT_TOOL_ID in its env and the reply carries agent_instructions to prepend to your first message. `prompt` is queued until the TUI is ready (first output, then agent_ready_quiet_ms of silence — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout) and delivered as one atomic write with Enter; prompt_receipt tells you whether it landed (delivered=false, reason=exited when the child died first). Busy guards refuse when the tool's max_busy or the container's max_busy_in_container is reached, naming the busy processes; force=true overrides. Docker-exec replies include container {status, uptime_s, mem_bytes, mem_limit_bytes} so you can decline the next spawn with evidence. The reply's `agent.parent_process_id` is the process that spawned you (null for a root) — the rail nests this row under it. close_on_exit=true makes the row close itself when the child exits; a bash-hosted tool (chappa-a/b) never exits on its own, so end its command line with `; exit` (or spawn with extra_args [\"-lc\", \"<command>\"]) and the row reaps when the run returns.",
+    "description": "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM — an element containing spaces reaches the child as ONE argument, so pass [\"--prompt\", \"two words here\"], never a pre-joined string. The child gets CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID / CHAPPA_AI_AGENT_TOOL_ID in its env and the reply carries agent_instructions to prepend to your first message. `prompt` is queued until the TUI is ready (first output, then agent_ready_quiet_ms of silence — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout) and delivered as one atomic write with Enter; prompt_receipt tells you whether it landed (delivered=false, reason=exited when the child died first). Busy guards refuse when the tool's max_busy or the container's max_busy_in_container is reached, naming the busy processes; force=true overrides. Docker-exec replies include container {status, uptime_s, mem_bytes, mem_limit_bytes} so you can decline the next spawn with evidence. The reply's `agent.parent_process_id` is the process that spawned you (null for a root) — the rail nests this row under it. The spawn creates a durable agent RECORD (`record_id` in the reply): the row survives exit and close as a stopped row that can be started again (start_record) and keeps a run history (get_record_runs). ephemeral=true opts out (no record; the row vanishes on close). close_on_exit=true implies ephemeral and makes the row close itself when the child exits; a bash-hosted tool never exits on its own, so end its command line with `; exit` (or spawn with extra_args [\"-lc\", \"<command>\"]) and the row reaps when the run returns.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -170,7 +170,7 @@
           "type": "integer"
         },
         "close_on_exit": {
-          "description": "Close this row automatically when the child exits (default false). Note: a bash-hosted tool never exits on its own — end the command with `; exit` or spawn with extra_args [\"-lc\", \"<command>\"] so the row reaps when the run returns.",
+          "description": "Close this row automatically when the child exits (default false; implies ephemeral). Note: a bash-hosted tool never exits on its own — end the command with `; exit` or spawn with extra_args [\"-lc\", \"<command>\"] so the row reaps when the run returns.",
           "type": "boolean"
         },
         "cols": {
@@ -178,6 +178,10 @@
           "maximum": 4096,
           "minimum": 1,
           "type": "integer"
+        },
+        "ephemeral": {
+          "description": "Spawn without a durable record (default false): the row vanishes on close and keeps no run history.",
+          "type": "boolean"
         },
         "extra_args": {
           "description": "argv appended to the tool's args, passed unsplit.",
@@ -514,6 +518,92 @@
       "type": "object"
     },
     "name": "close_terminal"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "A record's run history, newest first: {record_id, runs: [{run_uuid, status: running | exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, tail, summary?, session?}]}. `tail` is the automatic tail captured when the run's child exited — the last 200 screen lines, or the last 200 typed events for a json-transport agent — so a stopped row's output stays readable after its pane is gone. The ledger keeps the last 20 runs per record.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "Newest N runs (default and max 20).",
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "record_id": {
+          "description": "Record id from a process row's record_id (list_processes / get_process_status / spawn_agent).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_record_runs"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Start a stopped record again: a fresh terminal and a NEW run (new run_uuid; the previous run stays in the ledger). An agent starts a new session — its original prompt is never replayed, send your own with send_input. A project command is started by the app's frontend like start_process (waits up to wait_ms, answers pending=true if it has not registered yet); a workspace command cannot be started from here (409). A record whose terminal is still live is a no-op answering that terminal. Answers {record_id, kind: command | agent | terminal, term_id, run_uuid, pending}.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "description": "Record id from a process row's record_id.",
+          "type": "string"
+        },
+        "wait_ms": {
+          "description": "How long to wait for a project command's spawn to register (default 3000, max 15000).",
+          "maximum": 15000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "record_id"
+      ],
+      "type": "object"
+    },
+    "name": "start_record"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Remove a record and its run history. Requires confirm=true — there is no undo. An attached terminal is closed first; for a command record this deletes the command definition itself. Answers {record_id, kind, removed, runs_deleted}.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm": {
+          "description": "Must be true.",
+          "type": "boolean"
+        },
+        "record_id": {
+          "description": "Record id from a process row's record_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "confirm"
+      ],
+      "type": "object"
+    },
+    "name": "remove_record"
   },
   {
     "annotations": {

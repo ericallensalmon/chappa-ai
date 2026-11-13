@@ -266,6 +266,17 @@ describe("TerminalPanel", () => {
     panel.dispose();
   });
 
+  it("forwards the owning project to create_terminal so the shell's record is filed under it", async () => {
+    const { api } = stubApi();
+    const container = document.createElement("div");
+    const panel = new TerminalPanel({ container, api, platform: "Win32", projectId: 7 });
+    mockHostRect(container, 800, 400);
+    await panel.start();
+    const opts = (api.createTerminal as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(opts.projectId).toBe(7);
+    panel.dispose();
+  });
+
   it("a press inside the context menu does not dismiss it before the click lands", async () => {
     // REGRESSION: THE CAPTURE-PHASE document dismiss ran before the
     // menu buttons' click could fire — Copy/Paste were unclickable.

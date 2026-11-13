@@ -1915,6 +1915,7 @@ export class App {
       settings: this.settings,
       cwd,
       profile,
+      projectId,
       active: false,
       pathBase: baseFor(
         projectId !== undefined ? { kind: "projectShell", projectRoot } : { kind: "workspaceShell", spawnCwd: cwd ?? null },
@@ -2072,6 +2073,10 @@ export class App {
       // A process terminal renders as its project's command card, not a rail
       // row — but it must still live in `entries` so clicking its card (or a
       // reconcile) can realize a live pane. The id is already `seen` above.
+    } else if (f.project_id !== null) {
+      // A shell opened under a project (another window, or a restart of the
+      // webview) belongs in that project's TERMINALS section.
+      entry = { ...entry, kind: "project-shell", projectShell: { projectId: f.project_id } };
     }
     this.entries.set(id, entry);
     this.renderRail();

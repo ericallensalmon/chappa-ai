@@ -174,7 +174,8 @@ fn route_list_matches_the_registered_handlers() {
             .replace("{id}", "999999")
             .replace("{project}", "999999")
             .replace("{name}", "nope")
-            .replace("{rid}", "999999");
+            .replace("{rid}", "999999")
+            .replace("{record_id}", "no-such-record");
         let body = if route.method == "POST" { "{}" } else { "" };
         let (status, reply) = http(&addr, route.method, &concrete, Some(&token), body);
         let err = reply["error"].as_str().unwrap_or("");
@@ -409,9 +410,11 @@ fn the_control_row_keeps_its_exact_wire_shape() {
             "id",
             "kind",
             "last_output_at",
+            "last_run",
             "name",
             "output_bytes",
             "project_id",
+            "record_id",
             "rows",
             "seq",
             "status",

@@ -34,11 +34,13 @@ use crate::agent_json::{
 use crate::agent_tools::{docker_exec_prefix, AgentTool, EnvFlags, AgentToolsState, Runtime, ToolType, Transport};
 use crate::open_path::{parse_mounts, Mount};
 use crate::projects::Projects;
+use crate::records::{Records, Scope};
 use crate::registry::{
     emit_created, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, JsonEvent,
-    NullSink, Registry, TermId,
+    NullSink, Registry, RunRecorder, TermId,
 };
 use crate::settings::SettingsState;
+use project_model::records::{new_record_id, AgentRecord, RecordKind, Run, TailKind};
 
 // ---- constants (tuning numbers, named once) ----------------------------------
 
@@ -1634,6 +1636,16 @@ pub struct SpawnAgentRequest {
     /// returns; there is deliberately no idle-based close here.
     #[serde(default)]
     pub close_on_exit: bool,
+    /// Spawn WITHOUT a durable record: the row vanishes on close and leaves
+    /// no history, like a debug-harness terminal. Default false — an agent
+    /// normally outlives its terminal as a stopped row that can be started
+    /// again. `close_on_exit` implies this.
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// Internal: start THIS existing record again (a new run on the same
+    /// record) instead of creating a record. Never on the wire.
+    #[serde(skip)]
+    pub record_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1641,6 +1653,8 @@ pub struct SpawnAgentResponse {
     pub process_id: TermId,
     /// Same value — control-surface callers read `process_id`, the rail reads `term_id`.
     pub term_id: TermId,
+    /// The agent's durable record, `null` for an ephemeral spawn.
+    pub record_id: Option<String>,
     pub name: String,
     pub agent_instructions: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1659,6 +1673,10 @@ pub struct SpawnContext<'a> {
     pub tools: &'a AgentToolsState,
     pub settings: &'a SettingsState,
     pub projects: &'a Projects,
+    /// The record service the spawn writes its durable half to. An inert
+    /// (uninitialized) one makes every spawn ephemeral, which is what tests
+    /// and the harness want.
+    pub records: &'a Records,
     /// The SPAWNING actor's process id (the control route parses the
     /// `X-Chappa-Actor` header; `None` for the Tauri command route / a
     /// `user` / unparsable actor). This is the default parent candidate when
@@ -1766,24 +1784,56 @@ pub fn spawn_agent_with(
         project_id: req.project_id,
         parent_process_id,
         spawned_at_ms: now,
-        spawn_uuid: uuid,
+        spawn_uuid: uuid.clone(),
         nspid: plan.nspid,
         container: None,
         bridge: Bridge::Ok,
         transport: tool.transport,
         awaiting_input: false,
     };
+    // The durable half, BEFORE the terminal: the record (new, or the one
+    // being started again) and its fresh run, so the registry binding names
+    // a run the store already holds. `close_on_exit` rows reap themselves
+    // and keep no record.
+    let record_id = if req.close_on_exit || req.ephemeral {
+        None
+    } else {
+        let scope = match req.project_id {
+            Some(id) => Scope::Project(id),
+            None => Scope::Workspace,
+        };
+        let tail_kind = match tool.transport {
+            Transport::Json => TailKind::Events,
+            Transport::Tty => TailKind::Text,
+        };
+        match agent_record(ctx.records, ctx.registry, scope, &req, &name, tool.id, parent_process_id) {
+            Ok(record_id) => {
+                let run = Run::begin(uuid.clone(), now, tail_kind);
+                match ctx.records.begin_run(scope, RecordKind::Agent, &record_id, &run) {
+                    Ok(()) => Some(record_id),
+                    Err(e) => {
+                        log::warn!("[agents] run {uuid} of record {record_id} not recorded: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("[agents] spawn of \"{name}\" leaves no record: {e}");
+                None
+            }
+        }
+    };
     // Capture the broadcast app handle BEFORE the json-agent match
     // below moves `on_notify` (the emit is after it). A cheap Arc clone.
     let created_app = on_notify.clone();
-    let json_agent: Option<Arc<JsonAgent>> = match json_mode {
-        None => {
-            ctx.registry
-                .create_agent_terminal(cfg, sink, on_notify, name.clone(), id, meta.clone(), req.close_on_exit)?;
-            None
-        }
-        Some(mode) => {
-            let handle = ctx.registry.create_json_agent_terminal(
+    let created = match json_mode {
+        None => ctx
+            .registry
+            .create_agent_terminal(cfg, sink, on_notify.clone(), name.clone(), id, meta.clone(), req.close_on_exit, record_id.clone())
+            .map(|_| None),
+        Some(mode) => ctx
+            .registry
+            .create_json_agent_terminal(
                 cfg,
                 sink,
                 on_notify.clone(),
@@ -1791,7 +1841,20 @@ pub fn spawn_agent_with(
                 id,
                 meta.clone(),
                 req.close_on_exit,
-            )?;
+                record_id.clone(),
+            )
+            .map(|handle| Some((handle, mode))),
+    };
+    let json_agent: Option<Arc<JsonAgent>> = match created {
+        Err(e) => {
+            // The run began in the store but no terminal ever ran it.
+            if let Some(record_id) = &record_id {
+                ctx.records.run_stopped(record_id, &uuid, epoch_ms());
+            }
+            return Err(e);
+        }
+        Ok(None) => None,
+        Ok(Some((handle, mode))) => {
             let recipe = SpawnRecipe {
                 command: plan.command.clone(),
                 args: plan.args.clone(),
@@ -1823,7 +1886,8 @@ pub fn spawn_agent_with(
         Some(agent) => match json_boot(ctx.registry, agent, prompt) {
             Ok(receipt) => receipt,
             Err(err) => {
-                // The child never started: no entry to leave behind.
+                // The child never started: no entry to leave behind (the
+                // close reports the run as stopped).
                 ctx.registry.close(id);
                 return Err(err);
             }
@@ -1854,6 +1918,8 @@ pub fn spawn_agent_with(
                 project_id: req.project_id,
                 agent_tool_id: Some(tool.id),
                 parent_process_id,
+                record_id: record_id.clone(),
+                last_run: ctx.registry.run_head(id),
             },
         );
     }
@@ -1861,6 +1927,7 @@ pub fn spawn_agent_with(
     Ok(SpawnAgentResponse {
         process_id: id,
         term_id: id,
+        record_id,
         name,
         agent_instructions: instructions,
         prompt_receipt,
@@ -1868,6 +1935,46 @@ pub fn spawn_agent_with(
         agent,
         forced,
     })
+}
+
+/// The agent's record: the one named by `req.record_id` (a start of a
+/// stopped record — it must exist), else a NEW record built from the spawn
+/// request's durable half. The parent is recorded by RECORD id: the
+/// spawner's terminal resolves to its record when it has one (an ephemeral
+/// or unknown spawner leaves `None`).
+fn agent_record(
+    records: &Records,
+    registry: &Registry,
+    scope: Scope,
+    req: &SpawnAgentRequest,
+    name: &str,
+    tool_id: u32,
+    parent_process_id: Option<TermId>,
+) -> Result<String, String> {
+    if let Some(record_id) = &req.record_id {
+        return match records.locate(record_id) {
+            Some((_, RecordKind::Agent, _)) => Ok(record_id.clone()),
+            Some(_) => Err(format!("record {record_id} is not an agent")),
+            None => Err(format!("no such record: {record_id}")),
+        };
+    }
+    let record_id = new_record_id()?;
+    records.add_agent_record(
+        scope,
+        AgentRecord {
+            record_id: record_id.clone(),
+            name: name.to_owned(),
+            tool_id,
+            favorite: false,
+            disable_auto_rename: false,
+            notification_level: None,
+            parent_record_id: parent_process_id.and_then(|parent| registry.record_of(parent)),
+            extra_args: req.extra_args.clone(),
+            prompt: req.prompt.clone().filter(|p| !p.is_empty()),
+            last_run: None,
+        },
+    )?;
+    Ok(record_id)
 }
 
 // ---- Json transport glue -------------------------------------------------------
@@ -2043,14 +2150,16 @@ pub async fn spawn_agent(
     tools: State<'_, AgentToolsState>,
     settings: State<'_, SettingsState>,
     projects: State<'_, Projects>,
+    records: State<'_, Records>,
     req: SpawnAgentRequest,
     frames: Channel<InvokeResponseBody>,
 ) -> Result<SpawnAgentResponse, String> {
-    let (registry, tools, settings, projects) = (
+    let (registry, tools, settings, projects, records) = (
         registry.inner().clone(),
         tools.inner().clone(),
         settings.inner().clone(),
         projects.inner().clone(),
+        records.inner().clone(),
     );
     tauri::async_runtime::spawn_blocking(move || {
         spawn_agent_with(
@@ -2059,6 +2168,7 @@ pub async fn spawn_agent(
                 tools: &tools,
                 settings: &settings,
                 projects: &projects,
+                records: &records,
                 // The rail's own "New agent ▸" spawn has NO actor —
                 // user-spawned agents are roots (parent `None`).
                 actor: None,

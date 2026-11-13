@@ -45,6 +45,11 @@ pub const CHANGED_ON_DISK: &str = "chappa.yml changed on disk — re-apply your 
 /// re-hash guard, atomic write. Returns the model as written. An `edit` that
 /// changes nothing still writes (the caller decided; this keeps the path
 /// uniform), but a failed `edit` writes nothing and makes no backup.
+///
+/// Only process DEFINITIONS reach the project file. Agent and terminal
+/// records, and the per-command record state (`record_id`, `last_run`),
+/// live in projects.json / workspace.json and never pass through here: they
+/// describe what happened on this machine, not what the project is.
 pub fn apply<F>(store: &mut ProjectStore, id: u32, edit: F) -> Result<ProjectYml, String>
 where
     F: FnOnce(&Path, &mut ProjectYml) -> Result<(), String>,

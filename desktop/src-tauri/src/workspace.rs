@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use indexmap::IndexMap;
 use serde::Serialize;
 use project_model::backoff::RestartBackoff;
+use project_model::records::{RecordKind, Run, RunHead, TailKind};
 use project_model::settings::Settings;
 use project_model::status::{Lifecycle, ProcessEvent, RUNNING_AFTER_MS};
 use project_model::workspace::{validate_workspace_def, WorkspaceStore};
@@ -43,8 +44,10 @@ use term_core::actor::epoch_ms;
 use term_core::pty::PtySpec;
 use term_core::status::ProcessStatus;
 
+use crate::coordination::Coordination;
 use crate::projects::{process_command, ProcessDefDto};
-use crate::registry::{actor_config, ChannelSink, ExitHandler, Registry, TermId};
+use crate::records::RunLedger;
+use crate::registry::{actor_config, ChannelSink, ExitHandler, RecordBinding, Registry, TermId};
 use crate::settings::SettingsState;
 
 /// One workspace command at runtime. Same shape as a project `ProcessRuntime`,
@@ -86,6 +89,9 @@ struct WsInner {
     /// Lifecycle state per command name, in stored order.
     procs: IndexMap<String, WsProc>,
     shutting_down: bool,
+    /// The run ledger a command's runs are written to (see the projects
+    /// runtime for why the ledger handle lives beside the store).
+    ledger: RunLedger,
 }
 
 impl Default for WsInner {
@@ -96,6 +102,7 @@ impl Default for WsInner {
             settings: SettingsState::default(),
             procs: IndexMap::new(),
             shutting_down: false,
+            ledger: RunLedger::default(),
         }
     }
 }
@@ -111,18 +118,77 @@ impl Workspace {
     /// store at `<app-config>/workspace.json` and start the 500ms-alive
     /// ticker. Builds a never-started runtime per stored command so the rows
     /// are addressable; actual auto_start spawns are frontend-initiated (the
-    /// frames-channel constraint).
-    pub fn init(&self, app: &AppHandle, config_dir: std::path::PathBuf, settings: SettingsState) {
+    /// frames-channel constraint). Every stored command gets its record id
+    /// here, so the rows carry one before their first start.
+    pub fn init(&self, app: &AppHandle, config_dir: std::path::PathBuf, settings: SettingsState, coordination: Coordination) {
         let store = WorkspaceStore::new(config_dir.join("workspace.json"));
         let defs = store.commands();
+        for name in defs.keys() {
+            if let Err(e) = store.ensure_command_record_id(name) {
+                log::warn!("workspace `{name}`: record id not assigned: {e}");
+            }
+        }
         {
             let mut inner = self.inner.lock().unwrap();
             inner.store = Some(store);
             inner.app = Some(app.clone());
             inner.settings = settings;
             inner.procs = defs.into_iter().map(|(n, d)| (n, fresh(d))).collect();
+            inner.ledger = RunLedger::new(coordination);
         }
         spawn_ticker(self.inner.clone());
+    }
+
+    /// A workspace state over an explicit store and no app handle (tests,
+    /// headless services).
+    pub fn with_store(store: WorkspaceStore) -> Self {
+        let this = Self::default();
+        this.inner.lock().unwrap().store = Some(store);
+        this
+    }
+
+    /// The store handle (stateless: every call reads the file fresh).
+    pub fn store(&self) -> Result<WorkspaceStore, String> {
+        self.lock()?
+            .store
+            .clone()
+            .ok_or_else(|| "workspace store not initialized".to_owned())
+    }
+
+    pub fn app_handle(&self) -> Result<AppHandle, String> {
+        self.lock()?
+            .app
+            .clone()
+            .ok_or_else(|| "app handle not initialized".to_owned())
+    }
+
+    /// The frontend's start (a frames channel in hand) for a record start.
+    pub fn start_with_frames(
+        &self,
+        app: &AppHandle,
+        registry: &Registry,
+        name: String,
+        frames: Channel<InvokeResponseBody>,
+    ) -> Result<TermId, String> {
+        start_ws(app, registry, self, name, frames)
+    }
+
+    /// The delete behind the editor's command and a record removal (a
+    /// command record IS its definition): the file is written first (a
+    /// refused delete must not have killed anything), the record's run
+    /// history is pruned, then the running process, if any, is stopped.
+    pub fn delete_command(&self, app: &AppHandle, registry: &Registry, name: &str) -> Result<Vec<WorkspaceCommandDto>, String> {
+        let store = self.store()?;
+        let record_id = store.command_record_id(name);
+        store.delete_command(name)?;
+        let mut inner = self.lock()?;
+        if let Some(record_id) = record_id {
+            if let Err(e) = inner.ledger.delete_records(&[record_id]) {
+                log::warn!("workspace delete `{name}`: run history not pruned: {e}");
+            }
+        }
+        rebuild(&mut inner, registry, app, self.arc());
+        Ok(dtos(&inner))
     }
 
     /// App-exit: stop every workspace command, cancel pending restarts, and
@@ -197,8 +263,41 @@ fn emit_status(
     );
 }
 
+/// Begin a run for workspace command `name` (the projects runtime's
+/// `begin_command_run`, workspace edition): record id on first use, a fresh
+/// run uuid, the store head and the ledger row, all before the terminal
+/// exists. Callers hold the workspace lock; `None` (logged) leaves this run
+/// unrecorded.
+fn begin_command_run(inner: &WsInner, name: &str) -> Option<RecordBinding> {
+    let store = inner.store.as_ref()?;
+    let record_id = match store.ensure_command_record_id(name) {
+        Ok(record_id) => record_id,
+        Err(e) => {
+            log::warn!("workspace `{name}`: no record for this run: {e}");
+            return None;
+        }
+    };
+    let run_uuid = match crate::control_http::random_hex(16) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            log::warn!("workspace `{name}`: no record for this run: cannot generate a run uuid: {e}");
+            return None;
+        }
+    };
+    let run = Run::begin(run_uuid.clone(), now_ms(), TailKind::Text);
+    if let Err(e) = store.begin_run(&record_id, run.clone()) {
+        log::warn!("workspace `{name}`: run {run_uuid} not recorded: {e}");
+        return None;
+    }
+    if let Err(e) = inner.ledger.insert(&record_id, None, RecordKind::Command, &run) {
+        log::warn!("workspace `{name}`: ledger row for run {run_uuid} not written: {e}");
+    }
+    Some(RecordBinding { record_id, run_uuid })
+}
+
 /// Wire one command's terminal spawn up with its auto_restart hook. `name` is
-/// the command's key (there is no project id). Callers hold the workspace lock.
+/// the command's key (there is no project id). `record` is this run's
+/// binding ([`begin_command_run`]). Callers hold the workspace lock.
 fn spawn_proc(
     registry: &Registry,
     app: &AppHandle,
@@ -206,6 +305,7 @@ fn spawn_proc(
     name: &str,
     settings: &Settings,
     proc: &mut WsProc,
+    record: Option<RecordBinding>,
 ) -> Result<TermId, String> {
     let spec = build_workspace_spec(&proc.def, settings)?;
     let channel = proc
@@ -226,6 +326,7 @@ fn spawn_proc(
             Some(app.clone()),
             name.to_owned(),
             Some(on_exit),
+            record,
         )?,
         None => registry.create_terminal_with_exit(
             cfg,
@@ -233,6 +334,7 @@ fn spawn_proc(
             Some(app.clone()),
             name.to_owned(),
             Some(on_exit),
+            record,
         )?,
     };
     proc.term_id = Some(term_id);
@@ -317,9 +419,8 @@ fn respawn_proc(
         return;
     }
     let settings = inner.settings.snapshot();
-    let proc = match inner.procs.get_mut(name) {
-        Some(proc) => proc,
-        None => return,
+    let Some(proc) = inner.procs.get(name) else {
+        return;
     };
     if proc.generation != generation {
         return; // superseded by a user action
@@ -330,7 +431,12 @@ fn respawn_proc(
     if proc.term_id.is_none() {
         return; // never started: nothing to respawn
     }
-    let _ = spawn_proc(registry, app, ws.clone(), name, &settings, proc);
+    // Every respawn is a new run of the same record.
+    let record = begin_command_run(&inner, name);
+    let Some(proc) = inner.procs.get_mut(name) else {
+        return;
+    };
+    let _ = spawn_proc(registry, app, ws.clone(), name, &settings, proc, record);
 }
 
 /// One ticker: commands alive ≥500ms with no output graduate starting →
@@ -389,6 +495,12 @@ fn rebuild(inner: &mut WsInner, registry: &Registry, app: &AppHandle, ws: Arc<Mu
     let settings = inner.settings.snapshot();
     let mut next: IndexMap<String, WsProc> = IndexMap::new();
     for (name, def) in defs {
+        // A command the file gained is a record too.
+        if let Some(store) = inner.store.as_ref() {
+            if let Err(e) = store.ensure_command_record_id(&name) {
+                log::warn!("workspace `{name}`: record id not assigned: {e}");
+            }
+        }
         match inner.procs.shift_remove(&name) {
             Some(mut p) => {
                 let was_live = p.term_id.is_some()
@@ -407,7 +519,8 @@ fn rebuild(inner: &mut WsInner, registry: &Registry, app: &AppHandle, ws: Arc<Mu
                     if build_workspace_spec(&p.def, &settings).is_ok() && p.channel.is_some() {
                         p.lifecycle.on(ProcessEvent::Stop, now_ms());
                         p.generation += 1;
-                        let _ = spawn_proc(registry, app, ws.clone(), &name, &settings, &mut p);
+                        let record = begin_command_run(inner, &name);
+                        let _ = spawn_proc(registry, app, ws.clone(), &name, &settings, &mut p, record);
                     } else {
                         log::warn!(
                             "workspace `{name}` keeps running on its old definition — the new one does not spawn"
@@ -436,10 +549,17 @@ fn rebuild(inner: &mut WsInner, registry: &Registry, app: &AppHandle, ws: Arc<Mu
 }
 
 fn dtos(inner: &WsInner) -> Vec<WorkspaceCommandDto> {
+    // One file read for the whole listing: the record state rides the
+    // stored overrides, not the runtime.
+    let overrides = inner
+        .store
+        .as_ref()
+        .map(|s| s.load().process_overrides)
+        .unwrap_or_default();
     inner
         .procs
         .iter()
-        .map(|(name, p)| WorkspaceCommandDto::from_proc(name, p))
+        .map(|(name, p)| WorkspaceCommandDto::from_proc(name, p, overrides.get(name)))
         .collect()
 }
 
@@ -459,10 +579,14 @@ pub struct WorkspaceCommandDto {
     pub exit_code: Option<i32>,
     pub working_dir: Option<String>,
     pub env: IndexMap<String, String>,
+    /// The command's durable record and the head of its run ledger (the
+    /// project rows carry the same pair).
+    pub record_id: Option<String>,
+    pub last_run: Option<RunHead>,
 }
 
 impl WorkspaceCommandDto {
-    fn from_proc(name: &str, p: &WsProc) -> Self {
+    fn from_proc(name: &str, p: &WsProc, record: Option<&project_model::projects::ProcessOverride>) -> Self {
         Self {
             name: name.to_owned(),
             command: p.def.command.display(),
@@ -474,6 +598,8 @@ impl WorkspaceCommandDto {
             exit_code: p.exit_code,
             working_dir: p.def.working_dir.as_ref().map(|d| d.display().to_string()),
             env: p.def.env.clone(),
+            record_id: record.and_then(|r| r.record_id.clone()),
+            last_run: record.and_then(|r| r.last_run.as_ref().map(Run::head)),
         }
     }
 }
@@ -521,17 +647,7 @@ pub fn delete_workspace_command(
     workspace: State<'_, Workspace>,
     name: String,
 ) -> Result<Vec<WorkspaceCommandDto>, String> {
-    let store = {
-        let inner = workspace.lock()?;
-        inner
-            .store
-            .clone()
-            .ok_or_else(|| "workspace store not initialized".to_owned())?
-    };
-    store.delete_command(&name)?;
-    let mut inner = workspace.lock()?;
-    rebuild(&mut inner, &registry, &app, workspace.arc());
-    Ok(dtos(&inner))
+    workspace.delete_command(&app, &registry, &name)
 }
 
 /// Start one command. Live → idempotent no-op with its id. `frames` is the
@@ -560,6 +676,19 @@ fn start_ws(
         return Ok(id); // already live: idempotent
     }
     let settings = inner.settings.snapshot();
+    let def = inner
+        .procs
+        .get(&name)
+        .map(|p| p.def.clone())
+        .ok_or_else(|| format!("no command named `{name}`"))?;
+    // The run begins only for a spec that can spawn (a failed attempt leaves
+    // the record's previous run as it was), before `proc` is borrowed.
+    let spec = build_workspace_spec(&def, &settings);
+    let record = if spec.is_ok() {
+        begin_command_run(&inner, &name)
+    } else {
+        None
+    };
     let proc = inner
         .procs
         .get_mut(&name)
@@ -568,10 +697,10 @@ fn start_ws(
     if let Some(id) = proc.term_id.take() {
         registry.close(id);
     }
-    match build_workspace_spec(&proc.def, &settings) {
+    match spec {
         Ok(_) => {
             proc.term_id = None; // force a fresh id on this start
-            match spawn_proc(registry, app, workspace.arc(), &name, &settings, proc) {
+            match spawn_proc(registry, app, workspace.arc(), &name, &settings, proc, record) {
                 Ok(id) => {
                     proc.backoff.reset();
                     Ok(id)

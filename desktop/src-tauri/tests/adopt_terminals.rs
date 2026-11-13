@@ -277,6 +277,7 @@ fn rail_rows_carry_kind_and_binding_facts_for_each_spawn_kind() {
             aid,
             agent_meta(Some(4)),
             false,
+            None,
         )
         .expect("agent spawn");
 
@@ -316,6 +317,8 @@ fn created_broadcast_records_every_spawn_kind() {
                 parent_process_id: None,
                 project_id,
                 agent_tool_id: tool_id,
+                record_id: None,
+                last_run: None,
             },
         );
     }

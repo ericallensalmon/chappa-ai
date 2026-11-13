@@ -19,6 +19,9 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 term-core = { path = "../term-core" }
 blake3 = "1"
+# Record ids (the stable identity of a rail row that outlives its
+# terminal) come from the OS RNG, like every other id in the app.
+getrandom = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

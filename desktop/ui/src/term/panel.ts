@@ -247,6 +247,10 @@ export interface TerminalPanelOptions {
   /** Shell-profile NAME to spawn (new-terminal menu). Only meaningful
    *  for the default create_terminal path. */
   profile?: string;
+  /** The project this shell belongs to, when opened from a project's
+   *  terminals section; forwarded to create_terminal so the shell's record
+   *  is filed under the project. */
+  projectId?: number;
   /** Platform string for shell selection; tests inject this. */
   platform?: string;
   /** Renderer to construct. Defaults to the `?renderer=dom|gl` query
@@ -1021,6 +1025,7 @@ export class TerminalPanel {
       ? await this.opts.spawn((buf) => this.onFrame(buf), { cols: spec.cols ?? 80, rows: spec.rows ?? 24 })
       : await this.api.createTerminal({
           spec,
+          projectId: this.opts.projectId,
           onFrame: (buf) => this.onFrame(buf),
         });
     // The panel manager adds its rail row the moment the id is known — before
