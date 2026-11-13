@@ -11,6 +11,10 @@
 //!   the pty writer.
 //! - A frame is emitted only when there is damage AND no un-acked frame is
 //!   outstanding; damage self-coalesces between acks.
+//! - The child exiting does NOT end the thread: the actor reports `Exited`
+//!   and then stays alive, input-less, blocking on the control channel only,
+//!   so scroll / selection / copy / text dumps / resize keep working on the
+//!   final screen and its scrollback until the handle shuts it down.
 //!
 //! Frames carry *viewport* coordinates throughout: row 0 is the top of the
 //! screen, and `FrameData::display_offset` / `history_len` let the frontend
@@ -441,6 +445,20 @@ pub fn epoch_ms() -> u64 {
         .max(1)
 }
 
+/// Input refused because the child behind the handle has exited. The
+/// terminal itself stays readable (scroll, selection, copy, text dumps), but
+/// there is nothing left to deliver input to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dead;
+
+impl std::fmt::Display for Dead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the terminal's child has exited")
+    }
+}
+
+impl std::error::Error for Dead {}
+
 /// Cheap clonable handle. Every method just sends on the control mpsc, except
 /// `write_input` which goes straight to the pty writer.
 pub struct TermHandle {
@@ -477,17 +495,24 @@ impl TermHandle {
     }
 
     /// Pre-encoded input bytes (the encoder produces these). Bypasses
-    /// the control channel entirely — never queued behind parsing.
-    pub fn write_input(&self, bytes: &[u8]) {
+    /// the control channel entirely — never queued behind parsing. Refused
+    /// with [`Dead`] once the child has exited: the pane stays open for
+    /// reading, but a write would go nowhere.
+    pub fn write_input(&self, bytes: &[u8]) -> Result<(), Dead> {
+        if !self.io.child_alive() {
+            return Err(Dead);
+        }
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(bytes);
             let _ = writer.flush();
         }
+        Ok(())
     }
 
     /// Encode and send a semantic key event. The terminal modes that decide
     /// the encoding live on the actor thread, so the snapshot happens there
-    /// and only the resulting bytes touch the writer.
+    /// and only the resulting bytes touch the writer. Dropped by the actor
+    /// once the child has exited (as are `paste`, `mouse` and `poke`).
     pub fn write_key(&self, ev: KeyEvent) {
         let _ = self.tx.send(Control::WriteKey(ev));
     }
@@ -560,10 +585,10 @@ impl TermHandle {
     /// Synchronous: serialize the current viewport plus the last `lines`
     /// scrollback rows, oldest first, trailing whitespace trimmed. Same
     /// control-channel round trip as `copy_selection`; backs the debug HTTP
-    /// `/text` route. Falls back to an empty dump if the actor has already
-    /// exited (the actor thread ends after `Exited`, so the reply would never
-    /// come — `recv_timeout` turns that into a fast empty result instead of a
-    /// hang).
+    /// `/text` route. Keeps answering after the child exits (the actor
+    /// outlives its child until shutdown). Falls back to an empty dump if the
+    /// actor thread is gone or wedged — `recv_timeout` turns a reply that
+    /// never comes into a fast empty result instead of a hang.
     pub fn dump_text(&self, lines: usize) -> Vec<String> {
         let (tx, rx) = channel();
         if self
@@ -626,7 +651,7 @@ impl TermHandle {
     /// Falls back to all-zero stats if the actor is already gone. Uses
     /// `recv_timeout` for the same reason `dump_text` does: the caller is a
     /// synchronous Tauri command on the main thread, and a reply that never
-    /// comes (actor ended after `Exited`) must degrade, not hang the UI.
+    /// comes (actor shut down or wedged) must degrade, not hang the UI.
     pub fn stats(&self) -> FrameStats {
         let (tx, rx) = channel();
         if self.tx.send(Control::GetStats(StatsReply(tx))).is_err() {
@@ -1006,6 +1031,9 @@ struct Actor {
     child_exited: Option<ExitStatus>,
     eof_received: bool,
     exit_deadline: Option<Instant>,
+    /// `finish_exit` ran: the final frame and `Exited` are out, the pty is
+    /// released, and the loop only serves read-side requests until shutdown.
+    exited: bool,
     shutting_down: bool,
     /// Shared with the handle; this side only flips `child_alive`.
     io: Arc<IoCounters>,
@@ -1058,6 +1086,7 @@ impl Actor {
             child_exited: None,
             eof_received: false,
             exit_deadline: None,
+            exited: false,
             shutting_down: false,
             io,
         }
@@ -1065,6 +1094,11 @@ impl Actor {
 
     fn run(mut self) {
         while !self.shutting_down {
+            if self.exited {
+                self.serve_exited();
+                continue;
+            }
+
             // Parse whatever arrived before we block on the control channel.
             self.drain_bytes();
 
@@ -1086,20 +1120,41 @@ impl Actor {
             }
 
             // Child gone and output flushed (or we gave up waiting on EOF):
-            // paint the final screen and report the exit.
+            // paint the final screen and report the exit. The loop goes on,
+            // input-less, until shutdown (see `serve_exited`).
             if self.child_exited.is_some() && self.output_flushed() {
                 self.finish_exit();
-                break;
+                continue;
             }
 
             self.maybe_emit_frame();
         }
 
-        // The actor thread is ending: whatever the reason (exit observed,
-        // shutdown, kill), nothing is alive behind this handle any more.
+        // The actor thread is ending (shutdown, kill, or every handle
+        // dropped): nothing is alive behind this handle any more. An exited
+        // child already flipped this at exit time.
         self.io.child_alive.store(false, Ordering::Relaxed);
         // Dropping `self` drops `session`, whose Drop kills and reaps the
         // child if it is still running (see pty.rs).
+    }
+
+    /// One turn of the post-exit loop. The pty is released and no more
+    /// bytes will be parsed, so there is nothing to tick for: block on the
+    /// control channel alone (no timeout, so an idle exited pane costs no
+    /// CPU) and emit whatever the request dirtied — a scroll, a selection, a
+    /// resize, or the damage an ack just released.
+    fn serve_exited(&mut self) {
+        match self.ctrl_rx.recv() {
+            Ok(control) => self.on_control(control),
+            Err(_) => {
+                // Every handle was dropped: nobody can ask for anything.
+                self.shutting_down = true;
+                return;
+            }
+        }
+        if !self.shutting_down {
+            self.maybe_emit_frame();
+        }
     }
 
     fn drain_bytes(&mut self) {
@@ -1238,6 +1293,9 @@ impl Actor {
                     self.emit_search_status();
                 }
             }
+            // Nothing is listening on the other end of the pty any more.
+            Control::WriteKey(_) | Control::Paste(_) | Control::Mouse(_) | Control::Poke
+                if self.exited => {}
             Control::Poke => {
                 if let Some(session) = &self.session {
                     let cols = self.term.columns() as u16;
@@ -1596,6 +1654,15 @@ impl Actor {
             code: None,
             success: false,
         });
+        // Liveness flips at exit, not when the pane is finally closed: the
+        // embedder reads it as "is the child still running".
+        self.io.child_alive.store(false, Ordering::Relaxed);
+        // Release the pty now rather than at close. On platforms whose
+        // reader never sees EOF by itself (ConPTY), closing the pseudo
+        // console is what ends the reader thread; the child is already
+        // reaped, so the drop kills nothing.
+        self.session = None;
+        self.exited = true;
         let _ = self.events.send(TermEvent::Exited(status));
     }
 

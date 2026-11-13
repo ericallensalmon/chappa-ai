@@ -1135,13 +1135,15 @@ impl Registry {
     /// ONE atomic write of `bytes` to the pty (the
     /// caller has already appended `\r` for `submit` — text and Enter must
     /// never be split into two writes), journaled on the entry. Returns
-    /// `false` for an unknown id.
+    /// `false` for an unknown id. A write to an exited child is refused by
+    /// the handle and goes nowhere; the attempt is still journaled, and the
+    /// caller's receipt shows no output came back.
     pub fn write_journaled(&self, id: TermId, bytes: &[u8], text: String, submit: bool) -> bool {
         let handle = match self.handle(id) {
             Some(handle) => handle,
             None => return false,
         };
-        handle.write_input(bytes);
+        let _ = handle.write_input(bytes);
         self.record_input(id, bytes.len(), text, submit);
         true
     }

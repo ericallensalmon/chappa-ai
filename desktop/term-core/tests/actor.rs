@@ -1319,6 +1319,221 @@ fn final_frame_after_exit_clears_stale_mouse_capture() {
     }
 }
 
+// ---- exited panes stay readable ------------------------------------------
+
+/// Feed `count` numbered lines (`line00`, `line01`, ...) with no trailing
+/// newline, and wait until the frame showing the last one has been acked, so
+/// every byte is parsed before the caller moves on.
+fn seed_numbered_lines(
+    handle: &term_core::actor::TermHandle,
+    rx: &Receiver<TermEvent>,
+    count: usize,
+) {
+    let mut out = String::new();
+    for i in 0..count {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        out.push_str(&format!("line{i:02}"));
+    }
+    handle.feed(out.as_bytes());
+    let last = format!("line{:02}", count - 1);
+    loop {
+        let frame = next_frame(rx);
+        handle.ack(frame.seq);
+        if frame
+            .rows
+            .iter()
+            .any(|patch| patch.cells.iter().map(|c| c.ch).collect::<String>().trim_end() == last)
+        {
+            return;
+        }
+    }
+}
+
+/// Report the child's exit and consume everything up to `Exited`, acking the
+/// final frame the way the frontend would. Returns that final frame.
+fn exit_and_ack(handle: &term_core::actor::TermHandle, rx: &Receiver<TermEvent>) -> FrameData {
+    handle.note_child_exit(ExitStatus {
+        code: Some(0),
+        success: true,
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(TermEvent::Frame(frame)) => {
+                handle.ack(frame.seq);
+                last = Some(frame);
+            }
+            Ok(TermEvent::Exited(_)) => break,
+            Ok(_) => continue,
+            Err(err) => panic!("no Exited event: {err}"),
+        }
+    }
+    last.expect("the exit paints a final frame")
+}
+
+fn trimmed_row(frame: &FrameData, row: u16) -> String {
+    row_text(frame, row).trim_end().to_owned()
+}
+
+/// The child exiting must not freeze the pane: scrollback, selection, copy
+/// and text dumps keep answering on the final screen until the pane closes.
+#[test]
+fn exited_actor_keeps_serving_scroll_selection_copy_and_dumps() {
+    let (handle, rx, _sink) = test_actor(20, 5);
+    seed_numbered_lines(&handle, &rx, 30);
+    let last = exit_and_ack(&handle, &rx);
+    assert_eq!(last.kind, FrameKind::Full);
+    assert_eq!(last.history_len, 25);
+
+    // Scroll into history: the viewport moves and a frame says so.
+    handle.scroll(10);
+    let frame = next_frame(&rx);
+    handle.ack(frame.seq);
+    assert_eq!(frame.display_offset, 10);
+    assert_eq!(trimmed_row(&frame, 0), "line15");
+    assert_eq!(trimmed_row(&frame, 4), "line19");
+
+    // Scroll to the very top: the oldest line is reachable.
+    handle.set_display_offset(25);
+    let frame = next_frame(&rx);
+    handle.ack(frame.seq);
+    assert_eq!(frame.display_offset, 25);
+    assert_eq!(trimmed_row(&frame, 0), "line00");
+
+    // Select a whole scrolled-back line; the overlay repaints and copy
+    // round-trips the text.
+    handle.selection(SelectionOp::Start {
+        point: Point::new(1.into(), 0.into()),
+        kind: SelectionKind::Simple,
+    });
+    handle.selection(SelectionOp::Update {
+        point: Point::new(1.into(), 5.into()),
+        kind: SelectionKind::Simple,
+    });
+    assert_eq!(handle.copy_selection().as_deref(), Some("line01"));
+    // Start and Update may land in one frame or two (ack gate); the overlay
+    // must show up either way.
+    loop {
+        let frame = next_frame(&rx);
+        handle.ack(frame.seq);
+        if frame.selection_active {
+            let (start, end) = frame.selection.expect("the selected row is on screen");
+            assert_eq!((start.line.0, start.column.0), (1, 0));
+            assert_eq!((end.line.0, end.column.0), (1, 5));
+            break;
+        }
+    }
+
+    // Text dumps answer, relative to the viewport.
+    handle.set_display_offset(0);
+    let frame = next_frame(&rx);
+    handle.ack(frame.seq);
+    let dump = handle.dump_text(2);
+    assert_eq!(dump.len(), 7, "2 history lines + the 5-row screen");
+    assert_eq!(dump.first().map(String::as_str), Some("line23"));
+    assert_eq!(dump.last().map(String::as_str), Some("line29"));
+
+    handle.shutdown();
+}
+
+/// Input after exit is refused with a typed error (raw writes) or dropped
+/// (keys, pastes, mouse) — never written, never a panic or a hang.
+#[test]
+fn input_after_exit_is_refused_and_never_written() {
+    use term_core::actor::Dead;
+    use term_core::keys::{Key, KeyEvent, Mods, MouseEvent, MouseKind};
+
+    let (handle, rx, sink) = test_actor(20, 5);
+    assert_eq!(handle.write_input(b"before"), Ok(()));
+    assert_eq!(sink.lock().unwrap().as_slice(), b"before");
+    seed_numbered_lines(&handle, &rx, 3);
+    exit_and_ack(&handle, &rx);
+
+    assert!(!handle.io().child_alive(), "liveness flips at exit, not at close");
+    assert_eq!(handle.write_input(b"after"), Err(Dead));
+    handle.write_key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::empty(),
+    });
+    handle.paste("pasted");
+    handle.mouse(MouseEvent {
+        kind: MouseKind::Press,
+        button: 0,
+        col: 1,
+        row: 1,
+        mods: Mods::empty(),
+    });
+    // A synchronous round trip after the input requests: the control channel
+    // is FIFO, so by the time it answers every input above was handled.
+    assert!(!handle.dump_text(0).is_empty(), "the actor is still answering");
+    assert_eq!(
+        sink.lock().unwrap().as_slice(),
+        b"before",
+        "nothing reaches the writer after exit"
+    );
+
+    handle.shutdown();
+}
+
+/// A resize after exit reflows the grid like a live terminal and paints it.
+#[test]
+fn resize_after_exit_reflows_and_emits_a_frame() {
+    let (handle, rx, _sink) = test_actor(20, 5);
+    seed_numbered_lines(&handle, &rx, 10);
+    exit_and_ack(&handle, &rx);
+
+    // 10 columns: every "lineNN" still fits, nothing wraps yet.
+    handle.resize(10, 5);
+    let frame = next_frame(&rx);
+    handle.ack(frame.seq);
+    assert_eq!(frame.kind, FrameKind::Full);
+    assert!(frame.rows.iter().all(|patch| patch.cells.len() == 10));
+    assert_eq!(trimmed_row(&frame, 4), "line09");
+
+    // 4 columns: each 6-character line reflows onto two rows.
+    handle.resize(4, 5);
+    let frame = next_frame(&rx);
+    handle.ack(frame.seq);
+    assert_eq!(frame.kind, FrameKind::Full);
+    assert!(frame.rows.iter().all(|patch| patch.cells.len() == 4));
+    assert_eq!(frame.history_len, 15, "10 lines x 2 rows, minus the 5-row screen");
+    assert_eq!(trimmed_row(&frame, 3), "line");
+    assert_eq!(trimmed_row(&frame, 4), "09");
+
+    handle.shutdown();
+}
+
+/// An exited actor is idle (no ticking frames), and shutdown still ends its
+/// thread: the join returns promptly and the event channel disconnects.
+#[test]
+fn exited_actor_is_idle_and_shutdown_joins() {
+    let (handle, rx, _sink) = test_actor(20, 5);
+    seed_numbered_lines(&handle, &rx, 3);
+    exit_and_ack(&handle, &rx);
+    assert_no_frame(&rx);
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        handle.shutdown();
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("shutdown() must join an exited actor promptly");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok(_) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(err) => panic!("the actor thread kept its event sender: {err}"),
+        }
+    }
+}
+
 // ---- hard-kill (quit) ---------------------------------------------
 
 /// `TermHandle::kill` is the app-quit path: a straggler that ignores the

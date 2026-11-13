@@ -538,6 +538,37 @@ describe("TerminalPanel", () => {
     panel.dispose();
   });
 
+  it("keeps routing wheel and drag to the engine after the exit-time final frame", async () => {
+    // The engine keeps an exited terminal's scrollback and selection alive
+    // until the pane closes, so nothing pane-side may stop forwarding them
+    // once the child is gone.
+    const { api, onFrame } = stubApi();
+    const container = document.createElement("div");
+    const panel = new TerminalPanel({ container, api, platform: "Linux" });
+    mockHostRect(container, 800, 400);
+    await panel.start();
+    onFrame()!(minimalFrame(3, 2, 1));
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    onFrame()!(minimalFrame(3, 2, 2)); // the final full frame painted at exit
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+
+    const viewport = container.querySelector(".chappa-term-viewport") as HTMLElement;
+    viewport.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, deltaMode: 0, bubbles: true }));
+    await FLUSH();
+    expect(api.scroll).toHaveBeenCalledWith(42, 5);
+
+    viewport.dispatchEvent(
+      new MouseEvent("mousedown", { clientX: 4, clientY: 4, button: 0, detail: 1, bubbles: true }),
+    );
+    viewport.dispatchEvent(
+      new MouseEvent("mousemove", { clientX: 30, clientY: 4, buttons: 1, bubbles: true }),
+    );
+    await FLUSH();
+    expect(api.selection).toHaveBeenCalledWith(42, expect.objectContaining({ op: "start" }));
+    expect(api.selection).toHaveBeenCalledWith(42, expect.objectContaining({ op: "update" }));
+    panel.dispose();
+  });
+
   it("resizes the terminal when the host grows", async () => {
     const { api } = stubApi();
     const container = document.createElement("div");
