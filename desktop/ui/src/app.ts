@@ -20,6 +20,7 @@
 import { TerminalPanel, tauriApi, type PanelHost, type TerminalApi } from "./term/panel";
 import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
+import { baseFor } from "./term/paths";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
 import { projectBadge } from "./project_badge";
 import type { ProjectsSettingsApi } from "./projects_section";
@@ -1882,6 +1883,7 @@ export class App {
     const host = document.createElement("div");
     host.className = "chappa-panel-host";
     this.stack.appendChild(host);
+    const projectRoot = projectId !== undefined ? (this.projects.get(projectId)?.path ?? cwd ?? null) : null;
     const panel = new TerminalPanel({
       container: host,
       api: this.api,
@@ -1889,6 +1891,10 @@ export class App {
       cwd,
       profile,
       active: false,
+      pathBase: baseFor(
+        projectId !== undefined ? { kind: "projectShell", projectRoot } : { kind: "workspaceShell", spawnCwd: cwd ?? null },
+        null,
+      ),
       onCreated: (id) => this.onCreated(id, panel, host, profile ?? "shell", projectId),
     });
     try {
@@ -3358,6 +3364,20 @@ export class App {
     };
     // A json-transport tool gets the transcript view, not a
     // terminal — same host, same activation/focus discipline, no frames.
+    // Container agents print container paths: they resolve inside the exec
+    // workdir and reach the host only through mounts, which the tool
+    // definition does not carry — so none map yet.
+    const runtime = tool.runtime;
+    const pathBase = baseFor(
+      runtime.kind === "docker_exec"
+        ? { kind: "agent", projectRoot: null, spawnCwd: null, mounts: [], containerCwd: runtime.workdir ?? null }
+        : {
+            kind: "agent",
+            projectRoot: project !== undefined ? (this.projects.get(project)?.path ?? null) : null,
+            spawnCwd: null,
+          },
+      null,
+    );
     const panel: PanelHost =
       tool.transport === "json"
         ? new TranscriptPanel({
@@ -3371,6 +3391,7 @@ export class App {
             },
             onCreated: (id) => adopt(id, panel),
             onSent: (id) => this.setAgentWaiting(id, false),
+            pathBase,
           })
         : new TerminalPanel({
             container: host,
@@ -3388,6 +3409,7 @@ export class App {
               return response.term_id;
             },
             onCreated: (id) => adopt(id, panel),
+            pathBase,
           });
     try {
       await panel.start();
@@ -3895,6 +3917,14 @@ export class App {
         settings: this.settings,
         active: false,
         spawn: (onFrame) => this.spawnProcessChannel(row.projectId, name, onFrame),
+        pathBase: baseFor(
+          {
+            kind: "projectCommand",
+            projectRoot: this.projects.get(row.projectId)?.path ?? null,
+            workingDir: row.workingDir,
+          },
+          null,
+        ),
       });
       row.panel = panel;
       row.host = host;
@@ -4057,6 +4087,7 @@ export class App {
       settings: this.settings,
       active: false,
       spawn: (onFrame) => this.spawnWorkspaceChannel(name, onFrame),
+      pathBase: baseFor({ kind: "workspaceCommand", workingDir: row.workingDir, spawnCwd: null }, null),
     });
     row.host = host;
     row.panel = panel;

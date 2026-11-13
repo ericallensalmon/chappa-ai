@@ -17,7 +17,8 @@ import { DomRenderer } from "./renderer_dom";
 import { WebGLRenderer } from "./renderer_webgl";
 import type { RendererMetrics, TermRenderer } from "./renderer";
 import { InputController, isMarkNavShortcut, isSearchShortcut } from "./input";
-import { linkAt, LinkIndex, schemeAllowed } from "./links";
+import { linkAt, LinkIndex, rowText, schemeAllowed } from "./links";
+import { describeTarget, pathRunAt, resolvePath, type PathBase, type ResolvedPath } from "./paths";
 import { SearchBar } from "./search";
 import { Marks } from "./marks";
 import { Hud, type DebugStatsDto } from "./hud";
@@ -271,7 +272,26 @@ export interface TerminalPanelOptions {
    *  tauri-plugin-opener invoke; tests inject a stub. Scheme gating is the
    *  panel's job (links.ts), never this callback's. */
   openUrl?: (url: string) => Promise<void>;
+  /** What relative paths in this panel's output are relative to (see
+   *  `baseFor`). Absent = paths resolve as printed. */
+  pathBase?: PathBase | null;
+  /** Open a detected file path (ctrl/cmd+click) at its location. The target
+   *  is already resolved against `pathBase`; existence is the callback's to
+   *  check. Absent = the panel flashes the resolved target instead. */
+  openPath?: (target: OpenPathTarget) => void | Promise<void>;
 }
+
+/** A file to open, with the location the output named (absent = none). */
+export interface OpenPathTarget {
+  path: string;
+  line?: number;
+  col?: number;
+}
+
+/** What the cursor is over: a URL (wins when both match) or a file path. */
+type HoverTarget =
+  | { kind: "url"; row: number; colStart: number; colEnd: number; url: string }
+  | { kind: "path"; row: number; colStart: number; colEnd: number; target: ResolvedPath };
 
 /** Which renderer a panel uses. The DOM renderer stays behind the toggle as
  *  the permanent correctness oracle. */
@@ -806,20 +826,56 @@ export class TerminalPanel {
     this.input.focus();
   }
 
-  /** Ctrl/cmd+click on a link cell: open the URL when the scheme is allowed,
-   *  else flash a status. Returns true when the click was consumed (never
-   *  reaches the terminal). */
+  /** The link or file path under cell (row, col). URLs are checked first so
+   *  a URL that also looks like a path stays a URL. */
+  private hoverTargetAt(row: number, col: number): HoverTarget | null {
+    if (!this.store) return null;
+    const link = linkAt(this.store, this.links, row, col);
+    if (link) return { kind: "url", ...link };
+    const run = pathRunAt(rowText(this.store, row), col);
+    if (!run) return null;
+    return {
+      kind: "path",
+      row,
+      colStart: run.colStart,
+      colEnd: run.colEnd,
+      target: resolvePath(run, this.opts.pathBase ?? null),
+    };
+  }
+
+  /** Ctrl/cmd+click on a link or path cell: open the URL when the scheme is
+   *  allowed (else flash a status), or hand the path to `openPath`. Returns
+   *  true when the click was consumed (never reaches the terminal). */
   private handleLinkClick(ev: MouseEventDto): boolean {
     const linkClick = (ev.mods & (MOD_CTRL | MOD_SUPER)) !== 0;
     if (!linkClick) return false;
-    const run = this.store ? linkAt(this.store, this.links, ev.row, ev.col) : null;
-    if (!run) return false;
-    if (schemeAllowed(run.url)) {
-      void (this.opts.openUrl ?? defaultOpenUrl)(run.url);
+    const hit = this.hoverTargetAt(ev.row, ev.col);
+    if (!hit) return false;
+    if (hit.kind === "path") {
+      this.openPathTarget(hit.target);
+    } else if (schemeAllowed(hit.url)) {
+      void (this.opts.openUrl ?? defaultOpenUrl)(hit.url);
     } else {
-      this.flash(`not opening ${run.url}`);
+      this.flash(`not opening ${hit.url}`);
     }
     return true;
+  }
+
+  /** A container path with no host mount cannot be opened; the raw path on
+   *  the clipboard is what the user can still do with it. */
+  private openPathTarget(target: ResolvedPath): void {
+    if (target.inContainer) {
+      this.flash(`inside container: ${target.path}`);
+      void navigator.clipboard?.writeText(target.path).catch(() => {
+        /* clipboard unavailable — the flash still names the path */
+      });
+      return;
+    }
+    const open: OpenPathTarget = { path: target.path };
+    if (target.line !== undefined) open.line = target.line;
+    if (target.col !== undefined) open.col = target.col;
+    if (this.opts.openPath) void this.opts.openPath(open);
+    else this.flash(`no file opener: ${describeTarget(target)}`);
   }
 
   private updateLinkHover(ev: MouseEventDto): void {
@@ -827,7 +883,7 @@ export class TerminalPanel {
       this.hideLinkHover();
       return;
     }
-    const run = linkAt(this.store, this.links, ev.row, ev.col);
+    const run = this.hoverTargetAt(ev.row, ev.col);
     if (!run) {
       this.hideLinkHover();
       return;
@@ -837,7 +893,12 @@ export class TerminalPanel {
     this.linkUnderline.style.top = `${(run.row + 1) * this.cellH - 2}px`;
     this.linkUnderline.style.width = `${(run.colEnd - run.colStart + 1) * this.cellW}px`;
     this.linkUnderline.style.height = "2px";
-    this.linkBar.textContent = run.url;
+    this.linkBar.textContent =
+      run.kind === "url"
+        ? run.url
+        : run.target.inContainer
+          ? `inside container: ${run.target.path}`
+          : describeTarget(run.target);
     this.linkBar.style.display = "block";
   }
 

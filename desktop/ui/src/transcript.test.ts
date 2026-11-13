@@ -9,7 +9,7 @@ function event(seq: number, kind: ipc.AgentEventKind, payload: Record<string, un
   return { id: 5, seq, ts: 1, kind, payload };
 }
 
-function mount(ring: ipc.AgentEventDto[] = []) {
+function mount(ring: ipc.AgentEventDto[] = [], extra: Partial<ConstructorParameters<typeof TranscriptPanel>[0]> = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const sent: Array<[number, string]> = [];
@@ -28,6 +28,7 @@ function mount(ring: ipc.AgentEventDto[] = []) {
     spawn: async () => 5,
     onCreated: (id) => created.push(id),
     onSent: (_id, text) => sentHook.push(text),
+    ...extra,
   });
   return { container, api, panel, sent, created, sentHook };
 }
@@ -203,6 +204,42 @@ describe("TranscriptPanel", () => {
     panel.setSubprocessCount(3);
     await panel.setFontMetrics("x", 12, 1.2);
     expect(await panel.start()).toBe(5); // idempotent
+    panel.dispose(false);
+  });
+
+  it("text and tool results link file paths; ctrl+click opens, a plain click does not", async () => {
+    const opened: Array<{ path: string; line?: number; col?: number }> = [];
+    const ring = [
+      event(1, "text", { text: "The failure is in src/calc.rs:12:5, fixing it now." }),
+      event(2, "text", { text: "All done." }),
+      event(3, "tool_call", { phase: "result", content: "  --> src/main.rs:3:1\nwarning: unused" }),
+      event(4, "tool_call", { phase: "call", name: "Read", input: { file_path: "/home/dev/proj/src/x.rs" } }),
+    ];
+    const { container, panel } = mount(ring, {
+      pathBase: { dir: "/home/dev/proj", home: null },
+      openPath: (t) => {
+        opened.push(t);
+      },
+    });
+    await panel.start();
+    const log = container.querySelector(".chappa-transcript-log")!;
+    const texts = log.querySelectorAll(".chappa-transcript-text");
+    const anchor = texts[0].querySelector<HTMLElement>("a.chappa-path-link")!;
+    expect(anchor.textContent).toBe("src/calc.rs:12:5");
+    expect(texts[0].textContent).toBe("The failure is in src/calc.rs:12:5, fixing it now.");
+    // Plain text stays plain text.
+    expect(texts[1].querySelector("a")).toBeNull();
+    expect(texts[1].childNodes).toHaveLength(1);
+    // Tool results link; tool-call arguments stay as-is.
+    const result = log.querySelector('.chappa-transcript-tool[data-phase="result"]')!;
+    const call = log.querySelector('.chappa-transcript-tool[data-phase="call"]')!;
+    expect(result.querySelector("a.chappa-path-link")?.textContent).toBe("src/main.rs:3:1");
+    expect(call.querySelector("a")).toBeNull();
+
+    anchor.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(opened).toEqual([]);
+    anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    expect(opened).toEqual([{ path: "/home/dev/proj/src/calc.rs", line: 12, col: 5 }]);
     panel.dispose(false);
   });
 

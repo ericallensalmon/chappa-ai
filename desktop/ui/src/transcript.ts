@@ -23,7 +23,8 @@
 // through the same seq guard, so a replayed + live duplicate renders once.
 
 import type * as ipc from "./ipc";
-import type { PanelHost, TerminalApi } from "./term/panel";
+import type { OpenPathTarget, PanelHost, TerminalApi } from "./term/panel";
+import { linkifyPaths, PATH_LINK_CLASS, type PathBase } from "./term/paths";
 
 export interface TranscriptPanelOptions {
   container: HTMLElement;
@@ -36,6 +37,12 @@ export interface TranscriptPanelOptions {
    *  locally (the CLI's turn_started confirms it later). */
   onSent?: (id: number, text: string) => void;
   active?: boolean;
+  /** What relative paths in the agent's text are relative to (see
+   *  `baseFor`). Absent = paths resolve as printed. */
+  pathBase?: PathBase | null;
+  /** Open a file path the agent named (ctrl/cmd+click). A container path
+   *  no mount maps is never passed: it has nothing to open on the host. */
+  openPath?: (target: OpenPathTarget) => void | Promise<void>;
 }
 
 const ROOT_CSS =
@@ -124,6 +131,18 @@ export class TranscriptPanel implements PanelHost {
   private pending: ipc.AgentEventDto[] = [];
   private active: boolean;
   private disposed = false;
+  /** Ctrl/cmd+click on a path anchor opens it; a plain click is left alone
+   *  so selecting transcript text keeps working. */
+  private onLogClick = (e: MouseEvent): void => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const a = (e.target as Element | null)?.closest?.(`a.${PATH_LINK_CLASS}`) as HTMLElement | null;
+    if (!a || a.dataset.path === undefined || a.dataset.inContainer === "true") return;
+    e.preventDefault();
+    const target: OpenPathTarget = { path: a.dataset.path };
+    if (a.dataset.line !== undefined) target.line = Number(a.dataset.line);
+    if (a.dataset.col !== undefined) target.col = Number(a.dataset.col);
+    void this.opts.openPath?.(target);
+  };
   private onKeydown = (e: KeyboardEvent): void => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -143,6 +162,7 @@ export class TranscriptPanel implements PanelHost {
     this.log = document.createElement("div");
     this.log.className = "chappa-transcript-log";
     this.log.style.cssText = LOG_CSS;
+    this.log.addEventListener("click", this.onLogClick);
     this.waiting = document.createElement("div");
     this.waiting.className = "chappa-transcript-waiting";
     this.waiting.style.cssText = WAITING_STATUS_CSS;
@@ -260,11 +280,11 @@ export class TranscriptPanel implements PanelHost {
           summary.textContent = "thinking";
           const body = document.createElement("div");
           body.style.cssText = TEXT_CSS;
-          body.textContent = pretty(p.text);
+          body.append(...this.linkified(pretty(p.text)));
           details.append(summary, body);
           el.appendChild(details);
         } else {
-          el.textContent = pretty(p.text);
+          el.append(...this.linkified(pretty(p.text)));
         }
         break;
       }
@@ -281,7 +301,8 @@ export class TranscriptPanel implements PanelHost {
         summary.textContent = phase === "result" ? `◂ ${name}${flag}` : `▸ ${name}`;
         const pre = document.createElement("pre");
         pre.style.cssText = PRE_CSS;
-        pre.textContent = pretty(phase === "result" ? p.content : p.input);
+        if (phase === "result") pre.append(...this.linkified(pretty(p.content)));
+        else pre.textContent = pretty(p.input);
         details.append(summary, pre);
         el = details;
         break;
@@ -334,6 +355,11 @@ export class TranscriptPanel implements PanelHost {
     }
     if (el) el.dataset.seq = String(e.seq);
     return el;
+  }
+
+  /** `text` with its file paths as ctrl+clickable anchors. */
+  private linkified(text: string): Node[] {
+    return linkifyPaths(text, this.opts.pathBase ?? null);
   }
 
   /** Whether the agent is waiting for input (the box's ring + status line). */
@@ -445,6 +471,7 @@ export class TranscriptPanel implements PanelHost {
     // path); a transcript never issues the Rust close on its own.
     this.disposed = true;
     this.input.removeEventListener("keydown", this.onKeydown);
+    this.log.removeEventListener("click", this.onLogClick);
     this.host.textContent = "";
   }
 }
