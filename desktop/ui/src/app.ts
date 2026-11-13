@@ -3645,7 +3645,10 @@ export class App {
       // own pattern); the click still lands.
       item.addEventListener("mousedown", (e) => e.preventDefault());
       item.addEventListener("click", () => {
-        if (this.openProjects.has(p.id)) this.expandProject(p.id);
+        // The ringed badge is a pressed toggle: clicking it again collapses
+        // the project, leaving the workspace overview.
+        if (p.id === this.expandedProjectId) this.collapseProject();
+        else if (this.openProjects.has(p.id)) this.expandProject(p.id);
         else void this.openProject(p.id);
       });
       item.addEventListener("contextmenu", (e) => {
@@ -4592,6 +4595,28 @@ export class App {
     // bound agent falls back to the workspace list (or back into its
     // project's AGENTS section) the moment the switch happens. The sig
     // guards make the re-derivation of the other subsections a no-op.
+    this.renderRail();
+  }
+
+  /**
+   * Collapse the expanded project so the sidebar shows only the Workspace
+   * block plus one summary row per open project — the overview. Nothing
+   * stops: the project stays open and its summary row keeps updating in
+   * place. Reached by clicking the ringed badge again (a pressed toggle);
+   * clicking any badge or summary row expands again. Closing a project
+   * still expands the most recently opened remaining one, so this is the
+   * one path to the no-project view while projects are open.
+   */
+  collapseProject(): void {
+    if (this.expandedProjectId === null) return;
+    this.expandedProjectId = null;
+    // The stopped-command pane is project-scoped; nothing is expanded now.
+    this.hideProcessEmptyState();
+    this.switcher.textContent = "Project…";
+    this.renderProject();
+    this.renderProjectSummaries();
+    // Bound agents fall back to the workspace list when no project is
+    // expanded — the same re-derivation expandProject triggers.
     this.renderRail();
   }
 

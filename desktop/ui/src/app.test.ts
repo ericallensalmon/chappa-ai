@@ -1654,6 +1654,39 @@ describe("App add-project flow", () => {
     expect(items()[0].getAttribute("aria-pressed")).toBe("true");
     panelDispose(app);
   });
+
+  it("clicking the expanded project's badge again collapses it to the workspace overview", async () => {
+    const { api } = projectApi();
+    const root = document.createElement("div");
+    const app = new App({
+      root,
+      api,
+      confirm: async () => false,
+      confirmProjectTrust: async () => false,
+    });
+    await app.mount();
+    const items = () => [...root.querySelectorAll<HTMLButtonElement>(".chappa-badge-bar-item")];
+    const summaries = () => root.querySelectorAll(".chappa-project-summary").length;
+    click(items()[0]);
+    await FLUSH();
+    await FLUSH();
+    expect(items()[0].classList.contains("expanded")).toBe(true);
+    expect(summaries()).toBe(0);
+    // The ringed badge is a pressed toggle: a second click collapses the
+    // project. It stays open (undimmed) and is listed as a summary row.
+    click(items()[0]);
+    await FLUSH();
+    expect(items()[0].classList.contains("expanded")).toBe(false);
+    expect(items()[0].getAttribute("aria-pressed")).toBe("false");
+    expect(items()[0].classList.contains("open")).toBe(true);
+    expect(summaries()).toBe(1);
+    // A third click expands it again; the summary row goes.
+    click(items()[0]);
+    await FLUSH();
+    expect(items()[0].classList.contains("expanded")).toBe(true);
+    expect(summaries()).toBe(0);
+    panelDispose(app);
+  });
 });
 
 // --- settings: gear, pane, new-terminal profiles -------------------
