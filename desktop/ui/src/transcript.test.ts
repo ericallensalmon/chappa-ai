@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { mergeBySeq, TranscriptPanel, usageLine } from "./transcript";
+import { mergeBySeq, renderEvents, TranscriptPanel, usageLine } from "./transcript";
 import type * as ipc from "./ipc";
 
 const FLUSH = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -247,5 +247,23 @@ describe("TranscriptPanel", () => {
     expect(usageLine({ input_tokens: 26832, output_tokens: 2, context_tokens: 26832, total_cost_usd: 0 })).toBe("in 26.8k · out 2 · ctx 26.8k");
     expect(usageLine({ input_tokens: 150000, output_tokens: 1200, context_pct: 78.2, total_cost_usd: 1.5 })).toBe("in 150k · out 1.2k · ctx 78.2% · $1.5000");
     expect(usageLine({})).toBe("");
+  });
+});
+
+describe("renderEvents", () => {
+  it("draws a stored events tail with the live transcript's blocks, skipping what is not an event", () => {
+    const blocks = renderEvents([
+      { id: 3, seq: 10, ts: 0, kind: "turn_started", payload: { model: "m" } },
+      { id: 3, seq: 11, ts: 0, kind: "text", payload: { text: "hello" } },
+      { id: 3, seq: 12, ts: 0, kind: "awaiting_input", payload: {} },
+      "not an event",
+      null,
+      { id: 3, seq: 13, ts: 0, kind: "error", payload: { message: "boom" } },
+    ]);
+    expect(blocks.map((b) => b.className)).toEqual(["chappa-transcript-sep", "chappa-transcript-text", "chappa-transcript-error"]);
+    // The separator counts turns from the tail's own start.
+    expect(blocks[0].textContent).toBe("turn 1 · m");
+    expect(blocks[1].textContent).toBe("hello");
+    expect(blocks[2].textContent).toBe("boom");
   });
 });

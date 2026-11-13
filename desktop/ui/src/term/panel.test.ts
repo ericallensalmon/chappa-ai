@@ -80,6 +80,9 @@ function stubApi(): { api: TerminalApi; onFrame: (() => ((buf: ArrayBuffer) => v
     }),
     sendAgentInput: vi.fn(async () => ({ delivered: true, waited_ms: 0, seq_before: 0 })),
     getAgentEvents: vi.fn(async () => []),
+    listRecords: vi.fn(async () => []),
+    getRecordRuns: vi.fn(async () => []),
+    startRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "terminal" as const, term_id: null, run_uuid: null, pending: false })),
   };
   return { api, onFrame: () => onFrame };
 }

@@ -194,6 +194,15 @@ function stubApi(): {
     // The json transport's message + event-ring reads.
     sendAgentInput: vi.fn(async (_id: number, _text: string) => ({ delivered: true, waited_ms: 12, seq_before: 0, turn_started_seq: 1 })),
     getAgentEvents: vi.fn(async () => []),
+    // Durable records: none stored by default; a start allocates the next id.
+    listRecords: vi.fn(async (): Promise<ipc.RecordDto[]> => []),
+    getRecordRuns: vi.fn(async (): Promise<ipc.RunDto[]> => []),
+    startRecord: vi.fn(async (recordId: string) => {
+      const id = next++;
+      ids.push(id);
+      statuses.set(id, "starting");
+      return { record_id: recordId, kind: "agent" as const, term_id: id, run_uuid: `run-${id}`, pending: false };
+    }),
   };
   return {
     api,
@@ -643,6 +652,9 @@ function projectApi(over: {
     spawnAgent: vi.fn(async (req: ipc.SpawnAgentRequestDto) => fakeSpawnResponse(800 + next++, req)),
     sendAgentInput: vi.fn(async () => ({ delivered: true, waited_ms: 0, seq_before: 0 })),
     getAgentEvents: vi.fn(async () => []),
+    listRecords: vi.fn(async () => []),
+    getRecordRuns: vi.fn(async () => []),
+    startRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "terminal" as const, term_id: null, run_uuid: null, pending: false })),
   };
   return { api, calls };
 }
@@ -1000,7 +1012,7 @@ describe("App projects", () => {
     root.remove();
   });
 
-  it("clicking a stopped command fronts its empty state, and its ▶ Start spawns", async () => {
+  it("clicking a stopped command fronts its record card, and its ▶ Start spawns", async () => {
     const { api, calls } = projectApi();
     const root = document.createElement("div");
     const app = new App({ root, api, confirm: async () => false, confirmProjectTrust: async () => false });
@@ -1012,21 +1024,22 @@ describe("App projects", () => {
     // Run the first command so the stack has a real panel showing.
     click(rowButton(rows[0], "Start"));
     await FLUSH();
-    const started = root.querySelectorAll(".chappa-panel-host:not(.chappa-process-empty)");
+    const started = root.querySelectorAll(".chappa-panel-host:not(.chappa-record-pane)");
 
     // mousedown → click the SECOND (never-started) card: the stopped-command
     // pane fronts instead of the stack staying on command one.
     click(rows[1]);
-    const empty = root.querySelector<HTMLElement>(".chappa-process-empty")!;
+    const empty = root.querySelector<HTMLElement>(".chappa-record-pane")!;
     expect(empty.classList.contains("active")).toBe(true);
-    expect(empty.querySelector(".chappa-process-empty-title")?.textContent).toBe("Process is stopped");
+    expect(empty.querySelector(".chappa-record-title")?.textContent).toBe("chappa-ai tui is stopped");
+    expect(empty.querySelector(".chappa-record-hint")?.textContent).toBe("Start it to run this process.");
     expect(rows[1].classList.contains("active")).toBe(true);
     // Every real panel deactivated.
     for (const host of started) expect(host.classList.contains("active")).toBe(false);
 
     // ▶ Start from the pane spawns THAT command; the empty state hides when
     // its panel activates.
-    click(empty.querySelector(".chappa-process-empty-start")!);
+    click(empty.querySelector(".chappa-record-action")!);
     await FLUSH();
     expect(calls.startProcess.length).toBe(2);
     expect(calls.startProcess[1][1]).not.toBe(calls.startProcess[0][1]);
@@ -5698,5 +5711,349 @@ describe("App file opening", () => {
       container: { status: "running", started_at: null, uptime_s: null, mounts: moved },
     });
     expect(baseOf(app, id)).toEqual({ dir: "/workspace/app", home: null, mounts: moved });
+  });
+});
+
+// --- durable records: stopped rows + the record pane ------------------
+
+describe("App record rows and the record pane", () => {
+  type Created = ipc.TerminalCreatedEvent;
+  type Driver = {
+    applyCreated: (p: Created) => void;
+    dropEntry: (id: number, closeViaPanel?: boolean) => void;
+    entries: Map<number, RailEntry>;
+    renderRail: () => void;
+    activeId: number | null;
+  };
+  const drive = (app: App): Driver => app as unknown as Driver;
+
+  const PROJ: ipc.ProjectInfoDto = { id: 1, name: "chappa-ai", path: "/home/dev/app", icon: null, notificationLevel: null };
+
+  function agentRecord(over: Partial<ipc.RecordDto> = {}): ipc.RecordDto {
+    return {
+      record_id: "a1",
+      kind: "agent",
+      name: "claude",
+      project_id: null,
+      status: "exited",
+      term_id: null,
+      last_run: {
+        run_uuid: "r1",
+        status: "exited",
+        started_at_ms: 1000,
+        ended_at_ms: 61_000,
+        exit_code: 0,
+        success: true,
+        tail_kind: "text",
+        tail_len: 2,
+      },
+      agent: {
+        tool_id: 3,
+        parent_record_id: null,
+        favorite: false,
+        disable_auto_rename: false,
+        notification_level: null,
+        extra_args: [],
+        prompt: null,
+      },
+      ...over,
+    };
+  }
+
+  function shellRecord(over: Partial<ipc.RecordDto> = {}): ipc.RecordDto {
+    return {
+      record_id: "t1",
+      kind: "terminal",
+      name: "pwsh",
+      project_id: null,
+      status: "stopped",
+      term_id: null,
+      last_run: null,
+      terminal: { shell_profile: null, cwd: "C:\\code\\x" },
+      ...over,
+    };
+  }
+
+  async function mounted(
+    records: ipc.RecordDto[],
+    opts: { project?: boolean } = {},
+  ): Promise<{ api: TerminalApi; root: HTMLElement; app: App }> {
+    const { api } = stubApi();
+    vi.mocked(api.listRecords).mockResolvedValue(records);
+    if (opts.project) {
+      vi.mocked(api.listProjects).mockResolvedValue([PROJ]);
+      vi.mocked(api.openProject).mockResolvedValue({
+        project: PROJ,
+        trustPending: false,
+        trustCommands: [],
+        trustHash: "h",
+        processes: [],
+      });
+    }
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const app = new App({
+      root,
+      api,
+      confirm: async () => true,
+      agentTools: new AgentToolsStore(api as unknown as AgentToolsApi),
+      now: () => 181_000,
+    });
+    await app.mount();
+    if (opts.project) {
+      await app.openProject(1);
+      await FLUSH();
+    }
+    return { api, root, app };
+  }
+
+  const wsAgentRows = (root: HTMLElement): HTMLElement[] => [
+    ...root.querySelectorAll<HTMLElement>(".chappa-workspace-agent-list .chappa-rail-item"),
+  ];
+  const recordRows = (root: HTMLElement): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".chappa-record-row")];
+  const pane = (root: HTMLElement): HTMLElement => root.querySelector<HTMLElement>(".chappa-record-pane")!;
+  const key = (el: HTMLElement, init: KeyboardEventInit): void => {
+    el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  };
+  function teardown(app: App, root: HTMLElement): void {
+    panelDispose(app);
+    root.remove();
+  }
+
+  it("a stopped workspace agent renders in workspace AGENTS with no × and counts in M, not N", async () => {
+    const { root, app } = await mounted([agentRecord()]);
+    drive(app).applyCreated({ term_id: 40, name: "live", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null });
+    const rows = wsAgentRows(root);
+    expect(rows.length).toBe(2);
+    const stopped = rows.find((r) => r.classList.contains("chappa-record-row"))!;
+    expect(stopped.querySelector(".chappa-rail-name")?.textContent).toBe("claude");
+    expect(stopped.querySelector(".chappa-rail-close")).toBeNull();
+    expect(stopped.querySelector(".chappa-rail-cpu")).toBeNull();
+    expect(stopped.querySelector(".chappa-status-dot.dim")).not.toBeNull();
+    expect(stopped.querySelector(".chappa-record-start")?.textContent).toBe("▶");
+    // The live one is still "starting" (live) → N = 1; the record only adds to M.
+    expect(root.querySelector(".chappa-workspace-agents .chappa-subsection-count")?.textContent).toBe("1/2");
+    // ACTIVE is live-only: a record never lists there.
+    expect(root.querySelector(".chappa-active-section .chappa-record-row")).toBeNull();
+    teardown(app, root);
+  });
+
+  it("stopped records follow the live predicates: project agents/shells under the expanded project, workspace shells in TERMINALS", async () => {
+    const { root, app } = await mounted(
+      [
+        agentRecord({ record_id: "pa", name: "proj-agent", project_id: 1 }),
+        shellRecord({ record_id: "pt", name: "proj-shell", project_id: 1 }),
+        shellRecord({ record_id: "wt", name: "ws-shell" }),
+        agentRecord({ record_id: "oa", name: "other-agent", project_id: 9 }),
+      ],
+      { project: true },
+    );
+    const names = (sel: string): (string | null)[] =>
+      [...root.querySelectorAll<HTMLElement>(`${sel} .chappa-record-row .chappa-rail-name`)].map((e) => e.textContent);
+    expect(names(".chappa-project-agents")).toEqual(["proj-agent"]);
+    expect(root.querySelector(".chappa-project-agents .chappa-subsection-count")?.textContent).toBe("0/1");
+    expect(names(".chappa-project-term-list:not(.chappa-workspace-agent-list)").filter((n) => n !== "proj-agent")).toEqual([
+      "proj-shell",
+    ]);
+    expect(names(".chappa-rail-list")).toEqual(["ws-shell"]);
+    // An agent of a project that is not the expanded one: the workspace list.
+    expect(names(".chappa-workspace-agent-list")).toEqual(["other-agent"]);
+    // Collapsing the project moves its agent record to the workspace list,
+    // exactly like a live bound agent.
+    app.collapseProject();
+    expect(names(".chappa-workspace-agent-list")).toEqual(["proj-agent", "other-agent"]);
+    teardown(app, root);
+  });
+
+  it("clicking a stopped row fronts its card with the name, last run and stored tail", async () => {
+    const { api, root, app } = await mounted([agentRecord()]);
+    vi.mocked(api.getRecordRuns).mockResolvedValue([
+      { run_uuid: "r1", status: "exited", started_at_ms: 1000, ended_at_ms: 61_000, exit_code: 0, tail_kind: "text", tail: ["$ done", "bye"] },
+    ]);
+    recordRows(root)[0].click();
+    await FLUSH();
+    const p = pane(root);
+    expect(p.classList.contains("active")).toBe(true);
+    expect(p.querySelector(".chappa-record-title")?.textContent).toBe("claude is stopped");
+    expect(p.querySelector(".chappa-record-hint")?.textContent).toBe("Start it to begin a new session.");
+    expect(p.querySelector(".chappa-record-run")?.textContent).toBe("last run · exit 0 · ran 1m 0s · ended 2 min ago");
+    expect(api.getRecordRuns).toHaveBeenCalledWith("a1", 1);
+    expect(p.querySelector(".chappa-record-tail-text")?.textContent).toBe("$ done\nbye");
+    expect(recordRows(root)[0].classList.contains("active")).toBe(true);
+    teardown(app, root);
+  });
+
+  it("a json agent's stored events tail renders as transcript blocks", async () => {
+    const { api, root, app } = await mounted([agentRecord()]);
+    vi.mocked(api.getRecordRuns).mockResolvedValue([
+      {
+        run_uuid: "r1",
+        status: "exited",
+        started_at_ms: 1000,
+        tail_kind: "events",
+        tail: [{ id: 5, seq: 1, ts: 0, kind: "text", payload: { text: "the answer" } }],
+      },
+    ]);
+    recordRows(root)[0].click();
+    await FLUSH();
+    expect(pane(root).querySelector(".chappa-record-tail-events .chappa-transcript-text")?.textContent).toBe("the answer");
+    teardown(app, root);
+  });
+
+  it("the primary action starts the record through start_record and the row binds in place", async () => {
+    const { api, root, app } = await mounted([agentRecord()]);
+    recordRows(root)[0].click();
+    await FLUSH();
+    pane(root).querySelector<HTMLButtonElement>(".chappa-record-action")!.click();
+    await FLUSH();
+    expect(api.startRecord).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.startRecord).mock.calls[0][0]).toBe("a1");
+    expect(api.spawnAgent).not.toHaveBeenCalled();
+    // Same one row in the section, now live, its panel in front.
+    expect(wsAgentRows(root).length).toBe(1);
+    expect(recordRows(root).length).toBe(0);
+    const [termId, entry] = [...drive(app).entries][0];
+    expect(entry.recordId).toBe("a1");
+    expect(drive(app).activeId).toBe(termId);
+    expect(pane(root).classList.contains("active")).toBe(false);
+    // The broadcast for the same spawn arrives afterwards: still one row.
+    drive(app).applyCreated({ term_id: termId, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+    expect(wsAgentRows(root).length).toBe(1);
+    teardown(app, root);
+  });
+
+  it("S and Enter on the focused card start the record; a second press while starting does not double-start", async () => {
+    const { api, root, app } = await mounted([agentRecord()]);
+    recordRows(root)[0].click();
+    await FLUSH();
+    key(pane(root), { key: "s" });
+    key(pane(root), { key: "Enter" });
+    await FLUSH();
+    expect(api.startRecord).toHaveBeenCalledTimes(1);
+    teardown(app, root);
+
+    const second = await mounted([shellRecord()]);
+    recordRows(second.root)[0].click();
+    await FLUSH();
+    key(pane(second.root), { key: "Enter" });
+    await FLUSH();
+    expect(second.api.startRecord).toHaveBeenCalledWith("t1", expect.anything());
+    teardown(second.app, second.root);
+  });
+
+  it("Ctrl+T on the card opens the AGENTS add menu of the row's scope", async () => {
+    const { root, app } = await mounted([agentRecord(), agentRecord({ record_id: "pa", name: "proj-agent", project_id: 1 })], {
+      project: true,
+    });
+    const wsMenu = root.querySelector<HTMLElement>(".chappa-workspace-agents .chappa-new-agent-menu")!;
+    const projMenu = root.querySelector<HTMLElement>(".chappa-project-agents .chappa-new-agent-menu")!;
+    root.querySelector<HTMLElement>(".chappa-workspace-agent-list .chappa-record-row")!.click();
+    await FLUSH();
+    key(pane(root), { key: "t", ctrlKey: true });
+    expect(wsMenu.style.display).toBe("block");
+    expect(projMenu.style.display).toBe("none");
+    wsMenu.style.display = "none";
+    root.querySelector<HTMLElement>(".chappa-project-agents .chappa-record-row")!.click();
+    await FLUSH();
+    key(pane(root), { key: "t", ctrlKey: true });
+    expect(projMenu.style.display).toBe("block");
+    expect(wsMenu.style.display).toBe("none");
+    teardown(app, root);
+  });
+
+  it("a created event whose record matches a stopped row binds it in place (row count unchanged)", async () => {
+    const { root, app } = await mounted([agentRecord(), shellRecord()]);
+    expect(wsAgentRows(root).length).toBe(1);
+    expect(root.querySelectorAll(".chappa-rail-list .chappa-rail-item").length).toBe(1);
+    drive(app).applyCreated({ term_id: 77, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+    drive(app).applyCreated({ term_id: 78, name: "pwsh", kind: "terminal", project_id: null, agent_tool_id: null, parent_process_id: null, record_id: "t1" });
+    expect(wsAgentRows(root).length).toBe(1);
+    expect(root.querySelectorAll(".chappa-rail-list .chappa-rail-item").length).toBe(1);
+    expect(recordRows(root).length).toBe(0);
+    expect(drive(app).entries.get(77)?.recordId).toBe("a1");
+    teardown(app, root);
+  });
+
+  it("the mount reconcile binds a live terminal to its record (one row)", async () => {
+    const { api } = stubApi();
+    vi.mocked(api.listRecords).mockResolvedValue([agentRecord({ status: "running", term_id: 90 })]);
+    vi.mocked(api.listTerminals).mockResolvedValue([
+      { id: 90, name: "claude", status: "running", exit_code: null, cols: 80, rows: 24, seq: 1, kind: "agent", project_id: null, agent_tool_id: 3, record_id: "a1" },
+    ]);
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => true });
+    await app.mount();
+    expect(wsAgentRows(root).length).toBe(1);
+    expect(recordRows(root).length).toBe(0);
+    expect(root.querySelector(".chappa-workspace-agents .chappa-subsection-count")?.textContent).toBe("1/1");
+    teardown(app, root);
+  });
+
+  it("closing a recorded row leaves a stopped row and fronts its card", async () => {
+    const { root, app } = await mounted([]);
+    drive(app).applyCreated({ term_id: 50, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a9" });
+    drive(app).applyCreated({ term_id: 51, name: "temp", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: null });
+    drive(app).activeId = 50;
+    drive(app).dropEntry(50, false);
+    drive(app).dropEntry(51, false);
+    const rows = wsAgentRows(root);
+    expect(rows.length).toBe(1);
+    expect(rows[0].classList.contains("chappa-record-row")).toBe(true);
+    expect(rows[0].title).toBe("claude (stopped)");
+    expect(pane(root).classList.contains("active")).toBe(true);
+    expect(pane(root).querySelector(".chappa-record-title")?.textContent).toBe("claude is stopped");
+    teardown(app, root);
+  });
+
+  it("an exited recorded panel keeps its output with the frozen strip above it, whose start restarts the record", async () => {
+    const { api, root, app } = await mounted([agentRecord()]);
+    recordRows(root)[0].click();
+    await FLUSH();
+    pane(root).querySelector<HTMLButtonElement>(".chappa-record-action")!.click();
+    await FLUSH();
+    const [termId, entry] = [...drive(app).entries][0];
+    const strip = root.querySelector<HTMLElement>(".chappa-frozen-strip")!;
+    expect(strip.classList.contains("shown")).toBe(false);
+    drive(app).entries.set(termId, railReducer(entry, { type: "status", status: "failed", exitCode: 1, at: 61_000 }));
+    drive(app).renderRail();
+    expect(strip.classList.contains("shown")).toBe(true);
+    expect(strip.querySelector(".chappa-frozen-strip-text")?.textContent).toBe("failed · code 1 · 2 min ago");
+    // The panel stays in front: the strip never covers it, and no card.
+    expect(entry.host.classList.contains("active")).toBe(true);
+    expect(pane(root).classList.contains("active")).toBe(false);
+    const start = strip.querySelector<HTMLButtonElement>(".chappa-frozen-strip-start")!;
+    expect(start.textContent).toBe("▶ Start new session");
+    start.click();
+    await FLUSH();
+    expect(api.startRecord).toHaveBeenCalledTimes(2);
+    // The exited panel gave way to the new one; still one row.
+    expect(drive(app).entries.has(termId)).toBe(false);
+    expect(wsAgentRows(root).length).toBe(1);
+    expect(strip.classList.contains("shown")).toBe(false);
+    teardown(app, root);
+  });
+
+  it("an exited ephemeral shell shows the strip with nothing to start", async () => {
+    const { root, app } = await mounted([]);
+    await app.newShell();
+    await FLUSH();
+    const [id, entry] = [...drive(app).entries][0];
+    drive(app).entries.set(id, railReducer(entry, { type: "status", status: "exited", exitCode: 0 }));
+    drive(app).renderRail();
+    const strip = root.querySelector<HTMLElement>(".chappa-frozen-strip")!;
+    expect(strip.querySelector(".chappa-frozen-strip-text")?.textContent).toBe("exited · code 0");
+    expect(strip.querySelector<HTMLElement>(".chappa-frozen-strip-start")!.style.display).toBe("none");
+    teardown(app, root);
+  });
+
+  it("a stopped child agent nests under its parent's stopped row", async () => {
+    const { root, app } = await mounted([
+      agentRecord({ record_id: "p", name: "parent" }),
+      agentRecord({ record_id: "c", name: "child", agent: { ...agentRecord().agent!, parent_record_id: "p" } }),
+    ]);
+    const rows = wsAgentRows(root);
+    expect(rows.map((r) => r.querySelector(".chappa-rail-name")?.textContent)).toEqual(["parent", "child"]);
+    expect(rows[1].classList.contains("chappa-rail-child")).toBe(true);
+    teardown(app, root);
   });
 });

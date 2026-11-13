@@ -53,6 +53,16 @@ import { StatsStore, statsChip, statsTooltip } from "./stats";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
 import { ScratchpadsSection, type ScratchpadsApi } from "./scratchpads_section";
 import { makeCollapsibleSection, SIDEBAR_SECTIONS_CSS } from "./sidebar_sections";
+import {
+  FrozenStrip,
+  RecordPane,
+  frozenStripText,
+  paneState,
+  recordView,
+  startLabel,
+  type PaneRun,
+  type RecordView,
+} from "./record_pane";
 
 /** The process-status vocabulary. */
 export type RailStatus = "starting" | "running" | "stopped" | "exited" | "failed";
@@ -91,10 +101,13 @@ export function isLive(status: RailStatus): boolean {
  * draw the row without a second lookup).
  */
 export interface ForestAgent<R = unknown> {
-  id: number;
+  /** A live row's term id, or a stopped record's key (a string, so it can
+   *  never collide with a term id). */
+  id: number | string;
   /** The entry's `agent.parentId` — the process that spawned it, `null` for
-   *  a root. IMMUTABLE (history, not a live link). */
-  parentId: number | null;
+   *  a root. IMMUTABLE (history, not a live link). A stopped record names its
+   *  parent through the same key space. */
+  parentId: number | string | null;
   /** The row itself. */
   entry: R;
 }
@@ -114,8 +127,8 @@ export interface ForestAgent<R = unknown> {
  * Pure and unit-tested in isolation — no DOM.
  */
 export function agentForest<R>(rows: ForestAgent<R>[]): Array<[ForestAgent<R>, number]> {
-  const ids = new Set(rows.map((r) => r.id));
-  const childrenByParent = new Map<number, ForestAgent<R>[]>();
+  const ids = new Set<number | string>(rows.map((r) => r.id));
+  const childrenByParent = new Map<number | string, ForestAgent<R>[]>();
   const roots: ForestAgent<R>[] = [];
   for (const row of rows) {
     if (row.parentId === null || !ids.has(row.parentId)) {
@@ -126,9 +139,13 @@ export function agentForest<R>(rows: ForestAgent<R>[]): Array<[ForestAgent<R>, n
       else childrenByParent.set(row.parentId, [row]);
     }
   }
-  for (const list of childrenByParent.values()) list.sort((a, b) => a.id - b.id);
+  // Live children in id (spawn) order; stopped records keep the given order
+  // (the sort is stable, and a string key compares equal to anything).
+  for (const list of childrenByParent.values()) {
+    list.sort((a, b) => (typeof a.id === "number" && typeof b.id === "number" ? a.id - b.id : 0));
+  }
   const out: Array<[ForestAgent<R>, number]> = [];
-  const seen = new Set<number>();
+  const seen = new Set<number | string>();
   const visit = (row: ForestAgent<R>, depth: number): void => {
     if (seen.has(row.id)) return; // cycle guard — parents spawn first, cannot happen
     seen.add(row.id);
@@ -144,21 +161,41 @@ export function agentForest<R>(rows: ForestAgent<R>[]): Array<[ForestAgent<R>, n
   return out;
 }
 
+/** One row of an AGENTS section: a live (or frozen) entry, or a stopped
+ *  record with no terminal attached. */
+type AgentItem = { type: "entry"; id: number; entry: RailEntry } | { type: "record"; rec: RecordRow };
+
+/** The forest key of a stopped record (never a number, so never a term id). */
+function recordKey(recordId: string): string {
+  return `record:${recordId}`;
+}
+
 /** The rows an AGENTS section renders: the forest of `rows` (children nested
  *  under their spawning parent) with each row's depth and whether it is the
- *  last child at that depth (the tree connector's vertical stops at its dot). */
-function forestRows(rows: Array<[number, RailEntry]>): Array<{
-  id: number;
-  entry: RailEntry;
-  depth: number;
-  lastChild: boolean;
-}> {
-  const forest = agentForest(rows.map(([id, e]) => ({ id, parentId: e.agent?.parentId ?? null, entry: e })));
-  const out: Array<{ id: number; entry: RailEntry; depth: number; lastChild: boolean }> = [];
+ *  last child at that depth (the tree connector's vertical stops at its dot).
+ *  A stopped record nests by its parent's RECORD id: under that parent's
+ *  live row when one is attached (`liveTermOf`), under its stopped row
+ *  otherwise. */
+function forestRows(
+  items: AgentItem[],
+  liveTermOf: (recordId: string) => number | null,
+): Array<{ item: AgentItem; depth: number; lastChild: boolean }> {
+  const forest = agentForest(
+    items.map((item): ForestAgent<AgentItem> => {
+      if (item.type === "entry") return { id: item.id, parentId: item.entry.agent?.parentId ?? null, entry: item };
+      const parent = item.rec.agent?.parentRecordId ?? null;
+      return {
+        id: recordKey(item.rec.recordId),
+        parentId: parent === null ? null : (liveTermOf(parent) ?? recordKey(parent)),
+        entry: item,
+      };
+    }),
+  );
+  const out: Array<{ item: AgentItem; depth: number; lastChild: boolean }> = [];
   for (let j = 0; j < forest.length; j++) {
     const [fa, depth] = forest[j];
     const lastChild = depth >= 1 && (j + 1 >= forest.length || forest[j + 1][1] < depth);
-    out.push({ id: fa.id, entry: fa.entry, depth, lastChild });
+    out.push({ item: fa.entry, depth, lastChild });
   }
   return out;
 }
@@ -207,6 +244,13 @@ export interface RailEntry {
    *  The heuristic `"badge"` tier is still DERIVED from `bell` at render
    *  time — this field carries facts, not heuristics. */
   attention: Attention;
+  /** The durable record this row runs for (agents and shells; absent for
+   *  an ephemeral row). Closing the row leaves the record behind as a
+   *  stopped row. */
+  recordId?: string;
+  /** When the entry was seen to die (exited / failed), for the frozen
+   *  strip's age; null while live. */
+  endedAtMs?: number | null;
   /** Rail-row kind: "process" entries are started project processes
    *  and render in the project section, NOT the terminals list. Absent
    *  (default) = a plain shell row.
@@ -268,6 +312,10 @@ export interface ProcessRow {
   /** RAW per-process notification-level override; null = inherit the
    *  project default. Raw so a garbage value degrades via resolveLevel. */
   notificationLevel: string | null;
+  /** The command's durable record and its stored last run (the stopped
+   *  pane's last-run line and tail). */
+  recordId: string | null;
+  lastRun: PaneRun | null;
   /** Card badges: renderRail() skips process entries, so a hidden
    *  process terminal's bell/activity has to surface on its CARD instead. */
   bell: boolean;
@@ -339,6 +387,9 @@ export interface WorkspaceCommandRow {
   env: Record<string, string>;
   exitCode: number | null;
   termId: number | null;
+  /** The command's durable record and its stored last run. */
+  recordId: string | null;
+  lastRun: PaneRun | null;
   panel: TerminalPanel | null;
   host: HTMLElement | null;
   /** DOM refs for in-place status updates (the section is not rebuilt per
@@ -349,6 +400,39 @@ export interface WorkspaceCommandRow {
   stopBtn: HTMLButtonElement | null;
   restartBtn: HTMLButtonElement | null;
 }
+
+/**
+ * One stored agent or shell record (command records are the COMMANDS rows).
+ * Keyed by record id in the App's second map, beside the term-id-keyed
+ * entries: a stopped record has no terminal, so it has no entry. While a
+ * terminal is attached (`termId` names a live entry) the entry renders the
+ * row; otherwise the record does, as a stopped row whose pane is the
+ * record card.
+ */
+export interface RecordRow {
+  recordId: string;
+  kind: "agent" | "terminal";
+  name: string;
+  /** The owning project, or null for the workspace. */
+  projectId: number | null;
+  /** The resting status shown while nothing is attached. */
+  status: RailStatus;
+  /** The attached terminal, or null. */
+  termId: number | null;
+  /** The newest run as last seen (head from the list, or a fetched run). */
+  lastRun: PaneRun | null;
+  agent: { toolId: number; parentRecordId: string | null } | null;
+  terminal: { shellProfile: string | null; cwd: string | null } | null;
+  /** A start from this window is in flight (double-press guard). */
+  starting: boolean;
+}
+
+/** What the record pane is showing: a command card (project or workspace)
+ *  or an agent / shell record. */
+export type PaneTarget =
+  | { kind: "command"; projectId: number; name: string }
+  | { kind: "workspace-command"; name: string }
+  | { kind: "record"; recordId: string };
 
 /**
  * Attention flag for an ACTIVE-section row — a small enum so task
@@ -393,7 +477,8 @@ export interface ActiveRow {
 
 /** Rail mutations, pure so the reducer is unit-testable without a DOM. */
 export type RailAction =
-  | { type: "status"; status: RailStatus; exitCode: number | null }
+  /** `at`: when the change was observed (the frozen strip's age). */
+  | { type: "status"; status: RailStatus; exitCode: number | null; at?: number }
   | { type: "title"; title: string }
   | { type: "activity" }
   | { type: "bell" }
@@ -412,6 +497,8 @@ export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
         status: action.status,
         exitCode: action.exitCode,
         attention: isLive(action.status) ? entry.attention : null,
+        // The first observed death keeps its time; a repeat does not reset it.
+        endedAtMs: isLive(action.status) ? null : (entry.endedAtMs ?? action.at ?? null),
       };
     case "attention":
       return { ...entry, attention: isLive(entry.status) ? action.attention : null };
@@ -749,12 +836,13 @@ const APP_CSS = `
 .chappa-project-yml-error{display:none;margin:0 2px 8px;padding:6px 8px;border:1px solid #5c2f2f;border-radius:6px;background:#2a1717;color:#f0a0a0;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;}
 .chappa-panel-host{display:none;flex:1 1 auto;min-width:0;min-height:0;}
 .chappa-panel-host.active{display:block;}
-.chappa-panel-host.chappa-process-empty{display:none;}
-.chappa-panel-host.chappa-process-empty.active{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;}
-.chappa-process-empty-title{font:600 15px system-ui,sans-serif;color:#d6d8dc;}
-.chappa-process-empty-hint{font:13px system-ui,sans-serif;color:#8b949e;}
-.chappa-process-empty-start{margin-top:4px;padding:6px 14px;border:1px solid #262a31;border-radius:6px;background:#16181d;color:#d6d8dc;font:13px system-ui,sans-serif;cursor:pointer;}
-.chappa-process-empty-start:hover{background:#1d232b;}
+/* A stopped record row: dimmed, with the start button on hover (the space is
+   reserved so the hover never reflows the name). */
+.chappa-record-row .chappa-rail-name{color:#8b949e;}
+.chappa-status-dot.dim{opacity:.6;}
+.chappa-record-start{flex:none;margin-left:auto;border:0;background:none;color:#8b949e;font-size:11px;line-height:1;cursor:pointer;padding:0 2px;border-radius:4px;visibility:hidden;}
+.chappa-record-row:hover .chappa-record-start{visibility:visible;}
+.chappa-record-start:hover{color:#3fb950;}
 /* ACTIVE section: running processes + badged live terminals across
    ALL open projects, the first section of the workspace block. Hidden
    entirely when empty.
@@ -1094,13 +1182,25 @@ export class App {
    *  EVERY event, and most of them change nothing a bound-terminal row shows.
    *  Sentinel start so the first render always builds. */
   private projectTermsSig = "\u0000never-rendered";
-  /** The stopped-command pane: one lazily built
-   *  host shared by every stopped/never-started command; `emptyFor`
-   *  names the command it currently fronts (project-scoped: two open
-   *  projects can share a process name). */
-  private emptyHost: HTMLDivElement | null = null;
-  private emptyTitle: HTMLElement | null = null;
-  private emptyFor: { projectId: number; name: string } | null = null;
+  // --- durable records + the record pane --------------------------
+  /** Stored agent and shell records, keyed by record id — the second map
+   *  beside `entries` (keyed by term id): a stopped record has no terminal
+   *  and so no entry. Command records are not here; they are the COMMANDS
+   *  rows. */
+  private readonly records = new Map<string, RecordRow>();
+  /** The card a row shows when no terminal is attached: one lazily built
+   *  instance re-rendered per activation. `paneFor` names what it fronts
+   *  (null while hidden). */
+  private recordPane: RecordPane | null = null;
+  private paneFor: PaneTarget | null = null;
+  /** Bumped per pane render, so a slow tail fetch never paints over the
+   *  card of a row activated after it. */
+  private paneSeq = 0;
+  /** The line above an exited panel: what happened + the start action. */
+  private readonly frozenStrip: FrozenStrip;
+  /** The project AGENTS header's add button + menu (Ctrl+T on a project
+   *  row's card opens it). */
+  private readonly projectAgentSpawner: AgentSpawner;
 
   // --- notification levels ---------------------------------------
   /** Whether the chappa-ai WINDOW has focus. Half of the focused rule: "if
@@ -1394,6 +1494,7 @@ export class App {
     const agentsSpawner = this.buildAgentSpawner((toolId) =>
       void this.spawnAgent(toolId, this.expandedProjectId ?? undefined),
     );
+    this.projectAgentSpawner = agentsSpawner;
     agentsHeader.append(agentsLabel, this.projectAgentCount, agentsSpawner.btn, agentsSpawner.menu);
     this.projectAgentList = document.createElement("div");
     this.projectAgentList.className = "chappa-project-term-list";
@@ -1587,6 +1688,10 @@ export class App {
 
     this.stack = document.createElement("main");
     this.stack.className = "chappa-stack";
+    // First in the column, so it sits above whichever panel is showing and
+    // the panel shrinks under it rather than being covered.
+    this.frozenStrip = new FrozenStrip();
+    this.stack.appendChild(this.frozenStrip.el);
 
     // The per-command context menu. Built once, reused by every row;
     // it lives in the app root (not document.body) so it tears down with the
@@ -1867,6 +1972,9 @@ export class App {
     // Before any panel exists: every path base is computed once, at spawn.
     this.home = await this.files.homeDir().catch(() => null);
     await this.loadProjects();
+    // The stored records first, so the adoption below binds each live
+    // terminal to its record's row instead of adding a second one.
+    await this.loadRecords();
     // After projects load, adopt every live terminal the app does
     // not already know (backend spawns that happened while the app was closed
     // or reloading — the vite-reload orphan / parked item).
@@ -1974,6 +2082,21 @@ export class App {
    *  backend (MCP/control spawn, agent spawn, project process). Adopt it as a
    *  rail row in the right section; no pane until the user clicks it. */
   private applyCreated(p: ipc.TerminalCreatedEvent): void {
+    // A spawn this window made itself (a shell from the ＋) learns its record
+    // only from this broadcast: bind it, so closing the row leaves the record.
+    const own = this.seen.has(p.term_id) ? this.entries.get(p.term_id) : undefined;
+    if (own && p.record_id && !own.recordId) {
+      this.entries.set(p.term_id, { ...own, recordId: p.record_id });
+      this.bindRecord(p.record_id, p.term_id, {
+        name: p.name,
+        kind: p.kind,
+        project_id: p.project_id,
+        agent_tool_id: p.agent_tool_id,
+        parent_id: p.parent_process_id ?? null,
+      });
+      this.renderRail();
+      return;
+    }
     this.adopt({
       term_id: p.term_id,
       name: p.name,
@@ -1982,7 +2105,70 @@ export class App {
       agent_tool_id: p.agent_tool_id,
       // The broadcast carries the parent so the row nests immediately.
       parent_id: p.parent_process_id ?? null,
+      record_id: p.record_id ?? null,
+      ended_at_ms: p.last_run?.ended_at_ms ?? null,
     });
+  }
+
+  /** The stored agent and shell records (`list_records`), as stopped rows
+   *  until a terminal binds to them. */
+  private async loadRecords(): Promise<void> {
+    let list: ipc.RecordDto[];
+    try {
+      list = (await this.api.listRecords()) ?? [];
+    } catch {
+      return; // not in Tauri / transient — rows still bind as terminals appear
+    }
+    for (const r of list) {
+      if (r.kind === "command") continue;
+      if (this.records.has(r.record_id)) continue;
+      this.records.set(r.record_id, recordRowFromDto(r));
+    }
+    this.renderRail();
+  }
+
+  /** Attach terminal `termId` to record `recordId`, creating the record row
+   *  from the spawn's facts when this window has not seen it yet (a spawn
+   *  made after launch). Command terminals have no record row here. */
+  private bindRecord(
+    recordId: string,
+    termId: number,
+    f: {
+      name: string;
+      kind: "terminal" | "agent" | "process";
+      project_id: number | null;
+      agent_tool_id: number | null;
+      parent_id: number | null;
+    },
+  ): void {
+    if (f.kind === "process") return;
+    let rec = this.records.get(recordId);
+    if (!rec) {
+      rec = {
+        recordId,
+        kind: f.kind,
+        name: f.name,
+        projectId: f.project_id,
+        status: "running",
+        termId: null,
+        lastRun: null,
+        agent:
+          f.kind === "agent"
+            ? {
+                toolId: f.agent_tool_id ?? 0,
+                parentRecordId: f.parent_id !== null ? (this.entries.get(f.parent_id)?.recordId ?? null) : null,
+              }
+            : null,
+        terminal: f.kind === "terminal" ? { shellProfile: null, cwd: null } : null,
+        starting: false,
+      };
+      this.records.set(recordId, rec);
+    }
+    rec.termId = termId;
+    if (this.paneFor?.kind === "record" && this.paneFor.recordId === recordId && !rec.starting) {
+      // Its card was showing: the row is live now, so is its pane.
+      this.hideRecordPane();
+    }
   }
 
   /** The mount reconcile: adopt every LIVE terminal the app does not already
@@ -2003,6 +2189,10 @@ export class App {
           project_id: t.project_id ?? null,
           agent_tool_id: t.agent_tool_id ?? null,
           parent_id: t.parent_process_id ?? null,
+          record_id: t.record_id ?? null,
+          status: t.status as RailStatus,
+          exit_code: t.exit_code ?? null,
+          ended_at_ms: t.last_run?.ended_at_ms ?? null,
         });
       }
     } catch {
@@ -2029,24 +2219,35 @@ export class App {
     /** The spawning process's id — the forest nests this row under
      *  it when that parent is on the same surface. */
     parent_id: number | null;
+    /** The record the terminal runs for: a stopped row showing it binds
+     *  the terminal in place (no second row). */
+    record_id?: string | null;
+    /** The snapshot's status (the reconcile knows it; a broadcast is a
+     *  fresh spawn, so "starting"). */
+    status?: RailStatus;
+    exit_code?: number | null;
+    ended_at_ms?: number | null;
   }): void {
     const id = f.term_id;
     if (this.seen.has(id) || this.entries.has(id)) return;
     this.seen.add(id);
     const host = document.createElement("div");
+    const status = f.status ?? "starting";
     let entry: RailEntry = {
       id,
       panel: this.placeholderPanel(host),
       host,
       name: f.name,
-      status: "starting",
-      exitCode: null,
+      status,
+      exitCode: f.exit_code ?? null,
       title: null,
       activity: false,
       bell: false,
       attention: null,
       adopted: true,
       kind: "shell",
+      endedAtMs: isLive(status) ? null : (f.ended_at_ms ?? null),
+      ...(f.record_id && f.kind !== "process" ? { recordId: f.record_id } : {}),
     };
     if (f.kind === "agent") {
       entry = {
@@ -2079,6 +2280,7 @@ export class App {
       entry = { ...entry, kind: "project-shell", projectShell: { projectId: f.project_id } };
     }
     this.entries.set(id, entry);
+    if (entry.recordId) this.bindRecord(entry.recordId, id, f);
     this.renderRail();
   }
 
@@ -2199,7 +2401,7 @@ export class App {
       this.entries.get(id)?.panel.focusInput();
       return;
     }
-    this.hideProcessEmptyState();
+    this.hideRecordPane();
     this.activeId = id;
     for (const [entryId, entry] of this.entries) {
       const active = entryId === id;
@@ -2338,10 +2540,22 @@ export class App {
     // Likewise its clipboard answer: "allowed" is for that terminal only.
     this.clipboardGate.forget(id);
     entry.host.remove();
+    // A recorded row outlives its terminal: the record turns back into a
+    // stopped row (its run's outcome, or "stopped" for a close while live).
+    const rec = entry.recordId ? this.records.get(entry.recordId) : undefined;
+    if (rec && rec.termId === id) {
+      rec.termId = null;
+      rec.status = isLive(entry.status) ? "stopped" : entry.status;
+    }
     if (this.activeId === id) {
       this.activeId = null;
-      const ids = [...this.entries.keys()];
-      if (ids.length > 0) this.activate(ids[ids.length - 1]);
+      if (rec) {
+        // The row is still there, so its pane stays in front: the card.
+        this.showRecordPane({ kind: "record", recordId: rec.recordId });
+      } else {
+        const ids = [...this.entries.keys()];
+        if (ids.length > 0) this.activate(ids[ids.length - 1]);
+      }
     }
     this.renderRail();
   }
@@ -2438,6 +2652,7 @@ export class App {
           type: "status",
           status: (p.status ?? entry.status) as RailStatus,
           exitCode: p.exit_code ?? null,
+          at: this.now(),
         }),
       );
       this.renderRail();
@@ -2574,6 +2789,8 @@ export class App {
       existing.notificationLevel = dto.notificationLevel;
       existing.status = dto.status as RailStatus;
       existing.exitCode = dto.exitCode;
+      existing.recordId = dto.recordId ?? existing.recordId;
+      existing.lastRun = dto.lastRun ?? existing.lastRun;
       // Rust dropped the terminal (a reload stopped it): the panel is stale.
       // A restart-in-place keeps the id, so a same-id answer keeps the panel.
       if (dto.termId === null && existing.termId !== null) this.disposeProcessPanel(existing);
@@ -2582,8 +2799,8 @@ export class App {
     for (const [name, row] of state.processRows) {
       if (next.has(name)) continue;
       this.disposeProcessPanel(row);
-      if (this.emptyFor?.projectId === id && this.emptyFor.name === name) {
-        this.hideProcessEmptyState();
+      if (this.paneFor?.kind === "command" && this.paneFor.projectId === id && this.paneFor.name === name) {
+        this.hideRecordPane();
       }
     }
     state.processRows = next;
@@ -2615,6 +2832,8 @@ export class App {
       panel: null,
       host: null,
       notificationLevel: p.notificationLevel,
+      recordId: p.recordId ?? null,
+      lastRun: p.lastRun ?? null,
       bell: false,
       activity: false,
       el: null,
@@ -2939,6 +3158,12 @@ export class App {
       count += 1;
       this.railList.appendChild(this.buildTerminalRow(id, entry));
     }
+    // Stopped workspace shells follow the live ones and count in the total.
+    for (const rec of this.stoppedRecords("terminal")) {
+      if (rec.projectId !== null) continue;
+      count += 1;
+      this.railList.appendChild(this.buildRecordRow(rec, "chappa-workspace-record-row"));
+    }
     this.railCount.textContent = String(count);
     this.renderWorkspaceAgents();
     // The project subsections are the rail's sibling surfaces: every state
@@ -2949,6 +3174,111 @@ export class App {
     // ACTIVE re-derives with the rail too: entry status, titles and
     // shell badges all route through here. activeSig makes a no-change free.
     this.renderActiveSection();
+    // The strip follows the shown entry's status the same way.
+    this.renderFrozenStrip();
+  }
+
+  /** Records of `kind` with no terminal attached in this window: the
+   *  stopped rows. */
+  private stoppedRecords(kind: RecordRow["kind"]): RecordRow[] {
+    const out: RecordRow[] = [];
+    for (const rec of this.records.values()) {
+      if (rec.kind !== kind) continue;
+      if (rec.termId !== null && this.entries.has(rec.termId)) continue;
+      out.push(rec);
+    }
+    return out;
+  }
+
+  /** A stopped agent record renders in the expanded project's AGENTS
+   *  section by the same predicate as a live agent; otherwise in the
+   *  workspace list. */
+  private recordInExpandedSection(rec: RecordRow): boolean {
+    return this.expandedProjectId !== null && rec.projectId === this.expandedProjectId;
+  }
+
+  /** The live term id of a record, or null when none is attached. */
+  private readonly liveTermOf = (recordId: string): number | null => {
+    const termId = this.records.get(recordId)?.termId ?? null;
+    return termId !== null && this.entries.has(termId) ? termId : null;
+  };
+
+  /** One section's agent rows: live entries plus stopped records. */
+  private agentItems(entries: Array<[number, RailEntry]>, recs: RecordRow[]): AgentItem[] {
+    return [
+      ...entries.map(([id, entry]): AgentItem => ({ type: "entry", id, entry })),
+      ...recs.map((rec): AgentItem => ({ type: "record", rec })),
+    ];
+  }
+
+  /** What a stopped row renders, for the sections' repaint signatures. */
+  private recordSig(rec: RecordRow): string {
+    return [rec.recordId, rec.name, rec.status, this.isPaneFor(rec.recordId)].join("\u001f");
+  }
+
+  private isPaneFor(recordId: string): boolean {
+    return this.paneFor?.kind === "record" && this.paneFor.recordId === recordId;
+  }
+
+  /**
+   * One stopped row: a dim status dot and the name — no CPU chip, no ×
+   * (closing is what made it a stopped row). Hover shows ▶, the command
+   * card's start button; a click fronts the record card. Same row class as
+   * a live row, so a section's row count is one per record either way.
+   */
+  private buildRecordRow(rec: RecordRow, extraClass: string, depth = 0, lastChild = false): HTMLElement {
+    const row = document.createElement("button");
+    row.className = "chappa-rail-item chappa-record-row";
+    row.classList.add(extraClass);
+    row.dataset.recordId = rec.recordId;
+    row.classList.toggle("active", this.isPaneFor(rec.recordId));
+    row.style.position = "relative";
+    if (depth > 0) {
+      row.classList.add("chappa-rail-child");
+      if (lastChild) row.classList.add("chappa-rail-child-last");
+      row.style.setProperty("--chappa-sub-depth", String(Math.min(depth, 3)));
+    }
+    row.title = `${rec.name} (${rec.status})`;
+    row.addEventListener("click", () => this.activateRecord(rec.recordId));
+    const dot = document.createElement("span");
+    dot.className = `chappa-status-dot ${rec.status} dim`;
+    dot.title = rec.status;
+    const name = document.createElement("span");
+    name.className = "chappa-rail-name";
+    name.textContent = rec.name;
+    row.append(dot, name);
+    if (rec.kind === "agent") {
+      row.classList.add("agent");
+      if (extraClass === "chappa-workspace-agent-row" && rec.projectId !== null) {
+        const project = this.badgeFor(rec.projectId);
+        project.classList.add("chappa-rail-project");
+        row.append(project);
+      }
+    }
+    const start = document.createElement("button");
+    start.className = "chappa-record-start";
+    start.textContent = "▶";
+    start.title = startLabel(rec.kind).replace("▶ ", "");
+    start.addEventListener("mousedown", (e) => e.preventDefault());
+    start.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void this.startRecordRow(rec.recordId);
+    });
+    row.append(start);
+    return row;
+  }
+
+  /** Click on a stopped row: front its card (a row whose terminal is
+   *  attached activates that terminal instead). */
+  activateRecord(recordId: string): void {
+    const rec = this.records.get(recordId);
+    if (!rec) return;
+    const termId = this.liveTermOf(recordId);
+    if (termId !== null) {
+      this.activate(termId);
+      return;
+    }
+    this.showRecordPane({ kind: "record", recordId });
   }
 
   /**
@@ -2963,12 +3293,18 @@ export class App {
     for (const [id, entry] of this.entries) {
       if (entry.agent && !this.agentInExpandedSection(entry)) rows.push([id, entry]);
     }
+    const recs = this.stoppedRecords("agent").filter((r) => !this.recordInExpandedSection(r));
+    // Stopped records count in the total, never in the running half.
     const running = rows.filter(([, e]) => isLive(e.status)).length;
     this.wsAgentList.textContent = "";
-    for (const { id, entry, depth, lastChild } of forestRows(rows)) {
-      this.wsAgentList.appendChild(this.buildTerminalRow(id, entry, "chappa-workspace-agent-row", depth, lastChild));
+    for (const { item, depth, lastChild } of forestRows(this.agentItems(rows, recs), this.liveTermOf)) {
+      this.wsAgentList.appendChild(
+        item.type === "entry"
+          ? this.buildTerminalRow(item.id, item.entry, "chappa-workspace-agent-row", depth, lastChild)
+          : this.buildRecordRow(item.rec, "chappa-workspace-agent-row", depth, lastChild),
+      );
     }
-    this.wsAgentCount.textContent = `${running}/${rows.length}`;
+    this.wsAgentCount.textContent = `${running}/${rows.length + recs.length}`;
   }
 
   /** An agent row that renders in the EXPANDED project's AGENTS
@@ -3382,7 +3718,17 @@ export class App {
           // child nests under its recorded parent.
           parentId: resp.agent.parent_process_id ?? null,
         },
+        ...(resp.record_id ? { recordId: resp.record_id } : {}),
       });
+      if (resp.record_id) {
+        this.bindRecord(resp.record_id, id, {
+          name: resp.name,
+          kind: "agent",
+          project_id: resp.agent.project_id ?? project ?? null,
+          agent_tool_id: resp.agent.tool_id,
+          parent_id: resp.agent.parent_process_id ?? null,
+        });
+      }
       this.renderRail();
       // The spawn's container probe carries the mounts: from here on the
       // agent's container paths map to the host. Synchronous with `onCreated`,
@@ -3934,7 +4280,7 @@ export class App {
     for (const [termId, entry] of [...this.entries]) {
       if (this.boundToProject(entry, id)) this.forceClosePanel(termId);
     }
-    if (this.emptyFor?.projectId === id) this.hideProcessEmptyState();
+    if (this.paneFor?.kind === "command" && this.paneFor.projectId === id) this.hideRecordPane();
     state.summaryEl?.remove();
     this.openProjects.delete(id);
     if (this.expandedProjectId === id) {
@@ -4005,63 +4351,303 @@ export class App {
   }
 
   /** Focus a command's pane: its panel when one exists (running OR exited-
-   *  with-scrollback), else the stopped-command empty state
-   *  ("Process is stopped / Start it to run this process. / ▶ Start"). */
+   *  with-scrollback), else the record card for the command. */
   private activateProcess(projectId: number, name: string): void {
     const row = this.rowFor(projectId, name);
     if (!row) return;
     if (row.termId !== null && this.entries.has(row.termId)) {
       this.activate(row.termId);
     } else {
-      this.showProcessEmptyState(projectId, name);
+      this.showRecordPane({ kind: "command", projectId, name });
     }
   }
 
-  /** Front the stopped-command pane for one command: every real panel
-   *  deactivates (the stack must not keep showing the previous command) and
-   *  the card takes the active marker. */
-  private showProcessEmptyState(projectId: number, name: string): void {
-    const row = this.rowFor(projectId, name);
-    if (!row) return;
+  // --- the record pane --------------------------------------------
+
+  private ensureRecordPane(): RecordPane {
+    if (!this.recordPane) {
+      this.recordPane = new RecordPane({
+        onAction: () => {
+          const target = this.paneFor;
+          if (target) void this.startPaneTarget(target);
+        },
+        onNewAgent: () => {
+          const target = this.paneFor;
+          if (target) this.openAgentMenuFor(this.paneScope(target));
+        },
+      });
+      this.stack.appendChild(this.recordPane.host);
+    }
+    return this.recordPane;
+  }
+
+  /** The card for a pane target, built from its record and newest run
+   *  (null when the target no longer exists). */
+  private paneView(target: PaneTarget): { view: RecordView; recordId: string | null } | null {
+    const now = this.now();
+    if (target.kind === "command") {
+      const row = this.rowFor(target.projectId, target.name);
+      if (!row) return null;
+      return { view: recordView({ kind: "command", name: row.name, lastRun: row.lastRun }, now), recordId: row.recordId };
+    }
+    if (target.kind === "workspace-command") {
+      const row = this.wsCmds.get(target.name);
+      if (!row) return null;
+      return { view: recordView({ kind: "command", name: row.name, lastRun: row.lastRun }, now), recordId: row.recordId };
+    }
+    const rec = this.records.get(target.recordId);
+    if (!rec) return null;
+    return { view: recordView({ kind: rec.kind, name: rec.name, lastRun: rec.lastRun }, now), recordId: rec.recordId };
+  }
+
+  /** The project a pane target belongs to (null = the workspace). */
+  private paneScope(target: PaneTarget): number | null {
+    if (target.kind === "command") return target.projectId;
+    if (target.kind === "workspace-command") return null;
+    return this.records.get(target.recordId)?.projectId ?? null;
+  }
+
+  /** Front the record card: every real panel deactivates (the stack must not
+   *  keep showing the previous row), the target's row takes the active
+   *  marker, and the newest run's tail is fetched under the card. */
+  private showRecordPane(target: PaneTarget): void {
+    const built = this.paneView(target);
+    if (!built) return;
     this.activeId = null;
     for (const entry of this.entries.values()) {
       entry.panel.setActive(false);
       entry.host.classList.remove("active");
     }
-    if (!this.emptyHost) {
-      const host = document.createElement("div");
-      host.className = "chappa-panel-host chappa-process-empty";
-      this.emptyTitle = document.createElement("div");
-      this.emptyTitle.className = "chappa-process-empty-title";
-      const hint = document.createElement("div");
-      hint.className = "chappa-process-empty-hint";
-      hint.textContent = "Start it to run this process.";
-      const btn = document.createElement("button");
-      btn.className = "chappa-process-empty-start";
-      btn.textContent = "▶ Start";
-      btn.addEventListener("mousedown", (e) => e.preventDefault());
-      btn.addEventListener("click", () => {
-        const t = this.emptyFor;
-        if (t) void this.startProcess(t.projectId, t.name);
-      });
-      host.append(this.emptyTitle, hint, btn);
-      this.stack.appendChild(host);
-      this.emptyHost = host;
-    }
-    this.emptyTitle!.textContent = "Process is stopped";
-    this.emptyFor = { projectId, name };
-    this.emptyHost.classList.add("active");
+    const pane = this.ensureRecordPane();
+    this.paneFor = target;
+    const seq = ++this.paneSeq;
+    pane.show(built.view);
+    pane.setActive(true);
     for (const s of this.openProjects.values()) {
       for (const r of s.processRows.values()) {
-        r.el?.classList.toggle("active", r === row);
+        r.el?.classList.toggle(
+          "active",
+          target.kind === "command" && r.projectId === target.projectId && r.name === target.name,
+        );
       }
     }
+    for (const r of this.wsCmds.values()) {
+      r.el?.classList.toggle("active", target.kind === "workspace-command" && r.name === target.name);
+    }
     this.renderRail();
+    if (built.recordId) void this.loadPaneRun(target, built.recordId, seq);
   }
 
-  private hideProcessEmptyState(): void {
-    this.emptyFor = null;
-    this.emptyHost?.classList.remove("active");
+  /** The newest run with its tail, for the card on screen. A fetch that
+   *  lands after another activation is dropped. */
+  private async loadPaneRun(target: PaneTarget, recordId: string, seq: number): Promise<void> {
+    let runs: ipc.RunDto[];
+    try {
+      runs = (await this.api.getRecordRuns(recordId, 1)) ?? [];
+    } catch {
+      return; // the stored head already rendered; the tail just stays empty
+    }
+    const run = runs[0];
+    if (!run || seq !== this.paneSeq || !this.recordPane?.active) return;
+    if (target.kind === "record") {
+      const rec = this.records.get(target.recordId);
+      if (rec) rec.lastRun = run;
+    } else if (target.kind === "command") {
+      const row = this.rowFor(target.projectId, target.name);
+      if (row) row.lastRun = run;
+    } else {
+      const row = this.wsCmds.get(target.name);
+      if (row) row.lastRun = run;
+    }
+    const built = this.paneView(target);
+    if (built) this.recordPane.setRun(built.view.lastRun);
+    this.recordPane.setTail({ kind: run.tail_kind, lines: run.tail ?? [] });
+  }
+
+  private hideRecordPane(): void {
+    this.paneFor = null;
+    this.recordPane?.setActive(false);
+  }
+
+  /** The card's primary action: start the row through its own start path. */
+  private async startPaneTarget(target: PaneTarget): Promise<void> {
+    if (target.kind === "command") await this.startProcess(target.projectId, target.name);
+    else if (target.kind === "workspace-command") await this.startWorkspace(target.name);
+    else await this.startRecordRow(target.recordId);
+  }
+
+  /** Ctrl+T on a card: the AGENTS header's add menu of the row's scope —
+   *  the expanded project's when the row is its, else the workspace's. */
+  private openAgentMenuFor(projectId: number | null): void {
+    const spawner =
+      projectId !== null && projectId === this.expandedProjectId ? this.projectAgentSpawner : this.newAgentSpawner;
+    if (spawner.menu.style.display === "none") spawner.btn.click();
+  }
+
+  /**
+   * Start a stopped agent or shell record into this window: a fresh panel
+   * whose spawn is `start_record` with the panel's frames channel (an agent
+   * gets a NEW session). The terminal binds to the record's row in place.
+   * A record whose terminal is live just activates it; an exited one that
+   * is still attached is replaced (the backend closes it on start, so the
+   * local panel goes without a close call of its own).
+   */
+  async startRecordRow(recordId: string): Promise<void> {
+    const rec = this.records.get(recordId);
+    if (!rec || rec.starting) return;
+    const attachedId = this.liveTermOf(recordId);
+    const attached = attachedId !== null ? this.entries.get(attachedId) : undefined;
+    if (attachedId !== null && attached && isLive(attached.status)) {
+      this.activate(attachedId);
+      return;
+    }
+    rec.starting = true;
+    if (attachedId !== null) this.dropEntry(attachedId, false);
+    let tool = rec.agent ? this.agentTools.byId(rec.agent.toolId) : undefined;
+    if (rec.agent && !tool) {
+      await this.agentTools.load().catch(() => {});
+      tool = this.agentTools.byId(rec.agent.toolId);
+    }
+    const host = document.createElement("div");
+    host.className = "chappa-panel-host";
+    this.stack.appendChild(host);
+    const projectRoot = rec.projectId !== null ? (this.projects.get(rec.projectId)?.path ?? null) : null;
+    const pathBase =
+      rec.kind === "agent"
+        ? tool?.runtime.kind === "docker_exec"
+          ? this.containerPathBase(tool.runtime, [])
+          : baseFor({ kind: "agent", projectRoot, spawnCwd: null }, this.home)
+        : baseFor(
+            rec.projectId !== null
+              ? { kind: "projectShell", projectRoot }
+              : { kind: "workspaceShell", spawnCwd: rec.terminal?.cwd ?? null },
+            this.home,
+          );
+    const start = async (onFrame: (buf: ArrayBuffer) => void): Promise<number> => {
+      const frames = ipc.makeProjectFramesChannel((data) => {
+        onFrame(data instanceof ArrayBuffer ? data : Uint8Array.from(data).buffer);
+      });
+      const answer = await this.api.startRecord(recordId, frames);
+      if (answer.term_id === null) throw new Error(`${rec.name} did not start a terminal`);
+      return answer.term_id;
+    };
+    const bind = (id: number, panel: PanelHost): void => {
+      this.seen.add(id);
+      // The created broadcast can beat this answer and adopt the id first;
+      // its placeholder (no pane yet) gives way to the real panel.
+      this.entries.get(id)?.panel.dispose(false);
+      const base: RailEntry = {
+        id,
+        panel,
+        host,
+        name: rec.name,
+        status: "starting",
+        exitCode: null,
+        title: null,
+        activity: false,
+        bell: false,
+        attention: null,
+        recordId,
+      };
+      const entry: RailEntry =
+        rec.kind === "agent"
+          ? {
+              ...base,
+              kind: "agent",
+              agent: {
+                toolId: rec.agent?.toolId ?? 0,
+                toolType: tool?.tool_type ?? "custom",
+                model: tool?.model ?? null,
+                runtime: tool?.runtime ?? { kind: "host" },
+                projectId: rec.projectId,
+                container: null,
+                bridge: "ok",
+                transport: tool?.transport ?? "tty",
+                parentId: null,
+              },
+            }
+          : rec.projectId !== null
+            ? { ...base, kind: "project-shell", projectShell: { projectId: rec.projectId } }
+            : { ...base, kind: "shell" };
+      this.entries.set(id, entry);
+      rec.termId = id;
+      rec.status = "starting";
+      rec.starting = false;
+      this.lruAcquire(id);
+      this.activate(id);
+      this.renderRail();
+      void this.reconcile();
+      const pending = this.pendingAgentEvents.get(id);
+      this.pendingAgentEvents.delete(id);
+      for (const e of pending ?? []) this.applyAgentEvent(e);
+    };
+    const panel: PanelHost =
+      tool?.transport === "json"
+        ? new TranscriptPanel({
+            container: host,
+            api: this.api,
+            active: false,
+            spawn: () => start(() => {}),
+            onCreated: (id) => bind(id, panel),
+            onSent: (id) => this.setAgentWaiting(id, false),
+            pathBase,
+            openPath: this.openPathToast,
+          })
+        : new TerminalPanel({
+            container: host,
+            api: this.api,
+            settings: this.settings,
+            active: false,
+            spawn: (onFrame) => start(onFrame),
+            onCreated: (id) => bind(id, panel),
+            pathBase,
+            openPath: this.openPath,
+          });
+    try {
+      await panel.start();
+    } catch (err) {
+      console.error(`[chappa-ai] failed to start ${rec.name}: ${err}`);
+      host.remove();
+      rec.starting = false;
+      this.renderRail();
+      void this.showError(String(err instanceof Error ? err.message : err));
+    }
+  }
+
+  // --- the frozen strip -------------------------------------------
+
+  /** Show the strip above the active panel while its entry is dead (the
+   *  output stays readable under it), hide it otherwise. */
+  private renderFrozenStrip(): void {
+    const entry = this.activeId !== null ? this.entries.get(this.activeId) : undefined;
+    const rec = entry?.recordId ? (this.records.get(entry.recordId) ?? null) : null;
+    const state = entry && !entry.adopted ? paneState(rec, entry) : null;
+    if (!entry || !state || state.kind !== "frozen") {
+      if (this.frozenStrip.shown) this.frozenStrip.hide();
+      return;
+    }
+    const text = frozenStripText(
+      { status: state.status, exitCode: state.exitCode, endedAtMs: entry.endedAtMs ?? null },
+      this.now(),
+    );
+    this.frozenStrip.show(text, this.frozenStart(entry, rec));
+  }
+
+  /** What the strip's button starts: the record, the project command, or
+   *  the workspace command behind the entry — nothing for an ephemeral row. */
+  private frozenStart(entry: RailEntry, rec: RecordRow | null): { label: string; run: () => void } | null {
+    if (rec) return { label: startLabel(rec.kind), run: () => void this.startRecordRow(rec.recordId) };
+    if (entry.kind === "process" && entry.process) {
+      const { projectId, name } = entry.process;
+      return { label: startLabel("command"), run: () => void this.startProcess(projectId, name) };
+    }
+    for (const row of this.wsCmds.values()) {
+      if (row.termId === entry.id) {
+        const name = row.name;
+        return { label: startLabel("command"), run: () => void this.startWorkspace(name) };
+      }
+    }
+    return null;
   }
 
   /** Stop one process (idempotent: a non-running process stays put — the
@@ -4080,7 +4666,7 @@ export class App {
     // not on whatever panel the dispose fallback would activate.
     const wasFocused = row.termId !== null && this.activeId === row.termId;
     this.disposeProcessPanel(row);
-    if (wasFocused) this.showProcessEmptyState(projectId, name);
+    if (wasFocused) this.showRecordPane({ kind: "command", projectId, name });
     this.processRowChanged(row);
   }
 
@@ -4393,6 +4979,7 @@ export class App {
     el.addEventListener("click", (e) => {
       if ((e.target as Element).closest(".chappa-process-btn")) return;
       if (row.termId !== null && this.entries.has(row.termId)) this.activate(row.termId);
+      else this.showRecordPane({ kind: "workspace-command", name: row.name });
     });
     el.addEventListener("contextmenu", (e) => this.showWsCmdMenu(e, row.name));
 
@@ -4590,7 +5177,7 @@ export class App {
     state.activity = false;
     // The stopped-command pane is project-scoped: don't keep fronting a
     // collapsed project's empty state.
-    if (this.emptyFor !== null && this.emptyFor.projectId !== id) this.hideProcessEmptyState();
+    if (this.paneFor?.kind === "command" && this.paneFor.projectId !== id) this.hideRecordPane();
     this.switcher.textContent = this.projects.get(id)?.name ?? `project ${id}`;
     this.renderProject();
     this.renderProjectSummaries();
@@ -4615,8 +5202,8 @@ export class App {
   collapseProject(): void {
     if (this.expandedProjectId === null) return;
     this.expandedProjectId = null;
-    // The stopped-command pane is project-scoped; nothing is expanded now.
-    this.hideProcessEmptyState();
+    // A command's card is project-scoped; nothing is expanded now.
+    if (this.paneFor?.kind === "command") this.hideRecordPane();
     this.switcher.textContent = "Project…";
     this.renderProject();
     this.renderProjectSummaries();
@@ -5013,22 +5600,31 @@ export class App {
         rows.push([id, entry]);
       }
     }
+    // Stopped shells of the expanded project, after the live ones.
+    const recs =
+      this.expandedProjectId === null
+        ? []
+        : this.stoppedRecords("terminal").filter((r) => r.projectId === this.expandedProjectId);
     // Cheap signature over what a row actually renders (id, displayed title,
     // status, badges, active accent). "\u001f" — the ESCAPE SEQUENCE, never a
     // literal control byte in source — is the join separator; none of the
     // joined pieces can contain it in practice.
-    const sig = rows
-      .map(([id, e]) =>
+    const sig = [
+      ...rows.map(([id, e]) =>
         [id, e.title ?? e.name, e.status, e.bell, e.activity, id === this.activeId].join("\u001f"),
-      )
-      .join("\u001f");
+      ),
+      ...recs.map((r) => this.recordSig(r)),
+    ].join("\u001e");
     if (sig === this.projectTermsSig) return;
     this.projectTermsSig = sig;
     this.projectTermList.textContent = "";
     for (const [id, entry] of rows) {
       this.projectTermList.appendChild(this.buildTerminalRow(id, entry, "chappa-project-term-row"));
     }
-    this.projectTermCount.textContent = String(rows.length);
+    for (const rec of recs) {
+      this.projectTermList.appendChild(this.buildRecordRow(rec, "chappa-project-term-row"));
+    }
+    this.projectTermCount.textContent = String(rows.length + recs.length);
   }
 
   /**
@@ -5056,32 +5652,52 @@ export class App {
     // subagents included — parent + child + another root running, one exited
     // root → 3/4. `rows.length` counts each bound agent once; children are
     // never double-counted and never skipped.
+    const recs =
+      this.expandedProjectId === null
+        ? []
+        : this.stoppedRecords("agent").filter((r) => this.recordInExpandedSection(r));
+    // Stopped records count in M (the total), never in N.
     const running = rows.filter(([, e]) => isLive(e.status)).length;
+    const total = rows.length + recs.length;
     // The rows render as a FOREST (children nested under their
     // spawning parent). The `render` list feeds both the signature (which
     // includes depth, so an orphan promotion repaints) and the DOM.
-    const render = forestRows(rows);
+    const render = forestRows(this.agentItems(rows, recs), this.liveTermOf);
     // Cheap signature over what a row actually renders (the
     // renderProjectTerminals precedent, plus the agent-only facts the row
     // shows: the typed attention tier and the bridge state that rings it,
     // and the nesting depth so promotion/closure repaints).
     const sig = [
-      `${running}/${rows.length}`,
+      `${running}/${total}`,
       render
-        .map(({ id, entry: e, depth }) =>
-          [id, e.title ?? e.name, e.status, e.bell, e.activity, e.attention, e.agent?.bridge, id === this.activeId, depth].join(
-            "\u001f",
-          ),
+        .map(({ item, depth }) =>
+          item.type === "record"
+            ? [this.recordSig(item.rec), depth].join("\u001f")
+            : [
+                item.id,
+                item.entry.title ?? item.entry.name,
+                item.entry.status,
+                item.entry.bell,
+                item.entry.activity,
+                item.entry.attention,
+                item.entry.agent?.bridge,
+                item.id === this.activeId,
+                depth,
+              ].join("\u001f"),
         )
-        .join("\u001f"),
-    ].join("\u001f");
+        .join("\u001e"),
+    ].join("\u001e");
     if (sig === this.projectAgentsSig) return;
     this.projectAgentsSig = sig;
     this.projectAgentList.textContent = "";
-    for (const { id, entry, depth, lastChild } of render) {
-      this.projectAgentList.appendChild(this.buildTerminalRow(id, entry, "chappa-project-agent-row", depth, lastChild));
+    for (const { item, depth, lastChild } of render) {
+      this.projectAgentList.appendChild(
+        item.type === "entry"
+          ? this.buildTerminalRow(item.id, item.entry, "chappa-project-agent-row", depth, lastChild)
+          : this.buildRecordRow(item.rec, "chappa-project-agent-row", depth, lastChild),
+      );
     }
-    this.projectAgentCount.textContent = `${running}/${rows.length}`;
+    this.projectAgentCount.textContent = `${running}/${total}`;
   }
 
   /** The subsection's ＋ / profile pick: `+` spawns the default shell
@@ -5811,6 +6427,8 @@ function wsRowFromDto(dto: ipc.WorkspaceCommandDto): WorkspaceCommandRow {
     env: dto.env,
     exitCode: dto.exitCode,
     termId: dto.termId,
+    recordId: dto.recordId ?? null,
+    lastRun: dto.lastRun ?? null,
     panel: null,
     host: null,
     el: null,
@@ -5818,6 +6436,25 @@ function wsRowFromDto(dto: ipc.WorkspaceCommandDto): WorkspaceCommandRow {
     startBtn: null,
     stopBtn: null,
     restartBtn: null,
+  };
+}
+
+/** A stored agent or shell record as its row. Nothing is attached until a
+ *  live terminal (list_terminals / term://created) binds to it. */
+function recordRowFromDto(r: ipc.RecordDto): RecordRow {
+  const status = r.status as RailStatus;
+  return {
+    recordId: r.record_id,
+    kind: r.kind === "agent" ? "agent" : "terminal",
+    name: r.name,
+    projectId: r.project_id,
+    // Shown only while nothing is attached, when "running" cannot be true.
+    status: isLive(status) ? "stopped" : status,
+    termId: null,
+    lastRun: r.last_run,
+    agent: r.agent ? { toolId: r.agent.tool_id, parentRecordId: r.agent.parent_record_id } : null,
+    terminal: r.terminal ? { shellProfile: r.terminal.shell_profile, cwd: r.terminal.cwd } : null,
+    starting: false,
   };
 }
 

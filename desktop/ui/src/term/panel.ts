@@ -150,6 +150,16 @@ export interface TerminalApi {
   sendAgentInput(id: number, text: string, waitMs?: number): Promise<ipc.TurnReceiptDto>;
   /** The event ring since a cursor (transcript catch-up). */
   getAgentEvents(id: number, since?: number): Promise<ipc.AgentEventDto[]>;
+  // --- durable records -------------------------------------------
+  /** Every stored record with its live binding. */
+  listRecords(): Promise<ipc.RecordDto[]>;
+  /** A record's runs, newest first, each with its stored tail. */
+  getRecordRuns(recordId: string, limit?: number): Promise<ipc.RunDto[]>;
+  /** Start a stopped record into this window on `frames`. */
+  startRecord(
+    recordId: string,
+    frames: ipc.Channel<ArrayBuffer | number[]>,
+  ): Promise<ipc.StartRecordDto>;
 }
 
 /** The real adapter; swap in a stub in tests. */
@@ -207,6 +217,9 @@ export const tauriApi: TerminalApi = {
   spawnAgent: (req, frames) => ipc.spawnAgent(req, frames),
   sendAgentInput: (id, text, waitMs) => ipc.sendAgentInput(id, text, waitMs),
   getAgentEvents: (id, since) => ipc.getAgentEvents(id, since),
+  listRecords: () => ipc.listRecords(),
+  getRecordRuns: (recordId, limit) => ipc.getRecordRuns(recordId, limit),
+  startRecord: (recordId, frames) => ipc.startRecord(recordId, frames),
 };
 
 /**

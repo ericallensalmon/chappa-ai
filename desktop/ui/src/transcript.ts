@@ -116,6 +116,159 @@ export function mergeBySeq(replay: ipc.AgentEventDto[], live: ipc.AgentEventDto[
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/** What the block builder carries from one event to the next: the turn
+ *  counter behind the "turn N" separators, and what relative paths in the
+ *  agent's text resolve against. */
+export interface BlockContext {
+  turns: number;
+  pathBase: PathBase | null;
+}
+
+function separator(label: string): HTMLElement {
+  const sep = document.createElement("div");
+  sep.className = "chappa-transcript-sep";
+  sep.style.cssText = SEP_CSS;
+  const left = document.createElement("span");
+  left.style.cssText = RULE_CSS;
+  const text = document.createElement("span");
+  text.textContent = label;
+  const right = document.createElement("span");
+  right.style.cssText = RULE_CSS;
+  sep.append(left, text, right);
+  return sep;
+}
+
+/** One event → its block, or null for the kinds that only flip state
+ *  (`turn_ended`, `awaiting_input`). No seq guard: the caller owns ordering. */
+export function eventBlock(e: ipc.AgentEventDto, ctx: BlockContext): HTMLElement | null {
+  const p = e.payload ?? {};
+  const linkified = (text: string): Node[] => linkifyPaths(text, ctx.pathBase);
+  let el: HTMLElement;
+  switch (e.kind) {
+    case "turn_started": {
+      ctx.turns += 1;
+      const model = typeof p.model === "string" ? ` · ${p.model}` : "";
+      el = separator(`turn ${ctx.turns}${model}`);
+      el.dataset.kind = "turn_started";
+      break;
+    }
+    case "turn_ended":
+      return null; // the next separator closes it visually
+    case "text": {
+      el = document.createElement("div");
+      el.className = "chappa-transcript-text";
+      el.style.cssText = TEXT_CSS;
+      if (p.thinking === true) {
+        const details = document.createElement("details");
+        details.className = "chappa-transcript-thinking";
+        details.style.cssText = THINKING_CSS;
+        const summary = document.createElement("summary");
+        summary.style.cssText = TOOL_SUMMARY_CSS;
+        summary.textContent = "thinking";
+        const body = document.createElement("div");
+        body.style.cssText = TEXT_CSS;
+        body.append(...linkified(pretty(p.text)));
+        details.append(summary, body);
+        el.appendChild(details);
+      } else {
+        el.append(...linkified(pretty(p.text)));
+      }
+      break;
+    }
+    case "tool_call": {
+      const phase = p.phase === "result" ? "result" : "call";
+      const details = document.createElement("details");
+      details.className = "chappa-transcript-tool";
+      details.dataset.phase = phase;
+      details.style.cssText = TOOL_CSS;
+      const summary = document.createElement("summary");
+      summary.style.cssText = TOOL_SUMMARY_CSS;
+      const name = typeof p.name === "string" ? p.name : phase === "result" ? "result" : "tool";
+      const flag = p.is_error === true ? " · error" : "";
+      summary.textContent = phase === "result" ? `◂ ${name}${flag}` : `▸ ${name}`;
+      const pre = document.createElement("pre");
+      pre.style.cssText = PRE_CSS;
+      if (phase === "result") pre.append(...linkified(pretty(p.content)));
+      else pre.textContent = pretty(p.input);
+      details.append(summary, pre);
+      el = details;
+      break;
+    }
+    case "usage": {
+      el = document.createElement("div");
+      el.className = "chappa-transcript-usage";
+      el.style.cssText = USAGE_CSS;
+      el.textContent = usageLine(p);
+      break;
+    }
+    case "awaiting_input":
+      return null;
+    case "compaction":
+      el = separator("context compacted");
+      el.dataset.kind = "compaction";
+      break;
+    case "error": {
+      el = document.createElement("div");
+      el.className = "chappa-transcript-error";
+      el.style.cssText = ERROR_CSS;
+      const message = typeof p.message === "string" ? p.message : pretty(p.message ?? p);
+      el.textContent = message || "error";
+      break;
+    }
+    case "raw":
+    default: {
+      const details = document.createElement("details");
+      details.className = "chappa-transcript-raw";
+      details.style.cssText = RAW_CSS;
+      const summary = document.createElement("summary");
+      summary.style.cssText = TOOL_SUMMARY_CSS;
+      const label =
+        typeof p.stderr === "string"
+          ? "stderr"
+          : typeof p.line === "string"
+            ? "line"
+            : typeof p.type === "string"
+              ? `raw · ${p.type}${typeof p.subtype === "string" ? `/${p.subtype}` : ""}`
+              : "raw";
+      summary.textContent = label;
+      const pre = document.createElement("pre");
+      pre.style.cssText = PRE_CSS;
+      pre.textContent = typeof p.stderr === "string" ? p.stderr : typeof p.line === "string" ? p.line : pretty(p);
+      details.append(summary, pre);
+      el = details;
+      break;
+    }
+  }
+  el.dataset.seq = String(e.seq);
+  return el;
+}
+
+/** A stored run of events (a stopped agent's tail) → its transcript blocks,
+ *  in the order given, drawn exactly as the live transcript draws them.
+ *  Anything that is not an event object is skipped: a stored tail is data
+ *  read back from disk. */
+export function renderEvents(events: readonly unknown[], pathBase: PathBase | null = null): HTMLElement[] {
+  const ctx: BlockContext = { turns: 0, pathBase };
+  const out: HTMLElement[] = [];
+  for (const raw of events) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Partial<ipc.AgentEventDto>;
+    if (typeof e.kind !== "string") continue;
+    const el = eventBlock(
+      {
+        id: e.id ?? 0,
+        seq: e.seq ?? 0,
+        ts: e.ts ?? 0,
+        kind: e.kind,
+        payload: e.payload && typeof e.payload === "object" ? e.payload : {},
+      },
+      ctx,
+    );
+    if (el) out.push(el);
+  }
+  return out;
+}
+
 export class TranscriptPanel implements PanelHost {
   readonly host: HTMLElement;
   readonly glLive = false;
@@ -127,7 +280,8 @@ export class TranscriptPanel implements PanelHost {
   private readonly waiting: HTMLDivElement;
   private termId = -1;
   private lastSeq = 0;
-  private turns = 0;
+  /** The block builder's running state (turn count, path base). */
+  private readonly blocks: BlockContext;
   /** True between `onCreated` and the ring's answer: live events wait. */
   private replaying = false;
   private pending: ipc.AgentEventDto[] = [];
@@ -156,6 +310,7 @@ export class TranscriptPanel implements PanelHost {
     this.opts = opts;
     this.api = opts.api;
     this.active = opts.active ?? true;
+    this.blocks = { turns: 0, pathBase: opts.pathBase ?? null };
     this.host = opts.container;
     this.host.classList.add("chappa-transcript-host");
     const root = document.createElement("div");
@@ -252,123 +407,21 @@ export class TranscriptPanel implements PanelHost {
   }
 
   /** One event → its block (null for the kinds that only flip state).
-   *  Advances the seq guard. */
+   *  Advances the seq guard and flips the waiting state; the block itself
+   *  comes from the shared builder. */
   private render(e: ipc.AgentEventDto): HTMLElement | null {
     if (e.seq <= this.lastSeq) return null;
     this.lastSeq = e.seq;
-    const p = e.payload ?? {};
-    let el: HTMLElement | null = null;
-    switch (e.kind) {
-      case "turn_started": {
-        this.turns += 1;
-        this.setWaiting(false);
-        const model = typeof p.model === "string" ? ` · ${p.model}` : "";
-        el = this.separator(`turn ${this.turns}${model}`);
-        el.dataset.kind = "turn_started";
-        break;
-      }
-      case "turn_ended":
-        return null; // the next separator closes it visually
-      case "text": {
-        el = document.createElement("div");
-        el.className = "chappa-transcript-text";
-        el.style.cssText = TEXT_CSS;
-        if (p.thinking === true) {
-          const details = document.createElement("details");
-          details.className = "chappa-transcript-thinking";
-          details.style.cssText = THINKING_CSS;
-          const summary = document.createElement("summary");
-          summary.style.cssText = TOOL_SUMMARY_CSS;
-          summary.textContent = "thinking";
-          const body = document.createElement("div");
-          body.style.cssText = TEXT_CSS;
-          body.append(...this.linkified(pretty(p.text)));
-          details.append(summary, body);
-          el.appendChild(details);
-        } else {
-          el.append(...this.linkified(pretty(p.text)));
-        }
-        break;
-      }
-      case "tool_call": {
-        const phase = p.phase === "result" ? "result" : "call";
-        const details = document.createElement("details");
-        details.className = "chappa-transcript-tool";
-        details.dataset.phase = phase;
-        details.style.cssText = TOOL_CSS;
-        const summary = document.createElement("summary");
-        summary.style.cssText = TOOL_SUMMARY_CSS;
-        const name = typeof p.name === "string" ? p.name : phase === "result" ? "result" : "tool";
-        const flag = p.is_error === true ? " · error" : "";
-        summary.textContent = phase === "result" ? `◂ ${name}${flag}` : `▸ ${name}`;
-        const pre = document.createElement("pre");
-        pre.style.cssText = PRE_CSS;
-        if (phase === "result") pre.append(...this.linkified(pretty(p.content)));
-        else pre.textContent = pretty(p.input);
-        details.append(summary, pre);
-        el = details;
-        break;
-      }
-      case "usage": {
-        el = document.createElement("div");
-        el.className = "chappa-transcript-usage";
-        el.style.cssText = USAGE_CSS;
-        el.textContent = usageLine(p);
-        break;
-      }
-      case "awaiting_input":
-        this.setWaiting(true);
-        return null;
-      case "compaction":
-        el = this.separator("context compacted");
-        el.dataset.kind = "compaction";
-        break;
-      case "error": {
-        el = document.createElement("div");
-        el.className = "chappa-transcript-error";
-        el.style.cssText = ERROR_CSS;
-        const message = typeof p.message === "string" ? p.message : pretty(p.message ?? p);
-        el.textContent = message || "error";
-        break;
-      }
-      case "raw":
-      default: {
-        const details = document.createElement("details");
-        details.className = "chappa-transcript-raw";
-        details.style.cssText = RAW_CSS;
-        const summary = document.createElement("summary");
-        summary.style.cssText = TOOL_SUMMARY_CSS;
-        const label =
-          typeof p.stderr === "string"
-            ? "stderr"
-            : typeof p.line === "string"
-              ? "line"
-              : typeof p.type === "string"
-                ? `raw · ${p.type}${typeof p.subtype === "string" ? `/${p.subtype}` : ""}`
-                : "raw";
-        summary.textContent = label;
-        const pre = document.createElement("pre");
-        pre.style.cssText = PRE_CSS;
-        pre.textContent = typeof p.stderr === "string" ? p.stderr : typeof p.line === "string" ? p.line : pretty(p);
-        details.append(summary, pre);
-        el = details;
-        break;
-      }
-    }
-    if (el) el.dataset.seq = String(e.seq);
-    return el;
+    if (e.kind === "turn_started") this.setWaiting(false);
+    else if (e.kind === "awaiting_input") this.setWaiting(true);
+    return eventBlock(e, this.blocks);
   }
 
   /** Re-point path resolution for blocks rendered from now on, e.g. once a
    *  container agent's mounts are known. Blocks already on screen keep the
    *  targets they were rendered with. */
   setPathBase(base: PathBase | null): void {
-    this.opts.pathBase = base;
-  }
-
-  /** `text` with its file paths as ctrl+clickable anchors. */
-  private linkified(text: string): Node[] {
-    return linkifyPaths(text, this.opts.pathBase ?? null);
+    this.blocks.pathBase = base;
   }
 
   /** Whether the agent is waiting for input (the box's ring + status line). */
@@ -380,20 +433,6 @@ export class TranscriptPanel implements PanelHost {
     this.waiting.style.display = on ? "" : "none";
     this.input.classList.toggle("waiting", on);
     this.input.style.borderColor = on ? "#f0b429" : "#262a31";
-  }
-
-  private separator(label: string): HTMLElement {
-    const sep = document.createElement("div");
-    sep.className = "chappa-transcript-sep";
-    sep.style.cssText = SEP_CSS;
-    const left = document.createElement("span");
-    left.style.cssText = RULE_CSS;
-    const text = document.createElement("span");
-    text.textContent = label;
-    const right = document.createElement("span");
-    right.style.cssText = RULE_CSS;
-    sep.append(left, text, right);
-    return sep;
   }
 
   private isAtBottom(): boolean {
