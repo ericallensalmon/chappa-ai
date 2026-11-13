@@ -267,7 +267,9 @@ fn write(
         Ok(body) => body,
         Err(err) => return json(400, json!({"error": format!("bad body: {err}")})),
     };
-    handle.write_input(body.text.as_bytes());
+    if let Err(dead) = handle.write_input(body.text.as_bytes()) {
+        return json(409, json!({"error": dead.to_string()}));
+    }
     json(200, json!({"ok": true}))
 }
 
