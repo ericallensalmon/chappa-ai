@@ -36,7 +36,7 @@
 use std::sync::{Arc, Mutex};
 
 use project_model::records::{
-    AgentRecord, RecordKind, Run, RunHead, RunUpdate, StoredRecord, TailKind, TerminalRecord,
+    AgentRecord, AgentRecordPatch, RecordKind, Run, RunHead, RunUpdate, StoredRecord, TailKind, TerminalRecord,
     RUNS_RETAINED,
 };
 use serde::Serialize;
@@ -604,6 +604,43 @@ impl Records {
         }
     }
 
+    /// Edit an agent record's row state (name, favorite, automatic
+    /// renaming, notification level) wherever it is stored. A rename also
+    /// renames the attached terminal, so a live row and its record never
+    /// disagree. Answers the record as the list shows it.
+    pub fn update_agent(
+        &self,
+        registry: &Registry,
+        record_id: &str,
+        patch: &AgentRecordPatch,
+    ) -> Result<RecordDto, RecordError> {
+        let (scope, kind, _) = self
+            .locate(record_id)
+            .ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
+        if kind != RecordKind::Agent {
+            return Err(RecordError::Invalid(format!("not an agent record: {record_id}")));
+        }
+        patch.validate().map_err(RecordError::Invalid)?;
+        let parts = self.parts();
+        let updated = match scope {
+            Scope::Project(_) => parts
+                .projects
+                .store_access(|s| s.update_agent_record(record_id, patch))??
+                .map(|(_, agent)| agent),
+            Scope::Workspace => parts.workspace.store()?.update_agent_record(record_id, patch)?,
+        };
+        let agent = updated.ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
+        if patch.name.is_some() {
+            if let Some((term_id, _)) = registry.term_of_record(record_id) {
+                registry.set_name(term_id, &agent.name);
+            }
+        }
+        let (scope, record) = self
+            .get(record_id)
+            .ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
+        Ok(record_dto(registry, scope, record))
+    }
+
     /// Start a fresh run of a stopped record: a new terminal, a new run
     /// uuid, the previous run left to the ledger. `frames` is the webview's
     /// channel when the frontend asked; `None` is a headless (control) start
@@ -969,6 +1006,18 @@ pub async fn start_record(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Edit an agent record's row state. Every field of `patch` is optional;
+/// `notification_level: null` clears the level (the row inherits).
+#[tauri::command]
+pub fn update_agent_record(
+    registry: State<'_, Registry>,
+    records: State<'_, Records>,
+    record_id: String,
+    patch: AgentRecordPatch,
+) -> Result<RecordDto, String> {
+    Ok(records.update_agent(&registry, &record_id, &patch)?)
 }
 
 /// Remove a record and its history (closing its terminal first). Async: a

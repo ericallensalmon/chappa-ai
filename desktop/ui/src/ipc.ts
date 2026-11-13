@@ -589,6 +589,22 @@ export function removeRecord(recordId: string): Promise<RemoveRecordDto> {
   return call("remove_record", { recordId });
 }
 
+/** An edit of an agent record's own row state. Every key is optional and
+ *  an absent key is left alone; `notification_level: null` CLEARS the level
+ *  (the row inherits its project's), a literal sets it. */
+export interface AgentRecordPatchDto {
+  name?: string;
+  favorite?: boolean;
+  disable_auto_rename?: boolean;
+  notification_level?: string | null;
+}
+
+/** Edit an agent record (live or stopped). A rename also renames the
+ *  attached terminal. Answers the record as `listRecords` shows it. */
+export function updateAgentRecord(recordId: string, patch: AgentRecordPatchDto): Promise<RecordDto> {
+  return call("update_agent_record", { recordId, patch });
+}
+
 // --- rail / multi-terminal ----------------------------------------
 
 /** One live terminal's rail row (list_terminals snapshot). `status` uses

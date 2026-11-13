@@ -31,6 +31,7 @@ import {
   commandDialog,
   confirmDialog,
   parentDirectory,
+  promptDialog,
   type AddProjectAnswer,
   type CommandForm,
 } from "./dialog";
@@ -198,6 +199,100 @@ function forestRows(
     out.push({ item: fa.entry, depth, lastChild });
   }
   return out;
+}
+
+/** What a click on one agent-menu item does. */
+export type AgentMenuAction =
+  | "start"
+  | "stop"
+  | "restart"
+  | "favorite"
+  | "rename"
+  | "auto-rename"
+  | "dismiss"
+  | "remove";
+
+/** One entry of the agent row menu, in display order: a plain item, a
+ *  `label ▸` submenu (its rows render on open), or a separator line. */
+export type AgentMenuEntry =
+  | { type: "item"; action: AgentMenuAction; label: string; disabled: boolean; title?: string }
+  | { type: "submenu"; action: "level" | "add"; label: string; disabled: boolean; title?: string }
+  | { type: "separator" };
+
+/** The record half of the pair the agent menu is built from. */
+export interface AgentMenuRecord {
+  termId: number | null;
+  name: string;
+  agent: { favorite: boolean; disableAutoRename: boolean } | null;
+}
+
+/** The live-terminal half: absent for a stopped row. */
+export interface AgentMenuTerminal {
+  status: RailStatus;
+  exitCode: number | null;
+  bell: boolean;
+}
+
+/**
+ * The session-resume entries ("Choose session to resume…" and "Resume last
+ * session"). Their place in the menu is fixed — right after the lifecycle
+ * items, before the first separator — and this is the one array they go in.
+ * Nothing resumes a session yet, so the slot is empty.
+ */
+export function agentResumeEntries(
+  _record: AgentMenuRecord | null,
+  _terminal: AgentMenuTerminal | null,
+): AgentMenuEntry[] {
+  return [];
+}
+
+/**
+ * The agent row menu for one row, from its record and its terminal (either
+ * may be missing: a stopped row has no terminal, an ephemeral agent keeps no
+ * record). Lifecycle follows the pane state — Start on a stopped or exited
+ * row, Stop · Restart on a live one — so a record whose terminal sits in
+ * another surface still offers the right thing. Everything stored on the
+ * record (favorite, name, renaming, level, removal, starting again) is
+ * disabled without one.
+ */
+export function agentMenuEntries(
+  record: AgentMenuRecord | null,
+  terminal: AgentMenuTerminal | null,
+): AgentMenuEntry[] {
+  const live = paneState(record, terminal).kind === "live";
+  const noRecord = record === null;
+  const why = noRecord ? "this agent keeps no record" : undefined;
+  const item = (action: AgentMenuAction, label: string, disabled = noRecord): AgentMenuEntry => ({
+    type: "item",
+    action,
+    label,
+    disabled,
+    ...(disabled && why ? { title: why } : {}),
+  });
+  const lifecycle: AgentMenuEntry[] = live
+    ? [item("stop", "Stop", false), item("restart", "Restart")]
+    : [item("start", "Start")];
+  const favorite = record?.agent?.favorite ?? false;
+  const renameOff = record?.agent?.disableAutoRename ?? false;
+  return [
+    ...lifecycle,
+    ...agentResumeEntries(record, terminal),
+    { type: "separator" },
+    item("favorite", favorite ? "Remove from favorites" : "Add to favorites"),
+    item("rename", "Rename agent…"),
+    item("auto-rename", renameOff ? "Enable automatic renaming" : "Disable automatic renaming"),
+    { type: "separator" },
+    { type: "submenu", action: "level", label: "Notification level ▸", disabled: noRecord, ...(why ? { title: why } : {}) },
+    ...(terminal?.bell ? [item("dismiss", "Dismiss unread alert", false)] : []),
+    { type: "separator" },
+    { type: "submenu", action: "add", label: "Add ▸", disabled: false },
+    { type: "separator" },
+    // Removal is a stopped-row action: a live agent is stopped first, on
+    // purpose, never as a side effect of a delete.
+    live
+      ? { type: "item", action: "remove", label: "Remove agent", disabled: true, title: "Stop the agent first" }
+      : item("remove", "Remove agent"),
+  ];
 }
 
 /** A bridge fault is `container-down` or `stale` — anything but `ok`. */
@@ -421,7 +516,17 @@ export interface RecordRow {
   termId: number | null;
   /** The newest run as last seen (head from the list, or a fetched run). */
   lastRun: PaneRun | null;
-  agent: { toolId: number; parentRecordId: string | null } | null;
+  /** An agent record's facts and its own row state (stored on the record,
+   *  so a stopped row keeps them): favorites sort first and wear the star,
+   *  a renaming-disabled row ignores OSC titles, and the RAW level override
+   *  (null = inherit) feeds the notification decision. */
+  agent: {
+    toolId: number;
+    parentRecordId: string | null;
+    favorite: boolean;
+    disableAutoRename: boolean;
+    notificationLevel: string | null;
+  } | null;
   terminal: { shellProfile: string | null; cwd: string | null } | null;
   /** A start from this window is in flight (double-press guard). */
   starting: boolean;
@@ -623,6 +728,12 @@ export interface AppOptions {
   ) => Promise<CommandForm | null>;
   /** `Delete command "<name>"` confirm. Defaults to an in-app modal. */
   confirmDeleteCommand?: (name: string) => Promise<boolean>;
+  /** `Rename agent…`: resolves the typed name (verbatim) or null to
+   *  cancel. Defaults to the in-app prompt pre-filled with `current`. */
+  promptAgentName?: (current: string) => Promise<string | null>;
+  /** `Remove agent` confirm; `live` says the agent is running and will be
+   *  stopped. Defaults to an in-app modal. */
+  confirmRemoveAgent?: (name: string, live: boolean) => Promise<boolean>;
   /** A failed yml mutation's reason (name clash, containment, write error)
    *  shown to the user. Defaults to an in-app OK modal. */
   showError?: (message: string) => Promise<void>;
@@ -830,6 +941,7 @@ const APP_CSS = `
 .chappa-row-menu-label{padding:6px 8px 2px;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.04em;}
 .chappa-row-menu-item:disabled{color:#565b64;cursor:default;}
 .chappa-row-menu-item:disabled:hover{background:none;}
+.chappa-row-menu-sep{height:1px;margin:4px 6px;background:#2a2c31;}
 .chappa-process-star{flex:none;border:0;background:none;color:#565b64;font-size:12px;line-height:1;cursor:pointer;padding:0 2px;border-radius:3px;}
 .chappa-process-star:hover{color:#d6d8dc;}
 .chappa-process-star.on{color:#f0b429;}
@@ -1030,6 +1142,12 @@ export class App {
    *  command…, Copy command, Delete command). ONE reused element. */
   private readonly wsCmdMenu: HTMLElement;
   private wsCmdMenuFor: string | null = null;
+  /** The agent row context menu (live and stopped agents, both AGENTS
+   *  surfaces). ONE reused element, rebuilt on every open because its items
+   *  depend on the row's state. */
+  private readonly agentMenu: HTMLElement;
+  /** The row the agent menu was opened on: its record and/or terminal. */
+  private agentMenuFor: { recordId: string | null; termId: number | null } | null = null;
   private readonly lru = new GlLru(8);
   private entries = new Map<number, RailEntry>();
   /** `agent://event`s that arrived for an id we have not adopted
@@ -1045,6 +1163,8 @@ export class App {
     title: string,
   ) => Promise<CommandForm | null>;
   private readonly confirmDeleteCommand: (name: string) => Promise<boolean>;
+  private readonly promptAgentName: (current: string) => Promise<string | null>;
+  private readonly confirmRemoveAgent: (name: string, live: boolean) => Promise<boolean>;
   private readonly showError: (message: string) => Promise<void>;
   private readonly confirmClose: (name: string) => Promise<boolean>;
   private readonly confirmTrust: (commands: string[]) => Promise<boolean>;
@@ -1844,6 +1964,20 @@ export class App {
       }),
     );
 
+    // The agent row menu: same element class and dismiss (with Escape) as
+    // the command-row menu; its items are rebuilt per open (showAgentMenu).
+    this.agentMenu = document.createElement("div");
+    this.agentMenu.className = "chappa-row-menu chappa-agent-menu";
+    this.agentMenu.style.display = "none";
+    this.dismissUnbinds.push(
+      registerDismiss({
+        isOpen: () => this.agentMenu.style.display !== "none",
+        dismiss: () => this.hideAgentMenu(),
+        inside: [this.agentMenu],
+        escape: true,
+      }),
+    );
+
     // The badge bar, left of the rail: built once, repainted with the
     // switcher (renderProjectBar).
     this.badgeBar = document.createElement("nav");
@@ -1867,6 +2001,7 @@ export class App {
       this.rowMenu,
       this.projectCtxMenu,
       this.wsCmdMenu,
+      this.agentMenu,
       this.toasts,
     );
     // Banner stack: bottom-right INSIDE the window, in the app root
@@ -1938,6 +2073,17 @@ export class App {
       // native store or workspace.json — naming the yml was wrong for both.
       ((name) =>
         confirmDialog(`Delete command "${name}"?`, { okLabel: "Delete" }));
+    this.promptAgentName =
+      opts.promptAgentName ??
+      ((current) => promptDialog("Rename agent", { value: current, okLabel: "Rename" }));
+    this.confirmRemoveAgent =
+      opts.confirmRemoveAgent ??
+      ((name, live) =>
+        confirmDialog(
+          `Remove agent "${name}"? Its run history goes with it.` +
+            (live ? "\n\nIt is running and will be stopped." : ""),
+          { okLabel: "Remove" },
+        ));
     this.showError =
       opts.showError ?? (async (message) => void (await confirmDialog(message, { okLabel: "OK" })));
   }
@@ -2157,6 +2303,9 @@ export class App {
             ? {
                 toolId: f.agent_tool_id ?? 0,
                 parentRecordId: f.parent_id !== null ? (this.entries.get(f.parent_id)?.recordId ?? null) : null,
+                favorite: false,
+                disableAutoRename: false,
+                notificationLevel: null,
               }
             : null,
         terminal: f.kind === "terminal" ? { shellProfile: null, cwd: null } : null,
@@ -2703,7 +2852,7 @@ export class App {
     });
   }
 
-  /** `term://title` — an OSC title. A process whose row has
+  /** `term://title` — an OSC title. A process or agent whose row has
    *  `Disable automatic renaming` set keeps its name (the event is dropped
    *  before the reducer, so nothing downstream ever sees the title). */
   private applyTitle(p: ipc.TerminalEventDto): void {
@@ -2713,6 +2862,8 @@ export class App {
       const row = this.rowFor(entry.process.projectId, entry.process.name);
       if (row?.disableAutoRename) return;
     }
+    // The same guard for an agent: the flag lives on its record.
+    if (entry.agent && this.agentRecordOf(entry)?.agent?.disableAutoRename) return;
     this.entries.set(p.term_id, railReducer(entry, { type: "title", title: p.title ?? "" }));
     this.renderRail();
   }
@@ -3116,7 +3267,18 @@ export class App {
     if (entry.kind === "project-shell" && entry.projectShell) {
       return resolveLevel(null, this.projectDefaultLevel(entry.projectShell.projectId));
     }
+    if (entry.agent) {
+      // An agent: its record's override, then its own project's default —
+      // or, unbound, the plain-shell rule below.
+      const project = entry.agent.projectId ?? this.expandedProjectId;
+      return resolveLevel(this.agentRecordOf(entry)?.agent?.notificationLevel, this.projectDefaultLevel(project));
+    }
     return resolveLevel(null, this.projectDefaultLevel(this.expandedProjectId));
+  }
+
+  /** The record an entry runs for, when it has one. */
+  private agentRecordOf(entry: RailEntry): RecordRow | undefined {
+    return entry.recordId ? this.records.get(entry.recordId) : undefined;
   }
 
   /** The stored RAW project default for `id` (null when no project / unset). */
@@ -3205,15 +3367,34 @@ export class App {
 
   /** One section's agent rows: live entries plus stopped records. */
   private agentItems(entries: Array<[number, RailEntry]>, recs: RecordRow[]): AgentItem[] {
-    return [
+    const items = [
       ...entries.map(([id, entry]): AgentItem => ({ type: "entry", id, entry })),
       ...recs.map((rec): AgentItem => ({ type: "record", rec })),
     ];
+    // Favorites first within the surface, like COMMANDS; the sort is stable,
+    // so the order otherwise holds and children still nest under parents.
+    return items.sort((a, b) => Number(this.itemFavorite(b)) - Number(this.itemFavorite(a)));
+  }
+
+  /** Whether an agent row's record is a favorite. */
+  private itemFavorite(item: AgentItem): boolean {
+    const rec = item.type === "record" ? item.rec : this.agentRecordOf(item.entry);
+    return rec?.agent?.favorite ?? false;
+  }
+
+  /** The filled star a favorite agent row wears after its name (the
+   *  command card's star, display only: the menu is the toggle). */
+  private favoriteStar(): HTMLElement {
+    const star = document.createElement("span");
+    star.className = "chappa-process-star on chappa-agent-star";
+    star.textContent = "★";
+    star.title = "Favorite";
+    return star;
   }
 
   /** What a stopped row renders, for the sections' repaint signatures. */
   private recordSig(rec: RecordRow): string {
-    return [rec.recordId, rec.name, rec.status, this.isPaneFor(rec.recordId)].join("\u001f");
+    return [rec.recordId, rec.name, rec.status, rec.agent?.favorite, this.isPaneFor(rec.recordId)].join("\u001f");
   }
 
   private isPaneFor(recordId: string): boolean {
@@ -3249,6 +3430,8 @@ export class App {
     row.append(dot, name);
     if (rec.kind === "agent") {
       row.classList.add("agent");
+      if (rec.agent?.favorite) row.append(this.favoriteStar());
+      row.addEventListener("contextmenu", (e) => this.showAgentMenu(e, rec.recordId, null));
       if (extraClass === "chappa-workspace-agent-row" && rec.projectId !== null) {
         const project = this.badgeFor(rec.projectId);
         project.classList.add("chappa-rail-project");
@@ -3383,6 +3566,8 @@ export class App {
     // bridge), and the attention ring on a bridge fault.
     if (entry.agent) {
       row.classList.add("agent");
+      if (this.agentRecordOf(entry)?.agent?.favorite) row.append(this.favoriteStar());
+      row.addEventListener("contextmenu", (e) => this.showAgentMenu(e, entry.recordId ?? null, id));
       // On the WORKSPACE surface a bound agent wears its project's badge:
       // the row is there because its project is not the expanded one, so the
       // title alone cannot say where it works.
@@ -5681,6 +5866,7 @@ export class App {
                 item.entry.activity,
                 item.entry.attention,
                 item.entry.agent?.bridge,
+                this.itemFavorite(item),
                 item.id === this.activeId,
                 depth,
               ].join("\u001f"),
@@ -6027,7 +6213,12 @@ export class App {
   /** A `label ▸` menu row with its (initially empty) submenu; hover or click
    *  opens it, closing the other submenus. Same pattern as the notification
    *  submenu, whose parent/sub fields predate this helper. */
-  private rowSubmenuPair(label: string, cls: string): [HTMLElement, HTMLElement] {
+  private rowSubmenuPair(
+    label: string,
+    cls: string,
+    menu: HTMLElement = this.rowMenu,
+    open: (sub: HTMLElement) => void = (sub) => this.openRowSubmenu(sub),
+  ): [HTMLElement, HTMLElement] {
     const parent = document.createElement("div");
     parent.className = "chappa-row-submenu-parent";
     const toggle = this.rowMenuItem(label, parent);
@@ -6035,19 +6226,21 @@ export class App {
     const sub = document.createElement("div");
     sub.className = `chappa-row-submenu ${cls}`;
     parent.appendChild(sub);
-    this.rowMenu.appendChild(parent);
-    parent.addEventListener("mouseenter", () => this.openRowSubmenu(sub));
-    toggle.addEventListener("click", () => this.openRowSubmenu(sub));
+    menu.appendChild(parent);
+    parent.addEventListener("mouseenter", () => {
+      if (!toggle.disabled) open(sub);
+    });
+    toggle.addEventListener("click", () => open(sub));
     return [parent, sub];
   }
 
-  /** A project context-menu item (appended to `projectCtxMenu`). */
-  private rowMenuCtxItem(label: string): HTMLButtonElement {
+  /** A context-menu item appended to `menu` (the project menu by default). */
+  private rowMenuCtxItem(label: string, menu: HTMLElement = this.projectCtxMenu): HTMLButtonElement {
     const btn = document.createElement("button");
     btn.className = "chappa-row-menu-item";
     btn.textContent = label;
     btn.dataset.action = label;
-    this.projectCtxMenu.appendChild(btn);
+    menu.appendChild(btn);
     return btn;
   }
 
@@ -6138,10 +6331,28 @@ export class App {
    *  Inherit row (whose label names what is being inherited). */
   private renderRowSubmenu(row: ProcessRow): void {
     this.rowSubmenu.textContent = "";
-    const override = parseLevel(row.notificationLevel);
-    const inherited = resolveLevel(null, this.projectDefaultLevel(row.projectId));
+    this.fillLevelSubmenu(
+      this.rowSubmenu,
+      row.notificationLevel,
+      this.projectDefaultLevel(row.projectId),
+      (level) => this.chooseRowLevel(row.projectId, row.name, level),
+    );
+  }
+
+  /** The level rows of a `Notification level ▸` submenu — shared by the
+   *  command and agent menus: Inherit (naming what it inherits) and the
+   *  three levels, the checkmark on the override when one is set, else on
+   *  Inherit. `choose(null)` clears the override. */
+  private fillLevelSubmenu(
+    sub: HTMLElement,
+    rawOverride: string | null,
+    rawDefault: string | null,
+    choose: (level: Level | null) => void,
+  ): void {
+    const override = parseLevel(rawOverride);
+    const inherited = resolveLevel(null, rawDefault);
     const item = (label: string, checked: boolean, level: Level | null): void => {
-      const btn = this.rowMenuItem("", this.rowSubmenu);
+      const btn = this.rowMenuItem("", sub);
       // A fixed-width check column keeps the labels aligned whether or not the
       // row is the current one (a bare "✓ " prefix would shift them).
       const mark = document.createElement("span");
@@ -6151,7 +6362,7 @@ export class App {
       btn.append(mark, label);
       btn.dataset.level = level ?? "inherit";
       if (checked) btn.dataset.checked = "true";
-      btn.addEventListener("click", () => this.chooseRowLevel(row.projectId, row.name, level));
+      btn.addEventListener("click", () => choose(level));
     };
     item(`Inherit (${LEVEL_LABELS[inherited]})`, override === null, null);
     for (const level of LEVELS) item(LEVEL_LABELS[level], override === level, level);
@@ -6384,6 +6595,316 @@ export class App {
       await this.showError(`Could not duplicate: ${err}`);
     }
   }
+
+  // --- agent row context menu ----------------------------------------
+  //
+  // Right-click on an agent row, live or stopped, in either AGENTS surface.
+  // The items come from `agentMenuEntries(record, terminal)`; everything
+  // stored (favorite, name, renaming, level) is written to the agent RECORD
+  // and mirrored onto the row optimistically, reverted if the write fails.
+
+  /** The record and live terminal the agent menu is acting on. The record
+   *  is looked up through the terminal when the row was a live one (its
+   *  record id can arrive after the row was drawn). */
+  private agentMenuTarget(): { rec: RecordRow | null; termId: number | null; entry: RailEntry | null } {
+    const target = this.agentMenuFor;
+    if (!target) return { rec: null, termId: null, entry: null };
+    const fromTerm = target.termId !== null ? this.entries.get(target.termId) : undefined;
+    const recordId = fromTerm?.recordId ?? target.recordId;
+    const rec = recordId ? (this.records.get(recordId) ?? null) : null;
+    const termId = target.termId ?? (rec ? this.liveTermOf(rec.recordId) : null);
+    const entry = termId !== null ? (this.entries.get(termId) ?? null) : null;
+    return { rec, termId: entry ? termId : null, entry };
+  }
+
+  /** The project an agent row belongs to (its record's, else its live
+   *  entry's), or null for a workspace agent. */
+  private agentProjectOf(rec: RecordRow | null, entry: RailEntry | null): number | null {
+    return rec ? rec.projectId : (entry?.agent?.projectId ?? null);
+  }
+
+  /** Right-click on an agent row. */
+  private showAgentMenu(e: MouseEvent, recordId: string | null, termId: number | null): void {
+    e.preventDefault();
+    this.agentMenuFor = { recordId, termId };
+    const { rec, entry } = this.agentMenuTarget();
+    if (!rec && !entry) return;
+    this.renderAgentMenu(rec, entry);
+    this.agentMenu.style.display = "block";
+    const rect = this.agentMenu.getBoundingClientRect();
+    const left = Math.max(0, Math.min(e.clientX, window.innerWidth - rect.width));
+    const top = Math.max(0, Math.min(e.clientY, window.innerHeight - rect.height));
+    this.agentMenu.style.left = `${left}px`;
+    this.agentMenu.style.top = `${top}px`;
+  }
+
+  private renderAgentMenu(rec: RecordRow | null, entry: RailEntry | null): void {
+    this.agentMenu.textContent = "";
+    const record = rec ? { termId: rec.termId, name: rec.name, agent: rec.agent } : null;
+    const terminal = entry ? { status: entry.status, exitCode: entry.exitCode, bell: entry.bell } : null;
+    for (const item of agentMenuEntries(record, terminal)) {
+      if (item.type === "separator") {
+        const sep = document.createElement("div");
+        sep.className = "chappa-row-menu-sep";
+        this.agentMenu.appendChild(sep);
+        continue;
+      }
+      if (item.type === "submenu") {
+        const action = item.action;
+        const [parent, sub] = this.rowSubmenuPair(item.label, `chappa-agent-${action}`, this.agentMenu, (s) =>
+          this.openAgentSubmenu(action, s),
+        );
+        const toggle = parent.querySelector<HTMLButtonElement>("button")!;
+        toggle.dataset.action = action;
+        toggle.disabled = item.disabled;
+        toggle.title = item.title ?? "";
+        sub.dataset.action = action;
+        continue;
+      }
+      const action = item.action;
+      const btn = this.rowMenuCtxItem(item.label, this.agentMenu);
+      btn.dataset.action = action;
+      btn.classList.add(`chappa-agent-menu-${action}`);
+      // The destructive entry wears the project menu's Remove styling.
+      if (action === "remove") btn.classList.add("chappa-project-ctx-remove");
+      btn.disabled = item.disabled;
+      btn.title = item.title ?? "";
+      btn.addEventListener("click", () => this.onAgentMenuAction(action));
+    }
+  }
+
+  private closeAgentSubmenus(): void {
+    for (const sub of this.agentMenu.querySelectorAll<HTMLElement>(".chappa-row-submenu")) {
+      sub.classList.remove("open");
+    }
+  }
+
+  private hideAgentMenu(): void {
+    this.closeAgentSubmenus();
+    this.agentMenu.textContent = "";
+    this.agentMenu.style.display = "none";
+  }
+
+  /** Open one of the agent menu's submenus, filled for the current row. */
+  private openAgentSubmenu(action: "level" | "add", sub: HTMLElement): void {
+    this.closeAgentSubmenus();
+    sub.textContent = "";
+    const { rec, entry } = this.agentMenuTarget();
+    if (action === "level") {
+      if (!rec?.agent) return;
+      const recordId = rec.recordId;
+      this.fillLevelSubmenu(sub, rec.agent.notificationLevel, this.projectDefaultLevel(rec.projectId), (level) =>
+        this.chooseAgentLevel(recordId, level),
+      );
+    } else {
+      this.fillAgentAddSubmenu(sub, this.agentProjectOf(rec, entry));
+    }
+    sub.classList.add("open");
+  }
+
+  /**
+   * `Add ▸` for an agent row: what the row's own scope can add from its
+   * section headers. A project agent offers that project's Command… (the
+   * project command editor; off while the project is closed or its
+   * chappa.yml fails to load), Terminal (a shell in the project) and
+   * Agent ▸ (spawned into the project); a workspace agent offers the
+   * workspace command editor, a workspace shell and the workspace AGENTS
+   * spawner's pick. Either way a spawned agent is a root, not a child.
+   */
+  private fillAgentAddSubmenu(sub: HTMLElement, projectId: number | null): void {
+    const add = (label: string, cls: string, run: () => void, disabledWhy: string | null = null): void => {
+      const btn = this.rowMenuItem(label, sub);
+      btn.classList.add(cls);
+      btn.disabled = disabledWhy !== null;
+      btn.title = disabledWhy ?? "";
+      btn.addEventListener("click", () => {
+        this.hideAgentMenu();
+        run();
+      });
+    };
+    if (projectId !== null) {
+      const state = this.openProjects.get(projectId);
+      const why = !state
+        ? "open the project to add a command"
+        : state.ymlError
+          ? `editing disabled: ${state.ymlError}`
+          : null;
+      add("Command…", "chappa-agent-add-command", () => void this.onAddCommand(projectId), why);
+      add("Terminal", "chappa-agent-add-terminal", () => {
+        void this.newShell(this.projects.get(projectId)?.path, undefined, projectId);
+      });
+    } else {
+      add("Command…", "chappa-agent-add-command", () => void this.addWorkspaceCommand());
+      add("Terminal", "chappa-agent-add-terminal", () => void this.newShell());
+    }
+    const [, agents] = this.rowSubmenuPair("Agent ▸", "chappa-agent-add-agent", sub, (s) => {
+      s.classList.add("open");
+      this.fillAgentToolsSubmenu(s, projectId);
+      // The tool list loads lazily; refill once it is fresh.
+      void this.agentTools.load().then(() => {
+        if (s.classList.contains("open")) this.fillAgentToolsSubmenu(s, projectId);
+      });
+    });
+    agents.dataset.action = "add-agent";
+  }
+
+  /** The ENABLED agent tools as menu rows; a pick spawns into the row's
+   *  project (a workspace row takes the workspace spawner's path). */
+  private fillAgentToolsSubmenu(sub: HTMLElement, projectId: number | null): void {
+    sub.textContent = "";
+    const tools = this.agentTools.enabled();
+    for (const tool of tools) {
+      const btn = this.rowMenuItem(tool.model ? `${tool.name} · ${tool.model}` : tool.name, sub);
+      btn.dataset.toolId = String(tool.id);
+      btn.addEventListener("click", () => {
+        this.hideAgentMenu();
+        void this.spawnAgent(tool.id, projectId ?? undefined);
+      });
+    }
+    if (tools.length === 0) {
+      const btn = this.rowMenuItem("No enabled agent tools", sub);
+      btn.disabled = true;
+    }
+  }
+
+  private onAgentMenuAction(action: AgentMenuAction): void {
+    const { rec, termId, entry } = this.agentMenuTarget();
+    this.hideAgentMenu();
+    switch (action) {
+      case "start":
+        if (rec) void this.startRecordRow(rec.recordId);
+        return;
+      case "stop":
+        if (termId !== null) void this.closePanel(termId);
+        return;
+      case "restart":
+        if (rec && termId !== null) void this.restartAgent(rec.recordId, termId);
+        return;
+      case "favorite":
+        if (rec?.agent) this.writeAgentRecord(rec.recordId, { favorite: !rec.agent.favorite });
+        return;
+      case "rename":
+        if (rec) void this.renameAgent(rec.recordId);
+        return;
+      case "auto-rename":
+        if (rec?.agent) this.writeAgentRecord(rec.recordId, { disable_auto_rename: !rec.agent.disableAutoRename });
+        return;
+      case "dismiss":
+        if (termId !== null && entry) {
+          this.entries.set(termId, railReducer(entry, { type: "activate" }));
+          this.renderRail();
+        }
+        return;
+      case "remove":
+        if (rec) void this.removeAgent(rec.recordId);
+        return;
+    }
+  }
+
+  /** Restart = stop then start: the live terminal is closed (and awaited —
+   *  starting a record whose terminal is still live answers that same
+   *  terminal), then the record starts a fresh run in this window. */
+  private async restartAgent(recordId: string, termId: number): Promise<void> {
+    if (!this.entries.has(termId)) return;
+    try {
+      await this.api.closeTerminal(termId);
+    } catch {
+      // Already gone: the start below is what matters.
+    }
+    this.dropEntry(termId, false);
+    await this.startRecordRow(recordId);
+  }
+
+  /** Apply `patch` to the record's row state (and its live row's name), as
+   *  it will be stored. */
+  private applyAgentPatch(recordId: string, patch: ipc.AgentRecordPatchDto): void {
+    const rec = this.records.get(recordId);
+    if (!rec?.agent) return;
+    if (patch.favorite !== undefined) rec.agent.favorite = patch.favorite;
+    if (patch.disable_auto_rename !== undefined) rec.agent.disableAutoRename = patch.disable_auto_rename;
+    if (patch.notification_level !== undefined) rec.agent.notificationLevel = patch.notification_level;
+    if (patch.name !== undefined) {
+      rec.name = patch.name;
+      const termId = this.liveTermOf(recordId);
+      const entry = termId !== null ? this.entries.get(termId) : undefined;
+      // The stored name replaces any title the terminal set.
+      if (termId !== null && entry) this.entries.set(termId, { ...entry, name: patch.name, title: null });
+    }
+  }
+
+  /** Optimistic write of an agent record's row state: the row repaints at
+   *  once and the previous state comes back if the store refuses. */
+  private writeAgentRecord(recordId: string, patch: ipc.AgentRecordPatchDto): void {
+    const rec = this.records.get(recordId);
+    if (!rec?.agent) return;
+    const undo: ipc.AgentRecordPatchDto = {};
+    if (patch.favorite !== undefined) undo.favorite = rec.agent.favorite;
+    if (patch.disable_auto_rename !== undefined) undo.disable_auto_rename = rec.agent.disableAutoRename;
+    if (patch.notification_level !== undefined) undo.notification_level = rec.agent.notificationLevel;
+    if (patch.name !== undefined) undo.name = rec.name;
+    const liveId = this.liveTermOf(recordId);
+    const prevTitle = liveId !== null ? (this.entries.get(liveId)?.title ?? null) : null;
+    this.applyAgentPatch(recordId, patch);
+    this.renderRail();
+    void this.api.updateAgentRecord(recordId, patch).catch(async (err) => {
+      this.applyAgentPatch(recordId, undo);
+      const termId = this.liveTermOf(recordId);
+      const cur = termId !== null ? this.entries.get(termId) : undefined;
+      if (undo.name !== undefined && termId !== null && cur) this.entries.set(termId, { ...cur, title: prevTitle });
+      this.renderRail();
+      await this.showError(`Could not update agent: ${err}`);
+    });
+  }
+
+  /** A notification-level pick; null = Inherit (the override is cleared). */
+  private chooseAgentLevel(recordId: string, level: Level | null): void {
+    this.hideAgentMenu();
+    this.writeAgentRecord(recordId, { notification_level: level });
+  }
+
+  /** `Rename agent…`: the new name goes to the record and the row, and a
+   *  manual name turns automatic renaming off — otherwise the next title the
+   *  agent sets would replace it. A blank or unchanged answer does nothing. */
+  private async renameAgent(recordId: string): Promise<void> {
+    const rec = this.records.get(recordId);
+    if (!rec) return;
+    const answer = await this.ask(`rename-agent:${recordId}`, () => this.promptAgentName(rec.name));
+    if (answer === null) return;
+    const name = answer.trim();
+    const current = this.records.get(recordId);
+    if (!current || name === "" || name === current.name) return;
+    this.writeAgentRecord(recordId, { name, disable_auto_rename: true });
+  }
+
+  /** `Remove agent`: confirm, then remove the record and its history (the
+   *  backend closes a live terminal first). The row goes; it does not turn
+   *  back into a stopped row. */
+  private async removeAgent(recordId: string): Promise<void> {
+    const rec = this.records.get(recordId);
+    if (!rec) return;
+    const liveId = this.liveTermOf(recordId);
+    const running = liveId !== null && isLive(this.entries.get(liveId)?.status ?? "stopped");
+    const ok = await this.ask(`remove-agent:${recordId}`, () => this.confirmRemoveAgent(rec.name, running));
+    if (ok !== true) return;
+    try {
+      await this.api.removeRecord(recordId);
+    } catch (err) {
+      await this.showError(`Could not remove agent: ${err}`);
+      return;
+    }
+    this.forgetRecord(recordId);
+  }
+
+  /** Drop a removed record's row: its terminal (if still here) goes without
+   *  becoming a stopped row, and a card showing it closes. */
+  private forgetRecord(recordId: string): void {
+    const rec = this.records.get(recordId);
+    if (!rec) return;
+    this.records.delete(recordId);
+    if (this.paneFor?.kind === "record" && this.paneFor.recordId === recordId) this.hideRecordPane();
+    if (rec.termId !== null && this.entries.has(rec.termId)) this.dropEntry(rec.termId, false);
+    this.renderRail();
+  }
 }
 
 /** The editor's initial form from a row. */
@@ -6452,7 +6973,15 @@ function recordRowFromDto(r: ipc.RecordDto): RecordRow {
     status: isLive(status) ? "stopped" : status,
     termId: null,
     lastRun: r.last_run,
-    agent: r.agent ? { toolId: r.agent.tool_id, parentRecordId: r.agent.parent_record_id } : null,
+    agent: r.agent
+      ? {
+          toolId: r.agent.tool_id,
+          parentRecordId: r.agent.parent_record_id,
+          favorite: r.agent.favorite ?? false,
+          disableAutoRename: r.agent.disable_auto_rename ?? false,
+          notificationLevel: r.agent.notification_level ?? null,
+        }
+      : null,
     terminal: r.terminal ? { shellProfile: r.terminal.shell_profile, cwd: r.terminal.cwd } : null,
     starting: false,
   };

@@ -878,6 +878,16 @@ impl Registry {
         }
     }
 
+    /// Rename a live entry (a renamed record's attached terminal), so the
+    /// listings and the control surface report the new name. Unknown id: no-op.
+    pub fn set_name(&self, id: TermId, name: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.name = name.to_owned();
+            }
+        }
+    }
+
     /// The stable uuid of one entry, `None` when unknown.
     pub fn uuid_of(&self, id: TermId) -> Option<String> {
         self.inner

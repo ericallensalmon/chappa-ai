@@ -9,7 +9,9 @@
 //!  - a run still open at launch is reconciled as a crash;
 //!  - the ledger keeps the newest twenty runs per record;
 //!  - agent spawns create records (parent by RECORD id), `ephemeral` opts
-//!    out, and the three control routes answer as documented.
+//!    out, and the three control routes answer as documented;
+//!  - an agent record's row state (name, favorite, renaming, level) is
+//!    editable in either bucket, and a rename reaches its live terminal.
 //!
 //! Real terminals: `cmd` / `powershell` on Windows, `sh` elsewhere (the
 //! split every pty-touching test in this crate uses).
@@ -32,7 +34,7 @@ use app_lib::settings::SettingsState;
 use app_lib::workspace::Workspace;
 use project_model::projects::ProjectStore;
 use project_model::records::{
-    AgentRecord, RecordKind, Run, TailKind, TerminalRecord, RUNS_RETAINED, TAIL_LINES,
+    AgentRecord, AgentRecordPatch, RecordKind, Run, TailKind, TerminalRecord, RUNS_RETAINED, TAIL_LINES,
 };
 use project_model::workspace::WorkspaceStore;
 use serde_json::{json, Value};
@@ -442,6 +444,74 @@ fn a_project_shell_record_lives_with_its_project() {
     let listed = w.records.list(&w.registry).into_iter().find(|r| r.record_id == "t-proj").unwrap();
     assert_eq!((listed.project_id, listed.term_id), (Some(1), Some(term_id)));
     w.registry.close(term_id);
+}
+
+fn agent_record(id: &str, name: &str) -> AgentRecord {
+    AgentRecord {
+        record_id: id.into(),
+        name: name.into(),
+        tool_id: 1,
+        favorite: false,
+        disable_auto_rename: false,
+        notification_level: None,
+        parent_record_id: None,
+        extra_args: vec![],
+        prompt: None,
+        last_run: None,
+    }
+}
+
+/// The row-state edit finds the agent in its bucket (project or workspace),
+/// persists it, answers the listed record, renames an attached terminal,
+/// and refuses a non-agent record, an unknown id and an invalid patch.
+#[test]
+fn an_agent_record_row_state_edit_reaches_the_store_and_the_live_row() {
+    let w = world();
+    w.records.add_agent_record(Scope::Project(1), agent_record("a-proj", "claude")).unwrap();
+    w.records.add_agent_record(Scope::Workspace, agent_record("a-ws", "codex")).unwrap();
+    w.records.add_terminal_record(Scope::Workspace, terminal_record("t-shell")).unwrap();
+
+    let fav = AgentRecordPatch { favorite: Some(true), ..Default::default() };
+    let dto = w.records.update_agent(&w.registry, "a-proj", &fav).unwrap();
+    assert_eq!(dto.project_id, Some(1));
+    assert!(dto.agent.as_ref().unwrap().favorite);
+    assert!(w.records.get("a-proj").unwrap().1.agent.unwrap().favorite);
+
+    let level: AgentRecordPatch =
+        serde_json::from_value(json!({"notification_level": "none", "disable_auto_rename": true})).unwrap();
+    let dto = w.records.update_agent(&w.registry, "a-ws", &level).unwrap();
+    let facts = dto.agent.unwrap();
+    assert_eq!((facts.notification_level.as_deref(), facts.disable_auto_rename), (Some("none"), true));
+    let workspace_file = std::fs::read_to_string(w._dir.path().join("workspace.json")).unwrap();
+    assert!(workspace_file.contains("\"notification_level\": \"none\""), "{workspace_file}");
+
+    // A live agent: the rename lands on the record AND its terminal.
+    w.records
+        .begin_run(Scope::Workspace, RecordKind::Agent, "a-ws", &Run::begin("run-1", 1, TailKind::Text))
+        .unwrap();
+    let term_id = w
+        .registry
+        .create_recorded_terminal(
+            cfg(lingering_spec()),
+            Arc::new(MockSink::default()),
+            None,
+            "codex".into(),
+            RecordBinding { record_id: "a-ws".into(), run_uuid: "run-1".into() },
+        )
+        .expect("spawn");
+    let rename = AgentRecordPatch { name: Some("reviewer".into()), ..Default::default() };
+    let dto = w.records.update_agent(&w.registry, "a-ws", &rename).unwrap();
+    assert_eq!((dto.name.as_str(), dto.term_id), ("reviewer", Some(term_id)));
+    let row = w.registry.list_rows().into_iter().find(|r| r.base.id == term_id).expect("a live row");
+    assert_eq!(row.base.name, "reviewer");
+    assert_eq!(w.records.get("a-ws").unwrap().1.name, "reviewer");
+    w.registry.close(term_id);
+
+    assert!(w.records.update_agent(&w.registry, "t-shell", &fav).is_err(), "not an agent");
+    assert!(w.records.update_agent(&w.registry, "nope", &fav).is_err());
+    let blank = AgentRecordPatch { name: Some(" ".into()), ..Default::default() };
+    assert!(w.records.update_agent(&w.registry, "a-proj", &blank).is_err());
+    assert_eq!(w.records.get("a-proj").unwrap().1.name, "claude");
 }
 
 /// A run still `running` in the stores and the ledger when the service

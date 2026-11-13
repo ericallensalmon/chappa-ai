@@ -160,6 +160,11 @@ export interface TerminalApi {
     recordId: string,
     frames: ipc.Channel<ArrayBuffer | number[]>,
   ): Promise<ipc.StartRecordDto>;
+  /** Remove a record and its run history (an attached terminal is closed
+   *  first). */
+  removeRecord(recordId: string): Promise<ipc.RemoveRecordDto>;
+  /** Edit an agent record's row state (name, favorite, renaming, level). */
+  updateAgentRecord(recordId: string, patch: ipc.AgentRecordPatchDto): Promise<ipc.RecordDto>;
 }
 
 /** The real adapter; swap in a stub in tests. */
@@ -220,6 +225,8 @@ export const tauriApi: TerminalApi = {
   listRecords: () => ipc.listRecords(),
   getRecordRuns: (recordId, limit) => ipc.getRecordRuns(recordId, limit),
   startRecord: (recordId, frames) => ipc.startRecord(recordId, frames),
+  removeRecord: (recordId) => ipc.removeRecord(recordId),
+  updateAgentRecord: (recordId, patch) => ipc.updateAgentRecord(recordId, patch),
 };
 
 /**

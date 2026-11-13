@@ -18,8 +18,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    new_record_id, reconcile_runs, update_run, AgentRecord, RecordKind, RecordRef, Run, RunUpdate,
-    StoredRecord, TerminalRecord,
+    new_record_id, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, RecordKind, RecordRef,
+    Run, RunUpdate, StoredRecord, TerminalRecord,
 };
 use crate::yml::ProcessDef;
 
@@ -34,7 +34,7 @@ pub const NOTIFICATION_LEVELS: [&str; 3] = ["all", "important", "none"];
 
 /// `None` (unset) is always valid: it means "inherit", "level: None
 /// CLEARS (removes the override / resets the project field to None = 'all')".
-fn validate_level(level: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_level(level: Option<&str>) -> Result<(), String> {
     match level {
         None => Ok(()),
         Some(l) if NOTIFICATION_LEVELS.contains(&l) => Ok(()),
@@ -698,6 +698,28 @@ impl ProjectStore {
             self.save()?;
         }
         Ok(removed)
+    }
+
+    /// Edit an agent record's row state (name, favorite, automatic
+    /// renaming, notification level). `Ok(None)` when no project holds an
+    /// agent record with that id; a refused patch persists nothing.
+    pub fn update_agent_record(
+        &mut self,
+        record_id: &str,
+        patch: &AgentRecordPatch,
+    ) -> Result<Option<(u32, AgentRecord)>, String> {
+        patch.validate()?;
+        let updated = self.projects.iter_mut().find_map(|p| {
+            let id = p.id;
+            p.agents.iter_mut().find(|a| a.record_id == record_id).map(|a| {
+                patch.apply(a);
+                (id, a.clone())
+            })
+        });
+        if updated.is_some() {
+            self.save()?;
+        }
+        Ok(updated)
     }
 
     /// Every record id project `id` owns — what a project removal prunes
@@ -1419,6 +1441,67 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&before).unwrap(),
             "the row is back to what it was before any record"
         );
+    }
+
+    /// An agent record's row state is editable in place: the patch lands on
+    /// the right project's agent, persists, leaves the rest alone, and a
+    /// refused patch (blank name, unknown level) or an unknown id writes
+    /// nothing.
+    #[test]
+    fn an_agent_record_takes_a_row_state_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("projects.json");
+        let mut store = ProjectStore::new(store_path.clone());
+        store.add("/code/a".into(), "a".into(), None).unwrap();
+        store
+            .add_agent_record(
+                1,
+                AgentRecord {
+                    record_id: "agent-1".into(),
+                    name: "claude".into(),
+                    tool_id: 3,
+                    favorite: false,
+                    disable_auto_rename: false,
+                    notification_level: None,
+                    parent_record_id: None,
+                    extra_args: vec!["--verbose".into()],
+                    prompt: None,
+                    last_run: None,
+                },
+            )
+            .unwrap();
+
+        let patch = AgentRecordPatch {
+            name: Some(" reviewer ".into()),
+            favorite: Some(true),
+            disable_auto_rename: Some(true),
+            notification_level: Some(Some("important".into())),
+        };
+        let (owner, agent) = store.update_agent_record("agent-1", &patch).unwrap().unwrap();
+        assert_eq!(owner, 1);
+        assert_eq!(agent.name, "reviewer");
+        assert!(agent.favorite && agent.disable_auto_rename);
+        assert_eq!(agent.notification_level.as_deref(), Some("important"));
+        assert_eq!(agent.extra_args, vec!["--verbose".to_owned()], "untouched fields stay");
+
+        let reopened = ProjectStore::new(store_path.clone());
+        let stored = reopened.record("agent-1").unwrap().1;
+        assert_eq!(stored.name, "reviewer");
+        assert_eq!(stored.agent.unwrap().notification_level.as_deref(), Some("important"));
+
+        let before = fs::read_to_string(&store_path).unwrap();
+        let blank = AgentRecordPatch { name: Some("".into()), ..Default::default() };
+        assert!(store.update_agent_record("agent-1", &blank).is_err());
+        let loud = AgentRecordPatch { notification_level: Some(Some("All".into())), ..Default::default() };
+        assert!(store.update_agent_record("agent-1", &loud).is_err());
+        assert_eq!(store.update_agent_record("nope", &patch).unwrap(), None);
+        assert_eq!(fs::read_to_string(&store_path).unwrap(), before, "nothing written");
+
+        // Clearing the level is a null on the wire, and drops the key.
+        let clear = AgentRecordPatch { notification_level: Some(None), ..Default::default() };
+        let (_, agent) = store.update_agent_record("agent-1", &clear).unwrap().unwrap();
+        assert_eq!(agent.notification_level, None);
+        assert!(!fs::read_to_string(&store_path).unwrap().contains("notification_level"));
     }
 
     /// Every vocabulary member is accepted; everything else is rejected and

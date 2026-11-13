@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use crate::atomic;
 use crate::projects::ProcessOverride;
 use crate::records::{
-    new_record_id, reconcile_runs, update_run, AgentRecord, RecordKind, RecordRef, Run, RunUpdate,
-    StoredRecord, TerminalRecord,
+    new_record_id, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, RecordKind, RecordRef,
+    Run, RunUpdate, StoredRecord, TerminalRecord,
 };
 use crate::yml::ProcessDef;
 
@@ -389,6 +389,26 @@ impl WorkspaceStore {
         Ok(removed)
     }
 
+    /// Edit a workspace agent record's row state (see
+    /// `ProjectStore::update_agent_record`). `Ok(None)` when no workspace
+    /// agent has that id.
+    pub fn update_agent_record(
+        &self,
+        record_id: &str,
+        patch: &AgentRecordPatch,
+    ) -> Result<Option<AgentRecord>, String> {
+        patch.validate()?;
+        let _guard = self.guard();
+        let mut file = self.read();
+        let Some(agent) = file.agents.iter_mut().find(|a| a.record_id == record_id) else {
+            return Ok(None);
+        };
+        patch.apply(agent);
+        let updated = agent.clone();
+        self.write_atomic(&file)?;
+        Ok(Some(updated))
+    }
+
     /// At launch: reconcile runs cut off by a crash; returns the changed
     /// run uuids (see `ProjectStore::reconcile_crashed_runs`).
     pub fn reconcile_crashed_runs(&self) -> Result<Vec<String>, String> {
@@ -610,6 +630,25 @@ mod tests {
         assert_eq!(
             s.record("agent-1").unwrap().agent.unwrap().parent_record_id.as_deref(),
             Some(id.as_str())
+        );
+
+        // Row state: a patch edits the workspace agent in place; an unknown
+        // id or a refused patch writes nothing.
+        let patch = AgentRecordPatch {
+            name: Some("reviewer".into()),
+            favorite: Some(true),
+            notification_level: Some(Some("none".into())),
+            ..Default::default()
+        };
+        let agent = s.update_agent_record("agent-1", &patch).unwrap().unwrap();
+        assert_eq!((agent.name.as_str(), agent.favorite), ("reviewer", true));
+        assert_eq!(s.record("agent-1").unwrap().name, "reviewer");
+        assert_eq!(s.update_agent_record("term-1", &patch).unwrap(), None, "not an agent");
+        let bad = AgentRecordPatch { notification_level: Some(Some("loud".into())), ..Default::default() };
+        assert!(s.update_agent_record("agent-1", &bad).is_err());
+        assert_eq!(
+            s.record("agent-1").unwrap().agent.unwrap().notification_level.as_deref(),
+            Some("none")
         );
 
         // Crash reconcile: the open agent run closes as exited/null.

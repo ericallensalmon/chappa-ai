@@ -205,6 +205,8 @@ export function stubApi(): ApiHarness {
     listRecords: vi.fn(async () => []),
     getRecordRuns: vi.fn(async () => []),
     startRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "terminal" as const, term_id: null, run_uuid: null, pending: false })),
+    removeRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "agent" as const, removed: true, runs_deleted: 0 })),
+    updateAgentRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "agent" as const, name: "", project_id: null, status: "stopped", term_id: null, last_run: null })),
   };
   return { api, onFrame: () => onFrame };
 }

@@ -269,6 +269,68 @@ pub struct AgentRecord {
     pub last_run: Option<Run>,
 }
 
+/// A partial edit of an agent record's own row state: the name, the
+/// favorite flag, the automatic-renaming toggle and the notification level.
+/// An absent field is left alone. `notification_level` has three states on
+/// the wire: absent (untouched), `null` (cleared — the row inherits) or one
+/// of the level literals.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentRecordPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_auto_rename: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub notification_level: Option<Option<String>>,
+}
+
+/// A present key (even `null`) is `Some(..)`; an absent one falls back to
+/// the field default (`None`). What lets a patch tell "clear" from "keep".
+fn present_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
+}
+
+impl AgentRecordPatch {
+    /// Check the patch without touching anything: a blank name or a level
+    /// outside the vocabulary refuses the whole patch.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(name) = &self.name {
+            if name.trim().is_empty() {
+                return Err("agent name must not be blank".to_owned());
+            }
+        }
+        if let Some(level) = &self.notification_level {
+            crate::projects::validate_level(level.as_deref())?;
+        }
+        Ok(())
+    }
+
+    /// Apply a validated patch. The name is stored trimmed.
+    pub fn apply(&self, record: &mut AgentRecord) {
+        if let Some(name) = &self.name {
+            record.name = name.trim().to_owned();
+        }
+        if let Some(favorite) = self.favorite {
+            record.favorite = favorite;
+        }
+        if let Some(disabled) = self.disable_auto_rename {
+            record.disable_auto_rename = disabled;
+        }
+        if let Some(level) = &self.notification_level {
+            record.notification_level = level.clone();
+        }
+    }
+}
+
 /// A shell row. `shell_profile` names a settings profile (none = the
 /// platform default shell) and `cwd` is where the shell was opened, so
 /// starting the record again resumes in the same place.
@@ -317,6 +379,60 @@ pub fn reconcile_runs<'a>(runs: impl Iterator<Item = &'a mut Run>) -> Vec<String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn agent(name: &str) -> AgentRecord {
+        AgentRecord {
+            record_id: "a".repeat(32),
+            name: name.into(),
+            tool_id: 1,
+            favorite: false,
+            disable_auto_rename: false,
+            notification_level: Some("none".into()),
+            parent_record_id: None,
+            extra_args: vec![],
+            prompt: None,
+            last_run: None,
+        }
+    }
+
+    /// An absent level key keeps the stored level; `null` clears it; a
+    /// literal sets it.
+    #[test]
+    fn an_agent_patch_tells_a_cleared_level_from_an_absent_one() {
+        let keep: AgentRecordPatch = serde_json::from_value(json!({"favorite": true})).unwrap();
+        let clear: AgentRecordPatch = serde_json::from_value(json!({"notification_level": null})).unwrap();
+        let set: AgentRecordPatch = serde_json::from_value(json!({"notification_level": "important"})).unwrap();
+        assert_eq!(keep.notification_level, None);
+        assert_eq!(clear.notification_level, Some(None));
+        assert_eq!(set.notification_level, Some(Some("important".into())));
+
+        let mut a = agent("claude");
+        keep.apply(&mut a);
+        assert!(a.favorite);
+        assert_eq!(a.notification_level.as_deref(), Some("none"));
+        clear.apply(&mut a);
+        assert_eq!(a.notification_level, None);
+        set.apply(&mut a);
+        assert_eq!(a.notification_level.as_deref(), Some("important"));
+    }
+
+    #[test]
+    fn an_agent_patch_refuses_a_blank_name_or_an_unknown_level() {
+        let blank = AgentRecordPatch { name: Some("   ".into()), ..Default::default() };
+        assert!(blank.validate().is_err());
+        let level = AgentRecordPatch { notification_level: Some(Some("loud".into())), ..Default::default() };
+        assert!(level.validate().is_err());
+        let ok = AgentRecordPatch {
+            name: Some("  reviewer ".into()),
+            disable_auto_rename: Some(true),
+            ..Default::default()
+        };
+        ok.validate().unwrap();
+        let mut a = agent("claude");
+        ok.apply(&mut a);
+        assert_eq!(a.name, "reviewer");
+        assert!(a.disable_auto_rename);
+    }
 
     #[test]
     fn record_ids_are_32_hex_and_distinct() {

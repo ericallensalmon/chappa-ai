@@ -250,6 +250,7 @@ pub fn run() {
         records::get_record_runs,
         records::start_record,
         records::remove_record,
+        records::update_agent_record,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -311,6 +312,7 @@ pub fn run() {
         records::get_record_runs,
         records::start_record,
         records::remove_record,
+        records::update_agent_record,
         workspace::list_workspace_commands,
         workspace::save_workspace_command,
         workspace::delete_workspace_command,

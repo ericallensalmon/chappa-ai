@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, GlLru, agentForest, railReducer, type ActiveRow, type RailEntry, type RailStatus, PRE_ADOPT_EVENTS_PER_ID, PRE_ADOPT_EVENT_IDS_MAX } from "./app";
+import { App, GlLru, agentForest, agentMenuEntries, railReducer, type ActiveRow, type AppOptions, type RailEntry, type RailStatus, PRE_ADOPT_EVENTS_PER_ID, PRE_ADOPT_EVENT_IDS_MAX } from "./app";
 import type { NotifyCenter } from "./notify_center";
 import type { TerminalApi } from "./term/panel";
 import { emptyAgentTool, frame, stubSettings } from "./term/test-utils";
@@ -203,6 +203,8 @@ function stubApi(): {
       statuses.set(id, "starting");
       return { record_id: recordId, kind: "agent" as const, term_id: id, run_uuid: `run-${id}`, pending: false };
     }),
+    removeRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "agent" as const, removed: true, runs_deleted: 0 })),
+    updateAgentRecord: vi.fn(async (recordId: string): Promise<ipc.RecordDto> => ({ record_id: recordId, kind: "agent", name: "", project_id: null, status: "stopped", term_id: null, last_run: null })),
   };
   return {
     api,
@@ -655,6 +657,8 @@ function projectApi(over: {
     listRecords: vi.fn(async () => []),
     getRecordRuns: vi.fn(async () => []),
     startRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "terminal" as const, term_id: null, run_uuid: null, pending: false })),
+    removeRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "agent" as const, removed: true, runs_deleted: 0 })),
+    updateAgentRecord: vi.fn(async (recordId: string): Promise<ipc.RecordDto> => ({ record_id: recordId, kind: "agent", name: "", project_id: null, status: "stopped", term_id: null, last_run: null })),
   };
   return { api, calls };
 }
@@ -5776,9 +5780,12 @@ describe("App record rows and the record pane", () => {
 
   async function mounted(
     records: ipc.RecordDto[],
-    opts: { project?: boolean } = {},
+    opts: { project?: boolean; app?: Partial<AppOptions>; tools?: ipc.AgentToolDto[] } = {},
   ): Promise<{ api: TerminalApi; root: HTMLElement; app: App }> {
     const { api } = stubApi();
+    if (opts.tools) {
+      vi.mocked(api.listAgentTools).mockResolvedValue({ tools: opts.tools, machine_mode_types: ["claude", "opencode"] });
+    }
     vi.mocked(api.listRecords).mockResolvedValue(records);
     if (opts.project) {
       vi.mocked(api.listProjects).mockResolvedValue([PROJ]);
@@ -5798,6 +5805,7 @@ describe("App record rows and the record pane", () => {
       confirm: async () => true,
       agentTools: new AgentToolsStore(api as unknown as AgentToolsApi),
       now: () => 181_000,
+      ...opts.app,
     });
     await app.mount();
     if (opts.project) {
@@ -6055,5 +6063,311 @@ describe("App record rows and the record pane", () => {
     expect(rows.map((r) => r.querySelector(".chappa-rail-name")?.textContent)).toEqual(["parent", "child"]);
     expect(rows[1].classList.contains("chappa-rail-child")).toBe(true);
     teardown(app, root);
+  });
+
+  describe("agent row context menu", () => {
+    const menu = (root: HTMLElement): HTMLElement => root.querySelector<HTMLElement>(".chappa-agent-menu")!;
+    /** The menu's top-level rows in order: item labels, `---` for a separator. */
+    const menuItems = (root: HTMLElement): string[] =>
+      [...menu(root).children].map((el) =>
+        el.classList.contains("chappa-row-menu-sep")
+          ? "---"
+          : (el.querySelector("button") ?? (el as HTMLElement)).textContent ?? "",
+      );
+    const item = (root: HTMLElement, action: string): HTMLButtonElement =>
+      menu(root).querySelector<HTMLButtonElement>(`:scope > button[data-action="${action}"], :scope > div > button[data-action="${action}"]`)!;
+    const rightClick = (el: HTMLElement): void => {
+      el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    };
+
+    it("a stopped agent offers Start; a live one Stop · Restart; both in the same order", async () => {
+      const { root, app } = await mounted([agentRecord()]);
+      rightClick(recordRows(root)[0]);
+      expect(menu(root).style.display).toBe("block");
+      expect(menuItems(root)).toEqual([
+        "Start",
+        "---",
+        "Add to favorites",
+        "Rename agent…",
+        "Disable automatic renaming",
+        "---",
+        "Notification level ▸",
+        "---",
+        "Add ▸",
+        "---",
+        "Remove agent",
+      ]);
+      expect(item(root, "remove").disabled).toBe(false);
+
+      // The same record, now live with an unread bell: Stop · Restart and
+      // the dismiss entry; Remove is listed but disabled until it is stopped.
+      drive(app).applyCreated({ term_id: 60, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+      const entry = drive(app).entries.get(60)!;
+      drive(app).entries.set(60, railReducer({ ...entry, status: "running" }, { type: "bell" }));
+      drive(app).renderRail();
+      rightClick(wsAgentRows(root)[0]);
+      expect(menuItems(root)).toEqual([
+        "Stop",
+        "Restart",
+        "---",
+        "Add to favorites",
+        "Rename agent…",
+        "Disable automatic renaming",
+        "---",
+        "Notification level ▸",
+        "Dismiss unread alert",
+        "---",
+        "Add ▸",
+        "---",
+        "Remove agent",
+      ]);
+      expect(item(root, "remove").disabled).toBe(true);
+      // Dismiss clears the row's badge.
+      item(root, "dismiss").click();
+      expect(drive(app).entries.get(60)!.bell).toBe(false);
+      expect(menu(root).style.display).toBe("none");
+      teardown(app, root);
+    });
+
+    it("the model: an exited terminal still attached offers Start, an ephemeral agent only Stop", () => {
+      const rec = { termId: 7, name: "claude", agent: { favorite: true, disableAutoRename: true } };
+      const exited = agentMenuEntries(rec, { status: "exited", exitCode: 1, bell: false });
+      expect(exited.filter((e) => e.type === "item").map((e) => (e as { label: string }).label)).toEqual([
+        "Start",
+        "Remove from favorites",
+        "Rename agent…",
+        "Enable automatic renaming",
+        "Remove agent",
+      ]);
+      const ephemeral = agentMenuEntries(null, { status: "running", exitCode: null, bell: false });
+      const enabled = ephemeral.filter((e) => e.type !== "separator" && !e.disabled).map((e) => (e as { label: string }).label);
+      expect(enabled).toEqual(["Stop", "Add ▸"]);
+    });
+
+    it("Stop closes the live terminal, Start and Restart go through start_record", async () => {
+      const { api, root, app } = await mounted([agentRecord()]);
+      rightClick(recordRows(root)[0]);
+      item(root, "start").click();
+      await FLUSH();
+      expect(api.startRecord).toHaveBeenCalledTimes(1);
+      const [termId] = [...drive(app).entries.keys()];
+      drive(app).entries.set(termId, { ...drive(app).entries.get(termId)!, status: "running" });
+      drive(app).renderRail();
+
+      rightClick(wsAgentRows(root)[0]);
+      item(root, "restart").click();
+      await FLUSH();
+      expect(api.closeTerminal).toHaveBeenCalledWith(termId);
+      expect(api.startRecord).toHaveBeenCalledTimes(2);
+      expect(drive(app).entries.has(termId)).toBe(false);
+      expect(wsAgentRows(root).length).toBe(1);
+
+      const [next] = [...drive(app).entries.keys()];
+      drive(app).entries.set(next, { ...drive(app).entries.get(next)!, status: "running" });
+      drive(app).renderRail();
+      rightClick(wsAgentRows(root)[0]);
+      item(root, "stop").click();
+      await FLUSH();
+      expect(api.closeTerminal).toHaveBeenCalledWith(next);
+      // The record stays: a stopped row again.
+      expect(recordRows(root).length).toBe(1);
+      teardown(app, root);
+    });
+
+    it("the notification submenu checks the current level and a pick writes the record", async () => {
+      const { api, root, app } = await mounted([
+        agentRecord({ agent: { ...agentRecord().agent!, notification_level: "important" } }),
+      ]);
+      rightClick(recordRows(root)[0]);
+      item(root, "level").click();
+      const sub = menu(root).querySelector<HTMLElement>('.chappa-row-submenu[data-action="level"]')!;
+      expect(sub.classList.contains("open")).toBe(true);
+      const rows = [...sub.querySelectorAll<HTMLButtonElement>("button")];
+      expect(rows.map((b) => b.textContent)).toEqual(["Inherit (All)", "All", "✓Important", "None"]);
+      expect(sub.querySelector('[data-checked="true"]')?.getAttribute("data-level")).toBe("important");
+      sub.querySelector<HTMLButtonElement>('[data-level="none"]')!.click();
+      expect(api.updateAgentRecord).toHaveBeenCalledWith("a1", { notification_level: "none" });
+      expect(menu(root).style.display).toBe("none");
+      // The checkmark follows on the next open.
+      rightClick(recordRows(root)[0]);
+      item(root, "level").click();
+      expect(menu(root).querySelector('[data-checked="true"]')?.getAttribute("data-level")).toBe("none");
+      // Inherit clears the override (null on the wire).
+      menu(root).querySelector<HTMLButtonElement>('[data-level="inherit"]')!.click();
+      expect(api.updateAgentRecord).toHaveBeenLastCalledWith("a1", { notification_level: null });
+      teardown(app, root);
+    });
+
+    it("the favorite toggle writes the record, stars the row and sorts it first", async () => {
+      const { api, root, app } = await mounted([
+        agentRecord({ record_id: "a0", name: "first" }),
+        agentRecord({ record_id: "a1", name: "second" }),
+      ]);
+      const names = (): (string | null)[] => wsAgentRows(root).map((r) => r.querySelector(".chappa-rail-name")!.textContent);
+      expect(names()).toEqual(["first", "second"]);
+      rightClick(wsAgentRows(root)[1]);
+      item(root, "favorite").click();
+      expect(api.updateAgentRecord).toHaveBeenCalledWith("a1", { favorite: true });
+      expect(names()).toEqual(["second", "first"]);
+      expect(wsAgentRows(root)[0].querySelector(".chappa-agent-star")?.textContent).toBe("★");
+      rightClick(wsAgentRows(root)[0]);
+      expect(item(root, "favorite").textContent).toBe("Remove from favorites");
+      teardown(app, root);
+    });
+
+    it("a refused favorite write reverts the row", async () => {
+      const { api, root, app } = await mounted([agentRecord()], { app: { showError: async () => {} } });
+      vi.mocked(api.updateAgentRecord).mockRejectedValueOnce(new Error("disk full"));
+      rightClick(recordRows(root)[0]);
+      item(root, "favorite").click();
+      await FLUSH();
+      expect(recordRows(root)[0].querySelector(".chappa-agent-star")).toBeNull();
+      teardown(app, root);
+    });
+
+    it("rename writes the record name with automatic renaming off, renames the live row, and holds against OSC titles", async () => {
+      const prompts: string[] = [];
+      const { api, root, app } = await mounted([agentRecord()], {
+        app: {
+          promptAgentName: async (current) => {
+            prompts.push(current);
+            return "  reviewer ";
+          },
+        },
+      });
+      drive(app).applyCreated({ term_id: 61, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+      const title = (drive(app) as unknown as { applyTitle: (p: ipc.TerminalEventDto) => void }).applyTitle.bind(app);
+      title({ term_id: 61, title: "busy" } as ipc.TerminalEventDto);
+      expect(wsAgentRows(root)[0].querySelector(".chappa-rail-name")?.textContent).toBe("busy");
+      rightClick(wsAgentRows(root)[0]);
+      item(root, "rename").click();
+      await FLUSH();
+      expect(prompts).toEqual(["claude"]);
+      expect(api.updateAgentRecord).toHaveBeenCalledWith("a1", { name: "reviewer", disable_auto_rename: true });
+      expect(wsAgentRows(root)[0].querySelector(".chappa-rail-name")?.textContent).toBe("reviewer");
+      expect(drive(app).entries.get(61)!.name).toBe("reviewer");
+      // Automatic renaming is off now: a later OSC title is ignored.
+      title({ term_id: 61, title: "busy again" } as ipc.TerminalEventDto);
+      expect(wsAgentRows(root)[0].querySelector(".chappa-rail-name")?.textContent).toBe("reviewer");
+      rightClick(wsAgentRows(root)[0]);
+      expect(item(root, "auto-rename").textContent).toBe("Enable automatic renaming");
+      item(root, "auto-rename").click();
+      expect(api.updateAgentRecord).toHaveBeenLastCalledWith("a1", { disable_auto_rename: false });
+      title({ term_id: 61, title: "busy again" } as ipc.TerminalEventDto);
+      expect(wsAgentRows(root)[0].querySelector(".chappa-rail-name")?.textContent).toBe("busy again");
+      teardown(app, root);
+    });
+
+    it("remove confirms, then removes the record through remove_record and the row is gone", async () => {
+      const asked: Array<[string, boolean]> = [];
+      let answer = false;
+      const { api, root, app } = await mounted([agentRecord()], {
+        app: {
+          confirmRemoveAgent: async (name, live) => {
+            asked.push([name, live]);
+            return answer;
+          },
+        },
+      });
+      rightClick(recordRows(root)[0]);
+      item(root, "remove").click();
+      await FLUSH();
+      expect(asked).toEqual([["claude", false]]);
+      expect(api.removeRecord).not.toHaveBeenCalled();
+      expect(recordRows(root).length).toBe(1);
+
+      // A live agent cannot be removed: the entry is disabled and a click
+      // asks nothing.
+      answer = true;
+      drive(app).applyCreated({ term_id: 62, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+      drive(app).entries.set(62, { ...drive(app).entries.get(62)!, status: "running" });
+      drive(app).renderRail();
+      rightClick(wsAgentRows(root)[0]);
+      expect(item(root, "remove").disabled).toBe(true);
+      item(root, "remove").click();
+      await FLUSH();
+      expect(asked.length).toBe(1);
+      expect(api.removeRecord).not.toHaveBeenCalled();
+      expect(wsAgentRows(root).length).toBe(1);
+
+      // Once it has exited (panel still attached), Remove is back; the row
+      // goes without turning into a stopped row.
+      drive(app).entries.set(62, { ...drive(app).entries.get(62)!, status: "exited", exitCode: 0 });
+      drive(app).renderRail();
+      rightClick(wsAgentRows(root)[0]);
+      item(root, "remove").click();
+      await FLUSH();
+      expect(asked[1]).toEqual(["claude", false]);
+      expect(api.removeRecord).toHaveBeenCalledWith("a1");
+      expect(wsAgentRows(root).length).toBe(0);
+      expect(drive(app).entries.has(62)).toBe(false);
+      expect(root.querySelector(".chappa-workspace-agents .chappa-subsection-count")?.textContent).toBe("0/0");
+      teardown(app, root);
+    });
+
+    it("Add ▸ offers the row's scope: a project agent adds to its project, a workspace agent to the workspace", async () => {
+      const tool = dockerTool(3);
+      const { api, root, app } = await mounted(
+        [agentRecord(), agentRecord({ record_id: "pa", name: "proj-agent", project_id: 1 })],
+        { project: true, tools: [tool] },
+      );
+      const openAdd = (row: HTMLElement): HTMLElement => {
+        rightClick(row);
+        item(root, "add").click();
+        return menu(root).querySelector<HTMLElement>('.chappa-row-submenu[data-action="add"]')!;
+      };
+      const labels = (sub: HTMLElement): (string | null)[] =>
+        [...sub.querySelectorAll<HTMLButtonElement>(":scope > button, :scope > div > button")].map((b) => b.textContent);
+
+      // The project agent: its project's command editor, a project shell
+      // and a spawn into the project.
+      let sub = openAdd(root.querySelector<HTMLElement>(".chappa-project-agents .chappa-record-row")!);
+      expect(labels(sub)).toEqual(["Command…", "Terminal", "Agent ▸"]);
+      sub.querySelector<HTMLButtonElement>(".chappa-agent-add-agent-toggle")!.click();
+      await FLUSH();
+      const tools = sub.querySelector<HTMLElement>(".chappa-row-submenu.chappa-agent-add-agent")!;
+      expect(tools.classList.contains("open")).toBe(true);
+      tools.querySelector<HTMLButtonElement>(`[data-tool-id="${tool.id}"]`)!.click();
+      await FLUSH();
+      expect(api.spawnAgent).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.spawnAgent).mock.calls[0][0]).toMatchObject({ agent_tool_id: 3, project_id: 1 });
+      expect(vi.mocked(api.spawnAgent).mock.calls[0][0].parent_process_id ?? null).toBeNull();
+
+      sub = openAdd(root.querySelector<HTMLElement>(".chappa-project-agents .chappa-record-row")!);
+      sub.querySelector<HTMLButtonElement>(".chappa-agent-add-terminal")!.click();
+      await FLUSH();
+      expect(vi.mocked(api.createTerminal).mock.calls.at(-1)![0]).toMatchObject({ projectId: 1, spec: expect.objectContaining({ cwd: "/home/dev/app" }) });
+
+      // The workspace agent: the workspace command editor and a plain shell.
+      const promptWorkspaceCommand = vi.fn(async () => null);
+      const ws = await mounted([agentRecord()], { app: { promptWorkspaceCommand } });
+      sub = (() => {
+        rightClick(recordRows(ws.root)[0]);
+        ws.root.querySelector<HTMLButtonElement>('.chappa-agent-menu button[data-action="add"]')!.click();
+        return ws.root.querySelector<HTMLElement>('.chappa-agent-menu .chappa-row-submenu[data-action="add"]')!;
+      })();
+      expect(labels(sub)).toEqual(["Command…", "Terminal", "Agent ▸"]);
+      sub.querySelector<HTMLButtonElement>(".chappa-agent-add-command")!.click();
+      await FLUSH();
+      expect(promptWorkspaceCommand).toHaveBeenCalledWith(null, "Add command");
+      expect(ws.api.saveProjectProcess).not.toHaveBeenCalled();
+      rightClick(recordRows(ws.root)[0]);
+      ws.root.querySelector<HTMLButtonElement>('.chappa-agent-menu button[data-action="add"]')!.click();
+      ws.root.querySelector<HTMLButtonElement>(".chappa-agent-menu .chappa-agent-add-terminal")!.click();
+      await FLUSH();
+      expect(vi.mocked(ws.api.createTerminal).mock.calls.at(-1)![0]?.projectId).toBeUndefined();
+      teardown(ws.app, ws.root);
+      teardown(app, root);
+    });
+
+    it("an agent's own level wins over its project's default in the notification decision", async () => {
+      const { root, app } = await mounted([
+        agentRecord({ agent: { ...agentRecord().agent!, notification_level: "none" } }),
+      ]);
+      drive(app).applyCreated({ term_id: 63, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+      const level = (app as unknown as { levelForEntry: (e: RailEntry) => string }).levelForEntry(drive(app).entries.get(63)!);
+      expect(level).toBe("none");
+      teardown(app, root);
+    });
   });
 });
