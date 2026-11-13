@@ -2010,3 +2010,27 @@ working...
     handle.feed(b"]777;session;ses_said\\");
     assert_eq!(next_session(&rx), ("ses_said".to_owned(), SessionSource::Announced));
 }
+
+/// Each `OSC 777;summary` post reaches the embedder exactly once, in order,
+/// and one posted just before the child exits still arrives — ahead of the
+/// exit event, so the embedder can land it on the run before it closes.
+#[test]
+fn summary_posts_are_emitted_once_each_and_before_the_exit() {
+    let (handle, rx, _sink) = test_actor(40, 5);
+    handle.feed(b"working\r\n\x1b]777;summary;first draft\x07");
+    handle.feed(b"\x1b]777;summary;## Final\nall green\x1b\\");
+    handle.note_child_exit(ExitStatus { code: Some(0), success: true });
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(TermEvent::Summary { text }) => seen.push(text),
+            Ok(TermEvent::Exited(_)) => break,
+            Ok(_) => continue,
+            Err(e) => panic!("no Exited event: {e}"),
+        }
+    }
+    assert_eq!(seen, vec!["first draft".to_owned(), "## Final\nall green".to_owned()]);
+    assert!(rx.try_iter().all(|e| !matches!(e, TermEvent::Summary { .. })), "nothing after the exit");
+}

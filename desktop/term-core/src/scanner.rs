@@ -1,7 +1,8 @@
 //! Byte-stream pre-scan for OSC 9/99/777/133 (ported from an
-//! earlier standalone spike). OSC 777 carries two sub-keys here: `notify`
-//! (a desktop notification) and `session` (the process names the
-//! conversation it is running, for a later resume).
+//! earlier standalone spike). OSC 777 carries three sub-keys here: `notify`
+//! (a desktop notification), `session` (the process names the
+//! conversation it is running, for a later resume) and `summary` (the
+//! process says what its run was about, shown after it exits).
 //!
 //! `OscScanner` sits in front of `alacritty_terminal`'s parser (which drops
 //! these sequences) and tees OSC payloads out as structured events while
@@ -27,6 +28,43 @@ use crate::scan;
 /// than this are dropped (the event is not delivered) but still consumed so
 /// their bytes keep passing through.
 pub const DEFAULT_MAX_PAYLOAD: usize = 4 * 1024;
+
+/// Cap on a run summary's text, in bytes. A summary is meant to fit on a
+/// screen; this bounds what a chatty or hostile process can make the app
+/// store per run. `OSC 777;summary` is the one payload allowed past
+/// [`DEFAULT_MAX_PAYLOAD`] â€” up to this â€” and a longer one is TRUNCATED
+/// (with [`SUMMARY_TRUNCATED_MARKER`]) rather than dropped, so a process
+/// that overshoots still leaves its opening lines behind.
+pub const SUMMARY_MAX_BYTES: usize = 16 * 1024;
+
+/// Appended to a summary cut at [`SUMMARY_MAX_BYTES`].
+pub const SUMMARY_TRUNCATED_MARKER: &str = "\n… (summary truncated)";
+
+/// The payload prefix of a summary sequence (`OSC 777;summary;<text>`).
+const SUMMARY_PREFIX: &[u8] = b"777;summary;";
+
+/// Normalize a run summary from any writer: CRLF becomes LF (a pty turns
+/// the process's newlines into CRLF), surrounding blank lines and trailing
+/// whitespace go, and text over [`SUMMARY_MAX_BYTES`] is cut on a character
+/// boundary with [`SUMMARY_TRUNCATED_MARKER`] appended (the result never
+/// exceeds the cap). Returns `None` for a summary with nothing in it.
+pub fn cap_summary(text: &str) -> Option<String> {
+    let text = text.replace("\r\n", "\n");
+    let text = text.trim_start_matches(['\n', '\r']).trim_end();
+    if text.is_empty() {
+        return None;
+    }
+    if text.len() <= SUMMARY_MAX_BYTES {
+        return Some(text.to_owned());
+    }
+    let mut cut = SUMMARY_MAX_BYTES - SUMMARY_TRUNCATED_MARKER.len();
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = text[..cut].trim_end().to_owned();
+    out.push_str(SUMMARY_TRUNCATED_MARKER);
+    Some(out)
+}
 
 /// What OSC 133 marks mean (iTerm2 / popular shell-integration vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +112,10 @@ pub enum OscEvent {
     /// conversation it is running, so the embedder can offer to resume it
     /// later. Any program can emit it with one `printf`.
     Session(String),
+    /// `OSC 777;summary;<text>`: the process says what its run was about
+    /// (markdown, literal newlines allowed), shown after it exits. Already
+    /// normalized by [`cap_summary`]; a later post replaces an earlier one.
+    Summary { text: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +141,9 @@ pub struct OscScanner {
     cap: usize,
     /// True once the in-progress OSC exceeded `cap`; its event is dropped.
     dropped: bool,
+    /// True once an in-progress SUMMARY ran past its own larger cap: the
+    /// bytes kept so far are delivered, cut and marked.
+    truncated: bool,
     /// Buffered bytes of the in-progress CSI (after `ESC [`), used only to
     /// decide whether it is a kitty `u` form. Capped; detection aborts past
     /// the cap but the bytes still flow through to the parser untouched.
@@ -122,6 +167,7 @@ impl OscScanner {
             payload: Vec::with_capacity(cap),
             cap,
             dropped: false,
+            truncated: false,
             csi: Vec::with_capacity(CSI_DETECT_CAP),
         }
     }
@@ -156,6 +202,7 @@ impl OscScanner {
                         0x5D => {
                             self.payload.clear();
                             self.dropped = false;
+                            self.truncated = false;
                             self.state = State::Osc;
                         }
                         // `ESC [` opens a CSI; buffer it to detect the kitty
@@ -230,9 +277,13 @@ impl OscScanner {
                             self.state = State::Escape;
                         }
                         b => {
-                            if !self.dropped {
-                                if self.payload.len() < self.cap {
+                            if !self.dropped && !self.truncated {
+                                if self.payload.len() < self.payload_limit() {
                                     self.payload.push(b);
+                                } else if self.payload.starts_with(SUMMARY_PREFIX) {
+                                    // A summary past its cap keeps what it
+                                    // has; the rest is consumed unbuffered.
+                                    self.truncated = true;
                                 } else {
                                     // Oversized: forget the payload, keep
                                     // consuming so the stream stays intact.
@@ -266,6 +317,19 @@ impl OscScanner {
         }
         self.payload.clear();
         self.dropped = false;
+        self.truncated = false;
+    }
+
+    /// How many payload bytes the in-progress OSC may buffer: the scanner's
+    /// cap, except for a summary, which may hold one byte more than
+    /// [`SUMMARY_MAX_BYTES`] of text â€” that extra byte is how
+    /// [`cap_summary`] tells an overlong summary from one exactly at the cap.
+    fn payload_limit(&self) -> usize {
+        if self.payload.starts_with(SUMMARY_PREFIX) {
+            self.cap.max(SUMMARY_PREFIX.len() + SUMMARY_MAX_BYTES + 1)
+        } else {
+            self.cap
+        }
     }
 }
 
@@ -293,7 +357,8 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
         }
         b"777" => {
             // Windows Terminal notify: `777;notify;title;body`; our own
-            // `777;session;<id>` rides the same number.
+            // `777;session;<id>` and `777;summary;<text>` ride the same
+            // number.
             let sub = params.next().unwrap_or_default();
             match sub {
                 b"notify" => {
@@ -308,6 +373,7 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
                     let id = lossy(&join_rest(&mut params)).trim().to_owned();
                     (!id.is_empty()).then_some(OscEvent::Session(id))
                 }
+                b"summary" => cap_summary(&lossy(&join_rest(&mut params))).map(|text| OscEvent::Summary { text }),
                 _ => None,
             }
         }

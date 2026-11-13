@@ -200,6 +200,8 @@ fn canned(method: &str, path: &str) -> (u16, Value) {
         ("POST", "/records/abc123/resume") => (200, json!({"record_id": "abc123", "kind": "agent", "term_id": 14, "run_uuid": "r3", "session_id": "ses-1", "check": "quiet"})),
         ("POST", "/processes/12/session") => (200, json!({"id": 12, "record_id": "abc123", "run_uuid": "r3", "durable": true})),
         ("POST", "/processes/7/session") => (200, json!({"id": 7, "record_id": null, "run_uuid": null, "durable": false})),
+        ("POST", "/processes/12/summary") => (200, json!({"id": 12, "record_id": "abc123", "run_uuid": "r3", "summary": "done", "summary_source": "mcp", "truncated": false, "durable": true})),
+        ("POST", "/processes/7/summary") => (200, json!({"id": 7, "record_id": null, "run_uuid": null, "summary": "done", "summary_source": "mcp", "truncated": false, "durable": false})),
         // ---- coordination ----
         ("GET", "/scratchpads") => (200, json!({"scratchpads": [{"scratchpad_id": 5, "name": "pad", "revision": 3, "updated_by": "12"}], "total": 1})),
         ("POST", "/scratchpads") => (200, json!({"scratchpad_id": 5, "project_id": 6, "revision": 1, "name": "pad"})),
@@ -302,6 +304,8 @@ fn every_tool_round_trips_with_the_token_attached() {
         // set_session with an explicit target (the self-targeting default is
         // exercised with an identity below).
         ("set_session", json!({"session_id": "ses-9", "process_id": 7}), "POST", "/processes/7/session", json!({"session_id": "ses-9"}), json!({"id": 7, "record_id": null, "run_uuid": null, "durable": false})),
+        // set_summary likewise: the text travels as-is (markdown, newlines).
+        ("set_summary", json!({"text": "## done\n- ok", "process_id": 7}), "POST", "/processes/7/summary", json!({"text": "## done\n- ok"}), json!({"id": 7, "record_id": null, "run_uuid": null, "summary": "done", "summary_source": "mcp", "truncated": false, "durable": false})),
     ];
     let tool_names: Vec<String> = tools().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
     for (tool, args, method, path, body, expect) in cases {
@@ -323,7 +327,7 @@ fn every_tool_round_trips_with_the_token_attached() {
         "list_projects", "get_project", "spawn_terminal", "send_input", "send_bytes",
         "start_process", "stop_process", "restart_process", "close_terminal",
         "list_agent_tools", "spawn_agent", "get_agent_events", "reap_orphans",
-        "get_record_runs", "start_record", "remove_record", "resume_agent", "set_session",
+        "get_record_runs", "start_record", "remove_record", "resume_agent", "set_session", "set_summary",
     ].into_iter().collect();
     let listed: std::collections::BTreeSet<&str> = tool_names
         .iter()
@@ -346,6 +350,18 @@ fn every_tool_round_trips_with_the_token_attached() {
     assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/processes/12/session"));
     assert_eq!(req.body, json!({"session_id": "ses-9"}));
     assert!(call_tool(&identified, "set_session", &json!({"session_id": "  "})).is_err(), "an empty id is refused client-side");
+
+    // set_summary self-targets the same way.
+    let err = call_tool(&client, "set_summary", &json!({"text": "done"})).unwrap_err();
+    assert!(err.to_string().contains("set_summary needs `process_id`"), "{err}");
+    let before = server.requests().len();
+    let reply = call_tool(&identified, "set_summary", &json!({"text": "done"})).unwrap();
+    assert_eq!((reply["id"].as_u64(), reply["summary_source"].as_str()), (Some(12), Some("mcp")));
+    let req = &server.requests()[before];
+    assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/processes/12/summary"));
+    assert_eq!(req.body, json!({"text": "done"}));
+    assert!(call_tool(&identified, "set_summary", &json!({"text": " \n "})).is_err(), "an empty summary is refused client-side");
+    assert!(call_tool(&identified, "set_summary", &json!({})).is_err(), "text is required");
 }
 
 /// Every scratchpad/todo tool → exactly one request at the

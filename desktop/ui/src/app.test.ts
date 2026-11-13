@@ -6149,6 +6149,96 @@ describe("App record rows and the record pane", () => {
     teardown(app, root);
   });
 
+  /** A `term://summary` payload. */
+  const summaryEvent = (over: Partial<ipc.TerminalSummaryEvent>): ipc.TerminalSummaryEvent => ({
+    event: "term://summary",
+    term_id: 0,
+    seq: 0,
+    record_id: "a1",
+    run_uuid: "r1",
+    summary: "done",
+    summary_source: "osc",
+    ...over,
+  });
+
+  it("a run summary renders on the card above the tail, marks the stopped row, and follows term://summary", async () => {
+    const base = agentRecord();
+    const { api, root, app } = await mounted([
+      { ...base, last_run: { ...base.last_run!, summary: "## Review\n- **2** findings\n<script>x</script>", summary_source: "mcp" } },
+    ]);
+    vi.mocked(api.getRecordRuns).mockResolvedValue([
+      { ...base.last_run!, tail: ["$ review", "2 findings"], summary: "## Review\n- **2** findings\n<script>x</script>", summary_source: "mcp" },
+    ]);
+    const marker = recordRows(root)[0].querySelector<HTMLElement>(".chappa-rail-summary");
+    expect(marker?.textContent).toBe("≡");
+    expect(marker?.title).toBe("Review");
+    recordRows(root)[0].click();
+    await FLUSH();
+    const block = pane(root).querySelector<HTMLElement>(".chappa-record-summary")!;
+    expect(block.querySelector(".chappa-summary-label")?.textContent).toBe("Summary");
+    expect(block.querySelector(".chappa-summary-source")?.textContent).toBe("mcp");
+    expect(block.querySelector(".chappa-summary-ended")?.textContent).toBe("ended 2 min ago");
+    expect(block.querySelector(".chappa-md h2")?.textContent).toBe("Review");
+    expect(block.querySelector(".chappa-md strong")?.textContent).toBe("2");
+    expect(block.querySelector("script")).toBeNull();
+    expect(block.textContent).toContain("<script>x</script>");
+    expect(pane(root).querySelector(".chappa-record-tail-text")?.textContent).toBe("$ review\n2 findings");
+    const kids = [...pane(root).children];
+    expect(kids.indexOf(block)).toBeLessThan(kids.indexOf(pane(root).querySelector(".chappa-record-tail")!));
+
+    // A newer post for the same run (from another window's live terminal)
+    // redraws the block in place, no reload.
+    app.applySummary(summaryEvent({ term_id: 77, summary: "# Final\nall green", summary_source: "osc" }));
+    expect(block.querySelector(".chappa-md h1")?.textContent).toBe("Final");
+    expect(block.querySelector(".chappa-summary-source")?.textContent).toBe("osc");
+    expect(recordRows(root)[0].querySelector<HTMLElement>(".chappa-rail-summary")?.title).toBe("Final");
+    expect(vi.mocked(api.getRecordRuns)).toHaveBeenCalledTimes(1);
+    teardown(app, root);
+  });
+
+  it("a record without a summary shows no block and no marker", async () => {
+    const { root, app } = await mounted([agentRecord()]);
+    expect(recordRows(root)[0].querySelector(".chappa-rail-summary")).toBeNull();
+    recordRows(root)[0].click();
+    await FLUSH();
+    expect(pane(root).querySelector(".chappa-record-summary")?.childNodes.length).toBe(0);
+    teardown(app, root);
+  });
+
+  it("the frozen strip shows the run's summary collapsed and expands it over the output; a restart drops it", async () => {
+    const { root, app } = await mounted([agentRecord()]);
+    recordRows(root)[0].click();
+    await FLUSH();
+    pane(root).querySelector<HTMLButtonElement>(".chappa-record-action")!.click();
+    await FLUSH();
+    const [termId] = [...drive(app).entries][0];
+    // Posted while running, on the way out.
+    app.applySummary(summaryEvent({ term_id: termId, run_uuid: "r2", summary: "All done\n- 3 files" }));
+    const entry = drive(app).entries.get(termId)!;
+    expect(entry.summary).toEqual({ text: "All done\n- 3 files", source: "osc" });
+    drive(app).entries.set(termId, railReducer(entry, { type: "status", status: "exited", exitCode: 0, at: 61_000 }));
+    drive(app).renderRail();
+    const strip = root.querySelector<HTMLElement>(".chappa-frozen-strip")!;
+    const toggle = strip.querySelector<HTMLButtonElement>(".chappa-frozen-strip-summary")!;
+    expect(strip.querySelector(".chappa-frozen-strip-text")?.textContent).toBe("exited · code 0 · 2 min ago");
+    expect(toggle.textContent).toBe("Summary ▸ All done");
+    toggle.click();
+    expect(strip.classList.contains("expanded")).toBe(true);
+    expect(strip.querySelector(".chappa-frozen-summary .chappa-md li")?.textContent).toBe("3 files");
+    // The output stays underneath: the panel is still the active pane.
+    expect(entry.host.classList.contains("active")).toBe(true);
+    expect(pane(root).classList.contains("active")).toBe(false);
+    // A rail re-render keeps it open; the record's newest run has it too.
+    drive(app).renderRail();
+    expect(strip.classList.contains("expanded")).toBe(true);
+    // Dead → live is a new run: its summary starts empty.
+    const dead = drive(app).entries.get(termId)!;
+    const revived = railReducer(dead, { type: "status", status: "starting", exitCode: null });
+    expect(revived.summary).toBeNull();
+    expect(railReducer(entry, { type: "status", status: "running", exitCode: null }).summary).toEqual(entry.summary);
+    teardown(app, root);
+  });
+
   it("a stopped child agent nests under its parent's stopped row", async () => {
     const { root, app } = await mounted([
       agentRecord({ record_id: "p", name: "parent" }),

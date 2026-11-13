@@ -271,6 +271,13 @@ pub const ROUTES: &[Route] = &[
         handler: records::route_set_session,
     },
     Route {
+        method: "POST",
+        path: "/processes/{id}/summary",
+        fields: &["text"],
+        description: "The process posts what its run was about (the self-targeting control twin of `OSC 777;summary;<text>`: `set_summary` over MCP sends the caller's own id here). Markdown, normalized like the OSC path (CRLF to LF, surrounding blank lines trimmed) and capped at 16 KiB with a truncation marker; lands on the row's CURRENT run — the record head and the ledger row, last writer wins — and broadcasts `term://summary` when it changed. Shown on the row's record card and the strip above its exited pane. Only a live run takes one: 409 {error: not_running} once the run has ended. Answers {id, record_id, run_uuid, summary, summary_source: mcp, truncated, durable}. The no-call path: print `OSC 777;summary;<text>` (`printf '\\033]777;summary;%s\\007' \"build ok, 3 warnings\"`).",
+        handler: records::route_set_summary,
+    },
+    Route {
         method: "GET",
         path: "/agent_tools",
         fields: &[],

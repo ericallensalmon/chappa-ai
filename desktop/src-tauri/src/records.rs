@@ -37,6 +37,12 @@
 //! the provider's own words) as a typed failure, never a fresh session
 //! dressed up as a resume.
 //!
+//! **Summaries.** A process says what its run was about — `OSC
+//! 777;summary;<text>` printed by the process, or `set_summary` over the
+//! control surface — and that text lands on the CURRENT run as one more late
+//! fact (last writer wins per run). Only a live run takes one: a finished
+//! run's record is not edited after the fact.
+//!
 //! Lock discipline: the service holds clones of the store handles and never
 //! locks two of them at once; the ledger (coordination.db) has its own
 //! connection mutex. A command's record state is written by `projects.rs` /
@@ -49,7 +55,7 @@ use std::time::{Duration, Instant};
 
 use project_model::records::{
     AgentRecord, AgentRecordPatch, RecordKind, Run, RunHead, RunUpdate, Session, SessionSource, StoredRecord,
-    TailKind, TerminalRecord, RUNS_RETAINED,
+    SummarySource, TailKind, TerminalRecord, RUNS_RETAINED,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -66,8 +72,8 @@ use crate::coordination::{CoordError, Coordination};
 use crate::coordination_http::Args;
 use crate::projects::{ControlError, Projects};
 use crate::registry::{
-    emit_created, emit_session, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink,
-    Registry, RunExit, RunRecorder, TermId,
+    emit_created, emit_session, emit_summary, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink,
+    Registry, RunExit, RunRecorder, SummaryOutcome, TermId,
 };
 use crate::settings::SettingsState;
 use crate::workspace::Workspace;
@@ -164,7 +170,7 @@ impl RunLedger {
             tx.execute(
                 "INSERT OR REPLACE INTO runs (run_uuid, record_id, project_id, kind, status, started_at_ms, ended_at_ms,
                     exit_code, success, tail_kind, tail, summary, summary_source, session)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 rusqlite::params![
                     run.run_uuid,
                     record_id,
@@ -177,7 +183,8 @@ impl RunLedger {
                     run.success.map(i64::from),
                     run.tail_kind.as_str(),
                     Value::Array(run.tail.clone()).to_string(),
-                    run.summary.as_ref().map(Value::to_string),
+                    run.summary,
+                    run.summary_source.map(SummarySource::as_str),
                     run.session.as_ref().and_then(|s| serde_json::to_string(s).ok()),
                 ],
             )?;
@@ -239,6 +246,21 @@ impl RunLedger {
         })
     }
 
+    /// The process posted a summary of the run (the text as stored, plain —
+    /// not JSON); a later post replaces it. Unlike a session id, only while
+    /// the row is still open: a finished run is not edited after the fact,
+    /// so the row and the record head always agree. (A summary printed on
+    /// the way out is handled before the exit, so it still finds it open.)
+    pub fn set_summary(&self, run_uuid: &str, text: &str, source: SummarySource) -> Result<bool, CoordError> {
+        self.coord.with_tx(|tx| {
+            let changed = tx.execute(
+                "UPDATE runs SET summary=?2, summary_source=?3 WHERE run_uuid=?1 AND status IN ('running','starting')",
+                rusqlite::params![run_uuid, text, source.as_str()],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
     /// Launch-time reconcile: every row still open was cut off by a crash.
     pub fn reconcile_open_runs(&self) -> Result<usize, CoordError> {
         self.coord.with_tx(|tx| {
@@ -253,7 +275,8 @@ impl RunLedger {
     pub fn runs(&self, record_id: &str, limit: usize) -> Result<Vec<Run>, CoordError> {
         self.coord.with_tx(|tx| {
             let mut stmt = tx.prepare(
-                "SELECT run_uuid, status, started_at_ms, ended_at_ms, exit_code, success, tail_kind, tail, summary, session
+                "SELECT run_uuid, status, started_at_ms, ended_at_ms, exit_code, success, tail_kind, tail, summary, session,
+                    summary_source
                  FROM runs WHERE record_id = ?1 ORDER BY started_at_ms DESC, rowid DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![record_id, limit as i64], |r| {
@@ -262,6 +285,7 @@ impl RunLedger {
                 let tail: String = r.get(7)?;
                 let summary: Option<String> = r.get(8)?;
                 let session: Option<String> = r.get(9)?;
+                let summary_source: Option<String> = r.get(10)?;
                 Ok(Run {
                     run_uuid: r.get(0)?,
                     status: parse_status(&status),
@@ -271,7 +295,8 @@ impl RunLedger {
                     success: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
                     tail_kind: TailKind::parse(&tail_kind),
                     tail: serde_json::from_str::<Vec<Value>>(&tail).unwrap_or_default(),
-                    summary: summary.and_then(|s| serde_json::from_str(&s).ok()),
+                    summary,
+                    summary_source: summary_source.as_deref().and_then(SummarySource::parse),
                     session: session.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             })?;
@@ -676,6 +701,7 @@ impl Records {
             }
             LateFact::Stopped(ended_at_ms) => parts.ledger.stop(run_uuid, *ended_at_ms),
             LateFact::Session(session) => parts.ledger.set_session(run_uuid, session),
+            LateFact::Summary(text, source) => parts.ledger.set_summary(run_uuid, text, *source),
         };
         if let Err(e) = ledger {
             log::warn!("[records] ledger update for run {run_uuid} failed: {e}");
@@ -928,6 +954,7 @@ enum LateFact {
     Exited(RunExit),
     Stopped(u64),
     Session(Session),
+    Summary(String, SummarySource),
 }
 
 impl LateFact {
@@ -939,6 +966,7 @@ impl LateFact {
             }
             LateFact::Stopped(ended_at_ms) => run.stop(*ended_at_ms),
             LateFact::Session(session) => run.set_session(session.clone()),
+            LateFact::Summary(text, source) => run.set_summary(text.clone(), *source),
         }
     }
 }
@@ -954,6 +982,10 @@ impl RunRecorder for Records {
 
     fn run_session(&self, record_id: &str, run_uuid: &str, session: Session) {
         self.apply_late_fact(record_id, run_uuid, &LateFact::Session(session));
+    }
+
+    fn run_summary(&self, record_id: &str, run_uuid: &str, text: &str, source: SummarySource) {
+        self.apply_late_fact(record_id, run_uuid, &LateFact::Summary(text.to_owned(), source));
     }
 }
 
@@ -1348,6 +1380,49 @@ pub fn route_set_session(state: &ControlState, params: &Params, query: &str, bod
     }
 }
 
+/// `POST /processes/{id}/summary` (`text`): the process posts what its run
+/// was about — the control-surface twin of `OSC 777;summary` (`set_summary`
+/// over MCP, the actor header naming the caller). The text is normalized
+/// and capped exactly as the OSC path does; only a LIVE run takes it.
+pub fn route_set_summary(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+    let a = match args(query, body) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    let id = params.id.unwrap_or_default();
+    let raw = a.str("text").unwrap_or_default();
+    let Some(text) = term_core::scanner::cap_summary(raw) else {
+        return json(400, json!({"error": "invalid", "message": "text is required"}));
+    };
+    let truncated = raw.len() > term_core::scanner::SUMMARY_MAX_BYTES && text.ends_with(term_core::scanner::SUMMARY_TRUNCATED_MARKER);
+    match state.registry.record_summary(id, text.clone(), SummarySource::Mcp) {
+        SummaryOutcome::Stored { binding, changed } => {
+            if changed {
+                if let Some(app) = state.app.as_ref() {
+                    emit_summary(app, id, binding.as_ref(), &text, SummarySource::Mcp);
+                }
+            }
+            json(
+                200,
+                json!({
+                    "id": id,
+                    "record_id": binding.as_ref().map(|b| b.record_id.clone()),
+                    "run_uuid": binding.as_ref().map(|b| b.run_uuid.clone()),
+                    "summary": text,
+                    "summary_source": SummarySource::Mcp,
+                    "truncated": truncated,
+                    "durable": binding.is_some(),
+                }),
+            )
+        }
+        SummaryOutcome::Ended => json(
+            409,
+            json!({"error": "not_running", "message": format!("terminal {id}'s run has ended; a finished run's summary cannot be changed")}),
+        ),
+        SummaryOutcome::Unknown => json(404, json!({"error": "not_found", "message": format!("no such terminal: {id}")})),
+    }
+}
+
 /// `POST /records/{record_id}/remove` (confirm-gated: the history goes too).
 pub fn route_remove_record(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     let a = match args(query, body) {
@@ -1376,7 +1451,7 @@ project-less agents and shells in `workspace.json`; every row surface (`/process
 the rail rows, project and workspace command rows) carries `record_id` and `last_run`.\n\n\
 `last_run` is the head of the record's run ledger minus the tail: `{run_uuid, status: running | \
 exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, \
-tail_len, summary?, session?}`. When a run's child exits the app captures an automatic tail — the \
+tail_len, summary?, summary_source?, session?}`. When a run's child exits the app captures an automatic tail — the \
 last 200 screen lines (`text`), or for a json-transport agent the last 200 typed events (`events`) — \
 and the row stays as `exited` / `failed`. Closing the row (×, `close_terminal`, project stop, app \
 quit) leaves the record `stopped`; a run still `running` at launch was cut off by a crash and \
@@ -1419,7 +1494,19 @@ run_uuid, term_id, exit_code, provider_text, message}` with the provider's own w
 of the failed run's tail, e.g. claude's `No conversation found with session ID: <id>`), and the \
 failed run stays readable in the ledger — never a fresh session passed off as a resume. A record \
 with nothing to resume answers 409 `{error: no_session}`; a running record, a non-agent, a missing \
-tool or an empty `resume_argv` answer 409 `{error: resume_unavailable}`.\n";
+tool or an empty `resume_argv` answer 409 `{error: resume_unavailable}`.\n\n\
+**Run summaries.** `last_run.summary` is what the process itself said its run was about — \
+markdown, shown on the row's record card above the tail and as a one-line strip above its exited \
+pane — with `summary_source: osc | mcp` saying how it arrived. Two writers, both landing on the \
+CURRENT run (last writer wins; the run-uuid rule applies): print `OSC 777;summary;<text>` — \
+`printf '\\033]777;summary;%s\\007' \"build ok, 3 warnings\"`, literal newlines allowed in the \
+text — or call `set_summary` over MCP (`POST /processes/{id}/summary`, `{text}`; the MCP tool \
+targets the caller's own process — the path for json-transport agents, which have no terminal to \
+print into). Both normalize the text the same way (CRLF to LF, surrounding blank lines trimmed) and \
+cap it at 16 KiB, cutting a longer one with a `… (summary truncated)` marker. A summary printed just \
+before the process exits still lands; once the run has ended it is no longer editable (the route \
+answers 409 `{error: not_running}`). A change broadcasts `term://summary {term_id, record_id, \
+run_uuid, summary, summary_source}`. The ledger keeps each run's summary with the run.\n";
 
 // ---- Tauri commands -------------------------------------------------------
 

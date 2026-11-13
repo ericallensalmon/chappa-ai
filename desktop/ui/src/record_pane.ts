@@ -4,16 +4,20 @@
 //   live   — the terminal panel, fed by frames;
 //   frozen — an exited terminal whose panel is still attached: its output
 //            stays readable, and a one-line strip ABOVE it (never over it)
-//            offers the start action;
+//            offers the start action — plus, when the run posted a summary,
+//            its first line, which expands OVER the output on click (the
+//            output stays underneath);
 //   record — nothing attached: the row's stored record renders as a centered
 //            card ("<name> is stopped", a hint, the actions, keycap hints)
-//            with the last run's outcome and its stored tail underneath.
+//            with the last run's outcome, its summary (markdown) and its
+//            stored tail underneath.
 //
 // One RecordPane instance is mounted in the stack and re-rendered per
 // activation. The strings and the view are built by pure functions so they
 // are testable without a DOM; the class only draws them.
 
 import type * as ipc from "./ipc";
+import { firstLine, MARKDOWN_CSS, renderMarkdown } from "./markdown";
 import { renderEvents } from "./transcript";
 
 /** The kinds a record pane renders: the record kinds. */
@@ -50,12 +54,42 @@ export function paneState(_record: PaneRecord | null, entry: PaneEntry | null): 
 
 /** A run as the pane reads it: the head (`last_run`) or a full run. */
 export interface PaneRun {
+  /** Which run this is, when known (a summary event names its run). */
+  run_uuid?: string;
   status: string;
   started_at_ms: number;
   ended_at_ms?: number | null;
   exit_code?: number | null;
   /** The provider session the run saved, when one was captured. */
   session?: ipc.SessionDto | null;
+  /** What the process said its run was about (markdown), and how. */
+  summary?: string | null;
+  summary_source?: ipc.SummarySource | null;
+}
+
+/** A run summary as posted: the markdown and how it arrived. */
+export interface RunSummary {
+  text: string;
+  source: ipc.SummarySource | null;
+}
+
+/** The card's summary block: the text plus its header facts. */
+export interface SummaryView extends RunSummary {
+  /** `2 min ago` — when the run ended; null while it has no end. */
+  ended: string | null;
+  endedTitle: string | null;
+}
+
+/** A run's summary, or null when it has none (or an empty one). */
+export function runSummary(run: PaneRun | null | undefined): RunSummary | null {
+  const text = run?.summary;
+  if (typeof text !== "string" || text.trim() === "") return null;
+  return { text, source: run?.summary_source ?? null };
+}
+
+/** The strip's collapsed line: `Summary ▸ <first line>`. */
+export function summaryStripText(summary: RunSummary, expanded: boolean): string {
+  return `Summary ${expanded ? "▾" : "▸"} ${firstLine(summary.text)}`;
 }
 
 export interface RecordPaneInput {
@@ -94,6 +128,8 @@ export interface RecordView {
   session: string | null;
   /** The full session id, for the line's tooltip. */
   sessionTitle: string | null;
+  /** The last run's summary, rendered above the tail. */
+  summary: SummaryView | null;
 }
 
 /** The session line of an agent card. A saved id names the provider and
@@ -158,6 +194,8 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
   const name = input.name.trim();
   const run = input.lastRun;
   let lastRun: LastRunView | null = null;
+  const posted = runSummary(run);
+  let summary: SummaryView | null = null;
   if (run) {
     const end = run.ended_at_ms ?? null;
     lastRun = {
@@ -166,6 +204,7 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
       ended: end !== null ? formatAgo(end, now) : null,
       endedTitle: end !== null ? new Date(end).toLocaleString() : null,
     };
+    if (posted) summary = { ...posted, ended: lastRun.ended, endedTitle: lastRun.endedTitle };
   }
   const actions: RecordAction[] = [];
   // Resuming comes first: the primary key continues the conversation when
@@ -181,6 +220,7 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
     lastRun,
     session: input.kind === "agent" ? sessionLine(run, input.captures ?? false) : null,
     sessionTitle: input.kind === "agent" && run?.session ? run.session.session_id : null,
+    summary,
   };
 }
 
@@ -202,7 +242,7 @@ export interface PaneTail {
   lines: readonly unknown[];
 }
 
-export const RECORD_PANE_CSS = `
+export const RECORD_PANE_CSS = `${MARKDOWN_CSS}
 .chappa-panel-host.chappa-record-pane{display:none;}
 .chappa-panel-host.chappa-record-pane.active{display:flex;flex-direction:column;align-items:center;overflow:auto;outline:none;padding:0 16px;box-sizing:border-box;}
 .chappa-record-card{margin-top:18vh;display:flex;flex-direction:column;align-items:center;gap:8px;max-width:520px;}
@@ -219,13 +259,25 @@ export const RECORD_PANE_CSS = `
 .chappa-record-keys > span:nth-child(odd){text-align:right;}
 .chappa-keycap{display:inline-block;min-width:14px;padding:0 5px;border:1px solid #2a2e35;border-bottom-width:2px;border-radius:4px;background:#14161a;color:#adb3bd;font:11px ui-monospace,monospace;line-height:16px;text-align:center;}
 .chappa-record-run{margin-top:22px;font:12px ui-monospace,monospace;color:#8b949e;}
+.chappa-record-summary{align-self:stretch;margin:10px 0 0;border:1px solid #1c1f24;border-radius:6px;background:#121417;padding:8px 10px;}
 .chappa-record-summary:empty{display:none;}
+.chappa-summary-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;font:12px system-ui,sans-serif;color:#8b949e;}
+.chappa-summary-label{font-weight:600;color:#adb3bd;}
+.chappa-summary-source{padding:0 5px;border:1px solid #2a2e35;border-radius:8px;font:11px ui-monospace,monospace;color:#8b949e;}
+.chappa-summary-source:empty{display:none;}
+.chappa-summary-ended:empty{display:none;}
 .chappa-record-tail{align-self:stretch;margin:10px 0 16px;max-height:45vh;overflow:auto;border:1px solid #1c1f24;border-radius:6px;background:#0f1114;padding:8px 10px;}
 .chappa-record-tail:empty{display:none;}
 .chappa-record-tail-text{margin:0;white-space:pre-wrap;word-break:break-word;color:#c9d1d9;font:12px ui-monospace,monospace;}
 .chappa-record-tail-events{display:flex;flex-direction:column;gap:6px;font:13px system-ui,sans-serif;color:#d6d8dc;}
-.chappa-frozen-strip{flex:none;display:none;align-items:center;gap:10px;padding:4px 12px;border-bottom:1px solid #1c1f24;background:#121417;color:#8b949e;font:12px ui-monospace,monospace;}
+.chappa-frozen-strip{flex:none;display:none;position:relative;align-items:center;gap:10px;padding:4px 12px;border-bottom:1px solid #1c1f24;background:#121417;color:#8b949e;font:12px ui-monospace,monospace;}
 .chappa-frozen-strip.shown{display:flex;}
+.chappa-frozen-strip-text{flex:none;}
+.chappa-frozen-strip-summary{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;border:0;background:none;color:#adb3bd;font:12px ui-monospace,monospace;cursor:pointer;padding:0;}
+.chappa-frozen-strip-summary:hover{color:#d6d8dc;}
+.chappa-frozen-strip-start{margin-left:auto;}
+.chappa-frozen-summary{display:none;position:absolute;top:100%;left:0;right:0;z-index:5;max-height:60vh;overflow:auto;padding:10px 14px;background:#121417;border-bottom:1px solid #262a31;box-shadow:0 6px 16px rgba(0,0,0,.45);}
+.chappa-frozen-strip.expanded .chappa-frozen-summary{display:block;}
 .chappa-frozen-strip-start{border:1px solid #262a31;border-radius:4px;background:#16181d;color:#d6d8dc;font:12px system-ui,sans-serif;cursor:pointer;padding:2px 8px;}
 .chappa-frozen-strip-start:hover{background:#1d232b;}
 `;
@@ -297,7 +349,7 @@ export class RecordPane {
     card.append(this.title, this.hint, this.session, this.failure, this.actions, keys);
     this.run = document.createElement("div");
     this.run.className = "chappa-record-run";
-    // Reserved for a run summary; empty (and hidden) until one exists.
+    // The run's summary, above the tail; empty (and hidden) without one.
     this.summary = document.createElement("div");
     this.summary.className = "chappa-record-summary";
     this.tail = document.createElement("div");
@@ -325,7 +377,30 @@ export class RecordPane {
       this.actions.appendChild(btn);
     }
     this.setRun(view.lastRun);
+    this.setSummary(view.summary);
     this.tail.textContent = "";
+  }
+
+  /** Replace the summary block: a `Summary` header with the source chip and
+   *  the run's end, then the markdown. Null empties (and hides) it. */
+  setSummary(summary: SummaryView | null): void {
+    this.summary.textContent = "";
+    if (!summary) return;
+    const head = document.createElement("div");
+    head.className = "chappa-summary-head";
+    const label = document.createElement("span");
+    label.className = "chappa-summary-label";
+    label.textContent = "Summary";
+    const source = document.createElement("span");
+    source.className = "chappa-summary-source";
+    source.textContent = summary.source ?? "";
+    source.title = summary.source === "mcp" ? "posted with set_summary" : summary.source === "osc" ? "printed by the process" : "";
+    const ended = document.createElement("span");
+    ended.className = "chappa-summary-ended";
+    ended.textContent = summary.ended ? `ended ${summary.ended}` : "";
+    ended.title = summary.endedTitle ?? "";
+    head.append(label, source, ended);
+    this.summary.append(head, renderMarkdown(summary.text));
   }
 
   /** A resume the provider refused: say so on the card, above the actions,
@@ -400,13 +475,18 @@ function label(text: string): HTMLElement {
   return s;
 }
 
-/** The one-line strip above a frozen panel: what happened, and the start
- *  action when the row has something to start. */
+/** The one-line strip above a frozen panel: what happened, the run's
+ *  summary collapsed to its first line (click to expand it over the output,
+ *  which stays underneath), and the start action when the row has
+ *  something to start. */
 export class FrozenStrip {
   readonly el: HTMLDivElement;
   private readonly text: HTMLSpanElement;
+  private readonly summaryToggle: HTMLButtonElement;
+  private readonly summaryBody: HTMLDivElement;
   private readonly start: HTMLButtonElement;
   private onStart: (() => void) | null = null;
+  private summary: RunSummary | null = null;
 
   constructor() {
     injectStyles();
@@ -414,26 +494,58 @@ export class FrozenStrip {
     this.el.className = "chappa-frozen-strip";
     this.text = document.createElement("span");
     this.text.className = "chappa-frozen-strip-text";
+    this.summaryToggle = document.createElement("button");
+    this.summaryToggle.type = "button";
+    this.summaryToggle.className = "chappa-frozen-strip-summary";
+    this.summaryToggle.style.display = "none";
+    this.summaryToggle.addEventListener("mousedown", (e) => e.preventDefault());
+    this.summaryToggle.addEventListener("click", () => this.setExpanded(!this.expanded));
+    this.summaryBody = document.createElement("div");
+    this.summaryBody.className = "chappa-frozen-summary";
     this.start = document.createElement("button");
     this.start.type = "button";
     this.start.className = "chappa-frozen-strip-start";
     this.start.addEventListener("mousedown", (e) => e.preventDefault());
     this.start.addEventListener("click", () => this.onStart?.());
-    this.el.append(this.text, this.start);
+    this.el.append(this.text, this.summaryToggle, this.start, this.summaryBody);
   }
 
-  /** Show the strip; `start` null = nothing to start (an ephemeral row). */
-  show(text: string, start: { label: string; run: () => void } | null): void {
+  /** Show the strip; `start` null = nothing to start (an ephemeral row),
+   *  `summary` null = the run posted none. Re-showing the same summary
+   *  keeps it as it was (expanded or not); a different one starts
+   *  collapsed. */
+  show(text: string, start: { label: string; run: () => void } | null, summary: RunSummary | null = null): void {
     this.text.textContent = text;
     this.onStart = start?.run ?? null;
     this.start.style.display = start ? "" : "none";
     this.start.textContent = start?.label ?? "";
+    if (summary?.text !== this.summary?.text || summary?.source !== this.summary?.source) {
+      this.summary = summary;
+      this.summaryBody.textContent = "";
+      if (summary) this.summaryBody.appendChild(renderMarkdown(summary.text));
+      this.setExpanded(false);
+    }
+    this.summaryToggle.style.display = summary ? "" : "none";
     this.el.classList.add("shown");
   }
 
   hide(): void {
     this.onStart = null;
+    this.setExpanded(false);
     this.el.classList.remove("shown");
+  }
+
+  /** Whether the summary is open over the output. */
+  get expanded(): boolean {
+    return this.el.classList.contains("expanded");
+  }
+
+  setExpanded(expanded: boolean): void {
+    const open = expanded && this.summary !== null;
+    this.el.classList.toggle("expanded", open);
+    this.summaryToggle.textContent = this.summary ? summaryStripText(this.summary, open) : "";
+    this.summaryToggle.title = this.summary ? (open ? "Hide the run summary" : "Show the run summary") : "";
+    this.summaryToggle.setAttribute("aria-expanded", String(open));
   }
 
   get shown(): boolean {

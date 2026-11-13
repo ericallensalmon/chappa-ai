@@ -8,6 +8,8 @@ import {
   frozenStripText,
   paneState,
   recordView,
+  runSummary,
+  summaryStripText,
   type RecordPaneKind,
 } from "./record_pane";
 
@@ -54,6 +56,7 @@ describe("recordView", () => {
       lastRun: null,
       session: "Resume unavailable",
       sessionTitle: null,
+      summary: null,
     });
     expect(recordView({ kind: "terminal", name: "pwsh", lastRun: null }, NOW)).toEqual({
       title: "pwsh is stopped",
@@ -62,6 +65,7 @@ describe("recordView", () => {
       lastRun: null,
       session: null,
       sessionTitle: null,
+      summary: null,
     });
     expect(recordView({ kind: "command", name: "server", lastRun: null }, NOW)).toEqual({
       title: "server is stopped",
@@ -70,6 +74,7 @@ describe("recordView", () => {
       lastRun: null,
       session: null,
       sessionTitle: null,
+      summary: null,
     });
   });
 
@@ -220,7 +225,7 @@ describe("RecordPane", () => {
     pane.dispose();
   });
 
-  it("the last-run line reads outcome, duration and age; the summary slot stays empty", () => {
+  it("the last-run line reads outcome, duration and age; the summary slot stays empty without one", () => {
     const { pane } = mounted();
     pane.setRun({ outcome: "exit 1", duration: "3s", ended: "just now", endedTitle: "t" });
     expect(pane.host.querySelector(".chappa-record-run")?.textContent).toBe("last run · exit 1 · ran 3s · ended just now");
@@ -229,7 +234,112 @@ describe("RecordPane", () => {
   });
 });
 
+describe("run summaries on the card", () => {
+  const NOW = 1_700_000_600_000;
+  const run = {
+    status: "exited",
+    started_at_ms: NOW - 60_000,
+    ended_at_ms: NOW - 120_000 + 60_000,
+    exit_code: 0,
+    summary: "## Build\n- **ok**, 3 warnings\n- see `make.log`",
+    summary_source: "osc" as const,
+  };
+
+  it("the view carries the summary with its source and the run's end", () => {
+    const view = recordView({ kind: "command", name: "build", lastRun: run }, NOW);
+    expect(view.summary).toEqual({
+      text: run.summary,
+      source: "osc",
+      ended: "1 min ago",
+      endedTitle: new Date(run.ended_at_ms).toLocaleString(),
+    });
+    // No summary, or a blank one, is no summary block.
+    expect(recordView({ kind: "command", name: "build", lastRun: { ...run, summary: undefined } }, NOW).summary).toBeNull();
+    expect(recordView({ kind: "command", name: "build", lastRun: { ...run, summary: "  \n" } }, NOW).summary).toBeNull();
+    expect(runSummary({ ...run, summary_source: null })).toEqual({ text: run.summary, source: null });
+  });
+
+  it("renders above the tail as markdown, with a Summary label, the source chip and the end", () => {
+    const pane = new RecordPane({ onAction: vi.fn(), onNewAgent: vi.fn() });
+    document.body.appendChild(pane.host);
+    pane.show(recordView({ kind: "agent", name: "claude", lastRun: run }, NOW));
+    pane.setTail({ kind: "text", lines: ["tail line"] });
+    const block = pane.host.querySelector(".chappa-record-summary")!;
+    expect(block.querySelector(".chappa-summary-label")?.textContent).toBe("Summary");
+    expect(block.querySelector(".chappa-summary-source")?.textContent).toBe("osc");
+    expect(block.querySelector(".chappa-summary-ended")?.textContent).toBe("ended 1 min ago");
+    expect(block.querySelector(".chappa-md h2")?.textContent).toBe("Build");
+    expect([...block.querySelectorAll(".chappa-md li")].map((li) => li.textContent)).toEqual([
+      "ok, 3 warnings",
+      "see make.log",
+    ]);
+    expect(block.querySelector(".chappa-md strong")?.textContent).toBe("ok");
+    expect(block.querySelector(".chappa-md code")?.textContent).toBe("make.log");
+    // Order in the pane: the summary sits above the tail.
+    const children = [...pane.host.children];
+    expect(children.indexOf(block)).toBeLessThan(children.indexOf(pane.host.querySelector(".chappa-record-tail")!));
+    // A fresher run without one empties the block.
+    pane.setSummary(null);
+    expect(block.childNodes.length).toBe(0);
+    pane.dispose();
+  });
+
+  it("process-authored HTML stays text", () => {
+    const pane = new RecordPane({ onAction: vi.fn(), onNewAgent: vi.fn() });
+    document.body.appendChild(pane.host);
+    const evil = '<script>window.pwnedBySummary = 1</script><img src=x onerror="window.pwnedBySummary = 2">';
+    pane.show(recordView({ kind: "command", name: "x", lastRun: { ...run, summary: evil } }, NOW));
+    const md = pane.host.querySelector(".chappa-record-summary .chappa-md")!;
+    expect(md.querySelector("script, img")).toBeNull();
+    expect(md.textContent).toBe(evil);
+    expect((window as unknown as { pwnedBySummary?: number }).pwnedBySummary).toBeUndefined();
+    pane.dispose();
+  });
+});
+
 describe("FrozenStrip", () => {
+  it("shows the run's summary collapsed to its first line and expands it over the output", () => {
+    const strip = new FrozenStrip();
+    document.body.appendChild(strip.el);
+    const summary = { text: "# Deployed\n- **3** services\n- 0 errors", source: "mcp" as const };
+    strip.show("exited · code 0", { label: "▶ Start", run: vi.fn() }, summary);
+    const toggle = strip.el.querySelector<HTMLButtonElement>(".chappa-frozen-strip-summary")!;
+    const body = strip.el.querySelector<HTMLElement>(".chappa-frozen-summary")!;
+    expect(toggle.style.display).toBe("");
+    expect(toggle.textContent).toBe("Summary ▸ Deployed");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(strip.expanded).toBe(false);
+    // The whole summary is rendered (markdown), shown only when expanded.
+    expect(body.querySelector(".chappa-md h1")?.textContent).toBe("Deployed");
+    expect(body.querySelectorAll(".chappa-md li").length).toBe(2);
+    toggle.click();
+    expect(strip.expanded).toBe(true);
+    expect(strip.el.classList.contains("expanded")).toBe(true);
+    expect(toggle.textContent).toBe("Summary ▾ Deployed");
+    // Re-showing the same summary (a rail re-render) keeps it open…
+    strip.show("exited · code 0 · just now", { label: "▶ Start", run: vi.fn() }, { ...summary });
+    expect(strip.expanded).toBe(true);
+    // …a different one starts collapsed, and the click closes it.
+    strip.show("exited", null, { text: "second", source: "osc" });
+    expect(strip.expanded).toBe(false);
+    expect(toggle.textContent).toBe("Summary ▸ second");
+    toggle.click();
+    toggle.click();
+    expect(strip.expanded).toBe(false);
+    // No summary: no toggle, nothing to expand.
+    strip.show("exited", null);
+    expect(toggle.style.display).toBe("none");
+    strip.setExpanded(true);
+    expect(strip.expanded).toBe(false);
+    strip.hide();
+    strip.el.remove();
+  });
+
+  it("the strip line is the first line without its markup", () => {
+    expect(summaryStripText({ text: "\n\n- **build** ok `x`\nmore", source: "osc" }, false)).toBe("Summary ▸ build ok x");
+    expect(summaryStripText({ text: "```\ncode first\n```", source: null }, true)).toBe("Summary ▾ code first");
+  });
+
   it("shows the words and the start action, or no button for an ephemeral row", () => {
     const strip = new FrozenStrip();
     const run = vi.fn();

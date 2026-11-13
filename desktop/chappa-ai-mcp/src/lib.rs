@@ -600,7 +600,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_record_runs",
-            "description": "A record's run history, newest first: {record_id, runs: [{run_uuid, status: running | exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, tail, summary?, session?}]}. `tail` is the automatic tail captured when the run's child exited — the last 200 screen lines, or the last 200 typed events for a json-transport agent — so a stopped row's output stays readable after its pane is gone. The ledger keeps the last 20 runs per record.",
+            "description": "A record's run history, newest first: {record_id, runs: [{run_uuid, status: running | exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, tail, summary?, summary_source?: osc | mcp, session?}]}. `summary` is the markdown the process posted about its run (set_summary / OSC 777;summary). `tail` is the automatic tail captured when the run's child exited — the last 200 screen lines, or the last 200 typed events for a json-transport agent — so a stopped row's output stays readable after its pane is gone. The ledger keeps the last 20 runs per record.",
             "inputSchema": schema(json!({
                 "record_id": {"type": "string", "description": "Record id from a process row's record_id (list_processes / get_process_status / spawn_agent)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Newest N runs (default and max 20)."},
@@ -632,6 +632,15 @@ pub fn tools() -> Vec<Value> {
                 "session_id": {"type": "string", "description": "The provider's own session / conversation id."},
                 "process_id": {"type": "integer", "minimum": 0, "description": "Which process the id belongs to. Default: YOUR process (CHAPPA_AI_PROCESS_ID)."},
             }), &["session_id"]),
+            "annotations": annotations(false, false, true),
+        }),
+        json!({
+            "name": "set_summary",
+            "description": "Post a summary of YOUR run (or process_id's): shown in the rail pane after you exit — on the row's record card above the output tail, and as a one-line strip above the exited pane that expands on click. Markdown (headings, lists, code fences, inline code, bold); keep it under a screen — capped at 16 KiB, a longer one is cut with a truncation marker. Lands on the CURRENT run; a later call replaces it (refine it as you go; last writer wins). Only a live run takes one — call it before you exit. Answers {id, record_id, run_uuid, summary, summary_source: mcp, truncated, durable}; error not_running once the run has ended. The same works with no tool call at all: print the escape sequence `OSC 777;summary;<text>` — in a shell, printf '\\033]777;summary;%s\\007' \"build ok, 3 warnings\".",
+            "inputSchema": schema(json!({
+                "text": {"type": "string", "description": "The summary, markdown. What the run did and how it ended, for whoever opens the row later."},
+                "process_id": {"type": "integer", "minimum": 0, "description": "Which process the summary is for. Default: YOUR process (CHAPPA_AI_PROCESS_ID)."},
+            }), &["text"]),
             "annotations": annotations(false, false, true),
         }),
         json!({
@@ -1106,6 +1115,19 @@ fn record_id_arg(args: &Value) -> Result<String, ToolError> {
     Ok(id)
 }
 
+/// The process a self-describing tool targets: `process_id` when given,
+/// else the caller's own process (the actor identity this server runs as).
+fn own_process(client: &Client, args: &Value, tool: &str) -> Result<u64, ToolError> {
+    match opt_u64(args, "process_id")? {
+        Some(id) => Ok(id),
+        None => client.actor.as_deref().and_then(|a| a.parse::<u64>().ok()).ok_or_else(|| {
+            ToolError::Invalid(format!(
+                "{tool} needs `process_id`: this server has no CHAPPA_AI_PROCESS_ID identity to target"
+            ))
+        }),
+    }
+}
+
 fn arg_str(args: &Value, key: &str) -> Result<String, ToolError> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1242,20 +1264,16 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
             if session_id.trim().is_empty() {
                 return Err(ToolError::Invalid("`session_id` must not be empty".into()));
             }
-            // Self-targeting: the caller's own process unless it names another.
-            let process_id = match opt_u64(args, "process_id")? {
-                Some(id) => id,
-                None => client
-                    .actor
-                    .as_deref()
-                    .and_then(|a| a.parse::<u64>().ok())
-                    .ok_or_else(|| {
-                        ToolError::Invalid(
-                            "set_session needs `process_id`: this server has no CHAPPA_AI_PROCESS_ID identity to target".into(),
-                        )
-                    })?,
-            };
+            let process_id = own_process(client, args, "set_session")?;
             client.request("POST", &format!("/processes/{process_id}/session"), Some(&json!({"session_id": session_id})))
+        }
+        "set_summary" => {
+            let text = arg_str(args, "text")?;
+            if text.trim().is_empty() {
+                return Err(ToolError::Invalid("`text` must not be empty".into()));
+            }
+            let process_id = own_process(client, args, "set_summary")?;
+            client.request("POST", &format!("/processes/{process_id}/summary"), Some(&json!({"text": text})))
         }
         "remove_record" => {
             let record_id = record_id_arg(args)?;
@@ -1677,7 +1695,7 @@ pub fn handle_message(client: &Client, msg: &Value) -> Option<Value> {
                     "protocolVersion": requested,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "instructions": "Tools proxy to the chappa-ai desktop app's control surface. Read-only tools are safe to call freely. Prefer send_input receipts + get_process_status liveness over screen-diffing; get_process_output returns the whole screen by default. Scratchpads/todos (scratchpad_*, todo_*) are project-scoped working memory shared with other agents: read before you write, pass expected_revision on guarded writes, and treat revision_conflict / locked errors as 'someone else moved first' — re-read, never overwrite blind. Timers (timer_*) wake a process with a body injected as a fresh user turn: idle is measured off the pty byte stream and re-validated before firing, so trust timer_fire_when_idle_* instead of hand-rolling an idle_seconds rule, and check timer_list(include_fired: true) to see whether a wake-up was actually delivered. Stopped agent rows keep a record: start_record begins a fresh session, resume_agent has the PROVIDER continue the saved one (full prior conversation, nothing replayed) and fails loudly (resume_rejected) when the provider refuses; make your own row resumable by calling set_session with your conversation id or printing `OSC 777;session;<id>`.",
+                    "instructions": "Tools proxy to the chappa-ai desktop app's control surface. Read-only tools are safe to call freely. Prefer send_input receipts + get_process_status liveness over screen-diffing; get_process_output returns the whole screen by default. Scratchpads/todos (scratchpad_*, todo_*) are project-scoped working memory shared with other agents: read before you write, pass expected_revision on guarded writes, and treat revision_conflict / locked errors as 'someone else moved first' — re-read, never overwrite blind. Timers (timer_*) wake a process with a body injected as a fresh user turn: idle is measured off the pty byte stream and re-validated before firing, so trust timer_fire_when_idle_* instead of hand-rolling an idle_seconds rule, and check timer_list(include_fired: true) to see whether a wake-up was actually delivered. Stopped agent rows keep a record: start_record begins a fresh session, resume_agent has the PROVIDER continue the saved one (full prior conversation, nothing replayed) and fails loudly (resume_rejected) when the provider refuses; make your own row resumable by calling set_session with your conversation id or printing `OSC 777;session;<id>`. Before you exit, leave a short markdown summary of what your run did with set_summary (or print `OSC 777;summary;<text>`): it is what the row shows after you are gone.",
                 }),
             )
         }

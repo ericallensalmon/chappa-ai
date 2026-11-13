@@ -143,11 +143,39 @@ impl Session {
     }
 }
 
+/// Who posted a run's [`Run::summary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummarySource {
+    /// The process printed `OSC 777;summary;<text>`.
+    Osc,
+    /// The process (or anyone on its behalf) called `set_summary` over the
+    /// control surface.
+    Mcp,
+}
+
+impl SummarySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SummarySource::Osc => "osc",
+            SummarySource::Mcp => "mcp",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "osc" => Some(SummarySource::Osc),
+            "mcp" => Some(SummarySource::Mcp),
+            _ => None,
+        }
+    }
+}
+
 /// One run of a record. Serialized the same way in projects.json /
-/// workspace.json (`last_run`) and on the ledger route. `summary` is a
-/// RESERVED slot (a run summary) kept as opaque JSON so a file written by a
-/// later build round-trips here; `session` is the provider session the run
-/// is (or was) having, when one was learned.
+/// workspace.json (`last_run`) and on the ledger route. `summary` is what
+/// the process said its run was about (markdown, capped — see
+/// [`Run::set_summary`]); `session` is the provider session the run is (or
+/// was) having, when one was learned.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub run_uuid: String,
@@ -169,10 +197,30 @@ pub struct Run {
     /// (`tail_kind: events`, objects) at exit; empty while running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tail: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<Value>,
+    /// The run's summary, posted by the process itself. Read leniently: a
+    /// file written while this slot was still an untyped reservation (any
+    /// JSON) loads instead of failing the whole store.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "summary_text")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub summary_source: Option<SummarySource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
+}
+
+/// A stored summary: a string, or the `text` of an object an earlier build
+/// may have written into the reserved slot; anything else reads as absent.
+fn summary_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(text) => Some(text),
+        Value::Object(map) => map.get("text").and_then(Value::as_str).map(str::to_owned),
+        _ => None,
+    })
+}
+
+/// Any value this build does not understand reads as absent.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<Option<T>, D::Error> {
+    Ok(serde_json::from_value(Value::deserialize(d)?).ok())
 }
 
 impl Run {
@@ -188,6 +236,7 @@ impl Run {
             tail_kind,
             tail: Vec::new(),
             summary: None,
+            summary_source: None,
             session: None,
         }
     }
@@ -222,6 +271,15 @@ impl Run {
         self.session = Some(session);
     }
 
+    /// The process posted a summary of this run: it replaces any earlier
+    /// one (a process refines its summary as it goes — last writer wins,
+    /// whichever path it came by). The text is stored as given; writers cap
+    /// it first.
+    pub fn set_summary(&mut self, text: impl Into<String>, source: SummarySource) {
+        self.summary = Some(text.into());
+        self.summary_source = Some(source);
+    }
+
     /// True while no end has been recorded — the only state a late fact may
     /// still land on.
     pub fn is_open(&self) -> bool {
@@ -254,6 +312,7 @@ impl Run {
             tail_kind: self.tail_kind,
             tail_len: self.tail.len(),
             summary: self.summary.clone(),
+            summary_source: self.summary_source,
             session: self.session.clone(),
         }
     }
@@ -272,8 +331,10 @@ pub struct RunHead {
     pub success: Option<bool>,
     pub tail_kind: TailKind,
     pub tail_len: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "summary_text")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub summary_source: Option<SummarySource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
 }
@@ -530,13 +591,15 @@ mod tests {
         assert_eq!(sparse.session, None);
         assert!(sparse.is_open());
 
-        // The reserved summary slot passes through untouched (a later
-        // build's data); a session round-trips typed.
+        // A summary and a session round-trip typed.
         let future: Run = serde_json::from_str(
-            r#"{"run_uuid":"r3","status":"exited","started_at_ms":1,"summary":{"text":"ok","source":"mcp"},"session":{"provider":"claude","session_id":"ses-y","captured_at_ms":7,"source":"json"}}"#,
+            r##"{"run_uuid":"r3","status":"exited","started_at_ms":1,"summary":"# ok\n- done","summary_source":"mcp","session":{"provider":"claude","session_id":"ses-y","captured_at_ms":7,"source":"json"}}"##,
         )
         .unwrap();
-        assert_eq!(future.summary.as_ref().unwrap()["source"], "mcp");
+        assert_eq!(future.summary.as_deref(), Some("# ok\n- done"));
+        assert_eq!(future.summary_source, Some(SummarySource::Mcp));
+        assert_eq!(future.head().summary, future.summary);
+        assert_eq!(future.head().summary_source, Some(SummarySource::Mcp));
         let session = future.session.as_ref().unwrap();
         assert_eq!((session.provider.as_str(), session.session_id.as_str()), ("claude", "ses-y"));
         assert_eq!(session.source, SessionSource::Json);
@@ -544,6 +607,33 @@ mod tests {
         assert_eq!(session.short_id(), "es-y");
         let again: Run = serde_json::from_str(&serde_json::to_string(&future).unwrap()).unwrap();
         assert_eq!(again, future);
+    }
+
+    /// The summary slot was an untyped reservation before it was a string:
+    /// whatever an earlier writer put there loads (an object's `text`, or
+    /// nothing) instead of failing the file, an unknown source reads as
+    /// absent, and a later post replaces the summary and its source.
+    #[test]
+    fn summaries_read_leniently_and_a_later_post_wins() {
+        let old: Run = serde_json::from_str(
+            r#"{"run_uuid":"r","status":"exited","started_at_ms":1,"summary":{"text":"kept","source":"x"},"summary_source":"carrier-pigeon"}"#,
+        )
+        .unwrap();
+        assert_eq!((old.summary.as_deref(), old.summary_source), (Some("kept"), None));
+        let odd: RunHead = serde_json::from_str(
+            r#"{"run_uuid":"r","status":"exited","started_at_ms":1,"ended_at_ms":null,"exit_code":null,"success":null,"tail_kind":"text","tail_len":0,"summary":[1,2]}"#,
+        )
+        .unwrap();
+        assert_eq!(odd.summary, None);
+        let absent = serde_json::to_value(Run::begin("r", 1, TailKind::Text)).unwrap();
+        assert!(absent.get("summary").is_none() && absent.get("summary_source").is_none(), "absent stays absent");
+
+        let mut run = Run::begin("r", 1, TailKind::Text);
+        run.set_summary("draft", SummarySource::Osc);
+        run.set_summary("final", SummarySource::Mcp);
+        assert_eq!((run.summary.as_deref(), run.summary_source), (Some("final"), Some(SummarySource::Mcp)));
+        let v = serde_json::to_value(&run).unwrap();
+        assert_eq!((v["summary"].as_str(), v["summary_source"].as_str()), (Some("final"), Some("mcp")));
     }
 
     /// A later sighting of the session replaces the id, and the id a run was

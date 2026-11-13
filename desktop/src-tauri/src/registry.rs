@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use project_model::records::{RunHead, Session, SessionSource, TailKind, TAIL_LINES};
+use project_model::records::{RunHead, Session, SessionSource, SummarySource, TailKind, TAIL_LINES};
 use project_model::settings::Settings;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -80,6 +80,11 @@ pub fn actor_config(
 /// The `term://session` event name: a run learned (or changed) the provider
 /// session it is having. Carries `{term_id, record_id, run_uuid, session}`.
 pub const TERM_SESSION: &str = "term://session";
+
+/// The `term://summary` event name: a run's summary was posted (or
+/// replaced). Carries `{term_id, record_id, run_uuid, summary,
+/// summary_source}`.
+pub const TERM_SUMMARY: &str = "term://summary";
 
 /// Called by the pump when a terminal's child exits: `(term_id, exit_code,
 /// success)`. The project runner uses this to drive `auto_restart`
@@ -254,6 +259,22 @@ pub trait RunRecorder: Send + Sync + 'static {
     /// The run named the provider session it is having (a later sighting
     /// replaces an earlier one). Same run-uuid rule as every other late fact.
     fn run_session(&self, record_id: &str, run_uuid: &str, session: Session);
+    /// The process posted a summary of the run (a later post replaces an
+    /// earlier one). Same run-uuid rule as every other late fact.
+    fn run_summary(&self, record_id: &str, run_uuid: &str, text: &str, source: SummarySource);
+}
+
+/// What became of a posted run summary ([`Registry::record_summary`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SummaryOutcome {
+    /// No such terminal.
+    Unknown,
+    /// The terminal's run already ended: a finished run is not edited after
+    /// the fact.
+    Ended,
+    /// Stored on the live row (and, with a binding, on the record's run).
+    /// `changed` is false for a repeat of the same text.
+    Stored { binding: Option<RecordBinding>, changed: bool },
 }
 
 /// The byte-stream liveness of one entry, read for many ids under ONE
@@ -499,6 +520,8 @@ struct Entry {
     /// row's `last_run.session`. Seeded with the resume origin when the
     /// spawn was a resume.
     session: Option<Session>,
+    /// The run's summary as last posted — the live row's `last_run.summary`.
+    summary: Option<(String, SummarySource)>,
 }
 
 struct Inner {
@@ -675,6 +698,40 @@ impl Registry {
             }
         }
         Some((binding, changed))
+    }
+
+    /// The process posted a summary of its run: the live row's head takes
+    /// it and the recorder is told (the store head under the run-uuid rule,
+    /// the ledger row). Only while the run is open — starting or running; a
+    /// summary printed on the way out still counts, because the pump handles
+    /// it before the exit. A repeat of the same text is not news (the
+    /// recorder is not called again). Does NOT emit `term://summary`; the
+    /// caller owns the event seam it has.
+    pub fn record_summary(&self, id: TermId, text: String, source: SummarySource) -> SummaryOutcome {
+        let (binding, changed) = {
+            let Ok(mut inner) = self.inner.lock() else {
+                return SummaryOutcome::Unknown;
+            };
+            let Some(entry) = inner.entries.get_mut(&id) else {
+                return SummaryOutcome::Unknown;
+            };
+            if !matches!(entry.status, ProcessStatus::Starting | ProcessStatus::Running) {
+                return SummaryOutcome::Ended;
+            }
+            let changed = entry.summary.as_ref().map_or(true, |(t, s)| *t != text || *s != source);
+            entry.summary = Some((text.clone(), source));
+            let binding = entry.record.clone().map(|record_id| RecordBinding {
+                record_id,
+                run_uuid: entry.uuid.clone(),
+            });
+            (binding, changed)
+        };
+        if changed {
+            if let (Some(binding), Some(recorder)) = (binding.as_ref(), self.run_recorder()) {
+                recorder.run_summary(&binding.record_id, &binding.run_uuid, &text, source);
+            }
+        }
+        SummaryOutcome::Stored { binding, changed }
     }
 
     /// The provider name a session learned on entry `id` is filed under:
@@ -895,6 +952,7 @@ impl Registry {
             ended_at_ms: None,
             success: None,
             session: None,
+            summary: None,
         };
         inner.entries.insert(id, entry);
         // Entry in place before the pump starts, so the pump can never race a
@@ -1697,6 +1755,16 @@ fn spawn_pump(
                         }
                     }
                 }
+                TermEvent::Summary { text } => {
+                    // The child posted a summary of its run. Handled before
+                    // the exit that may follow it in the same flush, so one
+                    // printed on the way out still lands on the open run.
+                    if let SummaryOutcome::Stored { binding, changed: true } =
+                        registry_owned.record_summary(term_id, text.clone(), SummarySource::Osc)
+                    {
+                        push(term_id, seq, TERM_SUMMARY, &sink, &registry, summary_map(binding.as_ref(), &text, SummarySource::Osc));
+                    }
+                }
                 TermEvent::Exited(status) => {
                     apply_status(
                         term_id,
@@ -1843,6 +1911,29 @@ pub fn session_map(binding: Option<&RecordBinding>, session: &Session) -> serde_
         ("run_uuid", json!(binding.map(|b| b.run_uuid.as_str()))),
         ("session", json!(session)),
     ])
+}
+
+/// The `term://summary` payload: which run, and the summary it was given.
+pub fn summary_map(binding: Option<&RecordBinding>, text: &str, source: SummarySource) -> serde_json::Map<String, Value> {
+    json_map(&[
+        ("record_id", json!(binding.map(|b| b.record_id.as_str()))),
+        ("run_uuid", json!(binding.map(|b| b.run_uuid.as_str()))),
+        ("summary", json!(text)),
+        ("summary_source", json!(source)),
+    ])
+}
+
+/// Broadcast `term://summary` off an app handle — for a summary posted
+/// outside the pump (`set_summary` over the control surface). `seq` is 0,
+/// as for [`emit_session`].
+pub fn emit_summary(app: &AppHandle, term_id: TermId, binding: Option<&RecordBinding>, text: &str, source: SummarySource) {
+    let event = JsonEvent {
+        event: TERM_SUMMARY,
+        term_id,
+        seq: 0,
+        data: summary_map(binding, text, source),
+    };
+    let _ = app.emit(event.event, &event);
 }
 
 /// Broadcast `term://session` off an app handle — for the sightings that
@@ -2010,7 +2101,8 @@ fn run_head(entry: &Entry) -> RunHead {
             _ => TailKind::Text,
         },
         tail_len: 0,
-        summary: None,
+        summary: entry.summary.as_ref().map(|(text, _)| text.clone()),
+        summary_source: entry.summary.as_ref().map(|(_, source)| *source),
         session: entry.session.clone(),
     }
 }

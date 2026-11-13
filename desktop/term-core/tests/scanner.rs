@@ -1,6 +1,8 @@
 //! Tests for the OSC pre-scan scanner (deliverables).
 
-use term_core::scanner::{KittyEvent, OscEvent, OscScanner, PromptMarkKind};
+use term_core::scanner::{
+    cap_summary, KittyEvent, OscEvent, OscScanner, PromptMarkKind, SUMMARY_MAX_BYTES, SUMMARY_TRUNCATED_MARKER,
+};
 
 /// Feed a single byte at a time — the harshest chunking, plus the exact
 /// boundary splits the scanner has to survive.
@@ -66,6 +68,69 @@ fn osc_777_session_announces_an_id() {
     assert!(s.feed(b"]777;session").is_empty());
     let split = feed_one_byte_at_a_time(&mut s, b"]777;session;abc\\");
     assert_eq!(split, vec![OscEvent::Session("abc".into())]);
+}
+
+fn summary(text: &str) -> Vec<OscEvent> {
+    vec![OscEvent::Summary { text: text.into() }]
+}
+
+/// `OSC 777;summary;<text>`: BEL or ST terminated, split chunks reassembled,
+/// inner `;` and literal newlines kept (CRLF folded to LF), surrounding
+/// blank lines dropped, an empty summary is not a summary.
+#[test]
+fn osc_777_summary_carries_the_text() {
+    let mut s = OscScanner::new();
+    assert_eq!(s.feed(b"\x1b]777;summary;build ok, 3 warnings\x07"), summary("build ok, 3 warnings"));
+    assert_eq!(
+        s.feed(b"out \x1b]777;summary;# Done\r\n\r\n- a; b\n- `c`\n\x1b\\ more"),
+        summary("# Done\n\n- a; b\n- `c`")
+    );
+    let split = feed_one_byte_at_a_time(&mut s, b"\x1b]777;summary;one\ntwo\x1b\\");
+    assert_eq!(split, summary("one\ntwo"));
+    assert!(s.feed(b"\x1b]777;summary;\x07").is_empty(), "empty");
+    assert!(s.feed(b"\x1b]777;summary; \n \x07").is_empty(), "blank");
+    assert!(s.feed(b"\x1b]777;summary\x07").is_empty(), "no text field");
+    assert!(s.feed(b"\x1b]777;summarize;x\x07").is_empty(), "not the sub-key");
+    // A CAN aborts it the way the terminal's own parser does; what was
+    // collected so far is still the summary.
+    assert_eq!(s.feed(b"\x1b]777;summary;cut\x18short"), summary("cut"));
+}
+
+/// A summary may run past the generic OSC cap up to its own; at exactly the
+/// cap it is delivered whole, one byte over it is cut on a character
+/// boundary and marked, and the bytes after it still flow (the scanner is in
+/// ground state for the next sequence).
+#[test]
+fn osc_777_summary_truncates_at_its_cap() {
+    let mut s = OscScanner::new();
+    let exact = "x".repeat(SUMMARY_MAX_BYTES);
+    let ev = s.feed(format!("\x1b]777;summary;{exact}\x07").as_bytes());
+    assert_eq!(ev, summary(&exact), "exactly at the cap: untouched");
+
+    // Multi-byte characters straddle the cut point.
+    let long = "é".repeat(SUMMARY_MAX_BYTES);
+    let ev = s.feed(format!("\x1b]777;summary;{long}\x07\x1b]9;next\x07").as_bytes());
+    assert_eq!(ev.len(), 2, "{:?}", ev.iter().map(std::mem::discriminant).collect::<Vec<_>>());
+    let OscEvent::Summary { text } = &ev[0] else { panic!("not a summary") };
+    assert!(text.len() <= SUMMARY_MAX_BYTES, "{}", text.len());
+    assert!(text.ends_with(SUMMARY_TRUNCATED_MARKER));
+    assert!(text.trim_end_matches(SUMMARY_TRUNCATED_MARKER).chars().all(|c| c == 'é'));
+    assert_eq!(ev[1], OscEvent::Notify { title: None, body: "next".into() });
+
+    // Other payloads keep the generic cap: an oversized notify is dropped.
+    let big = "y".repeat(5000);
+    assert!(s.feed(format!("\x1b]9;{big}\x07").as_bytes()).is_empty());
+}
+
+/// The normalizer every writer shares (OSC and the control route).
+#[test]
+fn cap_summary_normalizes_and_caps() {
+    assert_eq!(cap_summary("\r\n\nok\r\n  "), Some("ok".into()));
+    assert_eq!(cap_summary("  indented\nkept"), Some("  indented\nkept".into()));
+    assert_eq!(cap_summary(" \n\t"), None);
+    let capped = cap_summary(&"z".repeat(SUMMARY_MAX_BYTES + 1)).unwrap();
+    assert_eq!(capped.len(), SUMMARY_MAX_BYTES);
+    assert!(capped.ends_with(SUMMARY_TRUNCATED_MARKER));
 }
 
 #[test]

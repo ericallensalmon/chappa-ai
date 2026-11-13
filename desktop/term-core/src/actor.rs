@@ -337,6 +337,13 @@ pub enum TermEvent {
         id: String,
         source: SessionSource,
     },
+    /// The child posted a summary of its run (`OSC 777;summary;<text>`,
+    /// already normalized and capped). One event per post, in stream order:
+    /// a later post replaces an earlier one, and one printed on the way out
+    /// still arrives before [`TermEvent::Exited`].
+    Summary {
+        text: String,
+    },
     Exited(ExitStatus),
 }
 
@@ -1254,6 +1261,9 @@ impl Actor {
                         id,
                         source: SessionSource::Announced,
                     });
+                }
+                OscEvent::Summary { text } => {
+                    let _ = self.events.send(TermEvent::Summary { text });
                 }
                 OscEvent::Kitty(_) => {} // handled pre-advance above
             }

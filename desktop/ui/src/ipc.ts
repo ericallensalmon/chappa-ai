@@ -531,9 +531,10 @@ export function shortSessionId(id: string): string {
 /** One run's head: `last_run` minus the tail itself (the tail is fetched
  *  through `getRecordRuns`, never pushed with a row). `status` is the run's
  *  resting status: running while live; exited / failed once the exit was
- *  observed; stopped when the row was closed first. `summary` is a
- *  reserved slot, absent today; `session` is present once the run learned
- *  the provider's session id. */
+ *  observed; stopped when the row was closed first. `summary` is the
+ *  markdown the process posted about its run (absent until one was posted)
+ *  and `summary_source` how it arrived; `session` is present once the run
+ *  learned the provider's session id. */
 export interface RunHeadDto {
   run_uuid: string;
   status: string;
@@ -543,9 +544,14 @@ export interface RunHeadDto {
   success: boolean | null;
   tail_kind: TailKind;
   tail_len: number;
-  summary?: unknown;
+  summary?: string | null;
+  summary_source?: SummarySource | null;
   session?: SessionDto | null;
 }
+
+/** How a run summary arrived: the process printed `OSC 777;summary`, or
+ *  someone called `set_summary` over the control surface. */
+export type SummarySource = "osc" | "mcp";
 
 /** One run WITH its tail (`getRecordRuns`): `tail` holds strings for
  *  `tail_kind: "text"` and AgentEventDto-shaped objects for `"events"`. */
@@ -558,7 +564,8 @@ export interface RunDto {
   success?: boolean | null;
   tail_kind: TailKind;
   tail?: unknown[];
-  summary?: unknown;
+  summary?: string | null;
+  summary_source?: SummarySource | null;
   session?: SessionDto | null;
 }
 
@@ -775,6 +782,21 @@ export interface TerminalSessionEvent {
   record_id: string | null;
   run_uuid: string | null;
   session: SessionDto;
+}
+
+/** A `term://summary` payload: a run's summary was posted or replaced
+ *  (`OSC 777;summary` from the process, or `set_summary`). Always the
+ *  current run's (a finished run takes no more). `record_id` / `run_uuid`
+ *  are null for an ephemeral row. The record card and the frozen strip
+ *  update off this without a reload. */
+export interface TerminalSummaryEvent {
+  event: string;
+  term_id: number;
+  seq: number;
+  record_id: string | null;
+  run_uuid: string | null;
+  summary: string;
+  summary_source: SummarySource;
 }
 
 /** A `term://closed` broadcast payload: `{term_id, reason}` where

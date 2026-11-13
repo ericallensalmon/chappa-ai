@@ -97,6 +97,7 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "close_terminal",
     "set_session",
     "resume_agent",
+    "set_summary",
 ];
 
 // ---- docker CLI seam ---------------------------------------------------------

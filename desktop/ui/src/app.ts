@@ -60,10 +60,13 @@ import {
   frozenStripText,
   paneState,
   recordView,
+  runSummary,
   startLabel,
   type PaneRun,
   type RecordView,
+  type RunSummary,
 } from "./record_pane";
+import { firstLine } from "./markdown";
 
 /** The process-status vocabulary. */
 export type RailStatus = "starting" | "running" | "stopped" | "exited" | "failed";
@@ -365,6 +368,9 @@ export interface RailEntry {
   /** When the entry was seen to die (exited / failed), for the frozen
    *  strip's age; null while live. */
   endedAtMs?: number | null;
+  /** The summary the current run posted (`term://summary`), for the
+   *  frozen strip; cleared when the entry comes back to life (a new run). */
+  summary?: RunSummary | null;
   /** Rail-row kind: "process" entries are started project processes
    *  and render in the project section, NOT the terminals list. Absent
    *  (default) = a plain shell row.
@@ -609,7 +615,9 @@ export type RailAction =
   | { type: "activate" }
   /** The typed attention tier (agent-waiting). Ignored on a dead
    *  entry: a process that is gone is never "waiting". */
-  | { type: "attention"; attention: Attention };
+  | { type: "attention"; attention: Attention }
+  /** The current run posted (or replaced) its summary. */
+  | { type: "summary"; summary: RunSummary | null };
 
 export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
   switch (action.type) {
@@ -623,7 +631,12 @@ export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
         attention: isLive(action.status) ? entry.attention : null,
         // The first observed death keeps its time; a repeat does not reset it.
         endedAtMs: isLive(action.status) ? null : (entry.endedAtMs ?? action.at ?? null),
+        // Dead → live is a NEW run (a restart into the same terminal): the
+        // previous run's summary is not this one's.
+        ...(entry.summary && !isLive(entry.status) && isLive(action.status) ? { summary: null } : {}),
       };
+    case "summary":
+      return { ...entry, summary: action.summary };
     case "attention":
       return { ...entry, attention: isLive(entry.status) ? action.attention : null };
     case "title":
@@ -973,6 +986,7 @@ const APP_CSS = `
 .chappa-status-dot.dim{opacity:.6;}
 .chappa-record-start{flex:none;margin-left:auto;border:0;background:none;color:#8b949e;font-size:11px;line-height:1;cursor:pointer;padding:0 2px;border-radius:4px;visibility:hidden;}
 .chappa-record-row:hover .chappa-record-start{visibility:visible;}
+.chappa-rail-summary{flex:none;color:#6b7280;font-size:12px;line-height:1;}
 .chappa-record-start:hover{color:#3fb950;}
 /* ACTIVE section: running processes + badged live terminals across
    ALL open projects, the first section of the workspace block. Hidden
@@ -2272,6 +2286,7 @@ export class App {
       parent_id: p.parent_process_id ?? null,
       record_id: p.record_id ?? null,
       ended_at_ms: p.last_run?.ended_at_ms ?? null,
+      summary: runSummary(p.last_run),
     });
   }
 
@@ -2364,6 +2379,7 @@ export class App {
           status: t.status as RailStatus,
           exit_code: t.exit_code ?? null,
           ended_at_ms: t.last_run?.ended_at_ms ?? null,
+          summary: runSummary(t.last_run),
         });
       }
     } catch {
@@ -2398,6 +2414,8 @@ export class App {
     status?: RailStatus;
     exit_code?: number | null;
     ended_at_ms?: number | null;
+    /** The current run's summary as the snapshot knows it. */
+    summary?: RunSummary | null;
   }): void {
     const id = f.term_id;
     if (this.seen.has(id) || this.entries.has(id)) return;
@@ -2419,6 +2437,7 @@ export class App {
       kind: "shell",
       endedAtMs: isLive(status) ? null : (f.ended_at_ms ?? null),
       ...(f.record_id && f.kind !== "process" ? { recordId: f.record_id } : {}),
+      ...(f.summary ? { summary: f.summary } : {}),
     };
     if (f.kind === "agent") {
       entry = {
@@ -2824,6 +2843,9 @@ export class App {
         ? { ...rec.lastRun, session: p.session }
         : { status: "running", started_at_ms: this.now(), session: p.session };
     });
+    // A run posted (or replaced) its summary: the frozen strip and the
+    // record card show it without a reload.
+    on<ipc.TerminalSummaryEvent>("term://summary", (p) => this.applySummary(p));
     on<ipc.TerminalEventDto>("term://status", (p) => {
       const entry = this.entries.get(p.term_id);
       if (!entry) return;
@@ -3460,6 +3482,16 @@ export class App {
     name.className = "chappa-rail-name";
     name.textContent = rec.name;
     row.append(dot, name);
+    // The last run left a summary: a quiet marker, its first line as the
+    // tooltip (the card shows the whole thing).
+    const posted = runSummary(rec.lastRun);
+    if (posted) {
+      const marker = document.createElement("span");
+      marker.className = "chappa-rail-summary";
+      marker.textContent = "≡";
+      marker.title = firstLine(posted.text);
+      row.append(marker);
+    }
     if (rec.kind === "agent") {
       row.classList.add("agent");
       if (rec.agent?.favorite) row.append(this.favoriteStar());
@@ -4867,6 +4899,53 @@ export class App {
     }
   }
 
+  /** A `term://summary`: the entry's current run (the frozen strip) and
+   *  the record's newest run (the card) take the posted text; a card on
+   *  screen for that record redraws its summary block. */
+  applySummary(p: ipc.TerminalSummaryEvent): void {
+    const summary: RunSummary = { text: p.summary, source: p.summary_source };
+    const entry = this.entries.get(p.term_id);
+    if (entry) this.entries.set(p.term_id, railReducer(entry, { type: "summary", summary }));
+    const recordId = p.record_id ?? entry?.recordId ?? null;
+    const holder = recordId ? this.runHolderOf(recordId) : undefined;
+    if (holder) {
+      const run = holder.lastRun;
+      // The same run (or one whose uuid is unknown) takes the summary; an
+      // older stored head gives way to the run that is posting.
+      holder.lastRun =
+        run && (!run.run_uuid || !p.run_uuid || run.run_uuid === p.run_uuid)
+          ? { ...run, summary: p.summary, summary_source: p.summary_source }
+          : {
+              ...(p.run_uuid ? { run_uuid: p.run_uuid } : {}),
+              status: "running",
+              started_at_ms: this.now(),
+              summary: p.summary,
+              summary_source: p.summary_source,
+            };
+      const target = this.paneFor;
+      if (target && this.recordPane?.active) {
+        const built = this.paneView(target);
+        if (built && built.recordId === recordId) this.recordPane.setSummary(built.view.summary);
+      }
+    }
+    // A stopped record row grows its marker (renderRail redraws the strip
+    // too); otherwise only the strip over the active panel can change.
+    if (recordId && this.records.has(recordId)) this.renderRail();
+    else if (entry && entry.id === this.activeId) this.renderFrozenStrip();
+  }
+
+  /** Whatever row keeps a record's newest run: a stopped/bound record row,
+   *  or a project / workspace command row. */
+  private runHolderOf(recordId: string): RecordRow | ProcessRow | WorkspaceCommandRow | undefined {
+    const rec = this.records.get(recordId);
+    if (rec) return rec;
+    for (const s of this.openProjects.values()) {
+      for (const row of s.processRows.values()) if (row.recordId === recordId) return row;
+    }
+    for (const row of this.wsCmds.values()) if (row.recordId === recordId) return row;
+    return undefined;
+  }
+
   // --- the frozen strip -------------------------------------------
 
   /** Show the strip above the active panel while its entry is dead (the
@@ -4883,7 +4962,7 @@ export class App {
       { status: state.status, exitCode: state.exitCode, endedAtMs: entry.endedAtMs ?? null },
       this.now(),
     );
-    this.frozenStrip.show(text, this.frozenStart(entry, rec));
+    this.frozenStrip.show(text, this.frozenStart(entry, rec), entry.summary ?? null);
   }
 
   /** What the strip's button starts: the record, the project command, or
