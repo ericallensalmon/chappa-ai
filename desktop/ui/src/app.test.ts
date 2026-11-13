@@ -3022,19 +3022,22 @@ const activeTags = (root: HTMLElement): Array<string | null> =>
   activeRows(root).map((r) => r.querySelector<HTMLElement>(".chappa-active-project")?.title ?? null);
 
 describe("App ACTIVE area", () => {
-  it("sits at the TOP of the rail, hidden while empty, shown when a process runs", async () => {
+  it("sits at the TOP of the rail, its header kept while empty, a row when a process runs", async () => {
     const { root, app } = await multiProject();
     // The section opens the workspace block: directly under its title.
     const rail = root.querySelector(".chappa-rail")!;
     const active = rail.querySelector<HTMLElement>(".chappa-active-section")!;
     expect(active.previousElementSibling?.classList.contains("chappa-workspace-header")).toBe(true);
-    // Empty state: hidden ENTIRELY. The mount shell is running but carries
-    // no badge — a plain live shell is not an ACTIVE row.
-    expect(activeSection(root).style.display).toBe("none");
+    // Empty state: the header stays (it carries the dashboard button), no
+    // rows. The mount shell is running but carries no badge — a plain live
+    // shell is not an ACTIVE row.
+    expect(activeSection(root).style.display).not.toBe("none");
+    expect(activeSection(root).querySelector(".chappa-dashboard-open")).not.toBeNull();
+    expect(activeRows(root).length).toBe(0);
+    expect(activeSection(root).querySelector(".chappa-active-count")?.textContent).toBe("0");
 
     await app.openProject(1); // trusted → auto-starts `server` (term 1)
     await FLUSH();
-    expect(activeSection(root).style.display).toBe("block");
     // House header: uppercase label + right count.
     expect(activeSection(root).querySelector(".chappa-active-label")?.textContent).toBe("ACTIVE");
     expect(activeSection(root).querySelector(".chappa-active-count")?.textContent).toBe("1");
@@ -3045,13 +3048,13 @@ describe("App ACTIVE area", () => {
     expect(rows[0].querySelector(".chappa-rail-name")?.textContent).toBe("server");
     expect(rows[0].querySelector(".chappa-active-project")).toBeNull();
 
-    // The process exits: the section empties and hides again.
+    // The process exits: the list empties under the header.
     const appAny = app as unknown as {
       applyProcessStatus: (p: ipc.ProjectProcessStatusEvent) => void;
     };
     appAny.applyProcessStatus({ project_id: 1, name: "server", status: "exited", exit_code: 0, term_id: 1 });
-    expect(activeSection(root).style.display).toBe("none");
     expect(activeRows(root).length).toBe(0);
+    expect(activeSection(root).querySelector(".chappa-active-count")?.textContent).toBe("0");
     panelDispose(app);
     root.remove();
   });
@@ -6566,6 +6569,209 @@ describe("App record rows and the record pane", () => {
       drive(app).applyCreated({ term_id: 63, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
       const level = (app as unknown as { levelForEntry: (e: RailEntry) => string }).levelForEntry(drive(app).entries.get(63)!);
       expect(level).toBe("none");
+      teardown(app, root);
+    });
+  });
+
+  describe("the dashboard", () => {
+    const dash = (root: HTMLElement): HTMLElement => root.querySelector<HTMLElement>(".chappa-dashboard")!;
+    const openDash = (root: HTMLElement): void => root.querySelector<HTMLButtonElement>(".chappa-dashboard-open")!.click();
+    const card = (root: HTMLElement, k: string): HTMLElement =>
+      dash(root).querySelector<HTMLElement>(`.chappa-dash-card[data-key="${k}"]`)!;
+    const groupCards = (root: HTMLElement, g: string): string[] =>
+      [...dash(root).querySelectorAll<HTMLElement>(`[data-group="${g}"] .chappa-dash-card`)].map((c) => c.dataset.key!);
+    const actionLabels = (el: HTMLElement): Array<string | null> =>
+      [...el.querySelectorAll<HTMLButtonElement>(".chappa-dash-action")].map((b) => b.textContent);
+    /** Adopt a live terminal for record `a1` and mark it running. */
+    function liveA1(app: App, termId = 40): void {
+      drive(app).applyCreated({ term_id: termId, name: "claude", kind: "agent", project_id: null, agent_tool_id: 3, parent_process_id: null, record_id: "a1" });
+      const entries = drive(app).entries;
+      entries.set(termId, railReducer(entries.get(termId)!, { type: "status", status: "running", exitCode: null }));
+      drive(app).renderRail();
+    }
+
+    it("the ACTIVE header's grid button opens the page in the stack; Back and Escape return to the panel it covered", async () => {
+      const { root, app } = await mounted([agentRecord()]);
+      await app.newShell();
+      await FLUSH();
+      const shellId = drive(app).activeId;
+      expect(shellId).not.toBeNull();
+      const btn = root.querySelector<HTMLButtonElement>(".chappa-active-header .chappa-dashboard-open")!;
+      expect(btn.querySelector("svg")).not.toBeNull();
+      btn.click();
+      expect(dash(root).classList.contains("active")).toBe(true);
+      expect(dash(root).parentElement?.classList.contains("chappa-stack")).toBe(true);
+      expect(drive(app).activeId).toBeNull();
+      expect(btn.classList.contains("open")).toBe(true);
+      expect(dash(root).querySelector(".chappa-dash-back")?.textContent).toBe("←Dashboard");
+      dash(root).querySelector<HTMLButtonElement>(".chappa-dash-back")!.click();
+      expect(dash(root).classList.contains("active")).toBe(false);
+      expect(btn.classList.contains("open")).toBe(false);
+      expect(drive(app).activeId).toBe(shellId);
+      // The button toggles; Escape leaves too.
+      btn.click();
+      btn.click();
+      expect(dash(root).classList.contains("active")).toBe(false);
+      btn.click();
+      key(dash(root), { key: "Escape" });
+      expect(dash(root).classList.contains("active")).toBe(false);
+      expect(drive(app).activeId).toBe(shellId);
+      teardown(app, root);
+    });
+
+    it("groups the cards by open project with its badge, name and totals, then the workspace; closed projects stay out", async () => {
+      const { root, app } = await mounted(
+        [
+          agentRecord({ record_id: "a1", project_id: 1 }),
+          agentRecord({ record_id: "a2", name: "elsewhere", project_id: 2 }),
+          shellRecord(),
+        ],
+        { project: true },
+      );
+      openDash(root);
+      await FLUSH();
+      expect([...dash(root).querySelectorAll<HTMLElement>(".chappa-dash-group")].map((g) => g.dataset.group)).toEqual(["p:1", "ws"]);
+      const head = dash(root).querySelector<HTMLElement>('[data-group="p:1"] .chappa-dash-group-head')!;
+      expect(head.querySelector(".chappa-dash-group-badge")?.children.length).toBe(1);
+      expect(head.querySelector(".chappa-dash-group-name")?.textContent).toBe("chappa-ai");
+      expect(head.querySelector(".chappa-dash-group-totals")?.textContent).toBe("0/1 running");
+      expect(dash(root).querySelector('[data-group="ws"] .chappa-dash-group-name')?.textContent).toBe("Workspace");
+      expect(groupCards(root, "p:1")).toEqual(["rec:a1"]);
+      expect(groupCards(root, "ws")).toEqual(["rec:t1"]);
+      expect(card(root, "rec:a2")).toBeNull();
+      teardown(app, root);
+    });
+
+    it("a stopped record's card: dim dot, kind, last run, the summary as markdown, the session line, resume first", async () => {
+      const base = resumableRecord();
+      const { root, app } = await mounted(
+        [{ ...base, last_run: { ...base.last_run!, summary: "# Build\n- **ok**\n<b>x</b>", summary_source: "osc" } }],
+        { tools: [resumableTool()] },
+      );
+      openDash(root);
+      await FLUSH();
+      const c = card(root, "rec:a1");
+      expect(c.querySelector(".chappa-dash-name")?.textContent).toBe("claude");
+      expect(c.querySelector(".chappa-dash-kind")?.textContent).toBe("agent");
+      expect(c.querySelector(".chappa-status-dot")?.className).toBe("chappa-status-dot exited dim");
+      expect(c.querySelector(".chappa-dash-run")?.textContent).toBe("last run · exit 0 · ran 1m 0s · ended 2 min ago");
+      expect(c.querySelector(".chappa-dash-summary .chappa-md h1")?.textContent).toBe("Build");
+      expect(c.querySelector(".chappa-dash-summary strong")?.textContent).toBe("ok");
+      expect(c.querySelector(".chappa-dash-summary b")).toBeNull();
+      expect(c.querySelector(".chappa-dash-line")?.textContent).toBe("");
+      expect(c.querySelector(".chappa-dash-session")?.textContent).toBe("Session saved · claude · …wxyz");
+      expect(actionLabels(c)).toEqual(["↻ Resume last session", "▶ Start new session"]);
+      teardown(app, root);
+    });
+
+    it("a live row's card: running dot, cpu and memory, attention, stop / restart; the group totals sum it", async () => {
+      const { root, app } = await mounted([agentRecord()]);
+      liveA1(app);
+      openDash(root);
+      statsDrive(app).applyStats(statsEvent(40, 12.4, 50 * 1024 * 1024, 2));
+      const c = card(root, "rec:a1");
+      expect(c.classList.contains("live")).toBe(true);
+      expect(c.querySelector(".chappa-status-dot")?.className).toBe("chappa-status-dot running");
+      expect(c.querySelector(".chappa-dash-stats")?.textContent).toBe("12%");
+      expect(c.querySelector<HTMLElement>(".chappa-dash-stats")?.title).toBe("50.0 MB · 2 subprocesses");
+      expect(c.querySelector(".chappa-dash-run")?.textContent).toBe("");
+      expect(actionLabels(c)).toEqual(["■ Stop", "⟲ Restart"]);
+      expect(dash(root).querySelector('[data-group="ws"] .chappa-dash-group-totals')?.textContent).toBe(
+        "1/1 running · 12% · 50.0 MB",
+      );
+      const entries = drive(app).entries;
+      entries.set(40, railReducer(entries.get(40)!, { type: "bell" }));
+      drive(app).renderRail();
+      expect(c.classList.contains("attention")).toBe(true);
+      expect(c.querySelector(".chappa-dash-mark")?.textContent).toBe("!");
+      teardown(app, root);
+    });
+
+    it("a card click fronts its row: the attached terminal, or the record card", async () => {
+      const { root, app } = await mounted([agentRecord(), shellRecord()]);
+      liveA1(app);
+      openDash(root);
+      card(root, "rec:a1").querySelector<HTMLElement>(".chappa-dash-name")!.click();
+      await FLUSH();
+      await FLUSH();
+      expect(drive(app).activeId).toBe(40);
+      expect(dash(root).classList.contains("active")).toBe(false);
+      openDash(root);
+      card(root, "rec:t1").click();
+      expect(dash(root).classList.contains("active")).toBe(false);
+      expect(pane(root).classList.contains("active")).toBe(true);
+      expect(pane(root).querySelector(".chappa-record-title")?.textContent).toBe("pwsh is stopped");
+      teardown(app, root);
+    });
+
+    it("Start on a stopped card goes through start_record, the rail's own start path", async () => {
+      const { api, root, app } = await mounted([agentRecord()]);
+      openDash(root);
+      await FLUSH();
+      card(root, "rec:a1").querySelector<HTMLButtonElement>('.chappa-dash-action[data-action="start"]')!.click();
+      await FLUSH();
+      await FLUSH();
+      expect(api.startRecord).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.startRecord).mock.calls[0][0]).toBe("a1");
+      const [termId, entry] = [...drive(app).entries][0];
+      expect(entry.recordId).toBe("a1");
+      expect(drive(app).activeId).toBe(termId);
+      teardown(app, root);
+    });
+
+    it("a status or summary event repaints its one card in place and leaves the others alone", async () => {
+      const { root, app } = await mounted([agentRecord(), agentRecord({ record_id: "a2", name: "codex" })]);
+      liveA1(app);
+      openDash(root);
+      await FLUSH();
+      const a1 = card(root, "rec:a1");
+      const a2 = card(root, "rec:a2");
+      const a2Run = a2.querySelector(".chappa-dash-run");
+      const a2Html = a2.innerHTML;
+      const entries = drive(app).entries;
+      entries.set(40, railReducer(entries.get(40)!, { type: "status", status: "exited", exitCode: 3, at: 121_000 }));
+      drive(app).renderRail();
+      expect(card(root, "rec:a1")).toBe(a1);
+      expect(a1.dataset.status).toBe("exited");
+      expect(a1.querySelector(".chappa-dash-run")?.textContent).toBe("exited · code 3 · 1 min ago");
+      expect(a2.querySelector(".chappa-dash-run")).toBe(a2Run);
+      expect(a2.innerHTML).toBe(a2Html);
+
+      app.applySummary(summaryEvent({ term_id: 40, record_id: "a1", run_uuid: "r9", summary: "## Done\nall green" }));
+      expect(card(root, "rec:a1")).toBe(a1);
+      expect(a1.querySelector(".chappa-dash-summary .chappa-md h2")?.textContent).toBe("Done");
+      expect(a2.innerHTML).toBe(a2Html);
+      teardown(app, root);
+    });
+
+    it("a json agent's card without a summary shows its last text event, read once from the ledger; History reads the runs", async () => {
+      const { api, root, app } = await mounted([agentRecord()]);
+      const base = agentRecord().last_run!;
+      vi.mocked(api.getRecordRuns).mockResolvedValue([
+        {
+          ...base,
+          tail_kind: "events",
+          tail: [
+            { id: 1, seq: 1, ts: 0, kind: "text", payload: { text: "Patched the parser.\nDetails below" } },
+            { id: 1, seq: 2, ts: 0, kind: "text", payload: { text: "hmm", thinking: true } },
+            { id: 1, seq: 3, ts: 0, kind: "turn_ended", payload: {} },
+          ],
+        },
+      ]);
+      openDash(root);
+      await FLUSH();
+      await FLUSH();
+      const c = card(root, "rec:a1");
+      expect(c.querySelector(".chappa-dash-line")?.textContent).toBe("Patched the parser.");
+      expect(vi.mocked(api.getRecordRuns).mock.calls).toEqual([["a1", 1]]);
+      // Repaints do not read again.
+      drive(app).renderRail();
+      await FLUSH();
+      expect(api.getRecordRuns).toHaveBeenCalledTimes(1);
+      c.querySelector<HTMLButtonElement>(".chappa-dash-history-toggle")!.click();
+      await FLUSH();
+      expect(vi.mocked(api.getRecordRuns).mock.calls.at(-1)).toEqual(["a1"]);
+      expect(c.querySelectorAll(".chappa-dash-run-row").length).toBe(1);
       teardown(app, root);
     });
   });

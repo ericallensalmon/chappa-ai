@@ -5,6 +5,8 @@ import {
   statsTooltip,
   StatsStore,
   subprocessLabel,
+  sumStats,
+  totalsLabel,
   ZERO_STATS,
   type TermStats,
 } from "./stats";
@@ -126,5 +128,22 @@ describe("StatsStore", () => {
     expect(store.apply(zero)).toBe(true);
     expect(store.get(1)).toEqual(ZERO_STATS);
     expect(store.apply(zero)).toBe(false);
+  });
+});
+
+describe("group totals", () => {
+  it("sums the samples, a missing one counting as zero", () => {
+    const a: TermStats = { cpuPct: 10.25, memBytes: 3 * 1024 * 1024, subprocCount: 1 };
+    const b: TermStats = { cpuPct: 2, memBytes: 1024 * 1024, subprocCount: 2 };
+    expect(sumStats([a, null, b])).toEqual({ cpuPct: 12.25, memBytes: 4 * 1024 * 1024, subprocCount: 3 });
+    expect(sumStats([])).toEqual(ZERO_STATS);
+  });
+
+  it("reads running/total, with cpu and memory only while something running reported", () => {
+    const sum: TermStats = { cpuPct: 12.4, memBytes: 340.2 * 1024 * 1024, subprocCount: 0 };
+    expect(totalsLabel(2, 5, sum)).toBe("2/5 running · 12% · 340.2 MB");
+    expect(totalsLabel(0, 5, sum)).toBe("0/5 running");
+    expect(totalsLabel(1, 1, ZERO_STATS)).toBe("1/1 running");
+    expect(totalsLabel(0, 0, ZERO_STATS)).toBe("0/0 running");
   });
 });

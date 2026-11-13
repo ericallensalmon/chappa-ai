@@ -1,9 +1,9 @@
 // Per-terminal process stats: the `term://stats` store plus the two
 // tiny formatters the rail row and the terminal hint bar render from.
 //
-// Scope is those two readouts ONLY — there is no activity-monitor view, so
-// no history, no series and no sampling
-// here: Rust
+// Scope is those readouts (plus the dashboard's per-group sums) ONLY —
+// there is no activity-monitor view, so no history, no series and no
+// sampling here: Rust
 // owns the poller and only tells us when something MATERIALLY changed
 // (>0.5% cpu, >1MB rss, any subprocess-count delta).
 //
@@ -58,6 +58,31 @@ export function statsTooltip(stats: TermStats): string {
  *  tail. Pluralised: "1 subprocesses" is the kind of wrong that gets noticed. */
 export function subprocessLabel(count: number): string {
   return `${count} ${count === 1 ? "subprocess" : "subprocesses"}`;
+}
+
+/** The summed cost of several terminals (a group's total). Missing samples
+ *  count as zero: a row that never reported costs nothing we know of. */
+export function sumStats(samples: Iterable<TermStats | null>): TermStats {
+  const sum = { ...ZERO_STATS };
+  for (const s of samples) {
+    if (!s) continue;
+    sum.cpuPct += s.cpuPct;
+    sum.memBytes += s.memBytes;
+    sum.subprocCount += s.subprocCount;
+  }
+  return sum;
+}
+
+/**
+ * A group's one-line totals: `2/5 running`, then the summed cpu and memory
+ * of the running rows when any of them reported (`2/5 running · 12% ·
+ * 340.2 MB`). Nothing running reads `0/5 running` alone — a stopped group
+ * has no cost to show.
+ */
+export function totalsLabel(running: number, total: number, sum: TermStats): string {
+  const head = `${running}/${total} running`;
+  if (running === 0 || sum.memBytes <= 0) return head;
+  return `${head} · ${Math.round(sum.cpuPct)}% · ${formatBytes(sum.memBytes)}`;
 }
 
 /** Whether two samples are the same reading (the ignore-unchanged gate). */

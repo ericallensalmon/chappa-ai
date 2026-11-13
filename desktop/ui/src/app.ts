@@ -67,6 +67,7 @@ import {
   type RunSummary,
 } from "./record_pane";
 import { firstLine } from "./markdown";
+import { Dashboard, tailLine, type CardActionId, type CardInput, type CardLive, type DashGroupInput } from "./dashboard";
 
 /** The process-status vocabulary. */
 export type RailStatus = "starting" | "running" | "stopped" | "exited" | "failed";
@@ -582,9 +583,8 @@ export type Attention = null | "badge" | "agent-waiting";
 /**
  * One ACTIVE-section row: a running/starting project process, or a
  * live terminal currently carrying an unacknowledged badge. Deliberately a
- * plain data record — the future stack-area management dashboard (recorded in
- * the task as future work) is a renderer over exactly this list plus process
- * stats.
+ * plain data record, derived from the row state on every repaint (the
+ * dashboard reads the same row state, records included).
  */
 export interface ActiveRow {
   kind: "process" | "terminal";
@@ -854,8 +854,10 @@ const APP_CSS = `
 .chappa-process-btn:disabled{opacity:.35;cursor:default;}
 .chappa-rail-header{position:relative;display:flex;align-items:center;gap:6px;}
 .chappa-rail-header-label{flex:1 1 auto;white-space:nowrap;}
-.chappa-new-term,.chappa-project-term-add,.chappa-project-term-more,.chappa-process-add,.chappa-workspace-cmd-add,.chappa-new-agent{flex:none;width:20px;height:20px;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;font:12px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
-.chappa-new-term:hover,.chappa-project-term-add:hover,.chappa-project-term-more:hover,.chappa-process-add:hover:not(:disabled),.chappa-workspace-cmd-add:hover,.chappa-new-agent:hover{background:#1d2127;color:#d6d8dc;}
+.chappa-new-term,.chappa-project-term-add,.chappa-project-term-more,.chappa-process-add,.chappa-workspace-cmd-add,.chappa-new-agent,.chappa-dashboard-open{flex:none;width:20px;height:20px;border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;font:12px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
+.chappa-new-term:hover,.chappa-project-term-add:hover,.chappa-project-term-more:hover,.chappa-process-add:hover:not(:disabled),.chappa-workspace-cmd-add:hover,.chappa-new-agent:hover,.chappa-dashboard-open:hover{background:#1d2127;color:#d6d8dc;}
+.chappa-dashboard-open{display:inline-flex;align-items:center;justify-content:center;}
+.chappa-dashboard-open.open{background:#1d232b;color:#d6d8dc;}
 .chappa-process-add:disabled{opacity:.35;cursor:default;}
 .chappa-new-term-menu,.chappa-project-term-menu{position:absolute;top:22px;right:0;z-index:30;min-width:170px;max-height:240px;overflow-y:auto;background:#1b1d21;border:1px solid #2a2c31;border-radius:6px;padding:4px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
 .chappa-new-term-option,.chappa-project-term-option{display:block;width:100%;text-align:left;background:none;border:0;color:#d6d8dc;padding:6px 8px;border-radius:4px;font:13px system-ui,sans-serif;cursor:pointer;}
@@ -989,8 +991,8 @@ const APP_CSS = `
 .chappa-rail-summary{flex:none;color:#6b7280;font-size:12px;line-height:1;}
 .chappa-record-start:hover{color:#3fb950;}
 /* ACTIVE section: running processes + badged live terminals across
-   ALL open projects, the first section of the workspace block. Hidden
-   entirely when empty.
+   ALL open projects, the first section of the workspace block. The header
+   stays when there are no rows (it carries the dashboard button).
    Attention rows (undismissed bell/notify badge) sort first and carry the
    accent ring. */
 .chappa-active-section{padding:0 8px 4px;}
@@ -1037,6 +1039,31 @@ function bellIcon(): SVGSVGElement {
   const clapper = document.createElementNS(NS, "path");
   clapper.setAttribute("d", "M13.73 21a2 2 0 0 1-3.46 0");
   svg.append(body, clapper);
+  return svg;
+}
+
+/** Four squares in a grid — the dashboard entry on the ACTIVE header; same
+ *  currentColor treatment as [`bellIcon`]. */
+function gridIcon(): SVGSVGElement {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "12");
+  svg.setAttribute("height", "12");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("aria-hidden", "true");
+  svg.style.display = "block";
+  for (const [x, y] of [[2, 2], [9, 2], [2, 9], [9, 9]]) {
+    const r = document.createElementNS(NS, "rect");
+    r.setAttribute("x", String(x));
+    r.setAttribute("y", String(y));
+    r.setAttribute("width", "5");
+    r.setAttribute("height", "5");
+    r.setAttribute("rx", "1");
+    svg.appendChild(r);
+  }
   return svg;
 }
 
@@ -1321,7 +1348,8 @@ export class App {
   // --- ACTIVE section --------------------------------------------
   /** The ACTIVE section at the top of the rail: house header + one row per
    *  running/starting process and per badged live terminal, across ALL open
-   *  projects. Hidden entirely when empty. */
+   *  projects. The header stays with no rows (it holds the dashboard
+   *  button); the list is just empty. */
   private readonly activeSection: HTMLElement;
   private readonly activeCount: HTMLElement;
   private readonly activeList: HTMLElement;
@@ -1330,6 +1358,22 @@ export class App {
    *  change nothing an ACTIVE row shows. Sentinel start so the first render
    *  always builds. */
   private activeSig = "0000never-rendered";
+  // --- the dashboard ----------------------------------------------
+  /** The ACTIVE header's grid button: opens (or leaves) the dashboard. */
+  private readonly dashboardBtn: HTMLButtonElement;
+  /** The page of cards, built lazily on first open and mounted in the stack
+   *  like the record pane. */
+  private dashboard: Dashboard | null = null;
+  /** What the stack showed before the dashboard, restored on Back. */
+  private dashboardPrev: { termId: number } | { pane: PaneTarget } | null = null;
+  /** A stopped record's newest stored line (its tail's last line, or a json
+   *  agent's last text), read from the ledger once per dashboard opening. */
+  private readonly dashTails = new Map<string, string | null>();
+  /** Ledger reads in flight for `dashTails` (one per record). */
+  private readonly dashTailReads = new Set<string>();
+  /** A live json agent's newest text event (first line), by term id: the
+   *  card's line while it has no summary. */
+  private readonly lastText = new Map<number, string>();
   /** What the TERMINALS subsection last rendered (the settings-pane
    *  profileSig precedent): renderRail tails into renderProjectTerminals on
    *  EVERY event, and most of them change nothing a bound-terminal row shows.
@@ -1474,10 +1518,10 @@ export class App {
     // ACTIVE section: the cross-project running/needs-attention
     // rows, first under the Workspace title. House header (uppercase muted +
     // hairline + right count, the chappa-subsection pattern); the list is
-    // rebuilt behind the activeSig guard. Hidden entirely while empty.
+    // rebuilt behind the activeSig guard. The header stays even with no
+    // rows: it carries the dashboard button.
     this.activeSection = document.createElement("section");
     this.activeSection.className = "chappa-active-section";
-    this.activeSection.style.display = "none";
     const activeHeader = document.createElement("div");
     activeHeader.className = "chappa-subsection-header chappa-active-header";
     const activeLabel = document.createElement("span");
@@ -1489,7 +1533,17 @@ export class App {
     this.activeCount = document.createElement("span");
     this.activeCount.className = "chappa-active-count";
     this.activeCount.textContent = "0";
-    activeHeader.append(activeLabel, this.activeCount);
+    // The dashboard entry: the header-line square button every section
+    // header uses for its action, with a grid glyph.
+    this.dashboardBtn = document.createElement("button");
+    this.dashboardBtn.type = "button";
+    this.dashboardBtn.className = "chappa-dashboard-open";
+    this.dashboardBtn.title = "Dashboard: every row of the open projects and the workspace";
+    this.dashboardBtn.setAttribute("aria-label", "Dashboard");
+    this.dashboardBtn.append(gridIcon());
+    this.dashboardBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    this.dashboardBtn.addEventListener("click", () => this.toggleDashboard());
+    activeHeader.append(activeLabel, this.activeCount, this.dashboardBtn);
     this.activeList = document.createElement("div");
     this.activeList.className = "chappa-active-list";
     this.activeSection.append(activeHeader, this.activeList);
@@ -2592,6 +2646,7 @@ export class App {
       return;
     }
     this.hideRecordPane();
+    this.hideDashboard();
     this.activeId = id;
     for (const [entryId, entry] of this.entries) {
       const active = entryId === id;
@@ -2729,6 +2784,7 @@ export class App {
     this.stats.forget(id);
     // Likewise its clipboard answer: "allowed" is for that terminal only.
     this.clipboardGate.forget(id);
+    this.lastText.delete(id);
     entry.host.remove();
     // A recorded row outlives its terminal: the record turns back into a
     // stopped row (its run's outcome, or "stopped" for a close while live).
@@ -2766,6 +2822,8 @@ export class App {
     this.settingsPane = null;
     this.editPane?.dispose();
     this.editPane = null;
+    this.dashboard?.dispose();
+    this.dashboard = null;
     this.banners.dispose();
     this.drawer?.dispose();
     this.drawer = null;
@@ -2842,6 +2900,7 @@ export class App {
       rec.lastRun = rec.lastRun
         ? { ...rec.lastRun, session: p.session }
         : { status: "running", started_at_ms: this.now(), session: p.session };
+      this.renderDashboard();
     });
     // A run posted (or replaced) its summary: the frozen strip and the
     // record card show it without a reload.
@@ -4083,6 +4142,13 @@ export class App {
       return;
     }
     if (entry.panel instanceof TranscriptPanel) entry.panel.apply(p);
+    if (p.kind === "text" && typeof p.payload.text === "string" && p.payload.thinking !== true) {
+      const line = firstLine(p.payload.text).trim();
+      if (line) {
+        this.lastText.set(id, line);
+        this.renderDashboard();
+      }
+    }
     if (!entry.agent) return;
     if (p.kind === "awaiting_input") {
       this.markAgentWaiting(id);
@@ -4679,6 +4745,7 @@ export class App {
   private showRecordPane(target: PaneTarget): void {
     const built = this.paneView(target);
     if (!built) return;
+    this.hideDashboard();
     this.activeId = null;
     for (const entry of this.entries.values()) {
       entry.panel.setActive(false);
@@ -4931,7 +4998,11 @@ export class App {
     // A stopped record row grows its marker (renderRail redraws the strip
     // too); otherwise only the strip over the active panel can change.
     if (recordId && this.records.has(recordId)) this.renderRail();
-    else if (entry && entry.id === this.activeId) this.renderFrozenStrip();
+    else {
+      if (entry && entry.id === this.activeId) this.renderFrozenStrip();
+      // A command's card on the dashboard shows it too.
+      this.renderDashboard();
+    }
   }
 
   /** Whatever row keeps a record's newest run: a stopped/bound record row,
@@ -4980,6 +5051,313 @@ export class App {
       }
     }
     return null;
+  }
+
+  // --- the dashboard ----------------------------------------------
+  //
+  // A page in the stack, beside the panels and the record card: one card per
+  // row of every open project plus the workspace. It reads the same row state
+  // the rail does and repaints from the same hooks as ACTIVE
+  // (renderActiveSection's head); starting, stopping and jumping go through
+  // the rail's own handlers.
+
+  private ensureDashboard(): Dashboard {
+    if (!this.dashboard) {
+      this.dashboard = new Dashboard({
+        onJump: (key) => this.dashboardJump(key),
+        onAction: (key, action) => this.dashboardAction(key, action),
+        onClose: () => this.closeDashboard(),
+        loadRuns: (key) => this.dashboardRuns(key),
+      });
+      this.stack.appendChild(this.dashboard.host);
+    }
+    return this.dashboard;
+  }
+
+  /** The ACTIVE header's grid button: open the dashboard, or leave it. */
+  toggleDashboard(): void {
+    if (this.dashboard?.active) this.closeDashboard();
+    else this.openDashboard();
+  }
+
+  /** Front the dashboard: the panel or card on screen steps back (and comes
+   *  back on Back), the stored lines are read afresh. */
+  openDashboard(): void {
+    const dash = this.ensureDashboard();
+    if (dash.active) return;
+    this.dashboardPrev =
+      this.paneFor !== null ? { pane: this.paneFor } : this.activeId !== null ? { termId: this.activeId } : null;
+    this.hideRecordPane();
+    this.activeId = null;
+    for (const entry of this.entries.values()) {
+      entry.panel.setActive(false);
+      entry.host.classList.remove("active");
+    }
+    for (const s of this.openProjects.values()) {
+      for (const r of s.processRows.values()) r.el?.classList.remove("active");
+    }
+    for (const r of this.wsCmds.values()) r.el?.classList.remove("active");
+    this.dashTails.clear();
+    dash.setActive(true);
+    this.dashboardBtn.classList.add("open");
+    // Clears the rows' active markers and the strip; its ACTIVE tail paints
+    // the dashboard.
+    this.renderRail();
+  }
+
+  /** Back (or Escape): leave the dashboard for what it covered. */
+  closeDashboard(): void {
+    const prev = this.dashboardPrev;
+    if (!this.hideDashboard()) return;
+    if (prev && "termId" in prev && this.entries.has(prev.termId)) this.activate(prev.termId);
+    else if (prev && "pane" in prev) this.showRecordPane(prev.pane);
+  }
+
+  /** Take the dashboard off screen (something else is being shown). Answers
+   *  whether it was showing. */
+  private hideDashboard(): boolean {
+    if (!this.dashboard?.active) return false;
+    this.dashboard.setActive(false);
+    this.dashboardBtn.classList.remove("open");
+    this.dashboardPrev = null;
+    return true;
+  }
+
+  /** Repaint the dashboard from the current rows (nothing while closed). */
+  private renderDashboard(): void {
+    if (!this.dashboard?.active) return;
+    const groups = this.dashboardGroups();
+    this.dashboard.update(groups, this.now());
+    this.readDashboardTails(groups);
+  }
+
+  /** The cards, grouped: each open project in open order, then the
+   *  workspace. Records of projects that are not open are left out. */
+  private dashboardGroups(): DashGroupInput[] {
+    const byProject = new Map<number, CardInput[]>();
+    for (const id of this.openProjects.keys()) byProject.set(id, []);
+    const workspace: CardInput[] = [];
+    const place = (projectId: number | null, card: CardInput): void => {
+      if (projectId === null) workspace.push(card);
+      else byProject.get(projectId)?.push(card);
+    };
+    for (const state of this.openProjects.values()) {
+      for (const row of state.processRows.values()) {
+        place(state.id, {
+          key: `cmd:${state.id}:${row.name}`,
+          kind: "command",
+          name: row.name,
+          recordId: row.recordId,
+          lastRun: row.lastRun,
+          live: this.commandLive(row.status, row.exitCode, row.termId, row.bell, row.activity),
+          lastText: row.recordId ? this.dashTails.get(row.recordId) : null,
+        });
+      }
+    }
+    for (const row of this.wsCmds.values()) {
+      const entry = row.termId !== null ? this.entries.get(row.termId) : undefined;
+      place(null, {
+        key: `ws:${row.name}`,
+        kind: "command",
+        name: row.name,
+        recordId: row.recordId,
+        lastRun: row.lastRun,
+        live: this.commandLive(row.status, row.exitCode, row.termId, entry?.bell ?? false, entry?.activity ?? false),
+        lastText: row.recordId ? this.dashTails.get(row.recordId) : null,
+      });
+    }
+    for (const rec of this.records.values()) {
+      const termId = this.liveTermOf(rec.recordId);
+      const entry = termId !== null ? this.entries.get(termId) : undefined;
+      const { canResume, captures } = this.resumeFacts(rec);
+      place(rec.projectId, {
+        key: `rec:${rec.recordId}`,
+        kind: rec.kind,
+        name: entry ? this.entryLabel(entry) : rec.name,
+        recordId: rec.recordId,
+        lastRun: rec.lastRun,
+        canResume,
+        captures,
+        live: termId !== null && entry ? this.entryLive(termId, entry) : null,
+        lastText: (termId !== null ? this.lastText.get(termId) : undefined) ?? this.dashTails.get(rec.recordId) ?? null,
+      });
+    }
+    // Live rows without a record (an ephemeral agent): live facts only.
+    const wsTerms = new Set([...this.wsCmds.values()].map((r) => r.termId));
+    for (const [id, entry] of this.entries) {
+      if (entry.recordId || entry.kind === "process" || wsTerms.has(id)) continue;
+      place(entry.agent?.projectId ?? entry.projectShell?.projectId ?? null, {
+        key: `term:${id}`,
+        kind: entry.agent ? "agent" : "terminal",
+        name: this.entryLabel(entry),
+        recordId: null,
+        lastRun: null,
+        live: this.entryLive(id, entry),
+        lastText: this.lastText.get(id) ?? null,
+      });
+    }
+    const groups: DashGroupInput[] = [];
+    for (const [id, cards] of byProject) {
+      const project = this.projects.get(id);
+      groups.push({
+        key: `p:${id}`,
+        name: this.projectLabel(id),
+        badge: () => this.badgeFor(id),
+        badgeSig: `${project?.name ?? ""}\u001f${project?.initials ?? ""}\u001f${project?.color ?? ""}`,
+        cards,
+      });
+    }
+    groups.push({ key: "ws", name: "Workspace", badge: null, badgeSig: "", cards: workspace });
+    return groups;
+  }
+
+  /** An attached terminal's facts for its card. Attention as the rail
+   *  derives it: the typed waiting tier, else a bell or a bridge fault. */
+  private entryLive(termId: number, entry: RailEntry): CardLive {
+    return {
+      status: entry.status,
+      exitCode: entry.exitCode,
+      endedAtMs: entry.endedAtMs ?? null,
+      attention:
+        entry.attention === "agent-waiting" ? "agent-waiting" : entry.bell || bridgeFault(entry.agent) ? "badge" : null,
+      activity: entry.activity,
+      stats: this.stats.get(termId),
+      summary: entry.summary ?? null,
+    };
+  }
+
+  /** A command row's facts: its lifecycle status is the row's own (the
+   *  process events), the rest comes from its terminal while one is
+   *  attached. Null for a stopped command with no terminal. */
+  private commandLive(
+    status: RailStatus,
+    exitCode: number | null,
+    termId: number | null,
+    bell: boolean,
+    activity: boolean,
+  ): CardLive | null {
+    const entry = termId !== null ? this.entries.get(termId) : undefined;
+    if (!entry && !isLive(status)) return null;
+    return {
+      status,
+      exitCode,
+      endedAtMs: entry?.endedAtMs ?? null,
+      attention: bell ? "badge" : null,
+      activity,
+      stats: termId !== null ? this.stats.get(termId) : null,
+      summary: entry?.summary ?? null,
+    };
+  }
+
+  /** Read the newest stored run of every stopped card once per opening:
+   *  its head replaces a stale one on the row (the run that just ended),
+   *  and its last line fills a card that has no summary. A card seen live
+   *  is read again when it stops. */
+  private readDashboardTails(groups: DashGroupInput[]): void {
+    for (const group of groups) {
+      for (const card of group.cards) {
+        const id = card.recordId;
+        if (!id) continue;
+        if (card.live !== null && isLive(card.live.status as RailStatus)) {
+          this.dashTails.delete(id);
+          continue;
+        }
+        if (card.live !== null || this.dashTails.has(id) || this.dashTailReads.has(id)) continue;
+        this.dashTailReads.add(id);
+        void this.api
+          .getRecordRuns(id, 1)
+          .then((runs) => {
+            const run = runs?.[0];
+            const holder = this.runHolderOf(id);
+            // Only a row that is still stopped takes the stored head.
+            if (run && holder && !this.holderAttached(holder)) holder.lastRun = run;
+            this.dashTails.set(id, run ? tailLine(run) : null);
+          })
+          .catch(() => {
+            this.dashTails.set(id, null);
+          })
+          .finally(() => {
+            this.dashTailReads.delete(id);
+            this.renderDashboard();
+          });
+      }
+    }
+  }
+
+  /** Whether a run holder has a terminal attached in this window. */
+  private holderAttached(holder: RecordRow | ProcessRow | WorkspaceCommandRow): boolean {
+    return holder.termId !== null && this.entries.has(holder.termId);
+  }
+
+  /** A card's run history: the record's ledger, newest first. */
+  private async dashboardRuns(key: string): Promise<ipc.RunDto[] | null> {
+    const recordId = this.dashboardRecordId(key);
+    if (!recordId) return null;
+    return (await this.api.getRecordRuns(recordId)) ?? [];
+  }
+
+  /** The record behind a card key, when it has one. */
+  private dashboardRecordId(key: string): string | null {
+    const target = parseDashKey(key);
+    if (!target) return null;
+    if (target.kind === "rec") return target.recordId;
+    if (target.kind === "cmd") return this.rowFor(target.projectId, target.name)?.recordId ?? null;
+    if (target.kind === "ws") return this.wsCmds.get(target.name)?.recordId ?? null;
+    return null;
+  }
+
+  /** A card click: front its row — its terminal when one is attached, else
+   *  its record card — expanding its project the way an ACTIVE row does. */
+  private dashboardJump(key: string): void {
+    const target = parseDashKey(key);
+    if (!target) return;
+    if (target.kind === "cmd") {
+      this.expandProject(target.projectId);
+      this.activateProcess(target.projectId, target.name);
+    } else if (target.kind === "ws") {
+      const row = this.wsCmds.get(target.name);
+      if (!row) return;
+      if (row.termId !== null && this.entries.has(row.termId)) this.activate(row.termId);
+      else this.showRecordPane({ kind: "workspace-command", name: row.name });
+    } else if (target.kind === "rec") {
+      const rec = this.records.get(target.recordId);
+      if (!rec) return;
+      if (rec.projectId !== null && this.openProjects.has(rec.projectId)) this.expandProject(rec.projectId);
+      this.activateRecord(rec.recordId);
+    } else {
+      const entry = this.entries.get(target.termId);
+      if (!entry) return;
+      const project = entry.agent?.projectId ?? entry.projectShell?.projectId ?? null;
+      if (project !== null && this.openProjects.has(project)) this.expandProject(project);
+      this.activate(target.termId);
+    }
+  }
+
+  /** A card's hover action, through the handler the rail uses for that
+   *  row: the command start/stop/restart paths, `startRecordRow` (and its
+   *  resume) for records, the row × (with its confirm) to stop a terminal. */
+  private dashboardAction(key: string, action: CardActionId): void {
+    const target = parseDashKey(key);
+    if (!target) return;
+    if (target.kind === "cmd") {
+      const { projectId, name } = target;
+      if (action === "start" || action === "resume") void this.startProcess(projectId, name);
+      else if (action === "stop") void this.stopProcess(projectId, name);
+      else void this.restartProcess(projectId, name);
+    } else if (target.kind === "ws") {
+      if (action === "start" || action === "resume") void this.startWorkspace(target.name);
+      else if (action === "stop") void this.stopWorkspace(target.name);
+      else void this.restartWorkspace(target.name);
+    } else if (target.kind === "rec") {
+      const termId = this.liveTermOf(target.recordId);
+      if (action === "start") void this.startRecordRow(target.recordId);
+      else if (action === "resume") void this.startRecordRow(target.recordId, { resume: true });
+      else if (termId === null) return;
+      else if (action === "stop") void this.closePanel(termId);
+      else void this.restartAgent(target.recordId, termId);
+    } else if (action === "stop") {
+      void this.closePanel(target.termId);
+    }
   }
 
   /** Stop one process (idempotent: a non-running process stays put — the
@@ -5328,6 +5706,8 @@ export class App {
 
   /** In-place status refresh for one command row. */
   private updateWorkspaceRow(row: WorkspaceCommandRow): void {
+    // Every workspace-command change lands here; its dashboard card too.
+    this.renderDashboard();
     if (!row.el || !row.pill) return;
     row.pill.textContent = row.status;
     row.pill.className = `chappa-status-pill ${row.status}`;
@@ -5799,9 +6179,12 @@ export class App {
 
   /** Rebuild the ACTIVE section behind the activeSig guard (the
    *  projectTermsSig precedent — the hooks fire per event and most events
-   *  change nothing an ACTIVE row shows). Empty ⇒ the section hides
-   *  entirely. */
+   *  change nothing an ACTIVE row shows). Empty ⇒ an empty list under the
+   *  header. */
   private renderActiveSection(): void {
+    // The dashboard repaints on exactly the events ACTIVE does (it diffs per
+    // card, so a no-change pass is cheap; closed, it costs nothing).
+    this.renderDashboard();
     const rows = this.collectActiveRows();
     const multi = this.openProjects.size > 1;
     // "\u001f" (fields) / "\u001e" (rows) — the ESCAPE SEQUENCES, never literal control bytes
@@ -5827,11 +6210,6 @@ export class App {
     if (sig === this.activeSig) return;
     this.activeSig = sig;
     this.activeList.textContent = "";
-    if (rows.length === 0) {
-      this.activeSection.style.display = "none";
-      return;
-    }
-    this.activeSection.style.display = "block";
     this.activeCount.textContent = String(rows.length);
     for (const row of rows) {
       this.activeList.appendChild(this.buildActiveRow(row, multi));
@@ -7063,6 +7441,24 @@ export class App {
     if (rec.termId !== null && this.entries.has(rec.termId)) this.dropEntry(rec.termId, false);
     this.renderRail();
   }
+}
+
+/** What a dashboard card key names. A command name may contain `:`, so a
+ *  project command's name is everything after its project id. */
+type DashTarget =
+  | { kind: "cmd"; projectId: number; name: string }
+  | { kind: "ws"; name: string }
+  | { kind: "rec"; recordId: string }
+  | { kind: "term"; termId: number };
+
+function parseDashKey(key: string): DashTarget | null {
+  const cmd = /^cmd:(\d+):([\s\S]*)$/.exec(key);
+  if (cmd) return { kind: "cmd", projectId: Number(cmd[1]), name: cmd[2] };
+  if (key.startsWith("ws:")) return { kind: "ws", name: key.slice(3) };
+  if (key.startsWith("rec:")) return { kind: "rec", recordId: key.slice(4) };
+  const term = /^term:(\d+)$/.exec(key);
+  if (term) return { kind: "term", termId: Number(term[1]) };
+  return null;
 }
 
 /** The editor's initial form from a row. */

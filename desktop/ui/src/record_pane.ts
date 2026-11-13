@@ -224,6 +224,15 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
   };
 }
 
+/** A last run in one line: `exit 1 · ran 3m 12s · ended 2 min ago` (the
+ *  duration and the age drop out while the run has no end). */
+export function lastRunText(run: LastRunView): string {
+  const parts = [run.outcome];
+  if (run.duration) parts.push(`ran ${run.duration}`);
+  if (run.ended) parts.push(`ended ${run.ended}`);
+  return parts.join(" · ");
+}
+
 /** The frozen strip's words: `exited · code 1 · 2 min ago`. The code is
  *  left out when none was observed, the age when the end time is unknown. */
 export function frozenStripText(
@@ -414,10 +423,7 @@ export class RecordPane {
     this.run.textContent = "";
     this.run.title = "";
     if (!run) return;
-    const parts = ["last run", run.outcome];
-    if (run.duration) parts.push(`ran ${run.duration}`);
-    if (run.ended) parts.push(`ended ${run.ended}`);
-    this.run.textContent = parts.join(" · ");
+    this.run.textContent = `last run · ${lastRunText(run)}`;
     if (run.endedTitle) this.run.title = run.endedTitle;
   }
 
