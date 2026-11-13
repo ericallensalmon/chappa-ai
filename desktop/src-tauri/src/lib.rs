@@ -287,6 +287,12 @@ pub fn run() {
         agents::get_agent_events,
         coordination::list_scratchpads,
         coordination::read_scratchpad,
+        workspace::list_workspace_commands,
+        workspace::save_workspace_command,
+        workspace::delete_workspace_command,
+        workspace::start_workspace_command,
+        workspace::stop_workspace_command,
+        workspace::restart_workspace_command,
     ]);
 
     let app = builder
