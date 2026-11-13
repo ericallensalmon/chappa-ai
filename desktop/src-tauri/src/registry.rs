@@ -1531,12 +1531,28 @@ fn push(
         seq,
         data,
     };
-    sink.emit_json(event.clone());
+    let recorded = ring_copy(&event);
+    sink.emit_json(event);
     if let Ok(mut inner) = registry.lock() {
         if let Some(entry) = inner.entries.get_mut(&term_id) {
-            entry.events.push(event);
+            entry.events.push(recorded);
         }
     }
+}
+
+/// The copy of `event` the debug ring keeps. An OSC 52 store carries
+/// whatever a program put on the clipboard (often a password or token), and
+/// the ring is readable over the debug server, so it records the size only;
+/// the frontend still gets the full text.
+fn ring_copy(event: &JsonEvent) -> JsonEvent {
+    let mut recorded = event.clone();
+    if event.event == "term://clipboard" {
+        if let Some(text) = recorded.data.remove("text") {
+            let bytes = text.as_str().map_or(0, str::len);
+            recorded.data.insert("bytes".into(), json!(bytes));
+        }
+    }
+    recorded
 }
 
 /// The ONE `Entry` → rail-row conversion, shared by [`Registry::list`] and the
@@ -1611,4 +1627,45 @@ fn json_map(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serd
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(kind: &'static str, data: serde_json::Map<String, serde_json::Value>) -> JsonEvent {
+        JsonEvent {
+            event: kind,
+            term_id: 1,
+            seq: 7,
+            data,
+        }
+    }
+
+    #[test]
+    fn debug_ring_keeps_only_the_size_of_a_clipboard_store() {
+        let store = event(
+            "term://clipboard",
+            json_map(&[("text", json!("copied words"))]),
+        );
+        let recorded = ring_copy(&store);
+        assert_eq!(recorded.event, "term://clipboard");
+        assert_eq!((recorded.term_id, recorded.seq), (1, 7));
+        assert!(
+            recorded.data.get("text").is_none(),
+            "clipboard text stays out of the ring"
+        );
+        assert_eq!(recorded.data.get("bytes"), Some(&json!(12)));
+        assert_eq!(
+            store.data.get("text"),
+            Some(&json!("copied words")),
+            "the sink's copy keeps the text"
+        );
+    }
+
+    #[test]
+    fn debug_ring_keeps_other_events_whole() {
+        let title = event("term://title", json_map(&[("title", json!("build"))]));
+        assert_eq!(ring_copy(&title).data, title.data);
+    }
 }
