@@ -290,6 +290,16 @@ export interface ContainerStateDto {
   uptime_s: number | null;
   mem_bytes?: number;
   mem_limit_bytes?: number;
+  /** The container's mounts as the probe last read them, for mapping the
+   *  paths an agent prints back to the host. A mount with an empty `source`
+   *  has no host side (a named volume, a tmpfs). Absent = never read. */
+  mounts?: MountDto[];
+}
+
+/** One container mount: `destination` inside, `source` on the host. */
+export interface MountDto {
+  source: string;
+  destination: string;
 }
 
 export type AgentBridge = "ok" | "container-down" | "stale";
@@ -706,6 +716,11 @@ export interface SettingsDto {
    *  ("allow"). Frontend-only consumer (clipboard_gate.ts); any other value
    *  loads as "ask". */
   clipboardWrites: ClipboardWritesMode;
+  /** How a ctrl+clicked file path opens: a command template with `{path}`,
+   *  `{line}` and `{col}` placeholders (`code --goto {path}:{line}:{col}`),
+   *  split into words before the path is substituted and run without a
+   *  shell. Empty (the default) = the OS default handler. */
+  editorCommand: string;
 }
 
 export type ClipboardWritesMode = "off" | "ask" | "allow";
@@ -718,6 +733,31 @@ export function getSettings(): Promise<SettingsDto> {
  *  always adopt the RETURNED value, never the value you sent. */
 export function setSettings(settings: SettingsDto): Promise<SettingsDto> {
   return call<SettingsDto>("set_settings", { settings });
+}
+
+// --- opening file paths -------------------------------------------
+
+/** `resolve_path`'s answer: the absolute path and what is there. */
+export interface ResolvedPathDto {
+  path: string;
+  exists: boolean;
+  kind: "file" | "dir" | null;
+}
+
+/** The user's home directory (null when the OS reports none). */
+export function homeDir(): Promise<string | null> {
+  return call("home_dir");
+}
+
+/** Click-time existence check; `base` joins a relative `text`. */
+export function resolvePath(base: string | null, text: string): Promise<ResolvedPathDto> {
+  return call("resolve_path", { base, text });
+}
+
+/** Open a file in the configured editor at `line`/`col` (a directory opens
+ *  in the file manager). Rejects with the reason it could not. */
+export function openInEditor(path: string, line?: number, col?: number): Promise<void> {
+  return call("open_in_editor", { path, line: line ?? null, col: col ?? null });
 }
 
 // --- projects / chappa.yml, continued -----------------------------

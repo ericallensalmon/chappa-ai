@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use app_lib::agent_tools::{AgentTool, AgentToolsState, Runtime, ToolType};
 use app_lib::agents::{
     reap_orphans, AgentMeta, Bridge, CloseVerification, FakeDocker, NsPid, SpawnAgentRequest,
-    SpawnContext, ORPHAN_SCAN_SCRIPT,
+    SpawnContext, INSPECT_FORMAT, ORPHAN_SCAN_SCRIPT,
 };
 use app_lib::control_http::{self, ControlState};
 use app_lib::projects::Projects;
@@ -943,11 +943,11 @@ fn sweep_reaps_orphans_one_scan_per_container_and_skips_a_down_one() {
     // dev-worker is running; down-box is exited — a down container is skipped
     // without a scan.
     docker.ok(
-        &["inspect", "-f", "{{.State.Status}} {{.State.StartedAt}}", "dev-worker"],
+        &["inspect", "-f", INSPECT_FORMAT, "dev-worker"],
         "running 2026-01-01T00:00:00Z",
     );
     docker.ok(
-        &["inspect", "-f", "{{.State.Status}} {{.State.StartedAt}}", "down-box"],
+        &["inspect", "-f", INSPECT_FORMAT, "down-box"],
         "exited 2026-01-01T00:00:00Z",
     );
     let registry = Registry::with_docker(docker.clone());

@@ -104,7 +104,25 @@ export function defaultSettings(): Settings {
     // unseen, but tools that use OSC 52 on purpose keep working after one
     // confirmation (matches `project_model`).
     clipboardWrites: "ask",
+    // Empty = the OS default handler (matches `project_model`).
+    editorCommand: "",
   };
+}
+
+/** The editor picker's presets. A UI convenience only: choosing one fills
+ *  the template field, and the stored value is always the template string.
+ *  Each command-line launcher accepts `path:line:col`. */
+export const EDITOR_PRESETS: ReadonlyArray<{ label: string; template: string }> = [
+  { label: "VS Code", template: "code --goto {path}:{line}:{col}" },
+  { label: "Cursor", template: "cursor --goto {path}:{line}:{col}" },
+  { label: "Zed", template: "zed {path}:{line}:{col}" },
+  { label: "Sublime Text", template: "subl {path}:{line}:{col}" },
+];
+
+/** A template as stored: trimmed, and anything but a string is empty (the
+ *  OS default). */
+export function clampEditorCommand(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
 }
 
 /** The three clipboard-write modes, in picker order. */
@@ -228,6 +246,7 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     // default, mirroring the ctrl-v/ctrl-c deliberate-upgrade shape.
     agentReapOrphans: s.agentReapOrphans !== false,
     clipboardWrites: clampClipboardWrites(s.clipboardWrites),
+    editorCommand: clampEditorCommand(s.editorCommand),
   };
 }
 

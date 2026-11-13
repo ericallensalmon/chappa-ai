@@ -15,8 +15,9 @@ export interface PathRun {
   col?: number;
 }
 
-/** One container bind mount: `destination` (in-container) is backed by
- *  `source` (on the host). */
+/** One container mount: `destination` (in-container) is backed by `source`
+ *  (on the host). An empty `source` is a mount with no host side (a named
+ *  volume, a tmpfs): paths under it stay inside the container. */
 export interface Mount {
   source: string;
   destination: string;
@@ -213,7 +214,9 @@ export function hostMountSource(source: string): string {
 }
 
 /** A container path mapped to the host through the longest matching mount
- *  destination; null when no mount covers it. */
+ *  destination; null when no mount covers it, or when the one that does has
+ *  no host side (a volume nested inside a bind must not fall through to the
+ *  bind's host directory). */
 export function mapThroughMounts(path: string, mounts: Mount[]): string | null {
   let best: Mount | null = null;
   for (const m of mounts) {
@@ -221,7 +224,7 @@ export function mapThroughMounts(path: string, mounts: Mount[]): string | null {
     const covers = path === dest || path.startsWith(dest === "/" ? "/" : `${dest}/`);
     if (covers && (best === null || dest.length > best.destination.length)) best = { source: m.source, destination: dest };
   }
-  if (!best) return null;
+  if (!best || best.source === "") return null;
   const host = hostMountSource(best.source);
   const rest = path.slice(best.destination.length).replace(/^\/+/, "");
   return rest === "" ? host : joinPath(host, rest);

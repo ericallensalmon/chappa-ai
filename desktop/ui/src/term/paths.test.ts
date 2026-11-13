@@ -600,3 +600,63 @@ describe("panel path links", () => {
     panel.dispose();
   });
 });
+
+describe("click-time opening hooks", () => {
+  it("a mount with no host side keeps its paths inside the container", () => {
+    const mounts = [
+      { source: "/home/dev/proj", destination: "/workspace/proj" },
+      { source: "", destination: "/workspace/proj/node_modules" },
+    ];
+    expect(mapThroughMounts("/workspace/proj/node_modules/x/index.js", mounts)).toBeNull();
+    expect(mapThroughMounts("/workspace/proj/src/a.ts", mounts)).toBe("/home/dev/proj/src/a.ts");
+  });
+
+  it("the opener's returned message is flashed on the panel", async () => {
+    const { container, panel, viewport } = await show(
+      { 1: "  --> src/gone.rs:3:1" },
+      { openPath: () => Promise.resolve("not found: /home/dev/proj/src/gone.rs") },
+    );
+    viewport.dispatchEvent(ctrlDown(8, 1));
+    await FLUSH_PROMISE();
+    const flash = container.querySelector<HTMLDivElement>(".chappa-link-flash")!;
+    expect(flash.style.display).toBe("block");
+    expect(flash.textContent).toBe("not found: /home/dev/proj/src/gone.rs");
+    panel.dispose();
+  });
+
+  it("a rejected open flashes its reason, a successful one flashes nothing", async () => {
+    const failing = await show({ 1: "  --> src/main.rs:12:5" }, { openPath: () => Promise.reject("cannot start code") });
+    failing.viewport.dispatchEvent(ctrlDown(8, 1));
+    await FLUSH_PROMISE();
+    expect(failing.container.querySelector<HTMLDivElement>(".chappa-link-flash")!.textContent).toBe("cannot start code");
+    failing.panel.dispose();
+
+    const fine = await show({ 1: "  --> src/main.rs:12:5" }, { openPath: () => Promise.resolve(null) });
+    fine.viewport.dispatchEvent(ctrlDown(8, 1));
+    await FLUSH_PROMISE();
+    expect(fine.container.querySelector<HTMLDivElement>(".chappa-link-flash")!.style.display).not.toBe("block");
+    fine.panel.dispose();
+  });
+
+  it("setPathBase switches a container panel from unmapped to mapped paths", async () => {
+    const { container, panel, viewport, paths } = await show(
+      { 0: "/workspace/proj/src/a.rs:4 error" },
+      { pathBase: { dir: "/workspace/proj", home: null, mounts: [] } },
+    );
+    viewport.dispatchEvent(ctrlDown(3, 0));
+    await FLUSH_PROMISE();
+    expect(paths).toEqual([]);
+    expect(container.querySelector<HTMLDivElement>(".chappa-link-flash")!.textContent).toBe(
+      "inside container: /workspace/proj/src/a.rs",
+    );
+    panel.setPathBase({
+      dir: "/workspace/proj",
+      home: null,
+      mounts: [{ source: "/run/desktop/mnt/host/c/code/proj", destination: "/workspace/proj" }],
+    });
+    viewport.dispatchEvent(ctrlDown(3, 0));
+    await FLUSH_PROMISE();
+    expect(paths).toEqual([{ path: "C:\\code\\proj\\src\\a.rs", line: 4 }]);
+    panel.dispose();
+  });
+});

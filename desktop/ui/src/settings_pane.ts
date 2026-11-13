@@ -8,7 +8,7 @@
 // scrolling page the close control disappeared as soon as a long tab was
 // scrolled, and reaching for it closed the window instead.
 //
-// Tabs: Terminal (behavior, appearance, shell profiles), Agents (the tool
+// Tabs: Terminal (behavior, opening files, appearance, shell profiles), Agents (the tool
 // registry and the agent knobs), Timers (the idle-timer knobs). Only tabs
 // with content exist; the last tab used is remembered.
 //
@@ -34,6 +34,7 @@ import {
   BUILTIN_EXEC_PROFILES,
   CLIPBOARD_WRITES_MODES,
   BUNDLED_FONTS,
+  EDITOR_PRESETS,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   LINE_HEIGHTS,
@@ -95,6 +96,11 @@ const STEP_BTN_CSS =
 const STEP_VALUE_CSS =
   "min-width:46px;text-align:center;font:12px ui-monospace,monospace;color:#d6d8dc;";
 const PROFILE_ROW_CSS = "display:flex;align-items:center;gap:6px;padding:4px 0;";
+/** Editor picker option values: the empty template, `preset:<index>` into
+ *  EDITOR_PRESETS, and Custom. */
+const EDITOR_DEFAULT = "default";
+const EDITOR_PRESET = "preset:";
+const EDITOR_CUSTOM = "custom";
 
 /** localStorage, or null where there is none or where touching it throws. */
 function safeStorage(): Storage | null {
@@ -173,6 +179,13 @@ export class SettingsPane {
   private readonly fontSizeDown: HTMLButtonElement;
   private readonly fontSizeUp: HTMLButtonElement;
   private readonly familySelect: HTMLSelectElement;
+  /** The editor picker (System default / a preset / Custom) and the one
+   *  template field it fills. */
+  private readonly editorSelect: HTMLSelectElement;
+  private readonly editorTemplate: HTMLInputElement;
+  /** Custom was picked: the picker keeps showing it even while the field
+   *  still holds a preset's template (the user is about to edit it). */
+  private editorCustom = false;
   private readonly execSelect: HTMLSelectElement;
   private readonly profileList: HTMLDivElement;
   private readonly addName: HTMLInputElement;
@@ -344,6 +357,54 @@ export class SettingsPane {
       ),
     );
 
+    const opening = settingsSection(
+      "Opening files",
+      "Ctrl+click (Cmd+click on macOS) a file path in terminal or agent output to open it at the line it names. " +
+        "A folder opens in the file manager.",
+    );
+    this.editorSelect = document.createElement("select");
+    this.editorSelect.style.cssText = SELECT_CSS;
+    this.editorSelect.dataset.setting = "editorPreset";
+    const editorOptions: Array<[string, string]> = [
+      [EDITOR_DEFAULT, "System default"],
+      ...EDITOR_PRESETS.map((p, i): [string, string] => [`${EDITOR_PRESET}${i}`, p.label]),
+      [EDITOR_CUSTOM, "Custom…"],
+    ];
+    for (const [value, label] of editorOptions) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      this.editorSelect.appendChild(opt);
+    }
+    this.editorSelect.addEventListener("change", () => this.pickEditor(this.editorSelect.value));
+    opening.card.appendChild(
+      settingsRow(
+        "Editor",
+        this.editorSelect,
+        "System default hands the file to the program your OS opens it with, without the line number, " +
+          "and refuses files it would run instead of open.",
+      ),
+    );
+    this.editorTemplate = document.createElement("input");
+    this.editorTemplate.type = "text";
+    this.editorTemplate.spellcheck = false;
+    this.editorTemplate.placeholder = "System default";
+    this.editorTemplate.style.cssText = `${INPUT_CSS}width:280px;`;
+    this.editorTemplate.dataset.setting = "editorCommand";
+    // Commit on `change` (blur/Enter): one settings write per edit, not per
+    // keystroke.
+    this.editorTemplate.addEventListener("change", () => {
+      void this.store.update({ editorCommand: this.editorTemplate.value.trim() });
+    });
+    opening.card.appendChild(
+      settingsRow(
+        "Editor command",
+        this.editorTemplate,
+        "{path}, {line} and {col} are filled in per click; {line} and {col} are 1 when the output named no " +
+          "location. The command runs directly, not through a shell, and the path is always passed as one argument.",
+      ),
+    );
+
     const appearance = settingsSection("Appearance", "The terminal face. The rest of the app uses the system font.");
     this.familySelect = document.createElement("select");
     this.familySelect.style.cssText = SELECT_CSS;
@@ -415,7 +476,7 @@ export class SettingsPane {
     shells.card.appendChild(
       settingsRow("Default execution profile", this.execSelect, "The shell that runs chappa.yml command lines."),
     );
-    terminal.append(behavior.element, appearance.element, shells.element);
+    terminal.append(behavior.element, opening.element, appearance.element, shells.element);
 
     // --- Projects tab ----------------------------------------------------------
     if (opts.projects) {
@@ -554,6 +615,7 @@ export class SettingsPane {
     this.fontSizeDown.disabled = s.fontSize <= FONT_SIZE_MIN;
     this.fontSizeUp.disabled = s.fontSize >= FONT_SIZE_MAX;
     this.familySelect.value = s.fontFamily;
+    this.syncEditor(s.editorCommand);
     this.syncProfiles(s.shellProfiles);
     this.syncExecProfiles(s);
   }
@@ -598,6 +660,35 @@ export class SettingsPane {
       void this.store.update({ fontSize: next });
     });
     return btn;
+  }
+
+  // --- opening files -------------------------------------------------------
+
+  /** The picker shows the preset whose template is stored, System default
+   *  for an empty template, and Custom for anything else (or once Custom was
+   *  picked). The field is left alone while it is being edited. */
+  private syncEditor(template: string): void {
+    if (document.activeElement !== this.editorTemplate) this.editorTemplate.value = template;
+    const preset = EDITOR_PRESETS.findIndex((p) => p.template === template);
+    if (this.editorCustom) this.editorSelect.value = EDITOR_CUSTOM;
+    else if (template === "") this.editorSelect.value = EDITOR_DEFAULT;
+    else if (preset >= 0) this.editorSelect.value = `${EDITOR_PRESET}${preset}`;
+    else this.editorSelect.value = EDITOR_CUSTOM;
+  }
+
+  /** A picker choice: System default and the presets store their template
+   *  at once; Custom keeps the current template and hands focus to the field. */
+  private pickEditor(choice: string): void {
+    if (choice === EDITOR_CUSTOM) {
+      this.editorCustom = true;
+      this.editorTemplate.focus();
+      return;
+    }
+    this.editorCustom = false;
+    const template =
+      choice === EDITOR_DEFAULT ? "" : (EDITOR_PRESETS[Number(choice.slice(EDITOR_PRESET.length))]?.template ?? "");
+    this.editorTemplate.value = template;
+    void this.store.update({ editorCommand: template });
   }
 
   // --- shell profiles ------------------------------------------------------

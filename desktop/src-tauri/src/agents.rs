@@ -32,6 +32,7 @@ use crate::agent_json::{
     TURN_RECEIPT_WAIT_DEFAULT_MS, TURN_RECEIPT_WAIT_MAX_MS,
 };
 use crate::agent_tools::{docker_exec_prefix, AgentTool, EnvFlags, AgentToolsState, Runtime, ToolType, Transport};
+use crate::open_path::{parse_mounts, Mount};
 use crate::projects::Projects;
 use crate::registry::{
     emit_created, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, JsonEvent,
@@ -324,6 +325,10 @@ pub struct ContainerState {
     pub mem_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_limit_bytes: Option<u64>,
+    /// The container's mounts, so the paths an agent prints inside it can
+    /// be mapped back to the host. Empty when unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<Mount>,
 }
 
 impl ContainerState {
@@ -334,6 +339,7 @@ impl ContainerState {
             uptime_s: None,
             mem_bytes: None,
             mem_limit_bytes: None,
+            mounts: Vec::new(),
         }
     }
 }
@@ -894,12 +900,16 @@ pub fn stale_candidate(last_output_ms: Option<u64>, now_ms: u64, stale_after_ms:
     last_output_ms.is_some_and(|last| now_ms.saturating_sub(last) >= stale_after_ms)
 }
 
-/// `docker inspect -f '{{.State.Status}} {{.State.StartedAt}}' C` → state.
+/// The probe's `docker inspect` format: status, start time, then the mounts
+/// as JSON (which runs to the end of the line and may contain spaces).
+pub const INSPECT_FORMAT: &str = "{{.State.Status}} {{.State.StartedAt}} {{json .Mounts}}";
+
+/// `docker inspect -f INSPECT_FORMAT C` → state.
 pub fn inspect_container(docker: &dyn DockerCli, container: &str) -> ContainerState {
     let args: Vec<String> = vec![
         "inspect".into(),
         "-f".into(),
-        "{{.State.Status}} {{.State.StartedAt}}".into(),
+        INSPECT_FORMAT.into(),
         container.into(),
     ];
     match docker.run(&args, DOCKER_CALL_TIMEOUT) {
@@ -910,6 +920,7 @@ pub fn inspect_container(docker: &dyn DockerCli, container: &str) -> ContainerSt
             uptime_s: None,
             mem_bytes: None,
             mem_limit_bytes: None,
+            mounts: Vec::new(),
         },
         _ => ContainerState::unknown(),
     }
@@ -927,6 +938,14 @@ pub fn parse_inspect(stdout: &str, now_ms: u64) -> ContainerState {
         None => ContainerStatus::Unknown,
     };
     let started_at = words.next().map(str::to_owned);
+    // The rest of the line is the mounts JSON; re-split on the original text
+    // so spaces inside it survive.
+    let mounts = stdout
+        .trim_start()
+        .splitn(3, char::is_whitespace)
+        .nth(2)
+        .map(parse_mounts)
+        .unwrap_or_default();
     let started_ms = started_at.as_deref().and_then(parse_rfc3339_ms);
     ContainerState {
         status,
@@ -937,6 +956,7 @@ pub fn parse_inspect(stdout: &str, now_ms: u64) -> ContainerState {
         started_at,
         mem_bytes: None,
         mem_limit_bytes: None,
+        mounts,
     }
 }
 
@@ -2318,6 +2338,25 @@ mod tests {
         assert!(stale_candidate(Some(0), 900_000, 900_000));
         // Container down wins over stale.
         assert_eq!(derive_bridge(BridgeInputs { container_status: ContainerStatus::Exited, ..quiet }), Bridge::ContainerDown);
+    }
+
+    #[test]
+    fn inspect_line_carries_the_mounts() {
+        let line = "running 2026-08-28T10:00:00Z [{\"Type\":\"bind\",\"Source\":\"C:\\\\code\\\\my app\",\
+                    \"Destination\":\"/workspace/app\",\"Mode\":\"\",\"RW\":true,\"Propagation\":\"rprivate\"}]\n";
+        let s = parse_inspect(line, 0);
+        assert_eq!(s.status, ContainerStatus::Running);
+        assert_eq!(s.started_at.as_deref(), Some("2026-08-28T10:00:00Z"));
+        assert_eq!(
+            s.mounts,
+            vec![Mount { source: r"C:\code\my app".into(), destination: "/workspace/app".into() }]
+        );
+        // The wire omits an empty list and keeps a known one.
+        assert!(serde_json::to_value(ContainerState::unknown()).unwrap().get("mounts").is_none());
+        assert_eq!(serde_json::to_value(&s).unwrap()["mounts"][0]["destination"], "/workspace/app");
+        // A line without the mounts field (or with garbage there) has none.
+        assert!(parse_inspect("running 2026-08-28T10:00:00Z", 0).mounts.is_empty());
+        assert!(parse_inspect("running 2026-08-28T10:00:00Z <no value>", 0).mounts.is_empty());
     }
 
     #[test]

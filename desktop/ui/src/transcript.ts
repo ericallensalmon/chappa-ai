@@ -23,7 +23,7 @@
 // through the same seq guard, so a replayed + live duplicate renders once.
 
 import type * as ipc from "./ipc";
-import type { OpenPathTarget, PanelHost, TerminalApi } from "./term/panel";
+import type { OpenPathHandler, OpenPathTarget, PanelHost, TerminalApi } from "./term/panel";
 import { linkifyPaths, PATH_LINK_CLASS, type PathBase } from "./term/paths";
 
 export interface TranscriptPanelOptions {
@@ -41,8 +41,10 @@ export interface TranscriptPanelOptions {
    *  `baseFor`). Absent = paths resolve as printed. */
   pathBase?: PathBase | null;
   /** Open a file path the agent named (ctrl/cmd+click). A container path
-   *  no mount maps is never passed: it has nothing to open on the host. */
-  openPath?: (target: OpenPathTarget) => void | Promise<void>;
+   *  no mount maps is never passed: it has nothing to open on the host. The
+   *  transcript has no flash surface, so a returned message is ignored: the
+   *  caller reports failures itself. */
+  openPath?: OpenPathHandler;
 }
 
 const ROOT_CSS =
@@ -355,6 +357,13 @@ export class TranscriptPanel implements PanelHost {
     }
     if (el) el.dataset.seq = String(e.seq);
     return el;
+  }
+
+  /** Re-point path resolution for blocks rendered from now on, e.g. once a
+   *  container agent's mounts are known. Blocks already on screen keep the
+   *  targets they were rendered with. */
+  setPathBase(base: PathBase | null): void {
+    this.opts.pathBase = base;
   }
 
   /** `text` with its file paths as ctrl+clickable anchors. */

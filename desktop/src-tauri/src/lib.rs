@@ -11,6 +11,7 @@ pub mod coordination_http;
 pub mod crash;
 #[cfg(debug_assertions)]
 pub mod debug_http;
+pub mod open_path;
 pub mod projects;
 pub mod registry;
 pub mod settings;
@@ -192,6 +193,9 @@ pub fn run() {
         commands::os_notify,
         settings::get_settings,
         settings::set_settings,
+        open_path::home_dir,
+        open_path::resolve_path,
+        open_path::open_in_editor,
         projects::list_projects,
         projects::add_project,
         projects::rename_project,
@@ -252,6 +256,9 @@ pub fn run() {
         commands::os_notify,
         settings::get_settings,
         settings::set_settings,
+        open_path::home_dir,
+        open_path::resolve_path,
+        open_path::open_in_editor,
         projects::list_projects,
         projects::add_project,
         projects::rename_project,

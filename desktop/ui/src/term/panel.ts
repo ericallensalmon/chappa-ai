@@ -224,6 +224,8 @@ export interface PanelHost {
   readonly glLive: boolean;
   releaseGlContext(): void;
   restoreGlContext(): void;
+  /** Re-point file-path resolution (a container agent's mounts arrived). */
+  setPathBase(base: PathBase | null): void;
   dispose(closeTerminal?: boolean): void;
 }
 
@@ -277,9 +279,15 @@ export interface TerminalPanelOptions {
   pathBase?: PathBase | null;
   /** Open a detected file path (ctrl/cmd+click) at its location. The target
    *  is already resolved against `pathBase`; existence is the callback's to
-   *  check. Absent = the panel flashes the resolved target instead. */
-  openPath?: (target: OpenPathTarget) => void | Promise<void>;
+   *  check. A returned (or rejected-with) message is flashed on the panel:
+   *  that is how `not found: <path>` reaches the user. Absent = the panel
+   *  flashes the resolved target instead. */
+  openPath?: OpenPathHandler;
 }
+
+/** The open callback. Resolves to null/undefined when the open went ahead,
+ *  or to the message the panel should flash when it did not. */
+export type OpenPathHandler = (target: OpenPathTarget) => void | string | null | Promise<void | string | null>;
 
 /** A file to open, with the location the output named (absent = none). */
 export interface OpenPathTarget {
@@ -874,8 +882,25 @@ export class TerminalPanel {
     const open: OpenPathTarget = { path: target.path };
     if (target.line !== undefined) open.line = target.line;
     if (target.col !== undefined) open.col = target.col;
-    if (this.opts.openPath) void this.opts.openPath(open);
-    else this.flash(`no file opener: ${describeTarget(target)}`);
+    const openPath = this.opts.openPath;
+    if (!openPath) {
+      this.flash(`no file opener: ${describeTarget(target)}`);
+      return;
+    }
+    void (async () => {
+      try {
+        const message = await openPath(open);
+        if (message) this.flash(message);
+      } catch (err) {
+        this.flash(err instanceof Error ? err.message : String(err));
+      }
+    })();
+  }
+
+  /** Re-point relative-path resolution, e.g. once a container agent's mounts
+   *  are known. Resolution happens per hover/click, so the next one uses it. */
+  setPathBase(base: PathBase | null): void {
+    this.opts.pathBase = base;
   }
 
   private updateLinkHover(ev: MouseEventDto): void {

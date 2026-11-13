@@ -5589,3 +5589,67 @@ describe("App OSC 52 clipboard writes — the event path", () => {
     panelDispose(app);
   });
 });
+
+// --- clickable file paths ---------------------------------------------------
+
+describe("App file opening", () => {
+  type PathInternals = {
+    entries: Map<number, RailEntry>;
+    applyBridge: (p: ipc.AgentBridgeEvent) => void;
+  };
+  /** The base a panel resolves against (what its hover and click use). */
+  const baseOf = (app: App, id: number): unknown =>
+    (((app as unknown as PathInternals).entries.get(id)!.panel as unknown) as { opts: { pathBase?: unknown } }).opts
+      .pathBase;
+
+  async function mounted(tools: ipc.AgentToolDto[] = []) {
+    const { api } = stubApi();
+    const store = new AgentToolsStore({
+      listAgentTools: vi.fn(async () => ({ tools, machine_mode_types: ["claude", "opencode"] as const })),
+      upsertAgentTool: vi.fn(async (t) => t),
+      deleteAgentTool: vi.fn(async () => {}),
+      parseAgentCommand: vi.fn(async () => ({ tool: emptyAgentTool(), docker_detected: false, warnings: [] })),
+    });
+    await store.load();
+    const files = {
+      homeDir: vi.fn(async () => "/home/dev"),
+      resolvePath: vi.fn(async (_base: string | null, text: string) => ({ path: text, exists: true, kind: "file" as const })),
+      openInEditor: vi.fn(async () => {}),
+    };
+    const root = document.createElement("div");
+    const app = new App({ root, api, settings: stubSettings().store, agentTools: store, confirm: async () => true, files });
+    await app.mount();
+    return { api, app, files };
+  }
+
+  it("asks for the home dir once at mount and gives shells it as their base", async () => {
+    const { app, files } = await mounted();
+    expect(files.homeDir).toHaveBeenCalledTimes(1);
+    await app.newShell();
+    const id = [...(app as unknown as PathInternals).entries.keys()][0];
+    expect(baseOf(app, id)).toEqual({ dir: "/home/dev", home: "/home/dev" });
+  });
+
+  it("a container agent maps through the mounts its spawn probe reported, and a bridge update re-points it", async () => {
+    const { api, app } = await mounted([dockerTool(3)]);
+    const mounts = [{ source: "/run/desktop/mnt/host/c/code/app", destination: "/workspace/app" }];
+    (api.spawnAgent as ReturnType<typeof vi.fn>).mockImplementation(async (req: ipc.SpawnAgentRequestDto) => {
+      const resp = fakeSpawnResponse(950, req);
+      return { ...resp, container: { ...resp.container!, mounts } };
+    });
+    const resp = await app.spawnAgent(3);
+    await FLUSH();
+    const id = resp!.term_id;
+    expect(baseOf(app, id)).toEqual({ dir: "/workspace/app", home: null, mounts });
+
+    const moved = [{ source: "/home/dev/other", destination: "/workspace/app" }];
+    (app as unknown as PathInternals).applyBridge({
+      event: "agent://bridge",
+      term_id: id,
+      id,
+      bridge: "ok",
+      container: { status: "running", started_at: null, uptime_s: null, mounts: moved },
+    });
+    expect(baseOf(app, id)).toEqual({ dir: "/workspace/app", home: null, mounts: moved });
+  });
+});

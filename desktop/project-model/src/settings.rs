@@ -256,6 +256,18 @@ impl<'de> Deserialize<'de> for ClipboardWrites {
     }
 }
 
+/// `editor_command` — how a ctrl+clicked file path opens: a command template
+/// with `{path}`, `{line}` and `{col}` placeholders, e.g.
+/// `code --goto {path}:{line}:{col}`. Default EMPTY = the OS default handler
+/// (line/col dropped). The app splits the template into words BEFORE
+/// substituting, so a path always lands inside one argument, and runs it
+/// without a shell. Stored trimmed; a non-string value (a hand edit) loads as
+/// empty instead of failing the whole parse.
+fn deserialize_editor_command<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().unwrap_or_default().to_owned())
+}
+
 /// The whole settings surface. `#[serde(default)]` at the container level is
 /// what makes a PARTIAL file fill per field: serde takes each missing field
 /// from `Settings::default()` instead of failing the parse.
@@ -306,6 +318,10 @@ pub struct Settings {
     /// FRONTEND-ONLY consumer — the prompt and the per-terminal memory live
     /// in the UI, which is the only layer that can ask the user.
     pub clipboard_writes: ClipboardWrites,
+    /// The file-open command template (empty = OS default handler).
+    /// Consumed Rust-side at click time, so there is no broadcast work.
+    #[serde(deserialize_with = "deserialize_editor_command")]
+    pub editor_command: String,
 }
 
 impl Default for Settings {
@@ -338,6 +354,7 @@ impl Default for Settings {
             ctrl_c_copy_only: default_ctrl_c_copy_only(),
             agent_reap_orphans: default_agent_reap_orphans(),
             clipboard_writes: ClipboardWrites::default(),
+            editor_command: String::new(),
         }
     }
 }
@@ -401,6 +418,10 @@ impl Settings {
         self.timer_retention_hours = self
             .timer_retention_hours
             .clamp(TIMER_RETENTION_HOURS_RANGE.0, TIMER_RETENTION_HOURS_RANGE.1);
+        let trimmed = self.editor_command.trim();
+        if trimmed.len() != self.editor_command.len() {
+            self.editor_command = trimmed.to_owned();
+        }
     }
 
     /// The profile named `name`, only when it is ENABLED (the spawn paths
@@ -894,6 +915,29 @@ mod tests {
     }
 
     #[test]
+    fn editor_command_defaults_empty_trims_and_survives_a_bad_value() {
+        assert_eq!(Settings::default().editor_command, "");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut store = SettingsStore::new(path.clone());
+        let mut next = store.get().clone();
+        next.editor_command = "  code --goto {path}:{line}:{col}\t\n".to_owned();
+        let stored = store.set(next).unwrap();
+        assert_eq!(stored.editor_command, "code --goto {path}:{line}:{col}");
+        assert_eq!(SettingsStore::new(path).get().editor_command, "code --goto {path}:{line}:{col}");
+
+        for raw in [
+            serde_json::json!({ "fontSize": 16, "editorCommand": 7 }),
+            serde_json::json!({ "fontSize": 16, "editorCommand": null }),
+            serde_json::json!({ "fontSize": 16, "editorCommand": ["code"] }),
+        ] {
+            let s: Settings = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(s.editor_command, "", "{raw}");
+            assert_eq!(s.font_size, 16, "a bad editorCommand must not reset other fields");
+        }
+    }
+
+    #[test]
     fn wire_shape_is_camel_case() {
         let json = serde_json::to_value(Settings::default()).unwrap();
         for key in [
@@ -911,6 +955,7 @@ mod tests {
             "ctrlCCopyOnly",
             "agentReapOrphans",
             "clipboardWrites",
+            "editorCommand",
         ] {
             assert!(json.get(key).is_some(), "missing wire key {key}");
         }

@@ -17,10 +17,11 @@
 // isAppShortcut owns them); this App performs the action from a window
 // listener, exactly like the HUD does for Ctrl+Shift+D.
 
-import { TerminalPanel, tauriApi, type PanelHost, type TerminalApi } from "./term/panel";
+import { TerminalPanel, tauriApi, type OpenPathTarget, type PanelHost, type TerminalApi } from "./term/panel";
 import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
-import { baseFor } from "./term/paths";
+import { baseFor, type Mount, type PathBase } from "./term/paths";
+import { openFileTarget, tauriFileOpener, type FileOpenerApi } from "./open_file";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
 import { projectBadge } from "./project_badge";
 import type { ProjectsSettingsApi } from "./projects_section";
@@ -544,6 +545,9 @@ export interface AppOptions {
   /** Clock for the notification center's timestamps. Date.now by
    *  default — injected here at the APP layer so tests pin time. */
   now?: () => number;
+  /** Ctrl+click file opening (home dir, existence check, editor launch).
+   *  Defaults to the Tauri commands. */
+  files?: FileOpenerApi;
 }
 
 const APP_CSS = `
@@ -1151,8 +1155,27 @@ export class App {
    *  its mem/subprocess tooltip. The hint bar's copy lives on the panel. */
   private readonly stats = new StatsStore();
 
+  /** Click-time file opening, and the home dir path bases expand `~` with
+   *  (null until `mount` has asked, or when the OS reports none). */
+  private readonly files: FileOpenerApi;
+  private home: string | null = null;
+
+  /** Ctrl+click on a file path in a terminal: the panel flashes the
+   *  returned message (a missing file, an editor that would not start). */
+  private readonly openPath = (target: OpenPathTarget): Promise<string | null> =>
+    openFileTarget(this.files, target);
+
+  /** The same for a transcript, which has no flash surface: a failure
+   *  becomes a toast instead. */
+  private readonly openPathToast = async (target: OpenPathTarget): Promise<null> => {
+    const message = await openFileTarget(this.files, target);
+    if (message) this.showToast(message);
+    return null;
+  };
+
   constructor(opts: AppOptions) {
     this.api = opts.api ?? tauriApi;
+    this.files = opts.files ?? tauriFileOpener;
     this.settings = opts.settings ?? settingsStore;
     this.agentTools = opts.agentTools ?? agentToolsStore;
     this.now = opts.now ?? Date.now;
@@ -1841,6 +1864,8 @@ export class App {
     // default font and re-measured a beat later would make ConPTY
     // reflow-repaint its first prompt row (the host-run bug).
     await this.startSettings();
+    // Before any panel exists: every path base is computed once, at spawn.
+    this.home = await this.files.homeDir().catch(() => null);
     await this.loadProjects();
     // After projects load, adopt every live terminal the app does
     // not already know (backend spawns that happened while the app was closed
@@ -1893,8 +1918,9 @@ export class App {
       active: false,
       pathBase: baseFor(
         projectId !== undefined ? { kind: "projectShell", projectRoot } : { kind: "workspaceShell", spawnCwd: cwd ?? null },
-        null,
+        this.home,
       ),
+      openPath: this.openPath,
       onCreated: (id) => this.onCreated(id, panel, host, profile ?? "shell", projectId),
     });
     try {
@@ -2066,6 +2092,7 @@ export class App {
       glLive: false,
       releaseGlContext: () => {},
       restoreGlContext: () => {},
+      setPathBase: () => {},
       dispose: () => {},
     };
   }
@@ -2085,6 +2112,7 @@ export class App {
       settings: this.settings,
       active: false,
       spawn: (onFrame, dims) => this.attachAdoptedChannel(id, onFrame, dims),
+      openPath: this.openPath,
     });
     try {
       await panel.start();
@@ -3351,6 +3379,13 @@ export class App {
         },
       });
       this.renderRail();
+      // The spawn's container probe carries the mounts: from here on the
+      // agent's container paths map to the host. Synchronous with `onCreated`,
+      // so a transcript renders its first block with them.
+      const mounts = (resp.container ?? resp.agent.container)?.mounts;
+      if (resp.agent.runtime.kind === "docker_exec" && mounts) {
+        panel.setPathBase(this.containerPathBase(resp.agent.runtime, mounts));
+      }
       // The spawn response's typed waiting fact goes through the SAME path
       // as a live `awaiting_input` event (ring + notify decision) — an
       // agent that was already waiting when we adopted it badges too.
@@ -3366,18 +3401,20 @@ export class App {
     // terminal — same host, same activation/focus discipline, no frames.
     // Container agents print container paths: they resolve inside the exec
     // workdir and reach the host only through mounts, which the tool
-    // definition does not carry — so none map yet.
+    // definition does not carry — none map until the spawn response's probe
+    // reports them (see `adopt`).
     const runtime = tool.runtime;
-    const pathBase = baseFor(
+    const pathBase =
       runtime.kind === "docker_exec"
-        ? { kind: "agent", projectRoot: null, spawnCwd: null, mounts: [], containerCwd: runtime.workdir ?? null }
-        : {
-            kind: "agent",
-            projectRoot: project !== undefined ? (this.projects.get(project)?.path ?? null) : null,
-            spawnCwd: null,
-          },
-      null,
-    );
+        ? this.containerPathBase(runtime, [])
+        : baseFor(
+            {
+              kind: "agent",
+              projectRoot: project !== undefined ? (this.projects.get(project)?.path ?? null) : null,
+              spawnCwd: null,
+            },
+            this.home,
+          );
     const panel: PanelHost =
       tool.transport === "json"
         ? new TranscriptPanel({
@@ -3392,6 +3429,7 @@ export class App {
             onCreated: (id) => adopt(id, panel),
             onSent: (id) => this.setAgentWaiting(id, false),
             pathBase,
+            openPath: this.openPathToast,
           })
         : new TerminalPanel({
             container: host,
@@ -3410,6 +3448,7 @@ export class App {
             },
             onCreated: (id) => adopt(id, panel),
             pathBase,
+            openPath: this.openPath,
           });
     try {
       await panel.start();
@@ -3505,7 +3544,20 @@ export class App {
       ...entry,
       agent: { ...entry.agent, bridge: p.bridge, container: p.container ?? entry.agent.container },
     });
+    // A container that came back may have been recreated with other mounts.
+    if (entry.agent.runtime.kind === "docker_exec" && p.container?.mounts) {
+      entry.panel.setPathBase(this.containerPathBase(entry.agent.runtime, p.container.mounts));
+    }
     this.renderRail();
+  }
+
+  /** Where a container agent's paths resolve: its exec workdir inside the
+   *  container, reaching the host through `mounts`. */
+  private containerPathBase(runtime: Extract<ipc.AgentRuntimeDto, { kind: "docker_exec" }>, mounts: Mount[]): PathBase {
+    return baseFor(
+      { kind: "agent", projectRoot: null, spawnCwd: null, mounts, containerCwd: runtime.workdir ?? null },
+      this.home,
+    );
   }
 
   /** `agent://reap` — a backend sweep reaped N orphaned marker
@@ -3923,8 +3975,9 @@ export class App {
             projectRoot: this.projects.get(row.projectId)?.path ?? null,
             workingDir: row.workingDir,
           },
-          null,
+          this.home,
         ),
+        openPath: this.openPath,
       });
       row.panel = panel;
       row.host = host;
@@ -4087,7 +4140,8 @@ export class App {
       settings: this.settings,
       active: false,
       spawn: (onFrame) => this.spawnWorkspaceChannel(name, onFrame),
-      pathBase: baseFor({ kind: "workspaceCommand", workingDir: row.workingDir, spawnCwd: null }, null),
+      pathBase: baseFor({ kind: "workspaceCommand", workingDir: row.workingDir, spawnCwd: null }, this.home),
+      openPath: this.openPath,
     });
     row.host = host;
     row.panel = panel;
