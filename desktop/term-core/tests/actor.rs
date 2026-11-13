@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use term_core::actor::{
     spawn_actor, spawn_actor_nopty, ActorConfig, Cell, CellFlags, CursorShape, FrameData,
-    FrameKind, Point, SearchNavDir, SelectionKind, SelectionOp, TermEvent,
+    FrameKind, Point, SearchNavDir, SelectionKind, SelectionOp, SessionSource, TermEvent,
 };
+use term_core::session::SessionMatcher;
 
 use term_core::color::Rgba;
 use term_core::pty::{ExitStatus, PtySpec};
@@ -1960,4 +1961,52 @@ fn poke_makes_an_idle_shell_talk() {
         assert_ne!(handle.io().output_bytes(), last, "poke produced no output from an idle shell");
     }
     handle.kill();
+}
+
+/// Wait for the next Session event, skipping other event kinds.
+fn next_session(rx: &Receiver<TermEvent>) -> (String, SessionSource) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(TermEvent::Session { id, source }) => return (id, source),
+            Ok(_) => continue,
+            Err(e) => panic!("no Session event: {e}"),
+        }
+    }
+}
+
+/// The two ways a child names its session reach the embedder as one event:
+/// the OSC announcement always, a matched line only when the spawn
+/// configured a recognizer — and every sighting is reported, in order, so
+/// the embedder can let the latest one win.
+#[test]
+fn session_ids_are_announced_or_matched_in_stream_order() {
+    // No matcher: the announcement alone is honoured.
+    let (handle, rx, _sink) = test_actor(40, 5);
+    handle.feed(b"Session ID: not-matched
+]777;session;ses_announced");
+    assert_eq!(next_session(&rx), ("ses_announced".to_owned(), SessionSource::Announced));
+    assert!(rx.try_iter().all(|e| !matches!(e, TermEvent::Session { .. })), "a plain line is not inspected");
+
+    // A matcher: the printed line is recognized even through colour codes and
+    // a split chunk; a later id (printed as the child exits) still arrives.
+    let (events, rx) = std::sync::mpsc::channel();
+    let cfg = ActorConfig {
+        session_matcher: Some(SessionMatcher::new(|line| {
+            line.strip_prefix("Session ID: ").map(|rest| rest.trim().to_owned())
+        })),
+        ..cfg(40, 5)
+    };
+    let (handle, _sink) = spawn_actor_nopty(cfg, events);
+    handle.feed(b"[1mSession ID: [0mses_");
+    handle.feed(b"first
+working...
+");
+    assert_eq!(next_session(&rx), ("ses_first".to_owned(), SessionSource::Matched));
+    handle.feed(b"Session ID: ses_final
+");
+    assert_eq!(next_session(&rx), ("ses_final".to_owned(), SessionSource::Matched));
+    handle.feed(b"]777;session;ses_said\\");
+    assert_eq!(next_session(&rx), ("ses_said".to_owned(), SessionSource::Announced));
 }

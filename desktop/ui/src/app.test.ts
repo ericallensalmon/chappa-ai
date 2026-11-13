@@ -203,6 +203,19 @@ function stubApi(): {
       statuses.set(id, "starting");
       return { record_id: recordId, kind: "agent" as const, term_id: id, run_uuid: `run-${id}`, pending: false };
     }),
+    resumeRecord: vi.fn(async (recordId: string, _frames: unknown, sessionId?: string) => {
+      const id = next++;
+      ids.push(id);
+      statuses.set(id, "starting");
+      return {
+        record_id: recordId,
+        kind: "agent" as const,
+        term_id: id,
+        run_uuid: `run-${id}`,
+        session_id: sessionId ?? "saved",
+        check: "quiet" as const,
+      };
+    }),
     removeRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "agent" as const, removed: true, runs_deleted: 0 })),
     updateAgentRecord: vi.fn(async (recordId: string): Promise<ipc.RecordDto> => ({ record_id: recordId, kind: "agent", name: "", project_id: null, status: "stopped", term_id: null, last_run: null })),
   };
@@ -230,6 +243,8 @@ function dockerTool(id = 3, over: Partial<ipc.AgentToolDto> = {}): ipc.AgentTool
     enabled: true,
     max_busy: null,
     transport: "tty",
+    resume_argv: ["-s", "{session_id}"],
+    session_capture: { kind: "json" },
     ...over,
   };
 }
@@ -657,6 +672,14 @@ function projectApi(over: {
     listRecords: vi.fn(async () => []),
     getRecordRuns: vi.fn(async () => []),
     startRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "terminal" as const, term_id: null, run_uuid: null, pending: false })),
+    resumeRecord: vi.fn(async (recordId: string) => ({
+      record_id: recordId,
+      kind: "agent" as const,
+      term_id: 1,
+      run_uuid: "run-resume",
+      session_id: "s",
+      check: "quiet" as const,
+    })),
     removeRecord: vi.fn(async (recordId: string) => ({ record_id: recordId, kind: "agent" as const, removed: true, runs_deleted: 0 })),
     updateAgentRecord: vi.fn(async (recordId: string): Promise<ipc.RecordDto> => ({ record_id: recordId, kind: "agent", name: "", project_id: null, status: "stopped", term_id: null, last_run: null })),
   };
@@ -5819,6 +5842,78 @@ describe("App record rows and the record pane", () => {
     ...root.querySelectorAll<HTMLElement>(".chappa-workspace-agent-list .chappa-rail-item"),
   ];
   const recordRows = (root: HTMLElement): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".chappa-record-row")];
+
+  /** An agent record whose last run saved a provider session. */
+  function resumableRecord(): ipc.RecordDto {
+    const base = agentRecord();
+    return {
+      ...base,
+      last_run: {
+        ...base.last_run!,
+        session: { provider: "claude", session_id: "abcd1234wxyz", captured_at_ms: 5, source: "json" },
+      },
+    };
+  }
+  const resumableTool = (): ipc.AgentToolDto =>
+    dockerTool(3, { tool_type: "claude", program: "claude", transport: "json", resume_argv: ["--resume", "{session_id}"] });
+
+  it("a saved session puts Resume first on the card; Resume continues it through resume_record, a refusal stays on the card", async () => {
+    const { api, root, app } = await mounted([resumableRecord()], { tools: [resumableTool()] });
+    recordRows(root)[0].click();
+    await FLUSH();
+    expect(root.querySelector(".chappa-record-session")?.textContent).toBe("Session saved · claude · …wxyz");
+    expect(root.querySelector<HTMLElement>(".chappa-record-session")?.title).toBe("abcd1234wxyz");
+    const labels = () => [...root.querySelectorAll<HTMLButtonElement>(".chappa-record-action")].map((b) => b.textContent);
+    expect(labels()).toEqual(["↻ Resume last session", "▶ Start new session"]);
+
+    // The provider refuses: the card says what it said, Start is still there,
+    // and nothing started a fresh session behind the user's back.
+    vi.mocked(api.resumeRecord).mockRejectedValueOnce({
+      kind: "resume_rejected",
+      record_id: "a1",
+      run_uuid: "r2",
+      term_id: 9,
+      exit_code: 1,
+      provider_text: "No conversation found with session ID: abcd1234wxyz",
+      message: "the provider rejected the resume",
+    });
+    root.querySelector<HTMLButtonElement>(".chappa-record-action[data-action=resume]")!.click();
+    await FLUSH();
+    await FLUSH();
+    expect(api.resumeRecord).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.resumeRecord).mock.calls[0][0]).toBe("a1");
+    expect(api.startRecord).not.toHaveBeenCalled();
+    expect(root.querySelector(".chappa-record-failure")?.textContent).toBe(
+      "Resume failed: No conversation found with session ID: abcd1234wxyz",
+    );
+    expect(labels()).toContain("▶ Start new session");
+
+    // Nothing saved after all: a plain start, no prompt replayed.
+    vi.mocked(api.resumeRecord).mockRejectedValueOnce({ kind: "no_session", record_id: "a1", message: "no saved session" });
+    root.querySelector<HTMLButtonElement>(".chappa-record-action[data-action=resume]")!.click();
+    await FLUSH();
+    await FLUSH();
+    expect(api.startRecord).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.startRecord).mock.calls[0][0]).toBe("a1");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a saved session resumes through resume_record and binds the new terminal to the row", async () => {
+    const { api, root, app } = await mounted([resumableRecord()], { tools: [resumableTool()] });
+    recordRows(root)[0].click();
+    await FLUSH();
+    root.querySelector<HTMLButtonElement>(".chappa-record-action[data-action=resume]")!.click();
+    await FLUSH();
+    await FLUSH();
+    expect(api.resumeRecord).toHaveBeenCalledTimes(1);
+    expect(api.startRecord).not.toHaveBeenCalled();
+    // One row, now live, bound to the record.
+    expect(wsAgentRows(root).length).toBe(1);
+    expect(recordRows(root).length).toBe(0);
+    panelDispose(app);
+    root.remove();
+  });
   const pane = (root: HTMLElement): HTMLElement => root.querySelector<HTMLElement>(".chappa-record-pane")!;
   const key = (el: HTMLElement, init: KeyboardEventInit): void => {
     el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
@@ -6302,6 +6397,20 @@ describe("App record rows and the record pane", () => {
       expect(wsAgentRows(root).length).toBe(0);
       expect(drive(app).entries.has(62)).toBe(false);
       expect(root.querySelector(".chappa-workspace-agents .chappa-subsection-count")?.textContent).toBe("0/0");
+      teardown(app, root);
+    });
+
+    it("a stopped record with a saved session lists Resume last session after Start and resumes through resume_record", async () => {
+      const { api, root, app } = await mounted([resumableRecord()], { tools: [resumableTool()] });
+      rightClick(recordRows(root)[0]);
+      expect(menuItems(root).slice(0, 3)).toEqual(["Start", "Resume last session (wxyz)", "---"]);
+      expect(item(root, "resume").disabled).toBe(false);
+      item(root, "resume").click();
+      await FLUSH();
+      await FLUSH();
+      expect(api.resumeRecord).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.resumeRecord).mock.calls[0][0]).toBe("a1");
+      expect(api.startRecord).not.toHaveBeenCalled();
       teardown(app, root);
     });
 

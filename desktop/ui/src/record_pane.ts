@@ -54,17 +54,23 @@ export interface PaneRun {
   started_at_ms: number;
   ended_at_ms?: number | null;
   exit_code?: number | null;
+  /** The provider session the run saved, when one was captured. */
+  session?: ipc.SessionDto | null;
 }
 
 export interface RecordPaneInput {
   kind: RecordPaneKind;
   name: string;
   lastRun: PaneRun | null;
+  /** The agent's tool has a way to continue a saved session. */
+  canResume?: boolean;
+  /** The agent's tool is set up to capture session ids at all. */
+  captures?: boolean;
 }
 
 /** One card action. Ordered: the first is the primary (S / Enter). */
 export interface RecordAction {
-  id: "start";
+  id: "start" | "resume";
   label: string;
 }
 
@@ -84,6 +90,26 @@ export interface RecordView {
   hint: string;
   actions: RecordAction[];
   lastRun: LastRunView | null;
+  /** Agents only: `Session saved · claude · …a1b2` or why resume is off. */
+  session: string | null;
+  /** The full session id, for the line's tooltip. */
+  sessionTitle: string | null;
+}
+
+/** The session line of an agent card. A saved id names the provider and
+ *  its last four characters; without one the card says resume is off, and
+ *  why when the tool was set up to capture. */
+export function sessionLine(run: PaneRun | null, captures: boolean): string {
+  const s = run?.session;
+  if (s) {
+    const from = s.resumed_from && s.resumed_from !== s.session_id ? ` (resumed from …${shortId(s.resumed_from)})` : "";
+    return `Session saved · ${s.provider} · …${shortId(s.session_id)}${from}`;
+  }
+  return captures ? "Resume unavailable (no session id seen)" : "Resume unavailable";
+}
+
+function shortId(id: string): string {
+  return id.length <= 4 ? id : id.slice(-4);
 }
 
 const GENERIC_TITLE: Record<RecordPaneKind, string> = {
@@ -141,11 +167,20 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
       endedTitle: end !== null ? new Date(end).toLocaleString() : null,
     };
   }
+  const actions: RecordAction[] = [];
+  // Resuming comes first: the primary key continues the conversation when
+  // one was saved and the tool can pick it up; a fresh start sends nothing.
+  if (input.kind === "agent" && run?.session && input.canResume) {
+    actions.push({ id: "resume", label: "↻ Resume last session" });
+  }
+  actions.push({ id: "start", label: startLabel(input.kind) });
   return {
     title: name ? `${name} is stopped` : GENERIC_TITLE[input.kind],
     hint: HINT[input.kind],
-    actions: [{ id: "start", label: startLabel(input.kind) }],
+    actions,
     lastRun,
+    session: input.kind === "agent" ? sessionLine(run, input.captures ?? false) : null,
+    sessionTitle: input.kind === "agent" && run?.session ? run.session.session_id : null,
   };
 }
 
@@ -173,6 +208,10 @@ export const RECORD_PANE_CSS = `
 .chappa-record-card{margin-top:18vh;display:flex;flex-direction:column;align-items:center;gap:8px;max-width:520px;}
 .chappa-record-title{font:600 15px system-ui,sans-serif;color:#d6d8dc;text-align:center;word-break:break-word;}
 .chappa-record-hint{font:13px system-ui,sans-serif;color:#8b949e;}
+.chappa-record-session{font:12px ui-monospace,monospace;color:#6b7280;}
+.chappa-record-session:empty{display:none;}
+.chappa-record-failure{font:13px system-ui,sans-serif;color:#f0883e;text-align:center;max-width:520px;word-break:break-word;}
+.chappa-record-failure:empty{display:none;}
 .chappa-record-actions{display:flex;flex-direction:column;align-items:stretch;gap:6px;margin-top:4px;}
 .chappa-record-action{padding:6px 14px;border:1px solid #262a31;border-radius:6px;background:#16181d;color:#d6d8dc;font:13px system-ui,sans-serif;cursor:pointer;}
 .chappa-record-action:hover{background:#1d232b;}
@@ -221,6 +260,8 @@ export class RecordPane {
   private readonly opts: RecordPaneOptions;
   private readonly title: HTMLElement;
   private readonly hint: HTMLElement;
+  private readonly session: HTMLElement;
+  private readonly failure: HTMLElement;
   private readonly actions: HTMLElement;
   private readonly run: HTMLElement;
   private readonly summary: HTMLElement;
@@ -240,6 +281,10 @@ export class RecordPane {
     this.title.className = "chappa-record-title";
     this.hint = document.createElement("div");
     this.hint.className = "chappa-record-hint";
+    this.session = document.createElement("div");
+    this.session.className = "chappa-record-session";
+    this.failure = document.createElement("div");
+    this.failure.className = "chappa-record-failure";
     this.actions = document.createElement("div");
     this.actions.className = "chappa-record-actions";
     const keys = document.createElement("div");
@@ -249,7 +294,7 @@ export class RecordPane {
     const newKeys = document.createElement("span");
     newKeys.append(keycap("Ctrl+T"));
     keys.append(label("Start"), startKeys, label("New agent"), newKeys);
-    card.append(this.title, this.hint, this.actions, keys);
+    card.append(this.title, this.hint, this.session, this.failure, this.actions, keys);
     this.run = document.createElement("div");
     this.run.className = "chappa-record-run";
     // Reserved for a run summary; empty (and hidden) until one exists.
@@ -265,6 +310,9 @@ export class RecordPane {
     this.view = view;
     this.title.textContent = view.title;
     this.hint.textContent = view.hint;
+    this.session.textContent = view.session ?? "";
+    this.session.title = view.sessionTitle ?? "";
+    this.failure.textContent = "";
     this.actions.textContent = "";
     for (const action of view.actions) {
       const btn = document.createElement("button");
@@ -278,6 +326,12 @@ export class RecordPane {
     }
     this.setRun(view.lastRun);
     this.tail.textContent = "";
+  }
+
+  /** A resume the provider refused: say so on the card, above the actions,
+   *  which still offer a fresh start. Cleared by the next `show`. */
+  setFailure(text: string | null): void {
+    this.failure.textContent = text ?? "";
   }
 
   /** Replace the last-run line (a fresher run arrived). */

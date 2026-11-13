@@ -24,8 +24,17 @@
 //!              "user": "dev", "workdir": "/workspace/app", "tty": true,
 //!              "max_busy_in_container": 1},
 //!  "env": {"CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"},
-//!  "enabled": true, "max_busy": null}
+//!  "enabled": true, "max_busy": null, "transport": "tty",
+//!  "resume_argv": ["-s", "{session_id}"], "session_capture": {"kind": "json"}}
 //! ```
+//!
+//! Resume: `session_capture` says how the app learns the id of the
+//! conversation a run is having (the machine-mode adapter, a regex over the
+//! printed output, only what the process announces itself, or nothing), and
+//! `resume_argv` is the argv that continues a saved id — `{session_id}` is
+//! substituted, the words go on the command line before the tool's own
+//! args. Both are user-editable per tool, so a CLI the templates do not
+//! know can still be resumed.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -35,8 +44,12 @@ pub use project_model::words::shell_words;
 use project_model::words::quote_word;
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use term_core::session::SessionMatcher;
 
 pub const FILE_NAME: &str = "agent_tools.json";
+
+/// The placeholder in `resume_argv` that the saved session id replaces.
+pub const SESSION_ID_SLOT: &str = "{session_id}";
 
 /// The tool types with known launch conventions, plus `custom` for the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -196,6 +209,82 @@ pub struct AgentTool {
     /// the transcript view). Only tool types with a machine mode
     /// (`agent_json::machine_mode`) can spawn as `json`.
     pub transport: Transport,
+    /// The argv that continues a saved session, with [`SESSION_ID_SLOT`]
+    /// where the id goes (`["--resume", "{session_id}"]`). Inserted before
+    /// the tool's own args (after the machine-mode flags for a json tool).
+    /// Empty = this tool offers no resume.
+    pub resume_argv: Vec<String>,
+    /// How the session id of a run is learned.
+    pub session_capture: SessionCapture,
+}
+
+/// How the app learns the id of the conversation a run is having.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionCapture {
+    /// The machine-mode adapter's typed id (json transport of a tool type
+    /// with a machine mode). A tty spawn of such a tool has no adapter and
+    /// captures nothing automatically.
+    Json,
+    /// A regex with exactly ONE capture group, run over every plain-text
+    /// line the process prints; the latest match wins, so an id printed at
+    /// exit is the one kept.
+    Regex { pattern: String },
+    /// Only what the process announces itself (`OSC 777;session;<id>`, or
+    /// `set_session` over the control surface).
+    Announced,
+    /// No automatic capture and no resume offered.
+    #[default]
+    None,
+}
+
+impl SessionCapture {
+    /// The template per tool type: the two machine-mode CLIs name their
+    /// session in their event stream; everything else starts at `none`.
+    pub fn template(tool_type: ToolType) -> Self {
+        match tool_type {
+            ToolType::Claude | ToolType::Opencode => SessionCapture::Json,
+            _ => SessionCapture::None,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SessionCapture::Json => "json",
+            SessionCapture::Regex { .. } => "regex",
+            SessionCapture::Announced => "announced",
+            SessionCapture::None => "none",
+        }
+    }
+}
+
+/// The per-type resume template: claude and opencode continue a session
+/// from their command line; nothing is assumed for the rest.
+pub fn resume_argv_template(tool_type: ToolType) -> Vec<String> {
+    match tool_type {
+        ToolType::Claude => vec!["--resume".into(), SESSION_ID_SLOT.into()],
+        ToolType::Opencode => vec!["-s".into(), SESSION_ID_SLOT.into()],
+        _ => Vec::new(),
+    }
+}
+
+/// `template` with every [`SESSION_ID_SLOT`] replaced by `session_id`
+/// (inside a word too, so `--resume={session_id}` works).
+pub fn resume_args(template: &[String], session_id: &str) -> Vec<String> {
+    template.iter().map(|word| word.replace(SESSION_ID_SLOT, session_id)).collect()
+}
+
+/// Compile a `regex` capture pattern: one capture group, the id. Errors are
+/// user-facing (the edit modal shows them).
+pub fn compile_session_pattern(pattern: &str) -> Result<regex::Regex, String> {
+    let re = regex::Regex::new(pattern).map_err(|e| format!("session pattern does not compile: {e}"))?;
+    if re.captures_len() != 2 {
+        return Err(format!(
+            "session pattern must have exactly one capture group (the id); this one has {}",
+            re.captures_len() - 1
+        ));
+    }
+    Ok(re)
 }
 
 /// How an agent's bytes reach the app.
@@ -251,7 +340,25 @@ impl AgentTool {
             // Always tty by default; the Agents pane OFFERS json for the
             // types that have a machine mode (claude, opencode).
             transport: Transport::Tty,
+            resume_argv: resume_argv_template(tool_type),
+            session_capture: SessionCapture::template(tool_type),
         }
+    }
+
+    /// The line recognizer for a `regex` capture, `None` for every other
+    /// kind (or a pattern that no longer compiles — the store validated it
+    /// on save, so that is a hand edit).
+    pub fn session_matcher(&self) -> Option<SessionMatcher> {
+        let SessionCapture::Regex { pattern } = &self.session_capture else {
+            return None;
+        };
+        let re = compile_session_pattern(pattern).ok()?;
+        Some(SessionMatcher::new(move |line| {
+            re.captures(line)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim().to_owned())
+                .filter(|id| !id.is_empty())
+        }))
     }
 
     /// The parity `command` string: `docker exec -u U -it -w W [-e K=V…]
@@ -298,6 +405,10 @@ impl AgentTool {
             self.model = None;
         }
         self.env.retain(|k, _| !k.trim().is_empty());
+        self.resume_argv.retain(|w| !w.trim().is_empty());
+        if let SessionCapture::Regex { pattern } = &mut self.session_capture {
+            *pattern = pattern.trim().to_owned();
+        }
     }
 
     /// An entry that can neither be listed nor spawned.
@@ -478,6 +589,8 @@ pub fn parse_command_line(line: &str) -> ParsedCommand {
     }
     let program = rest[0].clone();
     tool.tool_type = ToolType::from_program(&program);
+    tool.resume_argv = resume_argv_template(tool.tool_type);
+    tool.session_capture = SessionCapture::template(tool.tool_type);
     tool.program = program;
     tool.args = rest[1..].to_vec();
     tool.model = detect_model(&tool.args);
@@ -554,6 +667,15 @@ impl AgentToolStore {
             if let Some(list) = value.get("tools").and_then(|v| v.as_array()) {
                 for raw in list {
                     if let Ok(mut tool) = serde_json::from_value::<AgentTool>(raw.clone()) {
+                        // A file written before the resume fields existed:
+                        // the type's template, not "no resume" — an absent
+                        // key is not a choice the user made.
+                        if raw.get("session_capture").is_none() {
+                            tool.session_capture = SessionCapture::template(tool.tool_type);
+                        }
+                        if raw.get("resume_argv").is_none() {
+                            tool.resume_argv = resume_argv_template(tool.tool_type);
+                        }
                         tool.normalize();
                         if tool.id == 0 || !tool.is_usable() {
                             continue;
@@ -604,6 +726,23 @@ impl AgentToolStore {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        match &tool.session_capture {
+            SessionCapture::Json if crate::agent_json::machine_mode(tool.tool_type).is_none() => {
+                return Err(format!(
+                    "tool type \"{}\" has no machine mode — json session capture needs one of: {}; use a regex or the announce path",
+                    tool.tool_type.as_str(),
+                    crate::agent_json::MACHINE_MODE_TYPES
+                        .iter()
+                        .map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            SessionCapture::Regex { pattern } => {
+                compile_session_pattern(pattern)?;
+            }
+            _ => {}
         }
         if let Runtime::DockerExec { container, .. } = &tool.runtime {
             if container.is_empty() {
@@ -918,6 +1057,99 @@ mod tests {
         // Other templates carry no such default — it is claude's, not spawn's.
         assert!(AgentTool::template(ToolType::Opencode).env.is_empty());
         assert!(AgentTool::template(ToolType::Custom).program.is_empty());
+    }
+
+    /// The resume fields: claude / opencode templates carry their resume
+    /// flag and the json capture, everything else starts at none; the
+    /// substitution fills the slot wherever it sits in a word; the importer
+    /// seeds the detected type's template.
+    #[test]
+    fn resume_templates_and_substitution() {
+        let claude = AgentTool::template(ToolType::Claude);
+        assert_eq!(claude.resume_argv, vec!["--resume", "{session_id}"]);
+        assert_eq!(claude.session_capture, SessionCapture::Json);
+        let opencode = AgentTool::template(ToolType::Opencode);
+        assert_eq!(opencode.resume_argv, vec!["-s", "{session_id}"]);
+        assert_eq!(opencode.session_capture, SessionCapture::Json);
+        for t in [ToolType::Codex, ToolType::Gemini, ToolType::Custom] {
+            let tool = AgentTool::template(t);
+            assert!(tool.resume_argv.is_empty(), "{t:?}");
+            assert_eq!(tool.session_capture, SessionCapture::None, "{t:?}");
+        }
+        assert_eq!(
+            resume_args(&["--resume".into(), "{session_id}".into(), "--session={session_id}".into()], "ses-1"),
+            vec!["--resume", "ses-1", "--session=ses-1"]
+        );
+        assert!(resume_args(&[], "ses-1").is_empty());
+        let pasted = parse_command_line("claude --dangerously-skip-permissions").tool;
+        assert_eq!(pasted.resume_argv, vec!["--resume", "{session_id}"]);
+        assert_eq!(parse_command_line("mytool -x").tool.session_capture, SessionCapture::None);
+        // The wire shape of the capture kinds.
+        assert_eq!(serde_json::to_value(SessionCapture::Json).unwrap(), serde_json::json!({"kind": "json"}));
+        assert_eq!(
+            serde_json::to_value(SessionCapture::Regex { pattern: r"id (\S+)".into() }).unwrap(),
+            serde_json::json!({"kind": "regex", "pattern": r"id (\S+)"})
+        );
+        assert_eq!(serde_json::from_str::<SessionCapture>(r#"{"kind":"announced"}"#).unwrap(), SessionCapture::Announced);
+    }
+
+    /// The regex capture: one capture group, trimmed, empty matches
+    /// ignored; other kinds have no matcher.
+    #[test]
+    fn session_matcher_captures_the_one_group() {
+        let mut tool = AgentTool::template(ToolType::Custom);
+        tool.session_capture = SessionCapture::Regex { pattern: r"^Session(?: ID)?: (\S+)".into() };
+        let m = tool.session_matcher().expect("a matcher");
+        assert_eq!(m.matches("Session ID: ses_abc "), Some("ses_abc".into()));
+        assert_eq!(m.matches("Session: 42"), Some("42".into()));
+        assert_eq!(m.matches("no session here"), None);
+        tool.session_capture = SessionCapture::Announced;
+        assert!(tool.session_matcher().is_none());
+        assert!(compile_session_pattern("no group").is_err());
+        assert!(compile_session_pattern("(a)(b)").is_err());
+        assert!(compile_session_pattern("(").is_err());
+        assert!(compile_session_pattern(r"id=(\w+)").is_ok());
+    }
+
+    /// Saving validates the capture: a bad regex and a json capture on a
+    /// type without a machine mode are refused with a user-facing message;
+    /// a file from before the fields existed loads the type's template.
+    #[test]
+    fn store_validates_capture_and_migrates_absent_resume_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        let mut store = AgentToolStore::new(path.clone());
+        let mut t = AgentTool::template(ToolType::Custom);
+        t.program = "x".into();
+        t.session_capture = SessionCapture::Regex { pattern: "(".into() };
+        assert!(store.upsert(t.clone()).unwrap_err().contains("does not compile"));
+        t.session_capture = SessionCapture::Regex { pattern: "nogroup".into() };
+        assert!(store.upsert(t.clone()).unwrap_err().contains("one capture group"));
+        t.session_capture = SessionCapture::Json;
+        assert!(store.upsert(t.clone()).unwrap_err().contains("no machine mode"));
+        t.session_capture = SessionCapture::Regex { pattern: r" id (\w+) ".into() };
+        t.resume_argv = vec!["--resume".into(), "  ".into(), "{session_id}".into()];
+        let stored = store.upsert(t).unwrap();
+        assert_eq!(stored.session_capture, SessionCapture::Regex { pattern: r"id (\w+)".into() });
+        assert_eq!(stored.resume_argv, vec!["--resume", "{session_id}"], "blank words are dropped");
+
+        // An older file: no resume keys at all → the type's template; an
+        // explicit `none` on a claude tool is kept (the user's choice).
+        std::fs::write(
+            &path,
+            serde_json::json!({"next_id": 3, "tools": [
+                {"id": 1, "name": "claude", "tool_type": "claude", "program": "claude", "enabled": true},
+                {"id": 2, "name": "quiet", "tool_type": "claude", "program": "claude", "enabled": true,
+                 "resume_argv": [], "session_capture": {"kind": "none"}}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let store = AgentToolStore::new(path);
+        assert_eq!(store.get(1).unwrap().session_capture, SessionCapture::Json);
+        assert_eq!(store.get(1).unwrap().resume_argv, vec!["--resume", "{session_id}"]);
+        assert_eq!(store.get(2).unwrap().session_capture, SessionCapture::None);
+        assert!(store.get(2).unwrap().resume_argv.is_empty());
     }
 
     #[test]

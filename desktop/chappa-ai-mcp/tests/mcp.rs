@@ -197,6 +197,9 @@ fn canned(method: &str, path: &str) -> (u16, Value) {
         ("GET", "/records/abc123/runs") => (200, json!({"record_id": "abc123", "runs": [{"run_uuid": "r1", "status": "exited", "started_at_ms": 1, "ended_at_ms": 2, "exit_code": 0, "success": true, "tail_kind": "text", "tail": ["done"]}]})),
         ("POST", "/records/abc123/start") => (200, json!({"record_id": "abc123", "kind": "agent", "term_id": 13, "run_uuid": "r2", "pending": false})),
         ("POST", "/records/abc123/remove") => (200, json!({"record_id": "abc123", "kind": "agent", "removed": true, "runs_deleted": 2})),
+        ("POST", "/records/abc123/resume") => (200, json!({"record_id": "abc123", "kind": "agent", "term_id": 14, "run_uuid": "r3", "session_id": "ses-1", "check": "quiet"})),
+        ("POST", "/processes/12/session") => (200, json!({"id": 12, "record_id": "abc123", "run_uuid": "r3", "durable": true})),
+        ("POST", "/processes/7/session") => (200, json!({"id": 7, "record_id": null, "run_uuid": null, "durable": false})),
         // ---- coordination ----
         ("GET", "/scratchpads") => (200, json!({"scratchpads": [{"scratchpad_id": 5, "name": "pad", "revision": 3, "updated_by": "12"}], "total": 1})),
         ("POST", "/scratchpads") => (200, json!({"scratchpad_id": 5, "project_id": 6, "revision": 1, "name": "pad"})),
@@ -293,6 +296,12 @@ fn every_tool_round_trips_with_the_token_attached() {
         ("get_record_runs", json!({"record_id": "abc123", "limit": 5}), "GET", "/records/abc123/runs?limit=5", Value::Null, json!({"record_id": "abc123", "runs": [{"run_uuid": "r1", "status": "exited", "started_at_ms": 1, "ended_at_ms": 2, "exit_code": 0, "success": true, "tail_kind": "text", "tail": ["done"]}]})),
         ("start_record", json!({"record_id": "abc123", "wait_ms": 500}), "POST", "/records/abc123/start", json!({"wait_ms": 500}), json!({"record_id": "abc123", "kind": "agent", "term_id": 13, "run_uuid": "r2", "pending": false})),
         ("remove_record", json!({"record_id": "abc123", "confirm": true}), "POST", "/records/abc123/remove", json!({"confirm": true}), json!({"record_id": "abc123", "kind": "agent", "removed": true, "runs_deleted": 2})),
+        // Resume: the provider continues the saved session (or a named one).
+        ("resume_agent", json!({"record_id": "abc123"}), "POST", "/records/abc123/resume", json!({}), json!({"record_id": "abc123", "kind": "agent", "term_id": 14, "run_uuid": "r3", "session_id": "ses-1", "check": "quiet"})),
+        ("resume_agent", json!({"record_id": "abc123", "session_id": "ses-0"}), "POST", "/records/abc123/resume", json!({"session_id": "ses-0"}), json!({"record_id": "abc123", "kind": "agent", "term_id": 14, "run_uuid": "r3", "session_id": "ses-1", "check": "quiet"})),
+        // set_session with an explicit target (the self-targeting default is
+        // exercised with an identity below).
+        ("set_session", json!({"session_id": "ses-9", "process_id": 7}), "POST", "/processes/7/session", json!({"session_id": "ses-9"}), json!({"id": 7, "record_id": null, "run_uuid": null, "durable": false})),
     ];
     let tool_names: Vec<String> = tools().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
     for (tool, args, method, path, body, expect) in cases {
@@ -314,7 +323,7 @@ fn every_tool_round_trips_with_the_token_attached() {
         "list_projects", "get_project", "spawn_terminal", "send_input", "send_bytes",
         "start_process", "stop_process", "restart_process", "close_terminal",
         "list_agent_tools", "spawn_agent", "get_agent_events", "reap_orphans",
-        "get_record_runs", "start_record", "remove_record",
+        "get_record_runs", "start_record", "remove_record", "resume_agent", "set_session",
     ].into_iter().collect();
     let listed: std::collections::BTreeSet<&str> = tool_names
         .iter()
@@ -322,6 +331,21 @@ fn every_tool_round_trips_with_the_token_attached() {
         .filter(|n| !is_coordination(n) && !is_timer(n))
         .collect();
     assert_eq!(listed, exercised);
+
+    // set_session self-targets: without `process_id` the client's own actor
+    // id (CHAPPA_AI_PROCESS_ID) names the row; a client with no identity is
+    // told to pass one instead of guessing.
+    let err = call_tool(&client, "set_session", &json!({"session_id": "ses-9"})).unwrap_err();
+    assert!(err.to_string().contains("process_id"), "{err}");
+    let identified = server.client().with_identity(Some("12"), None);
+    let before = server.requests().len();
+    let reply = call_tool(&identified, "set_session", &json!({"session_id": "ses-9"})).unwrap();
+    assert_eq!(reply["id"], 12);
+    assert_eq!(reply["durable"], true);
+    let req = &server.requests()[before];
+    assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/processes/12/session"));
+    assert_eq!(req.body, json!({"session_id": "ses-9"}));
+    assert!(call_tool(&identified, "set_session", &json!({"session_id": "  "})).is_err(), "an empty id is refused client-side");
 }
 
 /// Every scratchpad/todo tool → exactly one request at the

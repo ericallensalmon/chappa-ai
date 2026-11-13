@@ -160,6 +160,14 @@ export interface TerminalApi {
     recordId: string,
     frames: ipc.Channel<ArrayBuffer | number[]>,
   ): Promise<ipc.StartRecordDto>;
+  /** Continue an agent record's saved provider session into this window on
+   *  `frames` (`sessionId` picks an earlier run's). Rejects with a
+   *  `ResumeFailureDto`. */
+  resumeRecord(
+    recordId: string,
+    frames: ipc.Channel<ArrayBuffer | number[]>,
+    sessionId?: string,
+  ): Promise<ipc.ResumeRecordDto>;
   /** Remove a record and its run history (an attached terminal is closed
    *  first). */
   removeRecord(recordId: string): Promise<ipc.RemoveRecordDto>;
@@ -225,6 +233,7 @@ export const tauriApi: TerminalApi = {
   listRecords: () => ipc.listRecords(),
   getRecordRuns: (recordId, limit) => ipc.getRecordRuns(recordId, limit),
   startRecord: (recordId, frames) => ipc.startRecord(recordId, frames),
+  resumeRecord: (recordId, frames, sessionId) => ipc.resumeRecord(recordId, frames, sessionId),
   removeRecord: (recordId) => ipc.removeRecord(recordId),
   updateAgentRecord: (recordId, patch) => ipc.updateAgentRecord(recordId, patch),
 };

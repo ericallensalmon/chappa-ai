@@ -22,7 +22,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text. A row whose child exited keeps its record: a stopped row with a record_id can be started again with start_record.",
+    "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text. A row whose child exited keeps its record: a stopped row with a record_id can be started again with start_record, or resumed with resume_agent when `last_run.session` {provider, session_id, captured_at_ms, source: json | regex | announced | mcp | resume, resumed_from?} holds the provider's own session id.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -576,6 +576,61 @@
       "type": "object"
     },
     "name": "start_record"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Resume a stopped agent record: the PROVIDER continues the saved session (default: the record's last_run.session; or pass session_id from an earlier run in get_record_runs), so the agent comes back with its complete prior conversation — nothing is replayed by the app, and your next send_input lands on top of all of that context. The tool's resume_argv (claude `--resume <id>`, opencode `-s <id>`) goes on the command line; the start is then watched and the reply says how it was judged: {record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent | deferred} (deferred = a per-turn CLI that can only refuse on the first message — watch that send's receipt). A provider that refuses — the child exits before it is ready, e.g. `No conversation found with session ID: <id>` — fails this call with error resume_rejected carrying provider_text and the failed run_uuid (its output stays in get_record_runs); it is never turned into a silent fresh start. error no_session = nothing saved to resume (use start_record); resume_unavailable = running already, not an agent, tool gone or no resume command.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "description": "Record id from a process row's record_id.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "A specific session to continue (from a run's `session.session_id` in get_record_runs). Default: the last run's saved session.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id"
+      ],
+      "type": "object"
+    },
+    "name": "resume_agent"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Tell chappa-ai the id of the conversation YOUR process is running (or process_id's), so the row can be resumed later with resume_agent even though your CLI prints no id the app recognizes. Lands on the current run under the run-uuid rule; answers {id, record_id, run_uuid, session, durable} (durable=false: an ephemeral row, nothing to resume later). The same announcement works with no tool call at all: print the escape sequence `OSC 777;session;<id>` — in a shell, printf '\\033]777;session;%s\\007' \"$ID\". Only the id is stored, never a transcript; whether the conversation can be picked up again is the provider's business.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "process_id": {
+          "description": "Which process the id belongs to. Default: YOUR process (CHAPPA_AI_PROCESS_ID).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "description": "The provider's own session / conversation id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "name": "set_session"
   },
   {
     "annotations": {

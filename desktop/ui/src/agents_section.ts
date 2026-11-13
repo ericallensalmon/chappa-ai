@@ -2,9 +2,10 @@
 // (name, type, model, runtime summary, enabled toggle), an edit modal with
 // every registry field (env as key/value rows, runtime as a Host/Docker
 // segmented picker revealing container/user/workdir/tty, the two busy
-// limits), the "Add from command…" paste box (Rust's command-string parser →
-// prefilled modal), and "Delete" with the live-reference refusal shown
-// inline. The agent settings (`agentReadyQuietMs`, `agentReadyMaxWaitMs`,
+// limits, the Resume group: how the session id is captured and the argv that
+// continues one), the "Add from command…" paste box (Rust's command-string
+// parser → prefilled modal), and "Delete" with the live-reference refusal
+// shown inline. The agent settings (`agentReadyQuietMs`, `agentReadyMaxWaitMs`,
 // `agentStaleAfterS`) live here too — they are agent knobs, not terminal ones.
 // The timer knobs have their own tab (timers_section.ts).
 //
@@ -16,11 +17,15 @@
 import { Segmented } from "./segmented";
 import {
   AGENT_TOOL_TYPES,
+  SESSION_CAPTURE_KINDS,
+  SESSION_ID_SLOT,
   runtimeSummary,
   templateFor,
   type AgentTool,
   type AgentToolType,
   type AgentToolsStore,
+  type SessionCapture,
+  type SessionCaptureKind,
 } from "./agent_tools";
 import {
   AGENT_READY_MAX_WAIT_MAX,
@@ -67,6 +72,21 @@ const OK_BTN_CSS =
 
 /** Unique-id source for the modal's `<label for>` associations. */
 let ids = 0;
+
+/** The one-line explanation per capture kind. */
+const CAPTURE_HINTS: Record<SessionCaptureKind, string> = {
+  json:
+    "The machine-mode adapter's typed id (JSON transport). A TTY spawn of this tool has no adapter and " +
+    "captures nothing by itself; the announce paths below still work.",
+  regex:
+    "One capture group, run over every plain-text line the process prints; the latest match wins, so an id " +
+    "printed at exit is the one kept. A pattern that never matches is not an error — the row shows " +
+    "“Resume unavailable (no session id seen)”.",
+  announced:
+    "Only what the process says itself: print OSC 777;session;<id> — in a shell, " +
+    "printf '\\033]777;session;%s\\007' \"$ID\" — or call the set_session MCP tool.",
+  none: "No automatic capture; the row never offers Resume. The announce paths still record an id if the process sends one.",
+};
 
 export interface AgentsSectionOptions {
   store: AgentToolsStore;
@@ -617,6 +637,87 @@ export class AgentsSection {
     syncTransport();
     field("Transport", transportWrap);
 
+    // The Resume group: how the session id is learned, and the argv that
+    // continues one. Both are per tool so a CLI the templates do not know
+    // (or a wrapper script) can still be resumed.
+    const resumeHead = document.createElement("div");
+    resumeHead.className = "chappa-agent-resume-head";
+    resumeHead.style.cssText = "font:600 12px system-ui,sans-serif;color:#adb3bd;padding:10px 0 2px;";
+    resumeHead.textContent = "Resume";
+    box.appendChild(resumeHead);
+    box.appendChild(
+      hint(
+        "Resume means the provider continues its own conversation — the agent restarts with everything it " +
+          "said and did; nothing is replayed. Only the session id is stored, never a transcript.",
+      ),
+    );
+    const capture: SessionCapture = tool.session_capture ?? { kind: "none" };
+    let captureKind: SessionCaptureKind = capture.kind;
+    const captureSelect = document.createElement("select");
+    captureSelect.style.cssText = SELECT_CSS;
+    captureSelect.dataset.field = "session_capture";
+    for (const k of SESSION_CAPTURE_KINDS) {
+      const opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = k;
+      captureSelect.appendChild(opt);
+    }
+    captureSelect.value = captureKind;
+    const captureHint = document.createElement("div");
+    captureHint.className = "chappa-agent-capture-hint";
+    captureHint.style.cssText = HINT_CSS;
+    const captureWrap = document.createElement("div");
+    captureWrap.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;";
+    captureWrap.append(captureSelect, captureHint);
+    field("Session capture", captureWrap);
+    const patternInput = textInput(
+      "session_pattern",
+      capture.kind === "regex" ? capture.pattern : "",
+      String.raw`one capture group, e.g. Session ID: (\S+)`,
+    );
+    const patternRow = field("Pattern", patternInput);
+    const syncCapture = (): void => {
+      // `json` needs a machine mode (Rust refuses it otherwise): the option
+      // is hidden for other types and a selected json snaps to none.
+      const offered = this.store.hasMachineMode(typeSelect.value as AgentToolType);
+      const jsonOption = captureSelect.querySelector<HTMLOptionElement>('option[value="json"]');
+      if (jsonOption) jsonOption.hidden = !offered;
+      if (!offered && captureKind === "json") {
+        captureKind = "none";
+        captureSelect.value = "none";
+      }
+      patternRow.style.display = captureKind === "regex" ? "" : "none";
+      captureHint.textContent = CAPTURE_HINTS[captureKind];
+    };
+    captureSelect.addEventListener("change", () => {
+      captureKind = captureSelect.value as SessionCaptureKind;
+      syncCapture();
+    });
+    typeSelect.addEventListener("change", syncCapture);
+    syncCapture();
+
+    // The resume argv: one word per LINE (the args rule), `{session_id}`
+    // substituted at resume time.
+    const resumeArgs = tool.resume_argv ?? [];
+    const resumeInput = document.createElement("textarea");
+    resumeInput.value = resumeArgs.join("\n");
+    resumeInput.rows = Math.max(2, Math.min(4, resumeArgs.length + 1));
+    resumeInput.spellcheck = false;
+    resumeInput.placeholder = `one argument per line, e.g. --resume and ${SESSION_ID_SLOT}`;
+    resumeInput.style.cssText = `${INPUT_CSS}flex:1 1 auto;resize:vertical;`;
+    resumeInput.dataset.field = "resume_argv";
+    const resumeWrap = document.createElement("div");
+    resumeWrap.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;";
+    const resumeHint = document.createElement("div");
+    resumeHint.className = "chappa-agent-resume-hint";
+    resumeHint.style.cssText = HINT_CSS;
+    resumeHint.textContent =
+      `${SESSION_ID_SLOT} is substituted with the saved id. These words go before the tool's own args ` +
+      "(after the machine-mode flags for a JSON tool); a per-turn JSON CLI continues through its adapter " +
+      "instead. Empty = no resume offered.";
+    resumeWrap.append(resumeInput, resumeHint);
+    field("Resume argv", resumeWrap);
+
     // Env rows: key/value pairs, each deletable — the claude template's
     // CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 is one of these, visibly.
     const envWrap = document.createElement("div");
@@ -706,6 +807,18 @@ export class AgentsSection {
         const n = Number(input.value);
         return input.value.trim() === "" || !Number.isFinite(n) || n <= 0 ? null : Math.floor(n);
       };
+      let sessionCapture: SessionCapture;
+      if (captureKind === "regex") {
+        const pattern = patternInput.value.trim();
+        if (pattern === "") {
+          error.textContent = "Pattern is required for regex session capture.";
+          error.style.display = "";
+          return;
+        }
+        sessionCapture = { kind: "regex", pattern };
+      } else {
+        sessionCapture = { kind: captureKind };
+      }
       let runtime: AgentTool["runtime"];
       if (runtimeKind === "docker_exec") {
         const container = containerInput.value.trim();
@@ -737,6 +850,11 @@ export class AgentsSection {
         enabled: enabledToggle.checked,
         max_busy: limit(busyInput),
         transport: this.store.hasMachineMode(typeSelect.value as AgentToolType) ? transport : "tty",
+        resume_argv: resumeInput.value
+          .split("\n")
+          .map((a) => a.replace(/\r$/, ""))
+          .filter((a) => a.trim() !== ""),
+        session_capture: sessionCapture,
       };
       void this.commit(next).then((ok) => {
         if (ok) this.closeModal();

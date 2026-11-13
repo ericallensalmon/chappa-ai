@@ -22,12 +22,12 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use project_model::records::{RunHead, TailKind, TAIL_LINES};
+use project_model::records::{RunHead, Session, SessionSource, TailKind, TAIL_LINES};
 use project_model::settings::Settings;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use term_core::actor::{
-    epoch_ms, spawn_actor, spawn_actor_nopty, ActorConfig, FrameKind, MarkKind, TermEvent,
+    self, epoch_ms, spawn_actor, spawn_actor_nopty, ActorConfig, FrameKind, MarkKind, TermEvent,
     TermHandle,
 };
 
@@ -73,8 +73,13 @@ pub fn actor_config(
         synthetic_prompt_marks: settings
             .map_or(defaults.synthetic_prompt_marks, |s| s.synthetic_prompt_marks),
         wheel_speed: settings.map_or(defaults.wheel_speed, |s| s.scroll_wheel_speed),
+        session_matcher: None,
     }
 }
+
+/// The `term://session` event name: a run learned (or changed) the provider
+/// session it is having. Carries `{term_id, record_id, run_uuid, session}`.
+pub const TERM_SESSION: &str = "term://session";
 
 /// Called by the pump when a terminal's child exits: `(term_id, exit_code,
 /// success)`. The project runner uses this to drive `auto_restart`
@@ -246,6 +251,9 @@ pub trait RunRecorder: Send + Sync + 'static {
     fn run_exited(&self, record_id: &str, run_uuid: &str, exit: RunExit);
     /// The row was closed before any exit was observed.
     fn run_stopped(&self, record_id: &str, run_uuid: &str, ended_at_ms: u64);
+    /// The run named the provider session it is having (a later sighting
+    /// replaces an earlier one). Same run-uuid rule as every other late fact.
+    fn run_session(&self, record_id: &str, run_uuid: &str, session: Session);
 }
 
 /// The byte-stream liveness of one entry, read for many ids under ONE
@@ -487,6 +495,10 @@ struct Entry {
     started_at_ms: u64,
     ended_at_ms: Option<u64>,
     success: Option<bool>,
+    /// The provider session this run is having, as last learned — the live
+    /// row's `last_run.session`. Seeded with the resume origin when the
+    /// spawn was a resume.
+    session: Option<Session>,
 }
 
 struct Inner {
@@ -572,7 +584,7 @@ impl Registry {
         *self.run_recorder.lock().unwrap_or_else(|e| e.into_inner()) = Some(recorder);
     }
 
-    fn run_recorder(&self) -> Option<Arc<dyn RunRecorder>> {
+    pub fn run_recorder(&self) -> Option<Arc<dyn RunRecorder>> {
         self.run_recorder.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
@@ -619,6 +631,63 @@ impl Registry {
             self.bridge_waker.wake();
         }
         Ok(id)
+    }
+
+    /// Seed the live row's session (a spawn that resumes a saved id knows
+    /// it before the child prints anything). Not reported to the recorder:
+    /// the caller wrote it into the run it began.
+    pub fn seed_session(&self, id: TermId, session: Session) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.session = Some(session);
+            }
+        }
+    }
+
+    /// A run learned its provider session: the live row's head takes it and
+    /// the recorder is told (the store head under the run-uuid rule, the
+    /// ledger row). Returns the entry's record binding — `None` for an
+    /// unknown id or an ephemeral row (nothing durable to resume later) —
+    /// and whether anything changed (a repeat of the same id is not news).
+    /// Does NOT emit `term://session`; the caller owns the event seam it
+    /// has (the pump's sink, an app handle).
+    pub fn record_session(&self, id: TermId, mut session: Session) -> Option<(Option<RecordBinding>, bool)> {
+        let (binding, changed) = {
+            let mut inner = self.inner.lock().ok()?;
+            let entry = inner.entries.get_mut(&id)?;
+            if session.resumed_from.is_none() {
+                session.resumed_from = entry.session.as_ref().and_then(|s| s.resumed_from.clone());
+            }
+            let changed = entry
+                .session
+                .as_ref()
+                .map_or(true, |s| s.session_id != session.session_id || s.source != session.source);
+            entry.session = Some(session.clone());
+            let binding = entry.record.clone().map(|record_id| RecordBinding {
+                record_id,
+                run_uuid: entry.uuid.clone(),
+            });
+            (binding, changed)
+        };
+        if changed {
+            if let (Some(binding), Some(recorder)) = (binding.as_ref(), self.run_recorder()) {
+                recorder.run_session(&binding.record_id, &binding.run_uuid, session);
+            }
+        }
+        Some((binding, changed))
+    }
+
+    /// The provider name a session learned on entry `id` is filed under:
+    /// the agent's tool type, or `shell` for a plain terminal.
+    pub fn session_provider(&self, id: TermId) -> Option<String> {
+        self.inner.lock().ok().and_then(|inner| {
+            inner.entries.get(&id).map(|e| {
+                e.agent
+                    .as_ref()
+                    .map(|meta| meta.tool_type.as_str().to_owned())
+                    .unwrap_or_else(|| "shell".to_owned())
+            })
+        })
     }
 
     /// An agent entry fronted by a NO-PTY actor — the json
@@ -825,6 +894,7 @@ impl Registry {
             started_at_ms: epoch_ms(),
             ended_at_ms: None,
             success: None,
+            session: None,
         };
         inner.entries.insert(id, entry);
         // Entry in place before the pump starts, so the pump can never race a
@@ -1611,6 +1681,22 @@ fn spawn_pump(
                         json_map(&[("text", json!(text))]),
                     );
                 }
+                TermEvent::Session { id, source } => {
+                    // The child named its session (announced, or matched in
+                    // a printed line). Every sighting is applied, so the
+                    // latest one — an id printed on the way out — wins.
+                    let source = match source {
+                        actor::SessionSource::Announced => SessionSource::Announced,
+                        actor::SessionSource::Matched => SessionSource::Regex,
+                    };
+                    let provider = registry_owned.session_provider(term_id).unwrap_or_default();
+                    let session = Session::new(provider, id, source, epoch_ms());
+                    if let Some((binding, changed)) = registry_owned.record_session(term_id, session.clone()) {
+                        if changed {
+                            push(term_id, seq, TERM_SESSION, &sink, &registry, session_map(binding.as_ref(), &session));
+                        }
+                    }
+                }
                 TermEvent::Exited(status) => {
                     apply_status(
                         term_id,
@@ -1652,7 +1738,19 @@ fn spawn_pump(
                     // ring, not a screen.
                     if let (Some(binding), Some(handle)) = (record.as_ref(), handle) {
                         if let Some(recorder) = registry_owned.run_recorder() {
-                            let (tail_kind, tail) = match registry_owned.json_agent(term_id) {
+                            let json_agent = registry_owned.json_agent(term_id);
+                            // A json agent's adapter holds the CLI's own
+                            // session id: copied onto the run once more at
+                            // exit, so a run that ended before its hooks
+                            // caught up still resumes.
+                            if let Some(session_id) = json_agent.as_ref().and_then(|agent| agent.session_id()) {
+                                let provider = registry_owned.session_provider(term_id).unwrap_or_default();
+                                let session = Session::new(provider, session_id, SessionSource::Json, ended_at_ms);
+                                if let Some((binding, true)) = registry_owned.record_session(term_id, session.clone()) {
+                                    push(term_id, seq, TERM_SESSION, &sink, &registry, session_map(binding.as_ref(), &session));
+                                }
+                            }
+                            let (tail_kind, tail) = match json_agent {
                                 Some(agent) => (TailKind::Events, events_tail(agent.events_since(0))),
                                 None => (TailKind::Text, text_tail(handle.dump_text(TAIL_LINES))),
                             };
@@ -1736,6 +1834,29 @@ pub fn events_tail(events: Vec<crate::agent_json::AgentEvent>) -> Vec<Value> {
         .skip(skip)
         .filter_map(|event| serde_json::to_value(event).ok())
         .collect()
+}
+
+/// The `term://session` payload: which run, and the session it learned.
+pub fn session_map(binding: Option<&RecordBinding>, session: &Session) -> serde_json::Map<String, Value> {
+    json_map(&[
+        ("record_id", json!(binding.map(|b| b.record_id.as_str()))),
+        ("run_uuid", json!(binding.map(|b| b.run_uuid.as_str()))),
+        ("session", json!(session)),
+    ])
+}
+
+/// Broadcast `term://session` off an app handle — for the sightings that
+/// arrive outside the pump (a json agent's typed event, a `set_session`
+/// over the control surface). `seq` is 0: these are not in the frame
+/// stream.
+pub fn emit_session(app: &AppHandle, term_id: TermId, binding: Option<&RecordBinding>, session: &Session) {
+    let event = JsonEvent {
+        event: TERM_SESSION,
+        term_id,
+        seq: 0,
+        data: session_map(binding, session),
+    };
+    let _ = app.emit(event.event, &event);
 }
 
 /// An agent's binding: its record id with the spawn uuid as the run uuid.
@@ -1890,7 +2011,7 @@ fn run_head(entry: &Entry) -> RunHead {
         },
         tail_len: 0,
         summary: None,
-        session: None,
+        session: entry.session.clone(),
     }
 }
 

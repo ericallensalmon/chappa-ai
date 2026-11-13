@@ -249,6 +249,7 @@ pub fn run() {
         records::list_records,
         records::get_record_runs,
         records::start_record,
+        records::resume_record,
         records::remove_record,
         records::update_agent_record,
     ]);
@@ -311,6 +312,7 @@ pub fn run() {
         records::list_records,
         records::get_record_runs,
         records::start_record,
+        records::resume_record,
         records::remove_record,
         records::update_agent_record,
         workspace::list_workspace_commands,

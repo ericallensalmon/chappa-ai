@@ -28,19 +28,21 @@ use term_core::actor::{ActorConfig, TermHandle};
 use term_core::pty::PtySpec;
 
 use crate::agent_json::{
-    event_json, machine_mode, AgentEvent, JsonAgent, JsonHooks, SpawnRecipe, TurnReceipt,
-    TURN_RECEIPT_WAIT_DEFAULT_MS, TURN_RECEIPT_WAIT_MAX_MS,
+    event_json, machine_mode, AgentEvent, AgentEventKind, JsonAgent, JsonHooks, SpawnRecipe,
+    TurnReceipt, TURN_RECEIPT_WAIT_DEFAULT_MS, TURN_RECEIPT_WAIT_MAX_MS,
 };
-use crate::agent_tools::{docker_exec_prefix, AgentTool, EnvFlags, AgentToolsState, Runtime, ToolType, Transport};
+use crate::agent_tools::{
+    docker_exec_prefix, resume_args, AgentTool, AgentToolsState, EnvFlags, Runtime, ToolType, Transport,
+};
 use crate::open_path::{parse_mounts, Mount};
 use crate::projects::Projects;
 use crate::records::{Records, Scope};
 use crate::registry::{
-    emit_created, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, JsonEvent,
-    NullSink, Registry, RunRecorder, TermId,
+    emit_created, emit_session, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink,
+    JsonEvent, NullSink, Registry, RunRecorder, TermId,
 };
 use crate::settings::SettingsState;
-use project_model::records::{new_record_id, AgentRecord, RecordKind, Run, TailKind};
+use project_model::records::{new_record_id, AgentRecord, RecordKind, Run, Session, SessionSource, TailKind};
 
 // ---- constants (tuning numbers, named once) ----------------------------------
 
@@ -93,6 +95,8 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "stop_process",
     "restart_process",
     "close_terminal",
+    "set_session",
+    "resume_agent",
 ];
 
 // ---- docker CLI seam ---------------------------------------------------------
@@ -1646,6 +1650,17 @@ pub struct SpawnAgentRequest {
     /// record) instead of creating a record. Never on the wire.
     #[serde(skip)]
     pub record_id: Option<String>,
+    /// Internal: continue a saved provider session instead of starting a
+    /// fresh one (`records::Records::resume` sets it). Never on the wire.
+    #[serde(skip)]
+    pub resume: Option<ResumeSpec>,
+}
+
+/// The session a spawn continues. The provider does the resuming — the
+/// agent restarts with its own complete history; nothing is replayed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeSpec {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1748,9 +1763,20 @@ pub fn spawn_agent_with(
         })?),
         Transport::Tty => None,
     };
+    // A resume: the tool's own resume words with the saved id filled in.
+    // They go BEFORE the tool's own args (a per-turn json CLI continues
+    // through the adapter's `-s` instead, so nothing is added there).
+    let resume_args = match &req.resume {
+        Some(spec) => resume_words(&tool, json_mode, &spec.session_id)?,
+        None => Vec::new(),
+    };
     let planned_tool = match json_mode {
-        Some(mode) => json_planned_tool(&tool, mode),
-        None => tool.clone(),
+        Some(mode) => json_planned_tool(&tool, mode, &resume_args),
+        None => {
+            let mut planned = tool.clone();
+            planned.args = [resume_args.clone(), tool.args.clone()].concat();
+            planned
+        }
     };
     let plan = build_spawn_plan(
         &planned_tool,
@@ -1774,7 +1800,17 @@ pub fn spawn_agent_with(
         scrollback_lines: 10_000,
         synthetic_prompt_marks: settings.synthetic_prompt_marks,
         wheel_speed: settings.scroll_wheel_speed,
+        // The `regex` capture reads the pty stream; a json spawn has no
+        // stream to read (its adapter carries the id).
+        session_matcher: if json_mode.is_none() { tool.session_matcher() } else { None },
     };
+    // The run a resume begins already names the session it continues, so
+    // the row can say so before the provider confirms anything.
+    let resume_session = req.resume.as_ref().map(|spec| {
+        let mut session = Session::new(tool.tool_type.as_str(), spec.session_id.clone(), SessionSource::Resume, now);
+        session.resumed_from = Some(spec.session_id.clone());
+        session
+    });
     let name = req.name.clone().unwrap_or_else(|| tool.name.clone());
     let meta = AgentMeta {
         tool_id: tool.id,
@@ -1808,7 +1844,8 @@ pub fn spawn_agent_with(
         };
         match agent_record(ctx.records, ctx.registry, scope, &req, &name, tool.id, parent_process_id) {
             Ok(record_id) => {
-                let run = Run::begin(uuid.clone(), now, tail_kind);
+                let mut run = Run::begin(uuid.clone(), now, tail_kind);
+                run.session = resume_session.clone();
                 match ctx.records.begin_run(scope, RecordKind::Agent, &record_id, &run) {
                     Ok(()) => Some(record_id),
                     Err(e) => {
@@ -1861,11 +1898,18 @@ pub fn spawn_agent_with(
                 cwd: plan.cwd.clone(),
                 env: plan.env.clone(),
             };
-            let agent = JsonAgent::new(id, handle, recipe, mode, json_hooks(on_notify));
+            let hooks = json_hooks(on_notify, ctx.registry.clone(), id, tool.tool_type);
+            let agent = JsonAgent::new(id, handle, recipe, mode, hooks);
+            if let Some(spec) = &req.resume {
+                agent.seed_session(&spec.session_id);
+            }
             ctx.registry.attach_json_agent(id, agent.clone());
             Some(agent)
         }
     };
+    if let Some(session) = resume_session {
+        ctx.registry.seed_session(id, session);
+    }
     // The entry exists: the next spawn's guard sees it. Everything below is
     // observation (inspect/stats) and the prompt wait — no lock needed.
     drop(_serialized);
@@ -1981,11 +2025,13 @@ fn agent_record(
 
 /// The tool as the json transport runs it: machine-mode flags BEFORE the
 /// tool's own args (`opencode run --format json -m …`, `claude -p
-/// --output-format stream-json … --model …`), and a docker runtime without
-/// `-t` (a pipe must not be a tty — the CLI would render, not stream).
-pub fn json_planned_tool(tool: &AgentTool, mode: crate::agent_json::MachineMode) -> AgentTool {
+/// --output-format stream-json … --model …`), the resume words (if any)
+/// between the two, and a docker runtime without `-t` (a pipe must not be
+/// a tty — the CLI would render, not stream).
+pub fn json_planned_tool(tool: &AgentTool, mode: crate::agent_json::MachineMode, resume: &[String]) -> AgentTool {
     let mut planned = tool.clone();
     let mut args: Vec<String> = mode.args.iter().map(|s| s.to_string()).collect();
+    args.extend(resume.iter().cloned());
     args.extend(tool.args.iter().cloned());
     planned.args = args;
     if let Runtime::DockerExec { tty, .. } = &mut planned.runtime {
@@ -1994,14 +2040,47 @@ pub fn json_planned_tool(tool: &AgentTool, mode: crate::agent_json::MachineMode)
     planned
 }
 
+/// The words a resume adds to the command line: the tool's `resume_argv`
+/// with the id substituted. A per-turn json CLI gets none — its adapter is
+/// seeded with the id and every child carries `-s <id>` already. A tool
+/// with an empty template cannot be resumed from the command line, and
+/// says so rather than starting a fresh session in resume's clothes.
+pub fn resume_words(tool: &AgentTool, json_mode: Option<crate::agent_json::MachineMode>, session_id: &str) -> Result<Vec<String>, String> {
+    if json_mode.is_some_and(|mode| !mode.persistent) {
+        return Ok(Vec::new());
+    }
+    if tool.resume_argv.is_empty() {
+        return Err(format!(
+            "agent tool \"{}\" has no resume command (its resume_argv is empty; set it in Settings ▸ Agents)",
+            tool.name
+        ));
+    }
+    Ok(resume_args(&tool.resume_argv, session_id))
+}
+
 /// The json agent's side effects: `agent://event` to the webview (when
-/// there is one). `awaiting_input` is NOT mirrored: the registry derives it
-/// from the agent at read time.
-fn json_hooks(app: Option<AppHandle>) -> JsonHooks {
+/// there is one), and the CLI's own session id — carried by every
+/// `turn_started` — copied onto the run (the live row, the record head,
+/// the ledger) with a `term://session` broadcast when it changes.
+/// `awaiting_input` is NOT mirrored: the registry derives it from the agent
+/// at read time.
+fn json_hooks(app: Option<AppHandle>, registry: Registry, id: TermId, tool_type: ToolType) -> JsonHooks {
     JsonHooks {
         emit: Arc::new(move |event: &AgentEvent| {
             if let Some(app) = &app {
                 let _ = app.emit("agent://event", &event_json(event));
+            }
+            if event.kind != AgentEventKind::TurnStarted {
+                return;
+            }
+            let Some(session_id) = event.payload.get("session_id").and_then(Value::as_str) else {
+                return;
+            };
+            let session = Session::new(tool_type.as_str(), session_id, SessionSource::Json, event.ts);
+            if let Some((binding, true)) = registry.record_session(id, session.clone()) {
+                if let Some(app) = &app {
+                    emit_session(app, id, binding.as_ref(), &session);
+                }
             }
         }),
     }
@@ -2210,6 +2289,35 @@ mod tests {
             spawned_at_ms: 0,
             spawn_uuid: format!("u-{id}"),
         }
+    }
+
+    /// Resume words sit between the machine-mode flags and the tool's own
+    /// args for a persistent json CLI, before the tool's args for a tty
+    /// one, and nowhere for a per-turn CLI (its adapter carries `-s`); an
+    /// empty template is a clear refusal, never a fresh start.
+    #[test]
+    fn resume_words_are_placed_per_transport() {
+        let mut claude = AgentTool::template(ToolType::Claude);
+        claude.args = vec!["--model".into(), "m".into()];
+        let mode = machine_mode(ToolType::Claude).unwrap();
+        let words = resume_words(&claude, Some(mode), "ses-1").unwrap();
+        assert_eq!(words, vec!["--resume", "ses-1"]);
+        let planned = json_planned_tool(&claude, mode, &words);
+        assert_eq!(
+            planned.args,
+            vec!["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--resume", "ses-1", "--model", "m"]
+        );
+        assert_eq!(resume_words(&claude, None, "ses-1").unwrap(), vec!["--resume", "ses-1"], "tty: the same words");
+
+        let opencode = AgentTool::template(ToolType::Opencode);
+        let per_turn = machine_mode(ToolType::Opencode).unwrap();
+        assert!(resume_words(&opencode, Some(per_turn), "ses-2").unwrap().is_empty(), "the adapter continues with -s");
+        assert_eq!(resume_words(&opencode, None, "ses-2").unwrap(), vec!["-s", "ses-2"]);
+
+        let mut custom = AgentTool::template(ToolType::Custom);
+        custom.name = "mine".into();
+        let err = resume_words(&custom, None, "ses-3").unwrap_err();
+        assert!(err.contains("no resume command"), "{err}");
     }
 
     /// The kebab names are the serde names — `as_str` must never drift from

@@ -709,6 +709,14 @@ impl JsonAgent {
         self.lock().adapter.session_id.clone()
     }
 
+    /// Resume a saved session: the adapter starts out knowing the id, so a
+    /// per-turn CLI's first child already carries `-s <id>` and a persistent
+    /// one's events are filed under it until the CLI names it itself. Call
+    /// BEFORE `spawn_child`.
+    pub fn seed_session(&self, session_id: &str) {
+        self.lock().adapter.session_id = Some(session_id.to_owned());
+    }
+
     /// A persistent CLI spawned without a prompt: its first ready signal is
     /// `awaiting_input`, not a turn. Call BEFORE `spawn_child`.
     pub fn expect_ready_as_awaiting(&self) {
@@ -1457,6 +1465,18 @@ mod tests {
         assert!(h.handle.io().child_alive(), "a per-turn agent is alive between turns");
         // The continuation argv carries -s <session> and the message LAST.
         assert_eq!(h.agent.child_args(Some("ses_1"), Some("two words")), ["-s", "ses_1", "two words"]);
+        // A resumed per-turn agent is seeded with the saved id, so its FIRST
+        // child already continues that session; the CLI's own step_start
+        // does not overwrite a seeded id.
+        let seeded = harness(machine_mode(ToolType::Opencode).unwrap());
+        seeded.agent.seed_session("ses_saved");
+        assert_eq!(seeded.agent.session_id().as_deref(), Some("ses_saved"));
+        assert_eq!(
+            seeded.agent.child_args(seeded.agent.session_id().as_deref(), Some("hello")),
+            ["-s", "ses_saved", "hello"]
+        );
+        seeded.agent.on_line(r#"{"type":"step_start","sessionID":"ses_saved","part":{}}"#);
+        assert_eq!(seeded.agent.session_id().as_deref(), Some("ses_saved"));
         // A persistent agent: feed awaiting, then a send with no stdin →
         // exited; the flag drop happens only on a successful write.
         let p = harness(machine_mode(ToolType::Claude).unwrap());

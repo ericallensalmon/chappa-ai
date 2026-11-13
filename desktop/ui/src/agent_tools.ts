@@ -17,6 +17,34 @@ export type AgentTool = ipc.AgentToolDto;
 export type AgentToolType = ipc.AgentToolType;
 export type AgentRuntime = ipc.AgentRuntimeDto;
 export type ParsedAgentCommand = ipc.ParsedAgentCommandDto;
+export type SessionCapture = ipc.SessionCaptureDto;
+export type SessionCaptureKind = ipc.SessionCaptureKind;
+
+/** The capture kinds, in the modal's order. */
+export const SESSION_CAPTURE_KINDS: readonly SessionCaptureKind[] = ["json", "regex", "announced", "none"];
+
+/** The placeholder in `resume_argv` that the saved id replaces. */
+export const SESSION_ID_SLOT = "{session_id}";
+
+/** The per-type resume template (the Rust template, mirrored): the two
+ *  machine-mode CLIs continue a session from their command line; nothing
+ *  is assumed for the rest. */
+export function resumeArgvFor(toolType: AgentToolType): string[] {
+  switch (toolType) {
+    case "claude":
+      return ["--resume", SESSION_ID_SLOT];
+    case "opencode":
+      return ["-s", SESSION_ID_SLOT];
+    default:
+      return [];
+  }
+}
+
+/** The per-type capture template: claude / opencode name their session in
+ *  their event stream; everything else starts at `none`. */
+export function sessionCaptureFor(toolType: AgentToolType): SessionCapture {
+  return toolType === "claude" || toolType === "opencode" ? { kind: "json" } : { kind: "none" };
+}
 
 /** The tool-type set plus `custom`, in display order. */
 export const AGENT_TOOL_TYPES: readonly AgentToolType[] = [
@@ -71,6 +99,8 @@ export function templateFor(toolType: AgentToolType, os: HostOs = detectHostOs()
     max_busy: null,
     // Always tty by default; the modal OFFERS json where a machine mode exists.
     transport: "tty",
+    resume_argv: resumeArgvFor(toolType),
+    session_capture: sessionCaptureFor(toolType),
   };
 }
 
@@ -81,6 +111,8 @@ export function cloneTool(t: AgentTool): AgentTool {
     args: [...t.args],
     env: { ...t.env },
     runtime: { ...t.runtime },
+    resume_argv: [...(t.resume_argv ?? [])],
+    session_capture: { ...(t.session_capture ?? { kind: "none" }) },
   };
 }
 

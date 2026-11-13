@@ -7,4 +7,5 @@ pub mod keys;
 pub mod pty;
 pub mod scan;
 pub mod scanner;
+pub mod session;
 pub mod status;

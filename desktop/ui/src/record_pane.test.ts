@@ -52,19 +52,51 @@ describe("recordView", () => {
       hint: "Start it to begin a new session.",
       actions: [{ id: "start", label: "▶ Start new session" }],
       lastRun: null,
+      session: "Resume unavailable",
+      sessionTitle: null,
     });
     expect(recordView({ kind: "terminal", name: "pwsh", lastRun: null }, NOW)).toEqual({
       title: "pwsh is stopped",
       hint: "Start it to resume this shell.",
       actions: [{ id: "start", label: "▶ Start" }],
       lastRun: null,
+      session: null,
+      sessionTitle: null,
     });
     expect(recordView({ kind: "command", name: "server", lastRun: null }, NOW)).toEqual({
       title: "server is stopped",
       hint: "Start it to run this process.",
       actions: [{ id: "start", label: "▶ Start" }],
       lastRun: null,
+      session: null,
+      sessionTitle: null,
     });
+  });
+
+  it("an agent run with a saved session puts Resume first and names the provider and the id's tail", () => {
+    const session = { provider: "claude", session_id: "abcd1234wxyz", captured_at_ms: 5, source: "json" as const };
+    const run = { status: "exited", started_at_ms: 1000, ended_at_ms: 2000, exit_code: 0, session };
+    const view = recordView({ kind: "agent", name: "claude", lastRun: run, canResume: true, captures: true }, NOW);
+    expect(view.actions.map((a) => a.id)).toEqual(["resume", "start"]);
+    expect(view.actions[0].label).toBe("↻ Resume last session");
+    expect(view.session).toBe("Session saved · claude · …wxyz");
+    expect(view.sessionTitle).toBe("abcd1234wxyz");
+    // A run resumed from an earlier id says so.
+    const resumed = { ...run, session: { ...session, resumed_from: "oldsession0001" } };
+    expect(recordView({ kind: "agent", name: "claude", lastRun: resumed, canResume: true }, NOW).session).toBe(
+      "Session saved · claude · …wxyz (resumed from …0001)",
+    );
+    // No resume command on the tool: the session is shown, the action is not.
+    const noCommand = recordView({ kind: "agent", name: "claude", lastRun: run, canResume: false }, NOW);
+    expect(noCommand.actions.map((a) => a.id)).toEqual(["start"]);
+    // No session seen on a capturing tool says why resume is off.
+    const plain = { status: "exited", started_at_ms: 1000, ended_at_ms: 2000, exit_code: 0 };
+    expect(recordView({ kind: "agent", name: "claude", lastRun: plain, canResume: true, captures: true }, NOW).session).toBe(
+      "Resume unavailable (no session id seen)",
+    );
+    expect(recordView({ kind: "agent", name: "claude", lastRun: plain, canResume: true, captures: false }, NOW).session).toBe(
+      "Resume unavailable",
+    );
   });
 
   it("falls back to the generic title per kind when the name is blank", () => {

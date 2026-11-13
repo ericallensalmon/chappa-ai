@@ -242,6 +242,8 @@ fn host_tool(tools: &AgentToolsState, name: &str, max_busy: Option<u32>) -> Agen
             enabled: true,
             max_busy,
             transport: Default::default(),
+            resume_argv: Vec::new(),
+            session_capture: Default::default(),
         })
         .unwrap()
 }
@@ -465,6 +467,8 @@ fn json_transport_spawns_over_pipes_and_flips_awaiting_input() {
             enabled: true,
             max_busy: None,
             transport: app_lib::agent_tools::Transport::Json,
+            resume_argv: Vec::new(),
+            session_capture: Default::default(),
         })
         .unwrap();
     // A json transport on a type without a machine mode is refused at upsert.
@@ -578,6 +582,8 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             tool_type: ToolType::Claude,
             program: dir.path().join("no-such-program").to_string_lossy().into_owned(),
             transport: app_lib::agent_tools::Transport::Json,
+            resume_argv: Vec::new(),
+            session_capture: Default::default(),
             enabled: true,
             ..AgentTool::default()
         })
@@ -608,6 +614,8 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             tool_type: ToolType::Opencode,
             program: dir.path().join("no-such-program").to_string_lossy().into_owned(),
             transport: app_lib::agent_tools::Transport::Json,
+            resume_argv: Vec::new(),
+            session_capture: Default::default(),
             enabled: true,
             ..AgentTool::default()
         })
@@ -686,6 +694,8 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
             program,
             args,
             transport: app_lib::agent_tools::Transport::Json,
+            resume_argv: Vec::new(),
+            session_capture: Default::default(),
             enabled: true,
             ..AgentTool::default()
         })
@@ -758,6 +768,8 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
             program,
             args,
             transport: app_lib::agent_tools::Transport::Json,
+            resume_argv: Vec::new(),
+            session_capture: Default::default(),
             enabled: true,
             ..AgentTool::default()
         })
@@ -903,6 +915,8 @@ fn docker_tools(dir: &std::path::Path, extra_container: Option<&str>) -> AgentTo
         enabled: true,
         max_busy: None,
         transport: Default::default(),
+        resume_argv: Vec::new(),
+        session_capture: Default::default(),
     };
     tools.upsert(tool.clone()).unwrap();
     if let Some(container) = extra_container {

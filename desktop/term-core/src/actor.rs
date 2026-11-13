@@ -46,6 +46,7 @@ use crate::keys::{
 };
 use crate::pty::{self, ExitStatus, PtySession, PtySpec};
 use crate::scanner::{KittyEvent, OscEvent, OscScanner, PromptMarkKind};
+use crate::session::{LineMatcher, SessionMatcher};
 
 /// Re-exported so embedders never need to reach into alacritty_terminal.
 pub use alacritty_terminal::index::Point;
@@ -79,6 +80,12 @@ pub struct ActorConfig {
     /// the alt-screen wheel→arrows path in `keys::alt_screen_wheel`; normal
     /// scrollback stays at system speed.
     pub wheel_speed: u8,
+    /// Recognizer for a session id the child prints as plain text (see
+    /// `session::LineMatcher`); a match is reported as
+    /// [`TermEvent::Session`] with [`SessionSource::Matched`]. `None` = the
+    /// stream is not inspected. The OSC `777;session;<id>` announcement is
+    /// honoured regardless.
+    pub session_matcher: Option<SessionMatcher>,
 }
 
 impl Default for ActorConfig {
@@ -88,8 +95,18 @@ impl Default for ActorConfig {
             scrollback_lines: 10_000,
             synthetic_prompt_marks: false,
             wheel_speed: 3,
+            session_matcher: None,
         }
     }
+}
+
+/// How a [`TermEvent::Session`] id reached us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSource {
+    /// The process announced it itself (`OSC 777;session;<id>`).
+    Announced,
+    /// The configured [`SessionMatcher`] recognized it in a printed line.
+    Matched,
 }
 
 /// Semantic prompt mark kinds (OSC 133), surfaced verbatim from the scanner.
@@ -313,6 +330,13 @@ pub enum TermEvent {
         total: usize,
     },
     Clipboard(String),
+    /// The child named the session it is running (announced, or matched in
+    /// its output). Emitted for every sighting, in stream order, so a
+    /// later id supersedes an earlier one — an id printed at exit wins.
+    Session {
+        id: String,
+        source: SessionSource,
+    },
     Exited(ExitStatus),
 }
 
@@ -987,6 +1011,8 @@ struct Actor {
     term: Term<ActorListener>,
     processor: Processor<StdSyncHandler>,
     scanner: OscScanner,
+    /// The plain-text session recognizer, when the spawn configured one.
+    session_lines: Option<LineMatcher>,
     session: Option<PtySession>,
     ctrl_rx: Receiver<Control>,
     byte_rx: Receiver<ByteMsg>,
@@ -1064,6 +1090,7 @@ impl Actor {
             term,
             processor: Processor::new(),
             scanner: OscScanner::new(),
+            session_lines: cfg.session_matcher.clone().map(LineMatcher::new),
             session,
             ctrl_rx,
             byte_rx,
@@ -1171,6 +1198,14 @@ impl Actor {
         // Mechanism: pre-scan for OSC 9/99/777/133 (alacritty drops
         // them) *before* handing the same bytes to the parser.
         let events = self.scanner.feed(bytes);
+        if let Some(lines) = self.session_lines.as_mut() {
+            for id in lines.feed(bytes) {
+                let _ = self.events.send(TermEvent::Session {
+                    id,
+                    source: SessionSource::Matched,
+                });
+            }
+        }
 
         // Kitty replies must be written BEFORE the parser advances: alacritty
         // answers DA1 (`CSI c`) during `advance`, and the kitty detection
@@ -1213,6 +1248,12 @@ impl Actor {
                     let row = self.term.grid().history_size() as i64
                         + self.term.grid().cursor.point.line.0 as i64;
                     let _ = self.events.send(TermEvent::PromptMark { kind, row });
+                }
+                OscEvent::Session(id) => {
+                    let _ = self.events.send(TermEvent::Session {
+                        id,
+                        source: SessionSource::Announced,
+                    });
                 }
                 OscEvent::Kitty(_) => {} // handled pre-advance above
             }

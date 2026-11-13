@@ -210,6 +210,7 @@ export type AgentMenuAction =
   | "rename"
   | "auto-rename"
   | "dismiss"
+  | "resume"
   | "remove";
 
 /** One entry of the agent row menu, in display order: a plain item, a
@@ -224,6 +225,10 @@ export interface AgentMenuRecord {
   termId: number | null;
   name: string;
   agent: { favorite: boolean; disableAutoRename: boolean } | null;
+  /** The last run's saved provider session id, when one was captured. */
+  sessionId?: string | null;
+  /** The tool has a way to continue a saved session. */
+  canResume?: boolean;
 }
 
 /** The live-terminal half: absent for a stopped row. */
@@ -234,16 +239,30 @@ export interface AgentMenuTerminal {
 }
 
 /**
- * The session-resume entries ("Choose session to resume…" and "Resume last
- * session"). Their place in the menu is fixed — right after the lifecycle
- * items, before the first separator — and this is the one array they go in.
- * Nothing resumes a session yet, so the slot is empty.
+ * The session-resume entry, right after the lifecycle items and before the
+ * first separator. A stopped record whose last run saved a provider session
+ * offers to continue it — the provider restores the whole conversation,
+ * nothing is replayed — labelled by the id's last four characters; it is
+ * disabled when the tool has no resume command. A live agent has nothing to
+ * resume, and a record without a saved session shows no entry at all.
  */
 export function agentResumeEntries(
-  _record: AgentMenuRecord | null,
-  _terminal: AgentMenuTerminal | null,
+  record: AgentMenuRecord | null,
+  terminal: AgentMenuTerminal | null,
 ): AgentMenuEntry[] {
-  return [];
+  if (!record?.sessionId) return [];
+  if (paneState(record, terminal).kind === "live") return [];
+  const id = record.sessionId;
+  const short = id.length <= 4 ? id : id.slice(-4);
+  return [
+    {
+      type: "item",
+      action: "resume",
+      label: `Resume last session (${short})`,
+      disabled: !record.canResume,
+      ...(record.canResume ? {} : { title: "this tool has no resume command" }),
+    },
+  ];
 }
 
 /**
@@ -2270,6 +2289,9 @@ export class App {
       if (this.records.has(r.record_id)) continue;
       this.records.set(r.record_id, recordRowFromDto(r));
     }
+    // An agent record's card and menu read its tool (resume command, session
+    // capture), so the tools are known before the first stopped row renders.
+    if (list.some((r) => r.kind === "agent")) await this.agentTools.load().catch(() => {});
     this.renderRail();
   }
 
@@ -2792,6 +2814,16 @@ export class App {
     // unknown id is a no-op; the frontend's own × path must not double-remove
     // (this is idempotent by id — the entry is already deleted).
     on<ipc.TerminalClosedEvent>("term://closed", (p) => this.dropEntry(p.term_id, false));
+    // A run learned its provider session: keep it on the record's newest
+    // run, so the card and menu offer to resume it once the agent stops.
+    on<ipc.TerminalSessionEvent>("term://session", (p) => {
+      const recordId = p.record_id ?? this.entries.get(p.term_id)?.recordId ?? null;
+      const rec = recordId ? this.records.get(recordId) : undefined;
+      if (!rec) return;
+      rec.lastRun = rec.lastRun
+        ? { ...rec.lastRun, session: p.session }
+        : { status: "running", started_at_ms: this.now(), session: p.session };
+    });
     on<ipc.TerminalEventDto>("term://status", (p) => {
       const entry = this.entries.get(p.term_id);
       if (!entry) return;
@@ -4552,9 +4584,11 @@ export class App {
   private ensureRecordPane(): RecordPane {
     if (!this.recordPane) {
       this.recordPane = new RecordPane({
-        onAction: () => {
+        onAction: (id) => {
           const target = this.paneFor;
-          if (target) void this.startPaneTarget(target);
+          if (!target) return;
+          if (id === "resume" && target.kind === "record") void this.startRecordRow(target.recordId, { resume: true });
+          else void this.startPaneTarget(target);
         },
         onNewAgent: () => {
           const target = this.paneFor;
@@ -4582,7 +4616,22 @@ export class App {
     }
     const rec = this.records.get(target.recordId);
     if (!rec) return null;
-    return { view: recordView({ kind: rec.kind, name: rec.name, lastRun: rec.lastRun }, now), recordId: rec.recordId };
+    const { canResume, captures } = this.resumeFacts(rec);
+    return {
+      view: recordView({ kind: rec.kind, name: rec.name, lastRun: rec.lastRun, canResume, captures }, now),
+      recordId: rec.recordId,
+    };
+  }
+
+  /** What an agent record's tool can do about sessions: whether it has a
+   *  resume command (or is a per-turn json CLI that continues by id), and
+   *  whether it captures ids at all. Shells have neither. */
+  private resumeFacts(rec: RecordRow): { canResume: boolean; captures: boolean } {
+    const tool = rec.agent ? this.agentTools.byId(rec.agent.toolId) : undefined;
+    if (!tool) return { canResume: false, captures: false };
+    const canResume =
+      (tool.resume_argv?.length ?? 0) > 0 || (tool.transport === "json" && tool.tool_type === "opencode");
+    return { canResume, captures: (tool.session_capture?.kind ?? "none") !== "none" };
   }
 
   /** The project a pane target belongs to (null = the workspace). */
@@ -4677,7 +4726,7 @@ export class App {
    * is still attached is replaced (the backend closes it on start, so the
    * local panel goes without a close call of its own).
    */
-  async startRecordRow(recordId: string): Promise<void> {
+  async startRecordRow(recordId: string, opts: { resume?: boolean; sessionId?: string } = {}): Promise<void> {
     const rec = this.records.get(recordId);
     if (!rec || rec.starting) return;
     const attachedId = this.liveTermOf(recordId);
@@ -4712,6 +4761,17 @@ export class App {
       const frames = ipc.makeProjectFramesChannel((data) => {
         onFrame(data instanceof ArrayBuffer ? data : Uint8Array.from(data).buffer);
       });
+      if (opts.resume) {
+        // The provider continues the saved conversation. No saved session
+        // falls through to a plain start (nothing to continue); a refusal
+        // is reported, never papered over with a fresh session.
+        try {
+          const resumed = await this.api.resumeRecord(recordId, frames, opts.sessionId);
+          return resumed.term_id;
+        } catch (err) {
+          if (!ipc.isResumeFailure(err) || err.kind !== "no_session") throw err;
+        }
+      }
       const answer = await this.api.startRecord(recordId, frames);
       if (answer.term_id === null) throw new Error(`${rec.name} did not start a terminal`);
       return answer.term_id;
@@ -4795,6 +4855,14 @@ export class App {
       host.remove();
       rec.starting = false;
       this.renderRail();
+      if (ipc.isResumeFailure(err)) {
+        // Back to the card, which says what the provider said and still
+        // offers a fresh start beside it.
+        this.showRecordPane({ kind: "record", recordId });
+        const text = err.kind === "resume_rejected" ? err.provider_text || err.message : err.message;
+        this.recordPane?.setFailure(`Resume failed: ${text}`);
+        return;
+      }
       void this.showError(String(err instanceof Error ? err.message : err));
     }
   }
@@ -6640,7 +6708,15 @@ export class App {
 
   private renderAgentMenu(rec: RecordRow | null, entry: RailEntry | null): void {
     this.agentMenu.textContent = "";
-    const record = rec ? { termId: rec.termId, name: rec.name, agent: rec.agent } : null;
+    const record = rec
+      ? {
+          termId: rec.termId,
+          name: rec.name,
+          agent: rec.agent,
+          sessionId: rec.lastRun?.session?.session_id ?? null,
+          canResume: this.resumeFacts(rec).canResume,
+        }
+      : null;
     const terminal = entry ? { status: entry.status, exitCode: entry.exitCode, bell: entry.bell } : null;
     for (const item of agentMenuEntries(record, terminal)) {
       if (item.type === "separator") {
@@ -6794,6 +6870,9 @@ export class App {
           this.entries.set(termId, railReducer(entry, { type: "activate" }));
           this.renderRail();
         }
+        return;
+      case "resume":
+        if (rec) void this.startRecordRow(rec.recordId, { resume: true });
         return;
       case "remove":
         if (rec) void this.removeAgent(rec.recordId);

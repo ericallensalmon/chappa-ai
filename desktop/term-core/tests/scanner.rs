@@ -51,6 +51,23 @@ fn osc_777_notify_title_and_body() {
     );
 }
 
+/// `OSC 777;session;<id>` is the universal "this is my conversation id"
+/// announcement: BEL or ST terminated, inner `;` kept, surrounding blanks
+/// trimmed, an empty id dropped.
+#[test]
+fn osc_777_session_announces_an_id() {
+    let mut s = OscScanner::new();
+    assert_eq!(
+        s.feed(b"]777;session;f1c70000-0000-4000-8000-000000000000"),
+        vec![OscEvent::Session("f1c70000-0000-4000-8000-000000000000".into())]
+    );
+    assert_eq!(s.feed(b"]777;session; ses_abc;v2 \\"), vec![OscEvent::Session("ses_abc;v2".into())]);
+    assert!(s.feed(b"]777;session;").is_empty(), "an empty id is not a session");
+    assert!(s.feed(b"]777;session").is_empty());
+    let split = feed_one_byte_at_a_time(&mut s, b"]777;session;abc\\");
+    assert_eq!(split, vec![OscEvent::Session("abc".into())]);
+}
+
 #[test]
 fn osc_777_ignores_other_subcommands() {
     let mut s = OscScanner::new();

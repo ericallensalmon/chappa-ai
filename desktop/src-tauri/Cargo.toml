@@ -38,6 +38,8 @@ project-model = { path = "../project-model" }
 # the checker to tell a live sibling instance from a stale endpoint file.
 chappa-ai-mcp = { path = "../chappa-ai-mcp" }
 indexmap = { version = "2", features = ["serde"] }
+# The per-tool session-id capture pattern (`session_capture: regex`).
+regex = "1"
 
 # The debug-only HTTP server AND the all-builds control surface
 # (control_http.rs on 8324) share this one server crate.

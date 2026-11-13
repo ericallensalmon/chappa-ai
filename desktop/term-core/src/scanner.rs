@@ -1,5 +1,7 @@
 //! Byte-stream pre-scan for OSC 9/99/777/133 (ported from an
-//! earlier standalone spike).
+//! earlier standalone spike). OSC 777 carries two sub-keys here: `notify`
+//! (a desktop notification) and `session` (the process names the
+//! conversation it is running, for a later resume).
 //!
 //! `OscScanner` sits in front of `alacritty_terminal`'s parser (which drops
 //! these sequences) and tees OSC payloads out as structured events while
@@ -68,6 +70,10 @@ pub enum OscEvent {
     /// A kitty keyboard-protocol control sequence (`CSI ? u`, `CSI > … u`,
     /// `CSI < … u`, `ESC c`). See [`KittyEvent`].
     Kitty(KittyEvent),
+    /// `OSC 777;session;<id>`: the process announces the id of the
+    /// conversation it is running, so the embedder can offer to resume it
+    /// later. Any program can emit it with one `printf`.
+    Session(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,17 +292,23 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
             })
         }
         b"777" => {
-            // Windows Terminal notify: `777;notify;title;body`.
+            // Windows Terminal notify: `777;notify;title;body`; our own
+            // `777;session;<id>` rides the same number.
             let sub = params.next().unwrap_or_default();
-            if sub == b"notify" {
-                let title = params.next().unwrap_or_default();
-                let body = join_rest(&mut params);
-                Some(OscEvent::Notify {
-                    title: non_empty(title),
-                    body: lossy(&body),
-                })
-            } else {
-                None
+            match sub {
+                b"notify" => {
+                    let title = params.next().unwrap_or_default();
+                    let body = join_rest(&mut params);
+                    Some(OscEvent::Notify {
+                        title: non_empty(title),
+                        body: lossy(&body),
+                    })
+                }
+                b"session" => {
+                    let id = lossy(&join_rest(&mut params)).trim().to_owned();
+                    (!id.is_empty()).then_some(OscEvent::Session(id))
+                }
+                _ => None,
             }
         }
         b"133" => {

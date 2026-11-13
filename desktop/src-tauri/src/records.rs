@@ -27,6 +27,16 @@
 //! on the ledger UPDATE): the first writer for a run wins, and a fact for a
 //! run the record has moved past touches only that run's ledger row.
 //!
+//! **Session + resume.** A run learns the provider's id for its conversation
+//! (the json adapter, a configured regex, an `OSC 777;session` announcement,
+//! `set_session` over the control surface) as one more late fact under the
+//! same rule. `resume` starts the record again with the PROVIDER continuing
+//! that id — the agent comes back with its own complete history, nothing is
+//! replayed here — and watches the start: a child that exits before it is
+//! ready was refused by the provider, and the caller gets that refusal (with
+//! the provider's own words) as a typed failure, never a fresh session
+//! dressed up as a resume.
+//!
 //! Lock discipline: the service holds clones of the store handles and never
 //! locks two of them at once; the ledger (coordination.db) has its own
 //! connection mutex. A command's record state is written by `projects.rs` /
@@ -35,9 +45,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use std::time::{Duration, Instant};
+
 use project_model::records::{
-    AgentRecord, AgentRecordPatch, RecordKind, Run, RunHead, RunUpdate, StoredRecord, TailKind, TerminalRecord,
-    RUNS_RETAINED,
+    AgentRecord, AgentRecordPatch, RecordKind, Run, RunHead, RunUpdate, Session, SessionSource, StoredRecord,
+    TailKind, TerminalRecord, RUNS_RETAINED,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -46,15 +58,16 @@ use tauri::{AppHandle, State};
 use term_core::actor::epoch_ms;
 use term_core::status::ProcessStatus;
 
-use crate::agent_tools::AgentToolsState;
-use crate::agents::{spawn_agent_with, SpawnAgentRequest, SpawnContext};
+use crate::agent_json::machine_mode;
+use crate::agent_tools::{AgentToolsState, Transport};
+use crate::agents::{readiness, spawn_agent_with, IoView, ReadyGate, Readiness, ResumeSpec, SpawnAgentRequest, SpawnContext};
 use crate::control_http::{json, ControlState, Params, Resp};
 use crate::coordination::{CoordError, Coordination};
 use crate::coordination_http::Args;
 use crate::projects::{ControlError, Projects};
 use crate::registry::{
-    emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink, Registry,
-    RunExit, RunRecorder, TermId,
+    emit_created, emit_session, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink,
+    Registry, RunExit, RunRecorder, TermId,
 };
 use crate::settings::SettingsState;
 use crate::workspace::Workspace;
@@ -165,7 +178,7 @@ impl RunLedger {
                     run.tail_kind.as_str(),
                     Value::Array(run.tail.clone()).to_string(),
                     run.summary.as_ref().map(Value::to_string),
-                    run.session.as_ref().map(Value::to_string),
+                    run.session.as_ref().and_then(|s| serde_json::to_string(s).ok()),
                 ],
             )?;
             tx.execute(
@@ -207,6 +220,20 @@ impl RunLedger {
                 "UPDATE runs SET status='stopped', ended_at_ms=?2
                  WHERE run_uuid=?1 AND status IN ('running','starting')",
                 rusqlite::params![run_uuid, ended_at_ms as i64],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// The run learned its provider session. The row is that run's own
+    /// history, so it takes the id whether or not the run is still open (an
+    /// id printed on the way out lands after the exit is recorded).
+    pub fn set_session(&self, run_uuid: &str, session: &Session) -> Result<bool, CoordError> {
+        let text = serde_json::to_string(session).map_err(|e| CoordError::Internal(e.to_string()))?;
+        self.coord.with_tx(|tx| {
+            let changed = tx.execute(
+                "UPDATE runs SET session=?2 WHERE run_uuid=?1",
+                rusqlite::params![run_uuid, text],
             )?;
             Ok(changed > 0)
         })
@@ -316,6 +343,125 @@ pub struct StartDto {
     /// performs the spawn, and it had not registered before the wait ran out.
     pub pending: bool,
 }
+
+/// The reply to `resume_record`: the new run, the id it continues, and how
+/// far the provider was watched before the resume counted as accepted.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResumeDto {
+    pub record_id: String,
+    pub kind: RecordKind,
+    pub term_id: TermId,
+    pub run_uuid: String,
+    /// The provider session this run continues.
+    pub session_id: String,
+    pub check: ResumeCheck,
+}
+
+/// What "the provider accepted the resume" rested on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeCheck {
+    /// The child produced output and went quiet (the ready gate opened).
+    Quiet,
+    /// The child kept printing for the whole max wait — a TUI that never
+    /// goes quiet — and is still alive.
+    ReadyByTimeout,
+    /// The child printed nothing within the max wait but is still alive.
+    Silent,
+    /// A per-turn CLI (opencode json): no child runs until the first
+    /// message, so the provider can only refuse then — as that send's
+    /// error, in the transcript.
+    Deferred,
+}
+
+/// Why a resume did not happen. The control surface answers it as
+/// `{"error": <kind>, ...}`; the Tauri command rejects with the same object
+/// (`kind` tagged), so the pane can show "Resume failed: <provider text>"
+/// and offer a fresh start — and fall through to a plain start when there
+/// was simply nothing to resume.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResumeFailure {
+    /// The record's last run (or the named run) has no saved session.
+    NoSession { record_id: String, message: String },
+    /// The provider refused: the child exited before it was ready.
+    /// `provider_text` is what it printed (the last lines of the run's
+    /// tail), `run_uuid` the failed run — readable through the ledger.
+    Rejected {
+        record_id: String,
+        run_uuid: String,
+        term_id: TermId,
+        exit_code: Option<i32>,
+        provider_text: String,
+        message: String,
+    },
+    /// Not an agent, no tool, no resume command, already running.
+    Unavailable { record_id: String, message: String },
+    NotFound { record_id: String, message: String },
+    Internal { message: String },
+}
+
+impl ResumeFailure {
+    pub fn status(&self) -> u16 {
+        match self {
+            ResumeFailure::NoSession { .. } | ResumeFailure::Rejected { .. } | ResumeFailure::Unavailable { .. } => 409,
+            ResumeFailure::NotFound { .. } => 404,
+            ResumeFailure::Internal { .. } => 500,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ResumeFailure::NoSession { .. } => "no_session",
+            ResumeFailure::Rejected { .. } => "resume_rejected",
+            ResumeFailure::Unavailable { .. } => "resume_unavailable",
+            ResumeFailure::NotFound { .. } => "not_found",
+            ResumeFailure::Internal { .. } => "internal",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            ResumeFailure::NoSession { message, .. }
+            | ResumeFailure::Rejected { message, .. }
+            | ResumeFailure::Unavailable { message, .. }
+            | ResumeFailure::NotFound { message, .. }
+            | ResumeFailure::Internal { message } => message,
+        }
+    }
+
+    /// The HTTP body: the tagged object with `kind` spelled `error`, the
+    /// control surface's error word.
+    pub fn to_json(&self) -> Value {
+        let mut body = serde_json::to_value(self).unwrap_or_else(|_| json!({}));
+        if let Some(map) = body.as_object_mut() {
+            map.remove("kind");
+            map.insert("error".into(), json!(self.kind()));
+        }
+        body
+    }
+}
+
+impl From<RecordError> for ResumeFailure {
+    fn from(err: RecordError) -> Self {
+        match err {
+            RecordError::NotFound(m) => ResumeFailure::NotFound { record_id: String::new(), message: m },
+            RecordError::Invalid(m) | RecordError::Unavailable(m) => {
+                ResumeFailure::Unavailable { record_id: String::new(), message: m }
+            }
+            RecordError::Internal(m) => ResumeFailure::Internal { message: m },
+        }
+    }
+}
+
+/// How long a resume watches a child that prints nothing at all before
+/// counting it as accepted ([`ResumeCheck::Silent`]).
+const RESUME_SILENT_MS: u64 = 5_000;
+/// How long a rejected resume waits for the run's exit (and tail) to be
+/// recorded before answering with whatever text it has.
+const RESUME_TAIL_WAIT: Duration = Duration::from_secs(3);
+/// How many lines of the failed run's tail travel as the provider's text.
+const REJECTION_LINES: usize = 4;
 
 /// The reply to `remove_record`.
 #[derive(Debug, Clone, Serialize)]
@@ -529,6 +675,7 @@ impl Records {
                 parts.ledger.finish(run_uuid, &row)
             }
             LateFact::Stopped(ended_at_ms) => parts.ledger.stop(run_uuid, *ended_at_ms),
+            LateFact::Session(session) => parts.ledger.set_session(run_uuid, session),
         };
         if let Err(e) = ledger {
             log::warn!("[records] ledger update for run {run_uuid} failed: {e}");
@@ -776,10 +923,11 @@ impl Records {
     }
 }
 
-/// The two late facts a run can receive.
+/// The late facts a run can receive.
 enum LateFact {
     Exited(RunExit),
     Stopped(u64),
+    Session(Session),
 }
 
 impl LateFact {
@@ -790,6 +938,7 @@ impl LateFact {
                 run.finish(exit.ended_at_ms, exit.exit_code, exit.success, exit.tail.clone());
             }
             LateFact::Stopped(ended_at_ms) => run.stop(*ended_at_ms),
+            LateFact::Session(session) => run.set_session(session.clone()),
         }
     }
 }
@@ -802,6 +951,231 @@ impl RunRecorder for Records {
     fn run_stopped(&self, record_id: &str, run_uuid: &str, ended_at_ms: u64) {
         self.apply_late_fact(record_id, run_uuid, &LateFact::Stopped(ended_at_ms));
     }
+
+    fn run_session(&self, record_id: &str, run_uuid: &str, session: Session) {
+        self.apply_late_fact(record_id, run_uuid, &LateFact::Session(session));
+    }
+}
+
+// ---- resume ---------------------------------------------------------------------
+
+impl Records {
+    /// Resume an agent record: start it again with the PROVIDER continuing
+    /// `session_id` (default: the last run's saved session), then watch the
+    /// start. The agent comes back with its complete prior conversation —
+    /// nothing is replayed from here. A record with nothing to resume
+    /// answers [`ResumeFailure::NoSession`] so the caller can fall through to
+    /// a plain start; a child that exits before it is ready was refused by
+    /// the provider and comes back as [`ResumeFailure::Rejected`] with the
+    /// provider's own text — never a silent fresh session.
+    pub fn resume(
+        &self,
+        deps: StartDeps<'_>,
+        record_id: &str,
+        session_id: Option<String>,
+        frames: Option<Channel<InvokeResponseBody>>,
+    ) -> Result<ResumeDto, ResumeFailure> {
+        let rid = || record_id.to_owned();
+        let (scope, record) = self.get(record_id).ok_or_else(|| ResumeFailure::NotFound {
+            record_id: rid(),
+            message: format!("no such record: {record_id}"),
+        })?;
+        if record.kind != RecordKind::Agent {
+            return Err(ResumeFailure::Unavailable {
+                record_id: rid(),
+                message: format!("record {record_id} is a {}, only agents have a session to resume", record.kind.as_str()),
+            });
+        }
+        let agent = record.agent.ok_or_else(|| ResumeFailure::Internal {
+            message: "agent record without its facts".into(),
+        })?;
+        let session_id = match session_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => id,
+            None => match record.last_run.as_ref().and_then(|run| run.session.as_ref()) {
+                Some(session) => session.session_id.clone(),
+                None => {
+                    return Err(ResumeFailure::NoSession {
+                        record_id: rid(),
+                        message: format!("record {record_id} has no saved session to resume"),
+                    })
+                }
+            },
+        };
+        let tool = deps.tools.get(agent.tool_id).ok_or_else(|| ResumeFailure::Unavailable {
+            record_id: rid(),
+            message: format!("agent tool {} of record {record_id} no longer exists", agent.tool_id),
+        })?;
+        let json_mode = match tool.transport {
+            Transport::Json => machine_mode(tool.tool_type),
+            Transport::Tty => None,
+        };
+        if let Some((term_id, head)) = deps.registry.term_of_record(record_id) {
+            if matches!(head.status, ProcessStatus::Starting | ProcessStatus::Running) {
+                return Err(ResumeFailure::Unavailable {
+                    record_id: rid(),
+                    message: format!("record {record_id} is running as terminal {term_id}; stop it before resuming"),
+                });
+            }
+            deps.registry.close(term_id);
+        }
+        let parts = self.parts();
+        let req = SpawnAgentRequest {
+            agent_tool_id: agent.tool_id,
+            project_id: scope.project_id(),
+            name: Some(agent.name),
+            extra_args: agent.extra_args,
+            record_id: Some(rid()),
+            resume: Some(ResumeSpec { session_id: session_id.clone() }),
+            ..SpawnAgentRequest::default()
+        };
+        let ctx = SpawnContext {
+            registry: deps.registry,
+            tools: deps.tools,
+            settings: deps.settings,
+            projects: &parts.projects,
+            records: self,
+            actor: None,
+        };
+        let (sink, on_notify): (Arc<dyn EventSink>, Option<AppHandle>) = match (frames, deps.app.clone()) {
+            (Some(frames), Some(app)) => (Arc::new(ChannelSink::new(frames, app.clone())), Some(app)),
+            _ => (Arc::new(NullSink), None),
+        };
+        let headless = on_notify.is_none();
+        let resp = spawn_agent_with(ctx, req, sink, on_notify).map_err(|e| {
+            if e.contains("no resume command") {
+                ResumeFailure::Unavailable { record_id: rid(), message: e }
+            } else {
+                ResumeFailure::Internal { message: e }
+            }
+        })?;
+        let term_id = resp.process_id;
+        let run_uuid = resp.agent.spawn_uuid.clone();
+        if headless {
+            if let Some(app) = deps.app.as_ref() {
+                emit_created(
+                    &AppCreatedBroadcast(app.clone()),
+                    CreatedEvent {
+                        term_id,
+                        name: resp.name.clone(),
+                        kind: "agent",
+                        project_id: resp.agent.project_id,
+                        agent_tool_id: Some(resp.agent.tool_id),
+                        parent_process_id: resp.agent.parent_process_id,
+                        record_id: Some(rid()),
+                        last_run: deps.registry.run_head(term_id),
+                    },
+                );
+            }
+        }
+        let settings = deps.settings.snapshot();
+        let check = match json_mode {
+            Some(mode) if !mode.persistent => Ok(ResumeCheck::Deferred),
+            _ => self.watch_resume(
+                deps.registry,
+                term_id,
+                u64::from(settings.agent_ready_quiet_ms),
+                u64::from(settings.agent_ready_max_wait_ms),
+            ),
+        };
+        let check = match check {
+            Ok(check) => check,
+            Err(()) => {
+                // Refused: wait for the run's end (and its tail) to be
+                // recorded, then hand the caller the provider's words.
+                let deadline = Instant::now() + RESUME_TAIL_WAIT;
+                let run = loop {
+                    let run = self.get(record_id).and_then(|(_, r)| r.last_run).filter(|r| r.run_uuid == run_uuid);
+                    match run {
+                        Some(run) if !run.is_open() => break Some(run),
+                        _ if Instant::now() >= deadline => break run,
+                        _ => std::thread::sleep(Duration::from_millis(25)),
+                    }
+                };
+                let exit_code = run.as_ref().and_then(|r| r.exit_code);
+                let provider_text = run.as_ref().map(|r| rejection_text(&r.tail)).unwrap_or_default();
+                let message = if provider_text.is_empty() {
+                    format!("the provider exited before it was ready (exit code {exit_code:?}) and printed nothing")
+                } else {
+                    format!("the provider refused the resume: {provider_text}")
+                };
+                return Err(ResumeFailure::Rejected {
+                    record_id: rid(),
+                    run_uuid,
+                    term_id,
+                    exit_code,
+                    provider_text,
+                    message,
+                });
+            }
+        };
+        Ok(ResumeDto {
+            record_id: rid(),
+            kind: RecordKind::Agent,
+            term_id,
+            run_uuid,
+            session_id,
+            check,
+        })
+    }
+
+    /// Watch a resumed child through the ready gate: output then quiet (or
+    /// the max wait) means the provider took the session; an exit first
+    /// means it refused (`Err`). A child that prints nothing for
+    /// [`RESUME_SILENT_MS`] but is alive is accepted as silent.
+    fn watch_resume(&self, registry: &Registry, term_id: TermId, quiet_ms: u64, max_wait_ms: u64) -> Result<ResumeCheck, ()> {
+        let handle = registry.handle(term_id).ok_or(())?;
+        let started = Instant::now();
+        let mut first_output_ms: Option<u64> = None;
+        loop {
+            let view = IoView::of(&handle);
+            let now = epoch_ms();
+            if first_output_ms.is_none() && view.has_output {
+                first_output_ms = Some(now);
+            }
+            let gate = ReadyGate { quiet_ms, max_wait_ms, first_output_ms };
+            match readiness(view, now, gate) {
+                Readiness::Exited => return Err(()),
+                Readiness::Ready => return Ok(ResumeCheck::Quiet),
+                Readiness::ReadyByTimeout => return Ok(ResumeCheck::ReadyByTimeout),
+                Readiness::Pending if started.elapsed() >= Duration::from_millis(RESUME_SILENT_MS) => {
+                    return Ok(ResumeCheck::Silent)
+                }
+                Readiness::Pending => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+    }
+}
+
+/// The provider's own words out of a failed run's tail: the last few
+/// non-empty text lines, or a json agent's error / stderr / stray lines.
+fn rejection_text(tail: &[Value]) -> String {
+    let mut lines: Vec<String> = tail
+        .iter()
+        .filter_map(|item| match item {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(event) => {
+                let payload = event.get("payload")?;
+                match event.get("kind").and_then(Value::as_str) {
+                    Some("error") => payload.get("message").map(|m| match m {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    }),
+                    Some("raw") => payload
+                        .get("stderr")
+                        .or_else(|| payload.get("line"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let skip = lines.len().saturating_sub(REJECTION_LINES);
+    lines.drain(..skip);
+    lines.join("\n")
 }
 
 /// One record's DTO: the live binding wins over the stored head while a
@@ -913,6 +1287,67 @@ pub fn route_start_record(state: &ControlState, params: &Params, query: &str, bo
     }
 }
 
+/// `POST /records/{record_id}/resume` (`session_id?`).
+pub fn route_resume_record(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+    let a = match args(query, body) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    let result = record_id_of(params).map_err(ResumeFailure::from).and_then(|record_id| {
+        let session_id = a.str("session_id").map(str::to_owned);
+        let deps = StartDeps {
+            registry: &state.registry,
+            tools: &state.agent_tools,
+            settings: &state.settings,
+            app: state.app.clone(),
+        };
+        state.records.resume(deps, &record_id, session_id, None)
+    });
+    match result {
+        Ok(v) => json(200, json!(v)),
+        Err(err) => json(err.status(), err.to_json()),
+    }
+}
+
+/// `POST /processes/{id}/session` (`session_id`): the process names the
+/// conversation it is running — the self-targeting half of the announce
+/// path (`set_session` over MCP, the actor header naming the caller).
+pub fn route_set_session(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+    let a = match args(query, body) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    let id = params.id.unwrap_or_default();
+    let session_id = match a.str("session_id").map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_owned(),
+        _ => return json(400, json!({"error": "invalid", "message": "session_id is required"})),
+    };
+    let Some(provider) = state.registry.session_provider(id) else {
+        return json(404, json!({"error": "not_found", "message": format!("no such terminal: {id}")}));
+    };
+    let session = Session::new(provider, session_id, SessionSource::Mcp, epoch_ms());
+    match state.registry.record_session(id, session.clone()) {
+        Some((binding, changed)) => {
+            if changed {
+                if let Some(app) = state.app.as_ref() {
+                    emit_session(app, id, binding.as_ref(), &session);
+                }
+            }
+            json(
+                200,
+                json!({
+                    "id": id,
+                    "record_id": binding.as_ref().map(|b| b.record_id.clone()),
+                    "run_uuid": binding.as_ref().map(|b| b.run_uuid.clone()),
+                    "session": session,
+                    "durable": binding.is_some(),
+                }),
+            )
+        }
+        None => json(404, json!({"error": "not_found", "message": format!("no such terminal: {id}")})),
+    }
+}
+
 /// `POST /records/{record_id}/remove` (confirm-gated: the history goes too).
 pub fn route_remove_record(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     let a = match args(query, body) {
@@ -958,7 +1393,33 @@ frontend like `start_process`, with `wait_ms` / `pending`; a workspace command a
 starts from the app) and answers `{record_id, kind, term_id, run_uuid, pending}`. `POST \
 /records/{record_id}/remove` (confirm=true) closes any attached terminal, deletes the record and its \
 ledger rows — for a command record that deletes the command definition — and answers `{record_id, \
-kind, removed, runs_deleted}`. Removing a project removes its records' ledger rows the same way.\n";
+kind, removed, runs_deleted}`. Removing a project removes its records' ledger rows the same way.\n\n\
+**Sessions and resume.** `last_run.session` is the provider's own id for the conversation a run is \
+(or was) having: `{provider, session_id, captured_at_ms, source: json | regex | announced | mcp | \
+resume, resumed_from?}`. It is learned per agent tool according to its `session_capture` setting \
+(`json` = the machine-mode adapter's typed id, copied onto the run on every turn_started and at exit; \
+`regex` = a one-group pattern over every plain-text line the process prints, latest match wins, so an \
+id printed at exit is the one kept; `announced` = only what the process says itself; `none`), and \
+ALWAYS from the two announce paths any process can use: print `OSC 777;session;<id>` — \
+`printf '\\033]777;session;%s\\007' \"$ID\"` — or call `set_session` over MCP (`POST \
+/processes/{id}/session`, `{session_id}`; the MCP tool targets the caller's own process). Every \
+sighting goes through the run-uuid rule; a change broadcasts `term://session {term_id, record_id, \
+run_uuid, session}`. Only the id is stored, never a transcript — whether the conversation can be \
+picked up again depends on the provider's own history.\n\n\
+`POST /records/{record_id}/resume` (`session_id?`, default the last run's saved session) starts an \
+agent record again with the PROVIDER continuing that session, so the agent comes back with its \
+complete prior conversation; nothing is replayed from here. The tool's `resume_argv` (`{session_id}` \
+substituted; claude `--resume <id>`, opencode `-s <id>`) goes before the tool's own args — after \
+the machine-mode flags for a json tool; a per-turn json CLI is continued through its adapter instead. \
+The start is then watched through the ready gate: output then quiet (or the max wait) = accepted, \
+answering `{record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent \
+| deferred}` (`deferred` = a per-turn CLI, which can only refuse on the first message). A child that \
+exits before it is ready was REFUSED by the provider: 409 `{error: resume_rejected, record_id, \
+run_uuid, term_id, exit_code, provider_text, message}` with the provider's own words (the last lines \
+of the failed run's tail, e.g. claude's `No conversation found with session ID: <id>`), and the \
+failed run stays readable in the ledger — never a fresh session passed off as a resume. A record \
+with nothing to resume answers 409 `{error: no_session}`; a running record, a non-agent, a missing \
+tool or an empty `resume_argv` answer 409 `{error: resume_unavailable}`.\n";
 
 // ---- Tauri commands -------------------------------------------------------
 
@@ -1006,6 +1467,41 @@ pub async fn start_record(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Resume an agent record into this webview (frames channel attached):
+/// the provider continues the saved session (or `session_id`). Rejects with
+/// a [`ResumeFailure`] object — `kind: no_session` means fall through to a
+/// plain start, `kind: resume_rejected` carries the provider's text. Async +
+/// `spawn_blocking`: the start is watched through the ready gate.
+#[tauri::command]
+pub async fn resume_record(
+    app: AppHandle,
+    registry: State<'_, Registry>,
+    tools: State<'_, AgentToolsState>,
+    settings: State<'_, SettingsState>,
+    records: State<'_, Records>,
+    record_id: String,
+    session_id: Option<String>,
+    frames: Channel<InvokeResponseBody>,
+) -> Result<ResumeDto, ResumeFailure> {
+    let (registry, tools, settings, records) = (
+        registry.inner().clone(),
+        tools.inner().clone(),
+        settings.inner().clone(),
+        records.inner().clone(),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let deps = StartDeps {
+            registry: &registry,
+            tools: &tools,
+            settings: &settings,
+            app: Some(app),
+        };
+        records.resume(deps, &record_id, session_id, Some(frames))
+    })
+    .await
+    .map_err(|e| ResumeFailure::Internal { message: e.to_string() })?
 }
 
 /// Edit an agent record's row state. Every field of `patch` is optional;

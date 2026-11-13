@@ -278,9 +278,30 @@ export interface AgentToolDto {
    *  mode over pipes → typed events → the transcript view). Only types
    *  with a machine mode (claude, opencode) may be `json`. */
   transport: AgentTransport;
+  /** The argv that continues a saved session; `{session_id}` is
+   *  substituted (claude `["--resume", "{session_id}"]`, opencode
+   *  `["-s", "{session_id}"]`). Goes before the tool's own args. Empty =
+   *  no resume offered for this tool. */
+  resume_argv: string[];
+  /** How the id of the conversation a run is having is learned. */
+  session_capture: SessionCaptureDto;
 }
 
 export type AgentTransport = "tty" | "json";
+
+/** `session_capture` on a tool: `json` = the machine-mode adapter's typed
+ *  id (json transport of claude / opencode; a tty spawn captures nothing
+ *  automatically); `regex` = one capture group run over every printed line,
+ *  the latest match wins; `announced` = only what the process says itself
+ *  (`OSC 777;session;<id>` or the `set_session` MCP tool); `none` = no
+ *  capture, no resume. The announce paths work whatever the kind. */
+export type SessionCaptureDto =
+  | { kind: "json" }
+  | { kind: "regex"; pattern: string }
+  | { kind: "announced" }
+  | { kind: "none" };
+
+export type SessionCaptureKind = SessionCaptureDto["kind"];
 
 /** The paste box's answer: a prefilled tool plus what could not be classified. */
 export interface ParsedAgentCommandDto {
@@ -482,11 +503,37 @@ export type RecordKind = "command" | "agent" | "terminal";
  *  events of a json-transport agent. */
 export type TailKind = "text" | "events";
 
+/** How a run's session id was learned. `resume` = the run was STARTED as
+ *  a resume of that id and the provider has not (yet) named the session
+ *  itself. */
+export type SessionSource = "json" | "regex" | "announced" | "mcp" | "resume";
+
+/** The provider's own id for the conversation a run is (or was) having —
+ *  what a resume continues. Only the id is stored, never a transcript:
+ *  whether the conversation can be picked up again depends on the
+ *  provider's own history. */
+export interface SessionDto {
+  /** The tool type that owns the id (`claude`, `opencode`, `custom`, …). */
+  provider: string;
+  session_id: string;
+  captured_at_ms: number;
+  source: SessionSource;
+  /** When the run was started as a resume: the id it was asked to
+   *  continue (kept after the provider names the session again). */
+  resumed_from?: string;
+}
+
+/** The last four characters of a session id — the row label. */
+export function shortSessionId(id: string): string {
+  return id.length <= 4 ? id : id.slice(-4);
+}
+
 /** One run's head: `last_run` minus the tail itself (the tail is fetched
  *  through `getRecordRuns`, never pushed with a row). `status` is the run's
  *  resting status: running while live; exited / failed once the exit was
- *  observed; stopped when the row was closed first. `summary` and
- *  `session` are reserved slots, absent today. */
+ *  observed; stopped when the row was closed first. `summary` is a
+ *  reserved slot, absent today; `session` is present once the run learned
+ *  the provider's session id. */
 export interface RunHeadDto {
   run_uuid: string;
   status: string;
@@ -497,7 +544,7 @@ export interface RunHeadDto {
   tail_kind: TailKind;
   tail_len: number;
   summary?: unknown;
-  session?: unknown;
+  session?: SessionDto | null;
 }
 
 /** One run WITH its tail (`getRecordRuns`): `tail` holds strings for
@@ -512,7 +559,7 @@ export interface RunDto {
   tail_kind: TailKind;
   tail?: unknown[];
   summary?: unknown;
-  session?: unknown;
+  session?: SessionDto | null;
 }
 
 /** One stored record with its live binding (`listRecords`). `status` is
@@ -589,6 +636,63 @@ export function removeRecord(recordId: string): Promise<RemoveRecordDto> {
   return call("remove_record", { recordId });
 }
 
+/** What `resumeRecord` answers: the new run continuing `session_id`, and
+ *  what the acceptance rested on. `quiet` / `ready_by_timeout` / `silent` =
+ *  the child was watched through the ready gate and is alive; `deferred` =
+ *  a per-turn CLI (opencode json) that can only refuse on its first
+ *  message — that send's error is where a refusal shows. */
+export interface ResumeRecordDto {
+  record_id: string;
+  kind: RecordKind;
+  term_id: number;
+  run_uuid: string;
+  session_id: string;
+  check: "quiet" | "ready_by_timeout" | "silent" | "deferred";
+}
+
+/** Why `resumeRecord` rejected (the rejection value of its promise):
+ *  `no_session` = nothing saved to resume — fall through to a plain
+ *  `startRecord`; `resume_rejected` = the PROVIDER refused (the child exited
+ *  before it was ready) and `provider_text` is what it printed — show
+ *  "Resume failed: <provider_text>" and offer "Start new session", never a
+ *  silent fresh start; `resume_unavailable` = running already, not an
+ *  agent, tool gone, or the tool has no resume command. */
+export type ResumeFailureDto =
+  | { kind: "no_session"; record_id: string; message: string }
+  | {
+      kind: "resume_rejected";
+      record_id: string;
+      run_uuid: string;
+      term_id: number;
+      exit_code: number | null;
+      provider_text: string;
+      message: string;
+    }
+  | { kind: "resume_unavailable"; record_id: string; message: string }
+  | { kind: "not_found"; record_id: string; message: string }
+  | { kind: "internal"; message: string };
+
+/** Whether an `invoke` rejection is a typed resume failure (anything else
+ *  is a plain error string). */
+export function isResumeFailure(err: unknown): err is ResumeFailureDto {
+  return typeof err === "object" && err !== null && typeof (err as { kind?: unknown }).kind === "string";
+}
+
+/** Resume an agent record into this webview: the PROVIDER continues the
+ *  saved session (default the last run's `last_run.session`; `sessionId`
+ *  picks an earlier run's id from `getRecordRuns`), so the agent comes back
+ *  with its complete prior conversation — nothing is replayed. The
+ *  `term://created` broadcast that follows carries the record id, and the
+ *  new run's `last_run.session` says what it was resumed from. Rejects with
+ *  a `ResumeFailureDto`. */
+export function resumeRecord(
+  recordId: string,
+  frames: Channel<ArrayBuffer | number[]>,
+  sessionId?: string,
+): Promise<ResumeRecordDto> {
+  return call("resume_record", { recordId, sessionId, frames });
+}
+
 /** An edit of an agent record's own row state. Every key is optional and
  *  an absent key is left alone; `notification_level: null` CLEARS the level
  *  (the row inherits its project's), a literal sets it. */
@@ -657,6 +761,20 @@ export interface TerminalCreatedEvent {
    *  older fixtures still type. */
   record_id?: string | null;
   last_run?: RunHeadDto | null;
+}
+
+/** A `term://session` payload: a run learned (or changed) the provider
+ *  session it is having — the json adapter, a regex match, an
+ *  `OSC 777;session` announcement or `set_session`. `record_id` /
+ *  `run_uuid` are null for an ephemeral row. The record card's session line
+ *  updates off this without a round-trip. */
+export interface TerminalSessionEvent {
+  event: string;
+  term_id: number;
+  seq: number;
+  record_id: string | null;
+  run_uuid: string | null;
+  session: SessionDto;
 }
 
 /** A `term://closed` broadcast payload: `{term_id, reason}` where

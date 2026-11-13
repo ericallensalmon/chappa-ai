@@ -27,6 +27,8 @@ function docker(id: number, over: Partial<AgentTool> = {}): AgentTool {
     enabled: true,
     max_busy: null,
     transport: "tty",
+    resume_argv: ["-s", "{session_id}"],
+    session_capture: { kind: "json" },
     ...over,
   };
 }
@@ -333,6 +335,63 @@ describe("Agents settings section", () => {
     action(edit, "saveAgent").click();
     await FLUSH();
     expect(api.tools().find((t) => t.id === 3)!.transport).toBe("tty");
+    s.dispose();
+  });
+
+  it("the Resume group: templates prefilled, per-kind hints, the pattern row for regex, and the saved shape", async () => {
+    const { api, host, section: s } = await section([]);
+    // The claude template: json capture, `--resume {session_id}`, both hints.
+    field<HTMLSelectElement>(host, "newAgentType").value = "claude";
+    action(host, "addAgent").click();
+    const modal = s.modalElement!;
+    expect(field<HTMLSelectElement>(modal, "session_capture").value).toBe("json");
+    expect(field<HTMLTextAreaElement>(modal, "resume_argv").value).toBe("--resume\n{session_id}");
+    expect(modal.querySelector(".chappa-agent-resume-hint")?.textContent).toMatch(/\{session_id\} is substituted/);
+    expect(modal.querySelector(".chappa-agent-capture-hint")?.textContent).toMatch(/machine-mode adapter/);
+    expect(field<HTMLInputElement>(modal, "session_pattern").closest<HTMLElement>("div")!.style.display).toBe("none");
+    // Regex reveals the pattern row and changes the hint; saving without a
+    // pattern is refused.
+    const capture = field<HTMLSelectElement>(modal, "session_capture");
+    capture.value = "regex";
+    capture.dispatchEvent(new Event("change"));
+    expect(field<HTMLInputElement>(modal, "session_pattern").closest<HTMLElement>("div")!.style.display).toBe("");
+    expect(modal.querySelector(".chappa-agent-capture-hint")?.textContent).toMatch(/latest match wins/);
+    action(modal, "saveAgent").click();
+    await FLUSH();
+    expect(modal.querySelector<HTMLElement>(".chappa-agent-modal-error")?.textContent).toMatch(/Pattern is required/);
+    expect(api.upsertAgentTool).not.toHaveBeenCalled();
+    field<HTMLInputElement>(modal, "session_pattern").value = String.raw` Session ID: (\S+) `;
+    field<HTMLTextAreaElement>(modal, "resume_argv").value = "--resume\n\n{session_id}\r";
+    action(modal, "saveAgent").click();
+    await FLUSH();
+    expect(api.upsertAgentTool).toHaveBeenCalledTimes(1);
+    const saved = api.tools()[0];
+    expect(saved.session_capture).toEqual({ kind: "regex", pattern: String.raw`Session ID: (\S+)` });
+    expect(saved.resume_argv).toEqual(["--resume", "{session_id}"]);
+    expect(s.modalElement).toBeNull();
+
+    // Announced shows the printf one-liner; a type without a machine mode
+    // hides json and snaps a json capture to none.
+    field<HTMLSelectElement>(host, "newAgentType").value = "opencode";
+    action(host, "addAgent").click();
+    const next = s.modalElement!;
+    expect(field<HTMLSelectElement>(next, "session_capture").value).toBe("json");
+    expect(field<HTMLTextAreaElement>(next, "resume_argv").value).toBe("-s\n{session_id}");
+    const type = field<HTMLSelectElement>(next, "tool_type");
+    type.value = "codex";
+    type.dispatchEvent(new Event("change"));
+    expect(field<HTMLSelectElement>(next, "session_capture").value).toBe("none");
+    expect(next.querySelector<HTMLOptionElement>('[data-field="session_capture"] option[value="json"]')!.hidden).toBe(true);
+    const sel = field<HTMLSelectElement>(next, "session_capture");
+    sel.value = "announced";
+    sel.dispatchEvent(new Event("change"));
+    expect(next.querySelector(".chappa-agent-capture-hint")?.textContent).toMatch(/777;session/);
+    action(next, "saveAgent").click();
+    await FLUSH();
+    expect(api.tools()[1].session_capture).toEqual({ kind: "announced" });
+    // The custom template starts at none with no resume words.
+    expect(templateFor("custom").session_capture).toEqual({ kind: "none" });
+    expect(templateFor("custom").resume_argv).toEqual([]);
     s.dispose();
   });
 

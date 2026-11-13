@@ -89,10 +89,65 @@ impl TailKind {
     }
 }
 
+/// How a run's [`Session`] id was learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSource {
+    /// The CLI's machine-mode event stream carried it (exact, no scraping).
+    Json,
+    /// The tool's configured regex matched a printed line.
+    Regex,
+    /// The process announced it (`OSC 777;session;<id>`).
+    Announced,
+    /// The process set it through the control surface (`set_session`).
+    Mcp,
+    /// This run was STARTED as a resume of that id; the provider has not
+    /// (yet) confirmed it by naming the session itself.
+    Resume,
+}
+
+/// The provider's own identity for the conversation a run is (or was)
+/// having — the ONE thing a resume needs. Never a transcript: whether the
+/// conversation can be picked up again depends on the provider's own
+/// history, not on anything stored here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Session {
+    /// The tool type that owns the id (`claude`, `opencode`, `custom`, …).
+    pub provider: String,
+    pub session_id: String,
+    pub captured_at_ms: u64,
+    pub source: SessionSource,
+    /// When this run was started as a resume: the id it was asked to
+    /// continue, kept even after the provider names the session again, so
+    /// the row can say what it was resumed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
+}
+
+impl Session {
+    pub fn new(provider: impl Into<String>, session_id: impl Into<String>, source: SessionSource, captured_at_ms: u64) -> Self {
+        Self {
+            provider: provider.into(),
+            session_id: session_id.into(),
+            captured_at_ms,
+            source,
+            resumed_from: None,
+        }
+    }
+
+    /// The last four characters of the id — what a row label shows.
+    pub fn short_id(&self) -> &str {
+        let n = self.session_id.len();
+        let cut = self.session_id.char_indices().map(|(i, _)| i).nth(n.saturating_sub(4).min(n));
+        &self.session_id[cut.unwrap_or(0)..]
+    }
+}
+
 /// One run of a record. Serialized the same way in projects.json /
-/// workspace.json (`last_run`) and on the ledger route; `summary` and
-/// `session` are RESERVED slots (a run summary; a provider session identity)
-/// kept as opaque JSON so a file written by a later build round-trips here.
+/// workspace.json (`last_run`) and on the ledger route. `summary` is a
+/// RESERVED slot (a run summary) kept as opaque JSON so a file written by a
+/// later build round-trips here; `session` is the provider session the run
+/// is (or was) having, when one was learned.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub run_uuid: String,
@@ -117,7 +172,7 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<Value>,
+    pub session: Option<Session>,
 }
 
 impl Run {
@@ -154,6 +209,17 @@ impl Run {
     pub fn stop(&mut self, ended_at_ms: u64) {
         self.status = ProcessStatus::Stopped;
         self.ended_at_ms = Some(ended_at_ms);
+    }
+
+    /// The provider named the session: the id replaces whatever the run
+    /// held (a later sighting wins — an id printed at exit is the one to
+    /// resume), while `resumed_from` survives so the row can still say what
+    /// this run continued.
+    pub fn set_session(&mut self, mut session: Session) {
+        if session.resumed_from.is_none() {
+            session.resumed_from = self.session.as_ref().and_then(|s| s.resumed_from.clone());
+        }
+        self.session = Some(session);
     }
 
     /// True while no end has been recorded — the only state a late fact may
@@ -209,7 +275,7 @@ pub struct RunHead {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<Value>,
+    pub session: Option<Session>,
 }
 
 /// The outcome of applying a late fact to a record's current run.
@@ -464,15 +530,38 @@ mod tests {
         assert_eq!(sparse.session, None);
         assert!(sparse.is_open());
 
-        // Reserved slots pass through untouched (a later build's data).
+        // The reserved summary slot passes through untouched (a later
+        // build's data); a session round-trips typed.
         let future: Run = serde_json::from_str(
-            r#"{"run_uuid":"r3","status":"exited","started_at_ms":1,"summary":{"text":"ok","source":"mcp"},"session":{"provider":"x","id":"y"}}"#,
+            r#"{"run_uuid":"r3","status":"exited","started_at_ms":1,"summary":{"text":"ok","source":"mcp"},"session":{"provider":"claude","session_id":"ses-y","captured_at_ms":7,"source":"json"}}"#,
         )
         .unwrap();
         assert_eq!(future.summary.as_ref().unwrap()["source"], "mcp");
-        assert_eq!(future.session.as_ref().unwrap()["id"], "y");
+        let session = future.session.as_ref().unwrap();
+        assert_eq!((session.provider.as_str(), session.session_id.as_str()), ("claude", "ses-y"));
+        assert_eq!(session.source, SessionSource::Json);
+        assert_eq!(session.resumed_from, None);
+        assert_eq!(session.short_id(), "es-y");
         let again: Run = serde_json::from_str(&serde_json::to_string(&future).unwrap()).unwrap();
         assert_eq!(again, future);
+    }
+
+    /// A later sighting of the session replaces the id, and the id a run was
+    /// resumed from survives every replacement.
+    #[test]
+    fn a_later_session_sighting_wins_and_keeps_the_resume_origin() {
+        let mut run = Run::begin("r", 1, TailKind::Text);
+        let mut asked = Session::new("claude", "old-id", SessionSource::Resume, 1);
+        asked.resumed_from = Some("old-id".into());
+        run.set_session(asked);
+        run.set_session(Session::new("claude", "old-id", SessionSource::Json, 2));
+        let s = run.session.as_ref().unwrap();
+        assert_eq!((s.source, s.resumed_from.as_deref()), (SessionSource::Json, Some("old-id")));
+        run.set_session(Session::new("claude", "new-id", SessionSource::Announced, 3));
+        let s = run.session.as_ref().unwrap();
+        assert_eq!((s.session_id.as_str(), s.resumed_from.as_deref()), ("new-id", Some("old-id")));
+        assert_eq!(Session::new("x", "ab", SessionSource::Mcp, 0).short_id(), "ab");
+        assert_eq!(run.head().session, run.session);
     }
 
     /// The late-fact rule: a fact for the current, open run applies; a fact

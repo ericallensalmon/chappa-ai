@@ -204,7 +204,7 @@ pub const ROUTES: &[Route] = &[
         method: "GET",
         path: "/processes",
         fields: &[],
-        description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`); both are null for an ephemeral row. Stats fields will ride along here.",
+        description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`) or, when `last_run.session` holds the provider's session id, resumed (`POST /records/{record_id}/resume`); both are null for an ephemeral row. Stats fields will ride along here.",
         handler: list_processes,
     },
     Route {
@@ -262,6 +262,13 @@ pub const ROUTES: &[Route] = &[
         fields: &["confirm"],
         description: "Close a terminal (kills the child). Requires confirm=true. For a docker-exec agent the container-side process is killed and verified FIRST (TERM, poll, KILL), then the host client; the answer carries verification = gone | still-present | container-down | unresolved (null for plain terminals).",
         handler: close_terminal,
+    },
+    Route {
+        method: "POST",
+        path: "/processes/{id}/session",
+        fields: &["session_id"],
+        description: "The process names the conversation it is running (the self-targeting half of the announce path: `set_session` over MCP sends the caller's own id here). The id lands on the row's current run under the run-uuid rule — the record head, the ledger row, and a `term://session` broadcast when it changed — and is what `POST /records/{record_id}/resume` continues later. Answers {id, record_id, run_uuid, session, durable}; durable=false for an ephemeral row (stored on the live row only). The other announce path needs no call at all: print `OSC 777;session;<id>` (`printf '\\033]777;session;%s\\007' \"$ID\"`).",
+        handler: records::route_set_session,
     },
     Route {
         method: "GET",
@@ -333,6 +340,13 @@ pub const ROUTES: &[Route] = &[
         fields: &["wait_ms?"],
         description: "Start a stopped record: a fresh terminal and a NEW run (new run_uuid; the previous run stays in the ledger). An agent starts a new session — its stored prompt is never replayed. A project command is started by the app's frontend like start_process (waits up to wait_ms, default 3000, else pending=true); a workspace command answers 409 (it starts from the app). A record whose terminal is still live is a no-op answering that terminal. Answers {record_id, kind, term_id, run_uuid, pending}; the webview receives `term://created` carrying the record_id.",
         handler: records::route_start_record,
+    },
+    Route {
+        method: "POST",
+        path: "/records/{record_id}/resume",
+        fields: &["session_id?"],
+        description: "Resume an agent record: start it again with the PROVIDER continuing `session_id` (default: the last run's saved `last_run.session`), so the agent comes back with its complete prior conversation — nothing is replayed by the app. The tool's `resume_argv` (`{session_id}` substituted: claude `--resume <id>`, opencode `-s <id>`) goes on the command line; a per-turn json CLI is continued through its adapter. The start is watched through the ready gate and answers {record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent | deferred}. A child that exits before it is ready was refused by the provider: 409 {error: resume_rejected, record_id, run_uuid, term_id, exit_code, provider_text, message} with the provider's own words (e.g. `No conversation found with session ID: <id>`) — never a silent fresh start. 409 {error: no_session} when there is nothing to resume (start the record instead); 409 {error: resume_unavailable} for a running record, a non-agent, a missing tool or an empty resume_argv; 404 for an unknown record.",
+        handler: records::route_resume_record,
     },
     Route {
         method: "POST",

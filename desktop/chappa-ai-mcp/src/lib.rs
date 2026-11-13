@@ -463,7 +463,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_process_status",
-            "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text. A row whose child exited keeps its record: a stopped row with a record_id can be started again with start_record.",
+            "description": "One process row (same fields as list_processes). `agent.parent_process_id` = the process that spawned it, null for a root. Use has_output/child_alive/last_output_at for liveness — never infer it from screen text. A row whose child exited keeps its record: a stopped row with a record_id can be started again with start_record, or resumed with resume_agent when `last_run.session` {provider, session_id, captured_at_ms, source: json | regex | announced | mcp | resume, resumed_from?} holds the provider's own session id.",
             "inputSchema": schema(json!({"id": id}), &["id"]),
             "annotations": annotations(true, false, true),
         }),
@@ -614,6 +614,24 @@ pub fn tools() -> Vec<Value> {
                 "record_id": {"type": "string", "description": "Record id from a process row's record_id."},
                 "wait_ms": wait("How long to wait for a project command's spawn to register", 3000, 15000),
             }), &["record_id"]),
+            "annotations": annotations(false, false, true),
+        }),
+        json!({
+            "name": "resume_agent",
+            "description": "Resume a stopped agent record: the PROVIDER continues the saved session (default: the record's last_run.session; or pass session_id from an earlier run in get_record_runs), so the agent comes back with its complete prior conversation — nothing is replayed by the app, and your next send_input lands on top of all of that context. The tool's resume_argv (claude `--resume <id>`, opencode `-s <id>`) goes on the command line; the start is then watched and the reply says how it was judged: {record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent | deferred} (deferred = a per-turn CLI that can only refuse on the first message — watch that send's receipt). A provider that refuses — the child exits before it is ready, e.g. `No conversation found with session ID: <id>` — fails this call with error resume_rejected carrying provider_text and the failed run_uuid (its output stays in get_record_runs); it is never turned into a silent fresh start. error no_session = nothing saved to resume (use start_record); resume_unavailable = running already, not an agent, tool gone or no resume command.",
+            "inputSchema": schema(json!({
+                "record_id": {"type": "string", "description": "Record id from a process row's record_id."},
+                "session_id": {"type": "string", "description": "A specific session to continue (from a run's `session.session_id` in get_record_runs). Default: the last run's saved session."},
+            }), &["record_id"]),
+            "annotations": annotations(false, false, false),
+        }),
+        json!({
+            "name": "set_session",
+            "description": "Tell chappa-ai the id of the conversation YOUR process is running (or process_id's), so the row can be resumed later with resume_agent even though your CLI prints no id the app recognizes. Lands on the current run under the run-uuid rule; answers {id, record_id, run_uuid, session, durable} (durable=false: an ephemeral row, nothing to resume later). The same announcement works with no tool call at all: print the escape sequence `OSC 777;session;<id>` — in a shell, printf '\\033]777;session;%s\\007' \"$ID\". Only the id is stored, never a transcript; whether the conversation can be picked up again is the provider's business.",
+            "inputSchema": schema(json!({
+                "session_id": {"type": "string", "description": "The provider's own session / conversation id."},
+                "process_id": {"type": "integer", "minimum": 0, "description": "Which process the id belongs to. Default: YOUR process (CHAPPA_AI_PROCESS_ID)."},
+            }), &["session_id"]),
             "annotations": annotations(false, false, true),
         }),
         json!({
@@ -1214,6 +1232,31 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
             let body = pick(args, &["wait_ms"]);
             client.request("POST", &format!("/records/{}/start", encode_segment(&record_id)), Some(&body))
         }
+        "resume_agent" => {
+            let record_id = record_id_arg(args)?;
+            let body = pick(args, &["session_id"]);
+            client.request("POST", &format!("/records/{}/resume", encode_segment(&record_id)), Some(&body))
+        }
+        "set_session" => {
+            let session_id = arg_str(args, "session_id")?;
+            if session_id.trim().is_empty() {
+                return Err(ToolError::Invalid("`session_id` must not be empty".into()));
+            }
+            // Self-targeting: the caller's own process unless it names another.
+            let process_id = match opt_u64(args, "process_id")? {
+                Some(id) => id,
+                None => client
+                    .actor
+                    .as_deref()
+                    .and_then(|a| a.parse::<u64>().ok())
+                    .ok_or_else(|| {
+                        ToolError::Invalid(
+                            "set_session needs `process_id`: this server has no CHAPPA_AI_PROCESS_ID identity to target".into(),
+                        )
+                    })?,
+            };
+            client.request("POST", &format!("/processes/{process_id}/session"), Some(&json!({"session_id": session_id})))
+        }
         "remove_record" => {
             let record_id = record_id_arg(args)?;
             let confirm = args.get("confirm").and_then(Value::as_bool).unwrap_or(false);
@@ -1634,7 +1677,7 @@ pub fn handle_message(client: &Client, msg: &Value) -> Option<Value> {
                     "protocolVersion": requested,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "instructions": "Tools proxy to the chappa-ai desktop app's control surface. Read-only tools are safe to call freely. Prefer send_input receipts + get_process_status liveness over screen-diffing; get_process_output returns the whole screen by default. Scratchpads/todos (scratchpad_*, todo_*) are project-scoped working memory shared with other agents: read before you write, pass expected_revision on guarded writes, and treat revision_conflict / locked errors as 'someone else moved first' — re-read, never overwrite blind. Timers (timer_*) wake a process with a body injected as a fresh user turn: idle is measured off the pty byte stream and re-validated before firing, so trust timer_fire_when_idle_* instead of hand-rolling an idle_seconds rule, and check timer_list(include_fired: true) to see whether a wake-up was actually delivered.",
+                    "instructions": "Tools proxy to the chappa-ai desktop app's control surface. Read-only tools are safe to call freely. Prefer send_input receipts + get_process_status liveness over screen-diffing; get_process_output returns the whole screen by default. Scratchpads/todos (scratchpad_*, todo_*) are project-scoped working memory shared with other agents: read before you write, pass expected_revision on guarded writes, and treat revision_conflict / locked errors as 'someone else moved first' — re-read, never overwrite blind. Timers (timer_*) wake a process with a body injected as a fresh user turn: idle is measured off the pty byte stream and re-validated before firing, so trust timer_fire_when_idle_* instead of hand-rolling an idle_seconds rule, and check timer_list(include_fired: true) to see whether a wake-up was actually delivered. Stopped agent rows keep a record: start_record begins a fresh session, resume_agent has the PROVIDER continue the saved one (full prior conversation, nothing replayed) and fails loudly (resume_rejected) when the provider refuses; make your own row resumable by calling set_session with your conversation id or printing `OSC 777;session;<id>`.",
                 }),
             )
         }
