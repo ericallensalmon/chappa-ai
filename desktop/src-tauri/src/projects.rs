@@ -57,6 +57,7 @@ use crate::registry::{
     actor_config, emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, ExitHandler,
     RecordBinding, Registry, TermId,
 };
+use crate::roots::{Root, RootKind};
 use crate::settings::SettingsState;
 use crate::sources::Sources;
 
@@ -74,7 +75,20 @@ struct ProjectRuntime {
     /// The project-file watcher (non-recursive, debounced). Its consumer
     /// thread reloads the project; dropping this ends the thread.
     _yml_watcher: Option<RestartWatcher>,
+    /// The project's git worktrees (cwd roots), listed on demand and kept
+    /// for [`WORKTREE_CACHE_TTL`]; dropped on every project-file reload.
+    worktrees: Option<WorktreeCache>,
 }
+
+/// One `git worktree list` result and when it was taken.
+struct WorktreeCache {
+    paths: Vec<PathBuf>,
+    listed_at: Instant,
+}
+
+/// How long a worktree listing stands before the next cwd check lists
+/// again. A worktree added from a shell shows up within this.
+pub const WORKTREE_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// One process of an open project. Status lives in `lifecycle` (project-model,
 /// including the 500ms-alive tick); the registry entry is reached through
@@ -333,6 +347,82 @@ impl Projects {
         let inner = self.store().ok()?;
         let store = inner.store.as_ref()?;
         store.get(id).map(|p| (p.name.clone(), p.path.clone()))
+    }
+
+    /// The project's stored "scan for secrets before launching an agent"
+    /// override, `None` when it follows the app setting.
+    pub fn secret_scan_pref(&self, id: u32) -> Option<bool> {
+        let inner = self.store().ok()?;
+        inner.store.as_ref()?.get(id).and_then(|p| p.secret_scan)
+    }
+
+    /// The cwd roots a working directory may fall under (see [`crate::roots`]):
+    /// for `Some(id)` that project's directory plus its git worktrees, for
+    /// `None` every OPEN project's; plus the extra roots of every trusted
+    /// source. Worktree listings are cached per open project and refreshed
+    /// after [`WORKTREE_CACHE_TTL`] or a project-file reload; git runs off
+    /// the lock.
+    pub fn cwd_roots(&self, project_id: Option<u32>) -> Vec<Root> {
+        // Pass 1, under the lock: the directories and which caches are stale.
+        let (mut roots, stale, sources): (Vec<Root>, Vec<(u32, PathBuf)>, Sources) = {
+            let Ok(inner) = self.inner.lock() else { return Vec::new() };
+            let mut roots = Vec::new();
+            let mut stale = Vec::new();
+            let mut consider = |id: u32, root: &Path, runtime: Option<&ProjectRuntime>, name: String| {
+                roots.push(Root::new(root, RootKind::Project { id, name }));
+                match runtime.and_then(|r| r.worktrees.as_ref()) {
+                    Some(cache) if cache.listed_at.elapsed() < WORKTREE_CACHE_TTL => {
+                        roots.extend(cache.paths.iter().map(|p| Root::new(p, RootKind::Worktree { project_id: id })));
+                    }
+                    _ if runtime.is_some() => stale.push((id, root.to_path_buf())),
+                    _ => {}
+                }
+            };
+            match project_id {
+                Some(id) => {
+                    if let Some(p) = inner.store.as_ref().and_then(|s| s.get(id)) {
+                        consider(id, &p.path, inner.runtimes.get(&id), p.name.clone());
+                    }
+                }
+                None => {
+                    for (id, runtime) in &inner.runtimes {
+                        let name = inner
+                            .store
+                            .as_ref()
+                            .and_then(|s| s.get(*id))
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default();
+                        consider(*id, &runtime.root, Some(runtime), name);
+                    }
+                }
+            }
+            (roots, stale, inner.sources.clone())
+        };
+        // Pass 2, off the lock: list the stale ones and store the result.
+        for (id, root) in stale {
+            let Some(paths) = crate::roots::git_worktrees(&root) else { continue };
+            roots.extend(paths.iter().map(|p| Root::new(p, RootKind::Worktree { project_id: id })));
+            if let Ok(mut inner) = self.inner.lock() {
+                if let Some(runtime) = inner.runtimes.get_mut(&id) {
+                    runtime.worktrees = Some(WorktreeCache { paths, listed_at: Instant::now() });
+                }
+            }
+        }
+        // Lock order projects → sources: the projects lock is released here.
+        for (source_id, path) in sources.trusted_roots() {
+            roots.push(Root::new(path, RootKind::Source { source_id }));
+        }
+        roots
+    }
+
+    /// Forget a project's worktree listing so the next cwd check lists again
+    /// (a worktree was just added or removed by something the app ran).
+    pub fn invalidate_worktrees(&self, id: u32) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(runtime) = inner.runtimes.get_mut(&id) {
+                runtime.worktrees = None;
+            }
+        }
     }
 }
 
@@ -1282,6 +1372,7 @@ pub fn open_project(
             processes,
             load_error: None,
             _yml_watcher: yml_watcher,
+            worktrees: None,
         },
     );
     // Every process of this project just got a fresh (stopped, no term_id)
@@ -1299,6 +1390,7 @@ pub fn open_project(
             initials: stored.initials.clone(),
             color: stored.color.clone(),
             notification_level: stored.notification_level.clone(),
+            secret_scan: stored.secret_scan,
         },
         trust_pending,
         trust_commands,
@@ -1697,6 +1789,14 @@ pub fn set_process_auto_rename(
         .set_process_auto_rename_disabled(project_id, &process_name, disabled)
 }
 
+/// The project's override of "scan for secrets before launching an agent":
+/// `true` / `false`, or `null` to follow the app setting. projects.json only.
+#[tauri::command]
+pub fn set_project_secret_scan(projects: State<'_, Projects>, project_id: u32, enabled: Option<bool>) -> Result<(), String> {
+    let mut inner = projects.store()?;
+    inner.store.as_mut().unwrap().set_secret_scan(project_id, enabled)
+}
+
 /// "Never write while a load error is outstanding." The write-back re-checks
 /// by loading fresh; this is the early, cheaper refusal with the recorded
 /// reason.
@@ -1908,7 +2008,11 @@ fn reload_locked(
     projects: Arc<Mutex<Inner>>,
     id: u32,
 ) {
-    let Some(root) = inner.runtimes.get(&id).map(|r| r.root.clone()) else {
+    let Some(root) = inner.runtimes.get_mut(&id).map(|r| {
+        // Something in the project changed; its worktree list may have too.
+        r.worktrees = None;
+        r.root.clone()
+    }) else {
         return;
     };
     let settings = inner.settings.snapshot();
@@ -2614,6 +2718,9 @@ pub struct ProjectInfoDto {
     /// `null` when unset. NOT resolved — resolution (per-process override →
     /// project default → 'all') lives in the UI.
     pub notification_level: Option<String>,
+    /// The project's secret-scan override (`true` / `false`), or `null`
+    /// when it follows the app setting.
+    pub secret_scan: Option<bool>,
 }
 
 impl From<&project_model::projects::Project> for ProjectInfoDto {
@@ -2626,6 +2733,7 @@ impl From<&project_model::projects::Project> for ProjectInfoDto {
             initials: p.initials.clone(),
             color: p.color.clone(),
             notification_level: p.notification_level.clone(),
+            secret_scan: p.secret_scan,
         }
     }
 }
@@ -2899,16 +3007,17 @@ mod tests {
             initials: None,
             color: None,
             notification_level: Some("important".into()),
+            secret_scan: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["notificationLevel"], "important");
         assert!(json.get("notification_level").is_none());
-        // The wire DTO is exactly these seven keys — no sync flag.
+        // The wire DTO is exactly these eight keys — no sync flag.
         let keys: std::collections::BTreeSet<&str> =
             json.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["id", "name", "path", "icon", "initials", "color", "notificationLevel"]
+            ["id", "name", "path", "icon", "initials", "color", "notificationLevel", "secretScan"]
                 .into_iter()
                 .collect::<std::collections::BTreeSet<&str>>()
         );

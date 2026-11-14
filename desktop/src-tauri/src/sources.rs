@@ -33,8 +33,10 @@
 //! Payloads are stored as opaque JSON for the view code; nothing here knows
 //! what a work item or a pull request is.
 
+pub mod actions;
 pub mod client;
 pub mod identity;
+pub mod links;
 pub mod manifest;
 pub mod store;
 
@@ -49,9 +51,20 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 use term_core::actor::epoch_ms;
 
-use client::{SourceClient, SourceError};
+use actions::{action_verdict, actions_for, find_action, ActionVerdict, SourceAction, VerdictContext};
+use client::{PostReply, SourceClient, SourceError};
 use manifest::{backoff_delay, parse_manifest, trust_summary, Endpoint, Manifest, TrustSummary, VIEW_NAMES, WORKFLOWS_POLL, WORKFLOWS_VIEW};
+pub use store::PromptPolicy;
 use store::{AttachedSource, SourceStore};
+
+use crate::agent_tools::AgentTool;
+use crate::roots::Root;
+
+/// Sent on every actions call: this app hosts a pane for a job's `run`
+/// block, so a source may hand the job's CLI back instead of running it.
+pub const RUNS_JOBS_HEADER: (&str, &str) = ("X-Chappa-Runs-Jobs", "1");
+/// How many finished jobs a source keeps in its log.
+pub const JOB_LOG_CAP: usize = 50;
 
 /// The one webview that may talk to sources. A second window (a terminal
 /// dock) is a second webview with the same origin, and it must not reach
@@ -178,6 +191,11 @@ struct SourceState {
     trust: Option<TrustSummary>,
     trusted: bool,
     views: BTreeMap<String, ViewState>,
+    /// Action ids whose "mutating without a confirm" refusal was logged,
+    /// so the log says it once per source and action, not once per render.
+    unconfirmable_logged: std::collections::BTreeSet<String>,
+    /// The jobs started from this source (202 replies), oldest first.
+    jobs: Vec<JobRecord>,
 }
 
 impl SourceState {
@@ -453,11 +471,13 @@ impl Sources {
             if !trust {
                 return Ok(());
             }
-            inner
-                .store
-                .as_mut()
-                .ok_or_else(|| "sources store not initialized".to_owned())?
-                .mark_trusted(&key, hash)?;
+            let store = inner.store.as_mut().ok_or_else(|| "sources store not initialized".to_owned())?;
+            if !store.is_trusted(&key, hash) {
+                // A different manifest may be a different program: the
+                // prompts it showed before do not count as shown.
+                store.forget_prompts(&key)?;
+            }
+            store.mark_trusted(&key, hash)?;
             let state = inner.sources.get_mut(&key).expect("looked up above");
             state.trusted = true;
             if state.status == SourceStatus::NeedsReview {
@@ -483,7 +503,7 @@ impl Sources {
             .map(|s| s.hidden_views().iter().cloned().collect())
             .unwrap_or_default();
         SourcesListing {
-            sources: inner.sources.values().map(source_dto).collect(),
+            sources: inner.sources.values().map(|s| source_dto(s, inner.store.as_ref())).collect(),
             hidden_views,
         }
     }
@@ -821,6 +841,327 @@ impl Sources {
     }
 }
 
+/// Who a source is, for the runner: what it is called, which project it
+/// belongs to, its process row (launched sources), and its trusted hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInfo {
+    /// The opaque registry id.
+    pub id: String,
+    /// The manifest's `source.id` — what the journal's `source:<id>` names.
+    pub manifest_id: String,
+    pub label: String,
+    pub key: String,
+    pub project_id: Option<u32>,
+    pub project_path: Option<PathBuf>,
+    pub term_id: Option<u32>,
+    pub link_hosts: Vec<String>,
+}
+
+/// An action found in a cached payload together with its verdict.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDto {
+    pub action: SourceAction,
+    pub verdict: ActionVerdict,
+    /// Whether an `agent` action's prompt must be shown before this run.
+    pub needs_prompt: bool,
+}
+
+impl Sources {
+    // ---- actions, links, panels, jobs (the runner reads these) ----------------
+
+    fn trusted_state<'a>(inner: &'a Inner, source_id: &str) -> Result<&'a SourceState, String> {
+        let state = inner
+            .sources
+            .values()
+            .find(|s| s.id == source_id)
+            .ok_or_else(|| format!("no source {source_id}"))?;
+        if !state.trusted || state.manifest.is_none() {
+            return Err(format!("source {} is not trusted; review it under Settings ▸ Sources first", state.id));
+        }
+        Ok(state)
+    }
+
+    fn info_of(state: &SourceState) -> SourceInfo {
+        let manifest = state.manifest.as_ref();
+        let (project_id, project_path, term_id) = match &state.origin {
+            Origin::Launched { project_id, project_path, term_id, .. } => (Some(*project_id), Some(project_path.clone()), *term_id),
+            Origin::Attached { .. } => (None, None, None),
+        };
+        SourceInfo {
+            id: state.id.clone(),
+            manifest_id: manifest.map(|m| m.id.clone()).unwrap_or_else(|| state.id.clone()),
+            label: manifest.map(|m| m.label.clone()).unwrap_or_else(|| state.key.clone()),
+            key: state.key.clone(),
+            project_id,
+            project_path,
+            term_id,
+            link_hosts: manifest.map(|m| m.link_hosts.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Who a trusted source is.
+    pub fn info(&self, source_id: &str) -> Result<SourceInfo, String> {
+        let inner = self.lock();
+        Self::trusted_state(&inner, source_id).map(Self::info_of)
+    }
+
+    /// The extra roots of every trusted source: `(registry id, path)`.
+    pub fn trusted_roots(&self) -> Vec<(String, String)> {
+        let inner = self.lock();
+        inner
+            .sources
+            .values()
+            .filter(|s| s.trusted)
+            .flat_map(|s| s.manifest.iter().flat_map(|m| m.roots.iter()).map(move |r| (s.id.clone(), r.clone())))
+            .collect()
+    }
+
+    pub fn prompt_policy(&self, source_id: &str) -> Result<PromptPolicy, String> {
+        let inner = self.lock();
+        let state = inner.sources.values().find(|s| s.id == source_id).ok_or_else(|| format!("no source {source_id}"))?;
+        Ok(inner.store.as_ref().map(|st| st.prompt_policy(&state.key)).unwrap_or_default())
+    }
+
+    pub fn set_prompt_policy(&self, source_id: &str, policy: PromptPolicy) -> Result<(), String> {
+        {
+            let mut inner = self.lock();
+            let key = inner
+                .sources
+                .values()
+                .find(|s| s.id == source_id)
+                .map(|s| s.key.clone())
+                .ok_or_else(|| format!("no source {source_id}"))?;
+            inner
+                .store
+                .as_mut()
+                .ok_or_else(|| "sources store not initialized".to_owned())?
+                .set_prompt_policy(&key, policy)?;
+        }
+        self.emit_sources();
+        Ok(())
+    }
+
+    /// Whether `action_id`'s prompt must be shown before it runs now:
+    /// always under `PromptPolicy::Always`, else until it was accepted once.
+    pub fn prompt_needs_dialog(&self, source_id: &str, action_id: &str) -> Result<bool, String> {
+        let inner = self.lock();
+        let state = Self::trusted_state(&inner, source_id)?;
+        let store = inner.store.as_ref().ok_or_else(|| "sources store not initialized".to_owned())?;
+        Ok(match store.prompt_policy(&state.key) {
+            PromptPolicy::Always => true,
+            PromptPolicy::FirstTime => !store.prompt_shown(&state.key, action_id),
+        })
+    }
+
+    /// The user accepted `action_id`'s prompt.
+    pub fn mark_prompt_shown(&self, source_id: &str, action_id: &str) -> Result<(), String> {
+        {
+            let mut inner = self.lock();
+            let key = Self::trusted_state(&inner, source_id)?.key.clone();
+            inner
+                .store
+                .as_mut()
+                .ok_or_else(|| "sources store not initialized".to_owned())?
+                .mark_prompt_shown(&key, action_id)?;
+        }
+        self.emit_sources();
+        Ok(())
+    }
+
+    fn cached_payload(state: &SourceState, view: &str) -> Result<Value, String> {
+        state
+            .views
+            .get(view)
+            .and_then(|v| v.payload.clone())
+            .ok_or_else(|| format!("source {} has no `{view}` data yet", state.id))
+    }
+
+    /// The actions under `key` in the cached `view` payload, judged. A
+    /// mutating endpoint without a confirm is left out (logged once).
+    pub fn actions(&self, source_id: &str, view: &str, key: Option<&str>, tools: &[AgentTool], roots: &[Root]) -> Result<Vec<ActionDto>, String> {
+        let (found, hosts, label, policy, shown) = {
+            let inner = self.lock();
+            let state = Self::trusted_state(&inner, source_id)?;
+            let payload = Self::cached_payload(state, view)?;
+            let manifest = state.manifest.as_ref().expect("trusted implies a manifest");
+            let store = inner.store.as_ref();
+            (
+                actions_for(&payload, key),
+                manifest.link_hosts.clone(),
+                manifest.label.clone(),
+                store.map(|s| s.prompt_policy(&state.key)).unwrap_or_default(),
+                store.map(|s| s.prompts_shown(&state.key)).unwrap_or_default(),
+            )
+        };
+        let ctx = VerdictContext { tools, roots, link_hosts: &hosts };
+        let mut out = Vec::new();
+        let mut hide: Vec<String> = Vec::new();
+        for f in found {
+            let verdict = action_verdict(&f.action, &ctx);
+            if verdict.hidden {
+                hide.push(f.action.id().to_owned());
+                continue;
+            }
+            let needs_prompt = matches!(f.action, SourceAction::Agent { .. })
+                && match policy {
+                    PromptPolicy::Always => true,
+                    PromptPolicy::FirstTime => !shown.iter().any(|id| id == f.action.id()),
+                };
+            out.push(ActionDto { action: f.action, verdict, needs_prompt });
+        }
+        if !hide.is_empty() {
+            let mut inner = self.lock();
+            if let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) {
+                for id in hide {
+                    if state.unconfirmable_logged.insert(id.clone()) {
+                        log::warn!("[sources] {label}: action `{id}` mutates without a confirm text and is not offered");
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The action `action_id` under `key` in the cached `view` payload, with
+    /// the source it belongs to. The runner judges it again before acting.
+    pub fn action(&self, source_id: &str, view: &str, key: Option<&str>, action_id: &str) -> Result<(SourceAction, SourceInfo), String> {
+        let inner = self.lock();
+        let state = Self::trusted_state(&inner, source_id)?;
+        let payload = Self::cached_payload(state, view)?;
+        let found = find_action(&payload, key, action_id).ok_or_else(|| {
+            format!(
+                "source {} offers no action `{action_id}` on {} of its `{view}` view",
+                state.id,
+                key.map(|k| format!("`{k}`")).unwrap_or_else(|| "the view itself".to_owned())
+            )
+        })?;
+        Ok((found.action, Self::info_of(state)))
+    }
+
+    /// Rule for links a trusted source hands over: https, on a host the
+    /// user trusted with the manifest.
+    pub fn link_check(&self, source_id: &str, url: &str) -> Result<(), String> {
+        let inner = self.lock();
+        let state = Self::trusted_state(&inner, source_id)?;
+        let hosts = state.manifest.as_ref().map(|m| m.link_hosts.clone()).unwrap_or_default();
+        links::source_link_check(url, &hosts).map(|_| ())
+    }
+
+    /// A fresh, verified client for a trusted source, plus its manifest.
+    /// Built per call (a POST must never ride a stale keep-alive), off the
+    /// lock.
+    fn client_for(&self, source_id: &str) -> Result<(SourceClient, Manifest), String> {
+        let (origin, manifest) = {
+            let inner = self.lock();
+            let state = Self::trusted_state(&inner, source_id)?;
+            (state.origin.clone(), state.manifest.clone().expect("trusted implies a manifest"))
+        };
+        let client = match &origin {
+            Origin::Launched { addr, token, .. } => SourceClient::new(addr, token)?,
+            Origin::Attached { addr, token_file, .. } => {
+                let (token, _) = read_attached_token(token_file)?;
+                SourceClient::new(addr, &token)?
+            }
+        };
+        Ok((client, manifest))
+    }
+
+    /// `POST {actions}` with the app's runs-jobs header. The status is the
+    /// outcome: 200 done, 202 started, 503 uncertain, anything else the
+    /// source's refusal.
+    pub fn call_endpoint(&self, source_id: &str, body: &Value) -> Result<PostReply, String> {
+        let (mut client, manifest) = self.client_for(source_id)?;
+        let endpoint = manifest.actions.ok_or_else(|| "this source declares no `actions` endpoint".to_owned())?;
+        client.post(&endpoint, &[RUNS_JOBS_HEADER], body).map_err(|e| e.to_string())
+    }
+
+    fn job_endpoint(manifest: &Manifest, job_id: &str) -> Result<Endpoint, String> {
+        let jobs = manifest.jobs.as_ref().ok_or_else(|| "this source declares no `jobs` endpoint".to_owned())?;
+        if !jobs.has_placeholder("id") {
+            return Err("the source's `jobs` path has no `{id}` placeholder".into());
+        }
+        Ok(jobs.with_placeholder("id", job_id))
+    }
+
+    /// `GET jobs/{id}`: `{state, log?}`.
+    pub fn job_get(&self, source_id: &str, job_id: &str) -> Result<Value, String> {
+        let (mut client, manifest) = self.client_for(source_id)?;
+        client.get(&Self::job_endpoint(&manifest, job_id)?).map_err(|e| e.to_string())
+    }
+
+    /// `POST jobs/{id}` with a run's exit report.
+    pub fn job_report(&self, source_id: &str, job_id: &str, report: &Value) -> Result<PostReply, String> {
+        let (mut client, manifest) = self.client_for(source_id)?;
+        client.post(&Self::job_endpoint(&manifest, job_id)?, &[], report).map_err(|e| e.to_string())
+    }
+
+    /// Fetch a panel. `path` must be the `endpoint` of a `panel` action in
+    /// one of the source's cached payloads — the payload is the closed list
+    /// for panels, as the manifest is for views — and must pass the same
+    /// path rules.
+    pub fn panel(&self, source_id: &str, path: &str) -> Result<Value, String> {
+        let endpoint = {
+            let inner = self.lock();
+            let state = Self::trusted_state(&inner, source_id)?;
+            let named = state.views.values().filter_map(|v| v.payload.as_ref()).any(|payload| {
+                actions::actions_in(payload)
+                    .0
+                    .iter()
+                    .any(|f| matches!(&f.action, SourceAction::Panel { endpoint, .. } if endpoint == path))
+            });
+            if !named {
+                return Err(format!("source {} names no panel at `{path}`", state.id));
+            }
+            Endpoint::named_in_payload(path)?
+        };
+        let (mut client, _) = self.client_for(source_id)?;
+        client.get(&endpoint).map_err(|e| e.to_string())
+    }
+
+    /// Record a job the source started.
+    pub fn job_started(&self, source_id: &str, job: JobRecord) {
+        let job_id = job.job_id.clone();
+        {
+            let mut inner = self.lock();
+            let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) else { return };
+            state.jobs.retain(|j| j.job_id != job.job_id);
+            state.jobs.push(job);
+            // Finished jobs roll off; running ones stay.
+            while state.jobs.len() > JOB_LOG_CAP {
+                match state.jobs.iter().position(|j| j.state != "running") {
+                    Some(i) => {
+                        state.jobs.remove(i);
+                    }
+                    None => break,
+                }
+            }
+        }
+        self.emit(json!({"event": "job", "source_id": source_id, "job_id": job_id}));
+    }
+
+    /// Update a job record in place.
+    pub fn job_update(&self, source_id: &str, job_id: &str, update: impl FnOnce(&mut JobRecord)) {
+        {
+            let mut inner = self.lock();
+            let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) else { return };
+            let Some(job) = state.jobs.iter_mut().find(|j| j.job_id == job_id) else { return };
+            update(job);
+        }
+        self.emit(json!({"event": "job", "source_id": source_id, "job_id": job_id}));
+    }
+
+    pub fn job(&self, source_id: &str, job_id: &str) -> Option<JobRecord> {
+        let inner = self.lock();
+        inner.sources.values().find(|s| s.id == source_id)?.jobs.iter().find(|j| j.job_id == job_id).cloned()
+    }
+
+    /// Whether the app is shutting down (job threads end then).
+    pub fn is_shutting_down(&self) -> bool {
+        self.lock().shutting_down
+    }
+}
+
 enum RunEnd {
     Cancelled,
     Failed,
@@ -838,6 +1179,8 @@ fn fresh_state(key: &str, origin: Origin) -> SourceState {
         trust: None,
         trusted: false,
         views: BTreeMap::new(),
+        unconfirmable_logged: Default::default(),
+        jobs: Vec::new(),
     }
 }
 
@@ -926,6 +1269,33 @@ pub struct SourceDto {
     pub views: Vec<ViewDto>,
     /// Platform caveats about an attached token file.
     pub warning: Option<String>,
+    /// When this source's agent prompts are shown before a run.
+    pub prompt_policy: PromptPolicy,
+    /// Action ids whose prompt the user has already accepted once.
+    pub prompts_shown: Vec<String>,
+    /// The jobs started from this source, oldest first.
+    pub jobs: Vec<JobRecord>,
+}
+
+/// One job a source started with a 202 reply: polled (`run: false`) or
+/// hosted in a pane of the source's project (`run: true`), and reported
+/// back to the source on exit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRecord {
+    pub job_id: String,
+    pub action_id: String,
+    pub view: String,
+    pub key: Option<String>,
+    pub started_utc: String,
+    /// `running` | `done` | `failed` | `lost` (the source stopped answering).
+    pub state: String,
+    pub run: bool,
+    pub term_id: Option<u32>,
+    pub exit_code: Option<i32>,
+    pub ended_utc: Option<String>,
+    /// The source's `log` for a polled job; the exit report's note for a run.
+    pub log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -965,7 +1335,7 @@ pub struct SourceViewDto {
     pub freshness: FreshnessDto,
 }
 
-fn source_dto(state: &SourceState) -> SourceDto {
+fn source_dto(state: &SourceState, store: Option<&SourceStore>) -> SourceDto {
     let (origin, fallback_label, warning) = match &state.origin {
         Origin::Launched { project_id, project_path, command, .. } => (
             OriginDto::Launched {
@@ -1006,6 +1376,9 @@ fn source_dto(state: &SourceState) -> SourceDto {
             })
             .collect(),
         warning,
+        prompt_policy: store.map(|s| s.prompt_policy(&state.key)).unwrap_or_default(),
+        prompts_shown: store.map(|s| s.prompts_shown(&state.key)).unwrap_or_default(),
+        jobs: state.jobs.clone(),
     }
 }
 

@@ -27,6 +27,7 @@
 import { Segmented } from "./segmented";
 import { AgentsSection } from "./agents_section";
 import { SourcesSection } from "./sources_section";
+import { SecuritySection } from "./security_section";
 import { TimersSection } from "./timers_section";
 import { ProjectsSection, type ProjectsSettingsApi } from "./projects_section";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
@@ -57,7 +58,7 @@ import {
   settingsSection,
 } from "./settings_widgets";
 
-export type SettingsTab = "terminal" | "projects" | "agents" | "sources" | "timers";
+export type SettingsTab = "terminal" | "projects" | "agents" | "sources" | "security" | "timers";
 
 /** Every tab in display order. Projects only renders when the app lends the
  *  pane its project adapter (a bare pane has no projects to show). */
@@ -66,6 +67,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "projects", label: "Projects" },
   { id: "agents", label: "Agents" },
   { id: "sources", label: "Sources" },
+  { id: "security", label: "Security" },
   { id: "timers", label: "Timers" },
 ];
 const DEFAULT_TAB: SettingsTab = "terminal";
@@ -201,6 +203,8 @@ export class SettingsPane {
   private readonly agents: AgentsSection;
   /** The Sources tab: the source list, trust, hide switches, attach. */
   private readonly sources: SourcesSection;
+  /** The Security tab: the pre-launch secret scan. */
+  private readonly security: SecuritySection;
   /** The Timers tab. */
   private readonly timers: TimersSection;
   /** The Projects tab, when the app lent its adapter. */
@@ -508,6 +512,10 @@ export class SettingsPane {
     });
     this.panels.get("sources")!.appendChild(this.sources.element);
 
+    // --- Security tab ----------------------------------------------------------
+    this.security = new SecuritySection({ settings: this.store });
+    this.panels.get("security")!.appendChild(this.security.element);
+
     // --- Timers tab ------------------------------------------------------------
     this.timers = new TimersSection({ settings: this.store });
     this.panels.get("timers")!.appendChild(this.timers.element);
@@ -575,6 +583,7 @@ export class SettingsPane {
     this.unsubscribe = this.store.subscribe((s) => this.sync(s));
     this.agents.activate();
     this.sources.activate();
+    this.security.activate();
     this.timers.activate();
     this.wrap.style.display = "flex";
     document.addEventListener("keydown", this.escape, true);
@@ -589,6 +598,7 @@ export class SettingsPane {
     this.unsubscribe = null;
     this.agents.deactivate();
     this.sources.deactivate();
+    this.security.deactivate();
     this.timers.deactivate();
     this.opts.onClose?.();
   }
@@ -603,6 +613,11 @@ export class SettingsPane {
     return this.sources;
   }
 
+  /** The Security section (tests drive its controls through it). */
+  get securitySection(): SecuritySection {
+    return this.security;
+  }
+
   toggleOpen(): void {
     if (this.opened) this.close();
     else this.open();
@@ -615,6 +630,7 @@ export class SettingsPane {
     this.lineHeightPicker.dispose();
     this.agents.dispose();
     this.sources.dispose();
+    this.security.dispose();
     this.timers.dispose();
     this.projectsSection?.dispose();
     this.wrap.remove();

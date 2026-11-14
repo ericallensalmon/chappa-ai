@@ -284,6 +284,11 @@ export interface AgentToolDto {
    *  `["-s", "{session_id}"]`). Goes before the tool's own args. Empty =
    *  no resume offered for this tool. */
   resume_argv: string[];
+  /** The argv that passes the first prompt on the command line, with
+   *  `{prompt}` where the text goes (claude / codex `["{prompt}"]`).
+   *  Appended last. Empty = the prompt is typed once the TUI is ready,
+   *  held while a startup question is on screen. */
+  prompt_argv: string[];
   /** How the id of the conversation a run is having is learned. */
   session_capture: SessionCaptureDto;
 }
@@ -421,6 +426,12 @@ export interface SpawnAgentRequestDto {
    *  keeps no run history. Default false — an agent normally outlives its
    *  terminal as a stopped row that can be started again. */
   ephemeral?: boolean;
+  /** Start in this folder instead of the project root. Must resolve inside
+   *  a cwd root (the project's directory or one of its git worktrees, or a
+   *  trusted source's root); Rust refuses anything else with the reason. */
+  working_dir?: string;
+  /** Extra environment over the tool's env (names `[A-Z_][A-Z0-9_]*`). */
+  env?: Record<string, string>;
 }
 
 export interface PromptReceiptDto {
@@ -884,6 +895,9 @@ export interface ProjectInfoDto {
    *  or null/absent when the badge derives from the name. */
   initials?: string | null;
   color?: string | null;
+  /** The project's secret-scan override (true / false), or null when it
+   *  follows the app setting. */
+  secretScan?: boolean | null;
   /** RAW project-default notification level: "all" | "important" |
    *  "none", or null meaning "never set" — which resolves to 'all'. Kept raw
    *  (a plain string) so an unknown value from a hand-edited store degrades
@@ -1042,9 +1056,68 @@ export interface SettingsDto {
    *  split into words before the path is substituted and run without a
    *  shell. Empty (the default) = the OS default handler. */
   editorCommand: string;
+  /** Scan an agent's working tree for secrets before it launches: true,
+   *  false, or null = automatic (on when gitleaks is installed). A project
+   *  may override it (`ProjectInfoDto.secretScan`). */
+  secretScanBeforeAgents: boolean | null;
+  /** What a finding does: `warn` launches and notifies, `block-agents`
+   *  (the default) refuses until fixed or acknowledged. */
+  secretScanPolicy: SecretScanPolicy;
+  /** Path of the gitleaks executable; empty = the one on PATH. */
+  secretScanProgram: string;
 }
 
 export type ClipboardWritesMode = "off" | "ask" | "allow";
+export type SecretScanPolicy = "warn" | "block-agents";
+
+/** `secret_scan_info`: whether a scanner was found and the switch's
+ *  effective app-wide value. */
+export interface ScannerInfoDto {
+  found: boolean;
+  program: string | null;
+  effectiveEnabled: boolean;
+}
+
+export function secretScanInfo(): Promise<ScannerInfoDto> {
+  return call("secret_scan_info");
+}
+
+/** One secret finding as shown: file, rule, line — never the value. */
+export interface SecretFindingDto {
+  file: string;
+  rule: string;
+  line?: number | null;
+}
+
+/** The JSON behind a `secret-scan-blocked:` spawn refusal. */
+export interface SecretScanBlockDto {
+  projectRoot: string;
+  cwd: string;
+  findings: SecretFindingDto[];
+  skipped: number;
+}
+
+/** An `agent://secret-scan` payload: a launch that went ahead with
+ *  something to say (findings under the warn policy, or a scan that could
+ *  not finish). */
+export interface SecretScanNoticeEvent {
+  term_id: number;
+  notice:
+    | { kind: "warn"; cwd: string; findings: SecretFindingDto[]; skipped: number }
+    | { kind: "incomplete"; cwd: string; reason: string };
+}
+
+/** Acknowledge findings into the project's local baseline; answers how
+ *  many were new. */
+export function acknowledgeSecretFindings(projectId: number, findings: SecretFindingDto[], note: string | null): Promise<number> {
+  return call("acknowledge_secret_findings", { projectId, findings, note });
+}
+
+/** The project's secret-scan override: true / false, or null to follow
+ *  the app setting. */
+export function setProjectSecretScan(projectId: number, enabled: boolean | null): Promise<void> {
+  return call("set_project_secret_scan", { projectId, enabled });
+}
 
 export function getSettings(): Promise<SettingsDto> {
   return call<SettingsDto>("get_settings");
@@ -1474,6 +1547,103 @@ export interface SourceDto {
   views: SourceViewInfoDto[];
   /** A platform caveat about an attached token file. */
   warning: string | null;
+  /** When this source's agent prompts are shown before a run. */
+  promptPolicy: SourcePromptPolicy;
+  /** Action ids whose prompt was accepted once already. */
+  promptsShown: string[];
+  /** Jobs started from this source, oldest first. */
+  jobs: SourceJobDto[];
+}
+
+export type SourcePromptPolicy = "first_time" | "always";
+
+/** One job a source started with a 202 reply. */
+export interface SourceJobDto {
+  jobId: string;
+  actionId: string;
+  view: string;
+  key: string | null;
+  startedUtc: string;
+  state: "running" | "done" | "failed" | "lost" | string;
+  /** True when the job's CLI runs in a pane of this app. */
+  run: boolean;
+  termId: number | null;
+  exitCode: number | null;
+  endedUtc: string | null;
+  log: string | null;
+}
+
+/** An action out of a cached payload with Rust's verdict on it. */
+export interface SourceActionDto {
+  action: SourceActionShape;
+  verdict: ActionVerdictDto;
+  /** An `agent` action whose prompt must be shown before this run. */
+  needsPrompt: boolean;
+}
+
+/** The Rust-parsed action: the contract's `Action` with `env` always
+ *  present on agent / terminal and `command` always a list on terminal. */
+export type SourceActionShape =
+  | { kind: "agent"; id: string; label: string; cwd: string; prompt: string; tool: string | null; title: string | null; env: Record<string, string> }
+  | { kind: "terminal"; id: string; label: string; cwd: string; command: string[]; env: Record<string, string> }
+  | { kind: "endpoint"; id: string; label: string; mutates: boolean; confirm: string | null; params: Record<string, unknown> | null; note: "optional" | "required" | null }
+  | { kind: "link"; id: string; label: string; url: string }
+  | { kind: "panel"; id: string; label: string; endpoint: string };
+
+export interface ActionVerdictDto {
+  enabled: boolean;
+  /** Why the button is disabled (its tooltip). */
+  reason: string | null;
+  /** Never drawn (a mutating endpoint without a confirm). */
+  hidden: boolean;
+  /** The resolved folder of an agent / terminal action. */
+  cwd: string | null;
+  /** The resolved agent tool `[id, name]` of an agent action. */
+  tool: [number, string] | null;
+}
+
+/** What `source_run_action` answers. */
+export type ActionOutcomeDto =
+  | { kind: "done"; message: string | null }
+  | { kind: "job"; job_id: string }
+  | { kind: "run"; job_id: string; term_id: number }
+  | { kind: "uncertain"; message: string }
+  | { kind: "opened"; url: string }
+  | { kind: "panel"; payload: unknown }
+  | { kind: "launched"; term_id: number; what: "agent" | "terminal" };
+
+export function sourceActions(sourceId: string, view: string, key: string | null): Promise<SourceActionDto[]> {
+  return call("source_actions", { sourceId, view, key });
+}
+
+export function sourceRunAction(
+  sourceId: string,
+  view: string,
+  key: string | null,
+  actionId: string,
+  confirmed: boolean,
+  note: string | null,
+): Promise<ActionOutcomeDto> {
+  return call("source_run_action", { sourceId, view, key, actionId, confirmed, note });
+}
+
+export function sourceJob(sourceId: string, jobId: string): Promise<SourceJobDto> {
+  return call("source_job", { sourceId, jobId });
+}
+
+/** A panel's page (re-call while it is open). `path` must be a panel
+ *  endpoint the source's payload named. */
+export function sourcePanel(sourceId: string, path: string): Promise<unknown> {
+  return call("source_panel", { sourceId, path });
+}
+
+/** Open a link from a source, after Rust's https + trusted-host check. */
+export function openSourceLink(sourceId: string, url: string): Promise<void> {
+  return call("open_source_link", { sourceId, url });
+}
+
+export function setSourcePromptPolicy(sourceId: string, policy: SourcePromptPolicy): Promise<SourcesListingDto> {
+  return call("set_source_prompt_policy", { sourceId, policy });
 }
 
 export interface SourcesListingDto {
@@ -1490,7 +1660,10 @@ export interface SourceViewDto {
 }
 
 /** A `term://sources` payload. */
-export type SourcesEvent = { event: "sources" } | { event: "view"; source_id: string; view: string };
+export type SourcesEvent =
+  | { event: "sources" }
+  | { event: "view"; source_id: string; view: string }
+  | { event: "job"; source_id: string; job_id: string };
 
 export function listSources(): Promise<SourcesListingDto> {
   return call("list_sources");

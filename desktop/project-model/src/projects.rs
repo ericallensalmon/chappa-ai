@@ -86,6 +86,11 @@ pub struct Project {
     /// (= false) until then, so untouched rows stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yml_backed_up: Option<bool>,
+    /// This project's override of the app-wide "scan for secrets before
+    /// launching an agent" setting: `Some(true)` always scans here,
+    /// `Some(false)` never does, absent follows the app setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_scan: Option<bool>,
     /// The native process definitions THE STORE owns, by process
     /// name. `None` (absent) until a project is migrated or mutated; after
     /// that `Some(map)` carries the defs (an EMPTY `Some({})` is a valid
@@ -298,6 +303,7 @@ impl ProjectStore {
             color: None,
             process_overrides: None,
             yml_backed_up: None,
+            secret_scan: None,
             processes: None,
             agents: Vec::new(),
             terminals: Vec::new(),
@@ -444,6 +450,14 @@ impl ProjectStore {
     ) -> Result<(), String> {
         let project = self.project_mut(id)?;
         Self::edit_override(project, process, |o| o.disable_auto_rename = disabled);
+        self.save()
+    }
+
+    /// The project's secret-scan override (`None` clears it, so the project
+    /// follows the app setting again).
+    pub fn set_secret_scan(&mut self, id: u32, enabled: Option<bool>) -> Result<(), String> {
+        let project = self.project_mut(id)?;
+        project.secret_scan = enabled;
         self.save()
     }
 
@@ -1381,6 +1395,7 @@ mod tests {
                     parent_record_id: None,
                     extra_args: vec![],
                     prompt: Some("do the thing".into()),
+                    working_dir: None,
                     last_run: Some(Run::begin("run-a", 5, TailKind::Events)),
                 },
             )
@@ -1400,7 +1415,7 @@ mod tests {
         assert!(store.add_agent_record(9, AgentRecord {
             record_id: "x".into(), name: "x".into(), tool_id: 1, favorite: false,
             disable_auto_rename: false, notification_level: None, parent_record_id: None,
-            extra_args: vec![], prompt: None, last_run: None,
+            extra_args: vec![], prompt: None, working_dir: None, last_run: None,
         }).is_err());
 
         let reopened = ProjectStore::new(store_path.clone());
@@ -1466,6 +1481,7 @@ mod tests {
                     parent_record_id: None,
                     extra_args: vec!["--verbose".into()],
                     prompt: None,
+                    working_dir: None,
                     last_run: None,
                 },
             )

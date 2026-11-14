@@ -243,6 +243,7 @@ fn host_tool(tools: &AgentToolsState, name: &str, max_busy: Option<u32>) -> Agen
             max_busy,
             transport: Default::default(),
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
         })
@@ -469,6 +470,7 @@ fn json_transport_spawns_over_pipes_and_flips_awaiting_input() {
             max_busy: None,
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
         })
@@ -585,6 +587,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             program: dir.path().join("no-such-program").to_string_lossy().into_owned(),
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
             enabled: true,
@@ -618,6 +621,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             program: dir.path().join("no-such-program").to_string_lossy().into_owned(),
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
             enabled: true,
@@ -699,6 +703,7 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
             args,
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
             enabled: true,
@@ -774,6 +779,7 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
             args,
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
             enabled: true,
@@ -922,6 +928,7 @@ fn docker_tools(dir: &std::path::Path, extra_container: Option<&str>) -> AgentTo
         max_busy: None,
         transport: Default::default(),
         resume_argv: Vec::new(),
+        prompt_argv: Vec::new(),
         session_capture: Default::default(),
         hooks_opt_out: false,
     };
@@ -1090,3 +1097,88 @@ fn control_reap_route_returns_per_orphan_verdicts() {
     assert_eq!(results[0]["pid"], 532);
 }
 
+
+/// A first prompt is HELD while a known startup question is on screen: the
+/// gate reads the grid, sees the folder-trust question the fake prints, and
+/// at its cap gives up naming it — nothing is typed, so the Enter that
+/// would have answered the question never reaches the pty.
+#[test]
+fn a_prompt_is_held_while_a_startup_question_is_on_screen_and_never_typed() {
+    use app_lib::agents::{deliver_prompt_when_ready, DeliveryPolicy};
+    let dir = tempfile::tempdir().unwrap();
+    let tools = AgentToolsState::with_path(dir.path().join("agent_tools.json"));
+    let tool = host_tool(&tools, "asks first", None);
+    let registry = Registry::with_docker(FakeDocker::new());
+    let settings = SettingsState::default();
+    let projects = Projects::default();
+    let records = app_lib::records::Records::default();
+    let ctx = SpawnContext {
+        registry: &registry,
+        tools: &tools,
+        settings: &settings,
+        projects: &projects,
+        records: &records,
+        actor: None,
+    };
+    // The fake echoes its last argument: the question, as one line.
+    let question = "Do you trust the files in this folder? 1. Yes, proceed 2. No, exit";
+    let resp = app_lib::agents::spawn_agent_headless(
+        ctx,
+        SpawnAgentRequest { agent_tool_id: tool.id, extra_args: vec![question.into()], ..SpawnAgentRequest::default() },
+    )
+    .expect("spawn");
+    let id = resp.process_id;
+    wait_until(|| screen_contains(&registry, id, "trust the files").then_some(()));
+    let receipt = deliver_prompt_when_ready(&registry, id, "echo answered", DeliveryPolicy::quiet_only(100, Duration::from_secs(2)));
+    assert!(!receipt.delivered, "{receipt:?}");
+    assert_eq!(receipt.reason.as_deref(), Some("held: waiting on the folder-trust question"));
+    assert!(receipt.waited_ms.unwrap() >= 2_000, "held until the cap: {receipt:?}");
+    assert!(registry.input_journal(id).unwrap().is_empty(), "nothing was typed");
+    assert!(!screen_contains(&registry, id, "answered"));
+    registry.close(id);
+}
+
+/// A tool with a `prompt_argv` gets its first prompt on the command line:
+/// the receipt says `argv`, the journal records it as such, and the pty
+/// sees no write at all.
+#[test]
+fn a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = AgentToolsState::with_path(dir.path().join("agent_tools.json"));
+    let mut tool = host_tool(&tools, "argv prompt", None);
+    tool.prompt_argv = vec!["{prompt}".into()];
+    let tool = tools.upsert(tool).unwrap();
+    let registry = Registry::with_docker(FakeDocker::new());
+    let settings = SettingsState::default();
+    let projects = Projects::default();
+    let records = app_lib::records::Records::default();
+    let ctx = SpawnContext {
+        registry: &registry,
+        tools: &tools,
+        settings: &settings,
+        projects: &projects,
+        records: &records,
+        actor: None,
+    };
+    let resp = app_lib::agents::spawn_agent_headless(
+        ctx,
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            extra_args: vec!["--flag".into()],
+            prompt: Some("fix the failing test".into()),
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .expect("spawn");
+    let id = resp.process_id;
+    let receipt = resp.prompt_receipt.expect("receipt");
+    assert!(receipt.delivered);
+    assert_eq!(receipt.reason.as_deref(), Some(app_lib::agents::PROMPT_VIA_ARGV));
+    // The prompt is the LAST argument, after the extra args: the echo of the
+    // last argument is the prompt itself.
+    wait_until(|| screen_contains(&registry, id, "fix the failing test").then_some(()));
+    let journal = registry.input_journal(id).unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!((journal[0].text.as_str(), journal[0].bytes_len, journal[0].submit, journal[0].via.as_deref()), ("fix the failing test", 0, true, Some("argv")));
+    registry.close(id);
+}

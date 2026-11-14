@@ -192,6 +192,7 @@ impl World {
                 max_busy: None,
                 transport: Transport::Tty,
                 resume_argv,
+                prompt_argv: Vec::new(),
                 session_capture: capture,
                 hooks_opt_out: false,
             })
@@ -259,6 +260,7 @@ fn announcing_entry(w: &World, record_id: &str, run_uuid: &str, sink: Arc<MockSi
                 parent_record_id: None,
                 extra_args: vec![],
                 prompt: None,
+                working_dir: None,
                 last_run: None,
             },
         )
@@ -381,6 +383,7 @@ fn a_json_agent_copies_its_session_from_the_event_stream() {
             max_busy: None,
             transport: Transport::Json,
             resume_argv: vec!["--resume".into(), "{session_id}".into()],
+            prompt_argv: Vec::new(),
             session_capture: SessionCapture::Json,
             hooks_opt_out: false,
         })

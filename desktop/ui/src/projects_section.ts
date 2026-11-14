@@ -11,7 +11,7 @@
 // under the cursor.
 
 import { PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
-import { INPUT_CSS, SMALL_BTN_CSS, settingsBlock, settingsSection } from "./settings_widgets";
+import { INPUT_CSS, SELECT_CSS, SMALL_BTN_CSS, settingsBlock, settingsSection } from "./settings_widgets";
 
 /** One project as the section reads it. */
 export interface ProjectRowInfo {
@@ -22,6 +22,20 @@ export interface ProjectRowInfo {
   color: string | null;
   /** Open in the rail right now (the row says so; nothing else changes). */
   open: boolean;
+  /** The project's override of "scan for secrets before launching an
+   *  agent": true / false, or null to follow the app setting (Security tab). */
+  secretScan: boolean | null;
+}
+
+/** The three positions of a project's secret-scan override. */
+export const SECRET_SCAN_CHOICES: ReadonlyArray<{ value: "default" | "on" | "off"; label: string }> = [
+  { value: "default", label: "Secret scan: app setting" },
+  { value: "on", label: "Secret scan: always" },
+  { value: "off", label: "Secret scan: off" },
+];
+
+export function secretScanChoice(v: boolean | null): "default" | "on" | "off" {
+  return v === null ? "default" : v ? "on" : "off";
 }
 
 /** What the app lends the section. Every mutation is the app's own flow
@@ -30,6 +44,8 @@ export interface ProjectsSettingsApi {
   list(): ProjectRowInfo[];
   rename(id: number, name: string): Promise<void>;
   setIdentity(id: number, initials: string | null, color: string | null): Promise<void>;
+  /** The secret-scan override (null = follow the app setting). */
+  setSecretScan(id: number, enabled: boolean | null): Promise<void>;
   remove(id: number): Promise<void>;
   add(): Promise<void>;
 }
@@ -71,7 +87,7 @@ export class ProjectsSection {
   refresh(): void {
     const rows = this.api.list();
     const sig = rows
-      .map((r) => [r.id, r.name, r.path, r.initials ?? "", r.color ?? "", r.open ? 1 : 0].join("\u001f"))
+      .map((r) => [r.id, r.name, r.path, r.initials ?? "", r.color ?? "", r.open ? 1 : 0, secretScanChoice(r.secretScan ?? null)].join("\u001f"))
       .join("\u001e");
     if (sig === this.sig) return;
     this.sig = sig;
@@ -141,6 +157,24 @@ export class ProjectsSection {
       });
     });
 
+    const scan = document.createElement("select");
+    scan.style.cssText = SELECT_CSS;
+    scan.dataset.field = "secretScan";
+    scan.title = "Whether an agent launched in this project has its folder scanned for secrets first";
+    for (const { value, label } of SECRET_SCAN_CHOICES) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      scan.appendChild(opt);
+    }
+    scan.value = secretScanChoice(row.secretScan ?? null);
+    scan.addEventListener("change", () => {
+      const next = scan.value === "default" ? null : scan.value === "on";
+      void this.api.setSecretScan(row.id, next).catch(() => {
+        scan.value = secretScanChoice(row.secretScan ?? null);
+      });
+    });
+
     const swatches = document.createElement("div");
     swatches.style.cssText = "display:flex;align-items:center;gap:4px;";
     swatches.setAttribute("role", "radiogroup");
@@ -186,6 +220,7 @@ export class ProjectsSection {
       this.field("Name", name),
       this.field("Initials", initials),
       this.field("Color", swatches),
+      this.field("Secrets", scan),
       remove,
       path,
     );

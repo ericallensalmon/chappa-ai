@@ -7,9 +7,15 @@
 //! {
 //!   "trust": {"<project path>::<command>": "<hash>", "attached:127.0.0.1:7000": "<hash>"},
 //!   "attached": [{"addr": "127.0.0.1:7000", "token_file": "/home/me/.config/x/token"}],
-//!   "hidden_views": ["prs"]
+//!   "hidden_views": ["prs"],
+//!   "prompt_policy": {"<key>": "always"},
+//!   "prompts_shown": {"<key>": ["agent-here"]}
 //! }
 //! ```
+//!
+//! `prompt_policy` is per source: `first_time` (the default) shows an
+//! `agent` action's prompt once per action id and remembers it in
+//! `prompts_shown`; `always` shows it before every run.
 //!
 //! Trust is keyed the way the project trust gate is keyed (per project, by
 //! path, since projects have no uuid) plus the command name, or by the
@@ -30,6 +36,27 @@ pub struct AttachedSource {
     pub token_file: PathBuf,
 }
 
+/// When an `agent` action's prompt is shown before it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptPolicy {
+    /// Once per `(source, action id)`; remembered after a confirmed run.
+    #[default]
+    FirstTime,
+    /// Before every run.
+    Always,
+}
+
+impl PromptPolicy {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "first_time" => Some(Self::FirstTime),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileShape {
     #[serde(default)]
@@ -38,6 +65,10 @@ struct FileShape {
     attached: Vec<AttachedSource>,
     #[serde(default)]
     hidden_views: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    prompt_policy: BTreeMap<String, PromptPolicy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    prompts_shown: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug)]
@@ -128,6 +159,45 @@ impl SourceStore {
         Ok(())
     }
 
+    /// How a source's agent prompts are shown (default: first time only).
+    pub fn prompt_policy(&self, key: &str) -> PromptPolicy {
+        self.data.prompt_policy.get(key).copied().unwrap_or_default()
+    }
+
+    pub fn set_prompt_policy(&mut self, key: &str, policy: PromptPolicy) -> Result<(), String> {
+        if policy == PromptPolicy::default() {
+            self.data.prompt_policy.remove(key);
+        } else {
+            self.data.prompt_policy.insert(key.to_owned(), policy);
+        }
+        self.save()
+    }
+
+    /// Whether the prompt of `action_id` was shown (and accepted) before.
+    pub fn prompt_shown(&self, key: &str, action_id: &str) -> bool {
+        self.data.prompts_shown.get(key).is_some_and(|set| set.contains(action_id))
+    }
+
+    pub fn prompts_shown(&self, key: &str) -> Vec<String> {
+        self.data.prompts_shown.get(key).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    pub fn mark_prompt_shown(&mut self, key: &str, action_id: &str) -> Result<(), String> {
+        if self.data.prompts_shown.entry(key.to_owned()).or_default().insert(action_id.to_owned()) {
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// A changed trust hash means the source may be a different program:
+    /// what it showed before no longer counts as shown.
+    pub fn forget_prompts(&mut self, key: &str) -> Result<(), String> {
+        if self.data.prompts_shown.remove(key).is_some() {
+            self.save()?;
+        }
+        Ok(())
+    }
+
     fn save(&self) -> Result<(), String> {
         project_model::atomic::write_json_atomic(&self.path, &self.data)
     }
@@ -182,6 +252,28 @@ mod tests {
         assert!(reopened.remove_attached("127.0.0.1:7000").unwrap());
         assert!(!reopened.remove_attached("127.0.0.1:7000").unwrap());
         assert!(SourceStore::new(dir.path().join(FILE_NAME)).attached().is_empty());
+    }
+
+    #[test]
+    fn prompt_policy_and_shown_prompts_round_trip() {
+        let (dir, mut store) = temp_store();
+        assert_eq!(store.prompt_policy("k"), PromptPolicy::FirstTime);
+        assert!(!store.prompt_shown("k", "a"));
+        store.mark_prompt_shown("k", "a").unwrap();
+        store.mark_prompt_shown("k", "a").unwrap();
+        store.set_prompt_policy("k", PromptPolicy::Always).unwrap();
+        let reopened = SourceStore::new(dir.path().join(FILE_NAME));
+        assert_eq!(reopened.prompt_policy("k"), PromptPolicy::Always);
+        assert!(reopened.prompt_shown("k", "a"));
+        assert!(!reopened.prompt_shown("k", "b"));
+        assert_eq!(reopened.prompts_shown("k"), ["a"]);
+        let mut reopened = reopened;
+        reopened.set_prompt_policy("k", PromptPolicy::FirstTime).unwrap();
+        reopened.forget_prompts("k").unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+        assert!(!text.contains("prompt_policy") && !text.contains("prompts_shown"), "defaults leave no keys: {text}");
+        assert_eq!(PromptPolicy::parse("always"), Some(PromptPolicy::Always));
+        assert_eq!(PromptPolicy::parse("sometimes"), None);
     }
 
     #[test]

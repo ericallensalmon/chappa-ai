@@ -614,6 +614,7 @@ mod tests {
             parent_record_id: Some(id.clone()),
             extra_args: vec!["--verbose".into()],
             prompt: Some("hello".into()),
+            working_dir: None,
             last_run: Some(Run::begin("run-a", 1, Default::default())),
         })
         .unwrap();

@@ -25,8 +25,18 @@
 //!              "max_busy_in_container": 1},
 //!  "env": {"CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"},
 //!  "enabled": true, "max_busy": null, "transport": "tty",
-//!  "resume_argv": ["-s", "{session_id}"], "session_capture": {"kind": "json"}}
+//!  "resume_argv": ["-s", "{session_id}"], "session_capture": {"kind": "json"},
+//!  "prompt_argv": []}
 //! ```
+//!
+//! First prompt: `prompt_argv` is the argv that hands a CLI its first prompt
+//! on the command line — `{prompt}` is substituted and the words go LAST,
+//! after the tool's own args and any extra args (`claude "<prompt>"`,
+//! `codex "<prompt>"`). A tool with one never has its first prompt typed
+//! into the pty, so the prompt cannot land on a startup question (a
+//! folder-trust or permission dialog) and answer it by accident. Empty =
+//! the prompt is typed once the TUI is ready, held back while a known
+//! startup question is on screen.
 //!
 //! Resume: `session_capture` says how the app learns the id of the
 //! conversation a run is having (the machine-mode adapter, a regex over the
@@ -74,6 +84,8 @@ pub const FILE_NAME: &str = "agent_tools.json";
 
 /// The placeholder in `resume_argv` that the saved session id replaces.
 pub const SESSION_ID_SLOT: &str = "{session_id}";
+/// The placeholder in `prompt_argv` that the first prompt replaces.
+pub const PROMPT_SLOT: &str = "{prompt}";
 
 /// The tool types with known launch conventions, plus `custom` for the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -238,6 +250,11 @@ pub struct AgentTool {
     /// the tool's own args (after the machine-mode flags for a json tool).
     /// Empty = this tool offers no resume.
     pub resume_argv: Vec<String>,
+    /// The argv that passes the first prompt on the command line, with
+    /// [`PROMPT_SLOT`] where the text goes (`["{prompt}"]`). Appended after
+    /// every other argument. Empty = the prompt is typed into the pty once
+    /// the program is ready.
+    pub prompt_argv: Vec<String>,
     /// How the session id of a run is learned.
     pub session_capture: SessionCapture,
     /// The user took the session-hook `--settings` flag off this tool, so
@@ -299,6 +316,22 @@ pub fn resume_argv_template(tool_type: ToolType) -> Vec<String> {
 /// (inside a word too, so `--resume={session_id}` works).
 pub fn resume_args(template: &[String], session_id: &str) -> Vec<String> {
     template.iter().map(|word| word.replace(SESSION_ID_SLOT, session_id)).collect()
+}
+
+/// The per-type first-prompt template: claude and codex take the prompt as
+/// a positional argument; nothing is assumed for the rest.
+pub fn prompt_argv_template(tool_type: ToolType) -> Vec<String> {
+    match tool_type {
+        ToolType::Claude | ToolType::Codex => vec![PROMPT_SLOT.into()],
+        _ => Vec::new(),
+    }
+}
+
+/// `template` with every [`PROMPT_SLOT`] replaced by `prompt` (inside a
+/// word too, so `--prompt={prompt}` works). The prompt stays ONE argument
+/// however many spaces or newlines it holds.
+pub fn prompt_args(template: &[String], prompt: &str) -> Vec<String> {
+    template.iter().map(|word| word.replace(PROMPT_SLOT, prompt)).collect()
 }
 
 /// Compile a `regex` capture pattern: one capture group, the id. Errors are
@@ -368,6 +401,7 @@ impl AgentTool {
             // types that have a machine mode (claude, opencode).
             transport: Transport::Tty,
             resume_argv: resume_argv_template(tool_type),
+            prompt_argv: prompt_argv_template(tool_type),
             session_capture: SessionCapture::template(tool_type),
             hooks_opt_out: false,
         }
@@ -455,6 +489,7 @@ impl AgentTool {
         }
         self.env.retain(|k, _| !k.trim().is_empty());
         self.resume_argv.retain(|w| !w.trim().is_empty());
+        self.prompt_argv.retain(|w| !w.trim().is_empty());
         if let SessionCapture::Regex { pattern } = &mut self.session_capture {
             *pattern = pattern.trim().to_owned();
         }
@@ -639,6 +674,7 @@ pub fn parse_command_line(line: &str) -> ParsedCommand {
     let program = rest[0].clone();
     tool.tool_type = ToolType::from_program(&program);
     tool.resume_argv = resume_argv_template(tool.tool_type);
+    tool.prompt_argv = prompt_argv_template(tool.tool_type);
     tool.session_capture = SessionCapture::template(tool.tool_type);
     tool.program = program;
     tool.args = rest[1..].to_vec();
@@ -822,6 +858,9 @@ impl AgentToolStore {
                         }
                         if raw.get("resume_argv").is_none() {
                             tool.resume_argv = resume_argv_template(tool.tool_type);
+                        }
+                        if raw.get("prompt_argv").is_none() {
+                            tool.prompt_argv = prompt_argv_template(tool.tool_type);
                         }
                         tool.normalize();
                         if tool.id == 0 || !tool.is_usable() {
@@ -1329,6 +1368,45 @@ mod tests {
         assert_eq!(store.get(1).unwrap().resume_argv, vec!["--resume", "{session_id}"]);
         assert_eq!(store.get(2).unwrap().session_capture, SessionCapture::None);
         assert!(store.get(2).unwrap().resume_argv.is_empty());
+    }
+
+    /// The first-prompt argv: claude and codex templates pass the prompt as
+    /// one positional argument, the others type it; the substitution keeps
+    /// a multi-word prompt in ONE word; a file without the key loads the
+    /// type's template while an explicit empty list is kept.
+    #[test]
+    fn prompt_argv_templates_substitution_and_backfill() {
+        assert_eq!(AgentTool::template(ToolType::Claude).prompt_argv, vec!["{prompt}"]);
+        assert_eq!(AgentTool::template(ToolType::Codex).prompt_argv, vec!["{prompt}"]);
+        for t in [ToolType::Opencode, ToolType::Gemini, ToolType::Custom] {
+            assert!(AgentTool::template(t).prompt_argv.is_empty(), "{t:?}");
+        }
+        assert_eq!(
+            prompt_args(&["--prompt={prompt}".into(), "{prompt}".into()], "fix the\nfailing test"),
+            vec!["--prompt=fix the\nfailing test", "fix the\nfailing test"]
+        );
+        assert!(prompt_args(&[], "x").is_empty());
+        assert_eq!(parse_command_line("claude --verbose").tool.prompt_argv, vec!["{prompt}"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"next_id": 4, "tools": [
+                {"id": 1, "name": "claude", "tool_type": "claude", "program": "claude", "enabled": true},
+                {"id": 2, "name": "typed", "tool_type": "claude", "program": "claude", "enabled": true, "prompt_argv": []},
+                {"id": 3, "name": "oc", "tool_type": "opencode", "program": "opencode", "enabled": true}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let mut store = AgentToolStore::new(path);
+        assert_eq!(store.get(1).unwrap().prompt_argv, vec!["{prompt}"], "absent key: the template");
+        assert!(store.get(2).unwrap().prompt_argv.is_empty(), "an explicit empty list is the user's choice");
+        assert!(store.get(3).unwrap().prompt_argv.is_empty());
+        let mut t = store.get(3).unwrap().clone();
+        t.prompt_argv = vec!["run".into(), " ".into(), "{prompt}".into()];
+        assert_eq!(store.upsert(t).unwrap().prompt_argv, vec!["run", "{prompt}"], "blank words are dropped");
     }
 
     #[test]

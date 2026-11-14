@@ -28,6 +28,7 @@ function docker(id: number, over: Partial<AgentTool> = {}): AgentTool {
     max_busy: null,
     transport: "tty",
     resume_argv: ["-s", "{session_id}"],
+    prompt_argv: [],
     session_capture: { kind: "json" },
     ...over,
   };

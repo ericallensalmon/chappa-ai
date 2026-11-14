@@ -585,6 +585,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stack-core",
  "sysinfo",
  "tauri",
  "tauri-build",

@@ -392,6 +392,11 @@ pub struct AgentRecord {
     pub extra_args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The directory the agent was launched in when it was not the
+    /// project root (a worktree, a folder a source named), so starting the
+    /// record again lands in the same place. Absent = the project root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<Run>,
 }
@@ -518,6 +523,7 @@ mod tests {
             parent_record_id: None,
             extra_args: vec![],
             prompt: None,
+            working_dir: None,
             last_run: None,
         }
     }
@@ -707,6 +713,7 @@ mod tests {
             parent_record_id: None,
             extra_args: vec![],
             prompt: None,
+            working_dir: None,
             last_run: None,
         };
         let text = serde_json::to_string(&agent).unwrap();

@@ -224,6 +224,7 @@ export class SourcesSection {
           s.trusted ? 1 : 0,
           s.trust?.hash ?? "",
           s.warning ?? "",
+          s.promptPolicy,
           s.views.map((v) => [v.name, v.asOf ?? "", v.lastError ?? "", v.refreshing ? 1 : 0, v.hasPayload ? 1 : 0].join(",")).join(";"),
         ].join("\u001f"),
       )
@@ -267,6 +268,25 @@ export class SourcesSection {
       trustBtn.dataset.action = "trustSource";
       trustBtn.addEventListener("click", () => void this.review(source));
       head.appendChild(trustBtn);
+    }
+    if (source.trusted) {
+      // How this source's agent prompts are shown before they run: once
+      // per action (the default) or before every run.
+      const policy = document.createElement("select");
+      policy.style.cssText = SMALL_BTN_CSS;
+      policy.dataset.action = "promptPolicy";
+      policy.title = "When a prompt this source wrote is shown before an agent runs with it";
+      for (const [value, label] of [["first_time", "Show prompts: first time only"], ["always", "Show prompts: always"]] as const) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = label;
+        policy.appendChild(opt);
+      }
+      policy.value = source.promptPolicy;
+      policy.addEventListener("change", () => {
+        void this.store.setPromptPolicy(source.id, policy.value as Source["promptPolicy"]).catch((e) => this.showError(String(e)));
+      });
+      head.appendChild(policy);
     }
     if (source.origin.kind === "attached") {
       const detachBtn = document.createElement("button");

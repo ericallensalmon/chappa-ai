@@ -26,6 +26,7 @@ function fakeApi(initial: ProjectRowInfo[]) {
       if (i >= 0) rows.splice(i, 1);
     }),
     add: vi.fn(async () => {}),
+    setSecretScan: vi.fn(async () => {}),
   };
   return api;
 }
@@ -37,6 +38,7 @@ const row = (id: number, name: string, extra: Partial<ProjectRowInfo> = {}): Pro
   initials: null,
   color: null,
   open: false,
+  secretScan: null,
   ...extra,
 });
 

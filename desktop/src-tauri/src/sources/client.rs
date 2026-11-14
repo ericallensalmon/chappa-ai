@@ -148,52 +148,105 @@ impl SourceClient {
     /// that never existed) is re-made and re-verified first, so the token
     /// only ever rides a connection whose peer just proved itself.
     pub fn get(&mut self, endpoint: &Endpoint) -> Result<Value, SourceError> {
-        let reusable = self.conn.as_ref().is_some_and(Connection::is_reusable);
-        if !reusable {
-            self.verify()?;
-        }
-        let auth = format!("Bearer {}", self.token_hex);
-        let headers = [("Authorization", auth.as_str()), ("Accept", "application/json")];
-        let outcome = self
-            .conn
-            .as_mut()
-            .expect("verified above")
-            .request("GET", endpoint.path(), &headers, None, MAX_PAYLOAD_BYTES);
-        let reply = match outcome {
-            Ok(reply) => reply,
-            // A keep-alive connection the source dropped between polls reads
-            // as closed on the first write or read: one fresh, re-verified
-            // connection and one retry, then the error stands.
-            Err(HttpError::Closed) | Err(HttpError::Io(_)) if reusable => {
-                self.verify()?;
-                self.conn
-                    .as_mut()
-                    .expect("verified above")
-                    .request("GET", endpoint.path(), &headers, None, MAX_PAYLOAD_BYTES)?
-            }
-            Err(e) => return Err(e.into()),
-        };
+        let reply = self.send("GET", endpoint, &[], None)?;
         if !reply.is_success() {
-            let body = reply.json().unwrap_or(Value::Null);
-            let text = |k: &str| body[k].as_str().unwrap_or("").to_owned();
-            let message = if body.is_object() {
-                text("message")
-            } else {
-                String::from_utf8_lossy(&reply.body).trim().to_owned()
-            };
-            return Err(SourceError::Http {
-                status: reply.status,
-                kind: text("kind"),
-                message,
-            });
+            return Err(http_error(&reply));
         }
         reply
             .json()
             .ok_or_else(|| SourceError::Malformed(format!("{} did not answer JSON", endpoint.path())))
     }
 
+    /// `POST` a JSON body to a declared endpoint (an action call, a job's
+    /// exit report). Unlike [`SourceClient::get`] the status comes back with
+    /// the body, because an action's outcome IS its status (200 done, 202
+    /// started, 503 uncertain), and a 4xx/5xx body still carries the
+    /// source's `{kind, message}`. Only a transport failure is an `Err`.
+    /// A POST is never retried on a dropped connection: the source may have
+    /// acted on the first one.
+    pub fn post(&mut self, endpoint: &Endpoint, extra_headers: &[(&str, &str)], body: &Value) -> Result<PostReply, SourceError> {
+        let text = body.to_string();
+        let mut headers = vec![("Content-Type", "application/json")];
+        headers.extend_from_slice(extra_headers);
+        let reply = self.send_once("POST", endpoint, &headers, Some(text.as_bytes()))?;
+        let body = reply.json().unwrap_or(Value::Null);
+        Ok(PostReply { status: reply.status, body })
+    }
+
+    /// One request with the token on a verified connection, retried once
+    /// on a connection the source dropped between calls (GET only).
+    fn send(&mut self, method: &str, endpoint: &Endpoint, extra: &[(&str, &str)], body: Option<&[u8]>) -> Result<chappa_ai_mcp::http::Response, SourceError> {
+        let reusable = self.conn.as_ref().is_some_and(Connection::is_reusable);
+        if !reusable {
+            self.verify()?;
+        }
+        let auth = format!("Bearer {}", self.token_hex);
+        let mut headers = vec![("Authorization", auth.as_str()), ("Accept", "application/json")];
+        headers.extend_from_slice(extra);
+        let outcome = self
+            .conn
+            .as_mut()
+            .expect("verified above")
+            .request(method, endpoint.path(), &headers, body, MAX_PAYLOAD_BYTES);
+        match outcome {
+            Ok(reply) => Ok(reply),
+            // A keep-alive connection the source dropped between polls reads
+            // as closed on the first write or read: one fresh, re-verified
+            // connection and one retry, then the error stands.
+            Err(HttpError::Closed) | Err(HttpError::Io(_)) if reusable => {
+                self.verify()?;
+                Ok(self
+                    .conn
+                    .as_mut()
+                    .expect("verified above")
+                    .request(method, endpoint.path(), &headers, body, MAX_PAYLOAD_BYTES)?)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// One request, no retry: always on a connection verified for this
+    /// call, so a stale keep-alive cannot swallow a POST.
+    fn send_once(&mut self, method: &str, endpoint: &Endpoint, extra: &[(&str, &str)], body: Option<&[u8]>) -> Result<chappa_ai_mcp::http::Response, SourceError> {
+        self.verify()?;
+        let auth = format!("Bearer {}", self.token_hex);
+        let mut headers = vec![("Authorization", auth.as_str()), ("Accept", "application/json")];
+        headers.extend_from_slice(extra);
+        Ok(self
+            .conn
+            .as_mut()
+            .expect("verified above")
+            .request(method, endpoint.path(), &headers, body, MAX_PAYLOAD_BYTES)?)
+    }
+
     /// The manifest.
     pub fn manifest(&mut self) -> Result<Value, SourceError> {
         self.get(&Endpoint::manifest())
     }
+}
+
+/// A POST's status and decoded body (`Null` when the body was not JSON).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PostReply {
+    pub status: u16,
+    pub body: Value,
+}
+
+impl PostReply {
+    /// The source's `{kind, message}` error body as a [`SourceError::Http`].
+    pub fn as_error(&self) -> SourceError {
+        let text = |k: &str| self.body[k].as_str().unwrap_or("").to_owned();
+        SourceError::Http { status: self.status, kind: text("kind"), message: text("message") }
+    }
+}
+
+fn http_error(reply: &chappa_ai_mcp::http::Response) -> SourceError {
+    let body = reply.json().unwrap_or(Value::Null);
+    let text = |k: &str| body[k].as_str().unwrap_or("").to_owned();
+    let message = if body.is_object() {
+        text("message")
+    } else {
+        String::from_utf8_lossy(&reply.body).trim().to_owned()
+    };
+    SourceError::Http { status: reply.status, kind: text("kind"), message }
 }

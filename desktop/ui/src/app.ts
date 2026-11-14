@@ -48,6 +48,7 @@ import {
 import * as ipc from "./ipc";
 import { registerDismiss } from "./dismiss";
 import { NotifyCenter, type CenterEntry } from "./notify_center";
+import { noticeText, offerAcknowledge, parseSecretScanBlock } from "./secret_scan";
 import { NotifyBanners } from "./notify_banners";
 import { NotifyDrawer } from "./notify_drawer";
 import { StatsStore, statsChip, statsTooltip } from "./stats";
@@ -2969,6 +2970,9 @@ export class App {
     // The docker-exec bridge probe's transitions (once each).
     on<ipc.AgentBridgeEvent>("agent://bridge", (p) => this.applyBridge(p));
     on<ipc.AgentReapEvent>("agent://reap", (p) => this.applyReap(p));
+    // A launch the pre-launch secret scan let through with something to
+    // say (findings under the warn policy, or a scan that did not finish).
+    on<ipc.SecretScanNoticeEvent>("agent://secret-scan", (p) => this.applySecretScanNotice(p));
     // A json-transport agent's typed events.
     on<ipc.AgentEventEvent>("agent://event", (p) => this.applyAgentEvent(p));
     // Tauri intercepts OS drag-drop before the webview sees it; the drop
@@ -3845,12 +3849,21 @@ export class App {
           initials: p.initials ?? null,
           color: p.color ?? null,
           open: this.openProjects.has(p.id),
+          secretScan: p.secretScan ?? null,
         })),
       rename: async (id, name) => {
         const err = await this.renameProjectApply(id, name);
         if (err) throw new Error(err);
       },
       setIdentity: (id, initials, color) => this.setProjectIdentityApply(id, initials, color),
+      setSecretScan: async (id, enabled) => {
+        await this.api.setProjectSecretScan(id, enabled);
+        const current = this.projects.get(id);
+        if (current) {
+          this.projects.set(id, { ...current, secretScan: enabled });
+          this.settingsPane?.refreshProjects();
+        }
+      },
       remove: (id) => this.removeProjectFlow(id),
       add: () => this.addProjectFlow(),
     };
@@ -4155,14 +4168,42 @@ export class App {
     try {
       await panel.start();
     } catch (err) {
+      host.remove();
+      // The pre-launch secret scan refused: name the findings (file and
+      // rule, never a value) and offer to acknowledge them; on Acknowledge
+      // the same launch is tried once more.
+      const block = parseSecretScanBlock(err);
+      if (block && project !== undefined) {
+        const acknowledged = await offerAcknowledge(block, project).catch((e) => {
+          void this.showError(String(e instanceof Error ? e.message : e));
+          return false;
+        });
+        if (acknowledged) return this.spawnAgent(toolId, projectId);
+        return null;
+      }
       // Refused (busy guard names the processes), disabled, or the spawn
       // itself failed: surface the reason, drop the empty host.
       console.error(`[chappa-ai] failed to spawn agent: ${err}`);
-      host.remove();
       void this.showError(String(err instanceof Error ? err.message : err));
       return null;
     }
     return response;
+  }
+
+  /** `agent://secret-scan` — a launch went ahead with a warning or without
+   *  a complete scan: one notification-center entry naming the folder and
+   *  the findings (file and rule only). */
+  private applySecretScanNotice(p: ipc.SecretScanNoticeEvent): void {
+    const { title, body } = noticeText(p.notice);
+    const entry = this.entries.get(p.term_id);
+    this.center.record({
+      termId: p.term_id,
+      projectId: entry?.agent?.projectId ?? null,
+      processName: entry?.name ?? null,
+      kind: "notify",
+      title,
+      body,
+    });
   }
 
   /**

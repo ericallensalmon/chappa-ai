@@ -147,6 +147,7 @@ function stubApi(): {
     addProject: vi.fn(async () => ({ id: 1, name: "p", path: "/p", icon: null, notificationLevel: null })),
     renameProject: vi.fn(async () => {}),
     setProjectIdentity: vi.fn(async () => {}),
+    setProjectSecretScan: vi.fn(async () => {}),
     removeProject: vi.fn(async () => {}),
     pickDirectory: vi.fn(async () => null),
     openProject: vi.fn(async () => ({
@@ -244,6 +245,7 @@ function dockerTool(id = 3, over: Partial<ipc.AgentToolDto> = {}): ipc.AgentTool
     max_busy: null,
     transport: "tty",
     resume_argv: ["-s", "{session_id}"],
+    prompt_argv: [],
     session_capture: { kind: "json" },
     ...over,
   };
@@ -580,6 +582,7 @@ function projectApi(over: {
       return { id: 2, name: name ?? "other", path, icon: null, notificationLevel: null };
     }),
     setProjectIdentity: vi.fn(async () => {}),
+    setProjectSecretScan: vi.fn(async () => {}),
     renameProject: vi.fn(async (id: number, name: string) => {
       calls.renameProject.push([id, name]);
     }),

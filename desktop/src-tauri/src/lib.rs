@@ -15,8 +15,12 @@ pub mod open_path;
 pub mod projects;
 pub mod records;
 pub mod registry;
+pub mod roots;
+pub mod secret_scan;
 pub mod settings;
+pub mod source_actions;
 pub mod sources;
+pub mod startup_questions;
 pub mod stats;
 pub mod timers;
 pub mod timers_http;
@@ -270,6 +274,15 @@ pub fn run() {
         sources::set_source_view_hidden,
         sources::attach_source,
         sources::detach_source,
+        source_actions::source_actions,
+        source_actions::source_run_action,
+        source_actions::source_job,
+        source_actions::source_panel,
+        source_actions::open_source_link,
+        source_actions::set_source_prompt_policy,
+        secret_scan::secret_scan_info,
+        secret_scan::acknowledge_secret_findings,
+        projects::set_project_secret_scan,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -339,6 +352,15 @@ pub fn run() {
         sources::set_source_view_hidden,
         sources::attach_source,
         sources::detach_source,
+        source_actions::source_actions,
+        source_actions::source_run_action,
+        source_actions::source_job,
+        source_actions::source_panel,
+        source_actions::open_source_link,
+        source_actions::set_source_prompt_policy,
+        secret_scan::secret_scan_info,
+        secret_scan::acknowledge_secret_findings,
+        projects::set_project_secret_scan,
         workspace::list_workspace_commands,
         workspace::save_workspace_command,
         workspace::delete_workspace_command,

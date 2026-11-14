@@ -132,6 +132,7 @@ impl World {
                 max_busy: None,
                 transport: Transport::Tty,
                 resume_argv: vec![],
+                prompt_argv: Vec::new(),
                 session_capture: SessionCapture::None,
                 hooks_opt_out: false,
             })
@@ -174,6 +175,7 @@ fn posting_entry(w: &World, record_id: &str, run_uuid: &str, sink: Arc<MockSink>
                 parent_record_id: None,
                 extra_args: vec![],
                 prompt: None,
+                working_dir: None,
                 last_run: None,
             },
         )

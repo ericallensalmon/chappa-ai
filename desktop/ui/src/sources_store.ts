@@ -38,6 +38,7 @@ export interface SourcesApi {
   setSourceViewHidden(view: string, hidden: boolean): Promise<SourcesListing>;
   attachSource(addr: string, tokenFile: string): Promise<SourcesListing>;
   detachSource(sourceId: string): Promise<SourcesListing>;
+  setSourcePromptPolicy(sourceId: string, policy: ipc.SourcePromptPolicy): Promise<SourcesListing>;
   /** Subscribe to `term://sources`; resolves the unlisten function. Absent
    *  outside Tauri (the store then only refreshes on demand). */
   listen?(handler: (event: ipc.SourcesEvent) => void): Promise<() => void>;
@@ -50,6 +51,7 @@ const tauriSourcesApi: SourcesApi = {
   setSourceViewHidden: ipc.setSourceViewHidden,
   attachSource: ipc.attachSource,
   detachSource: ipc.detachSource,
+  setSourcePromptPolicy: ipc.setSourcePromptPolicy,
   // Decided at call time, not module load: this module is imported by code
   // that also runs outside a webview (tests, the plain-browser dev page).
   listen: async (handler) => {
@@ -182,6 +184,12 @@ export class SourcesStore {
 
   async detach(sourceId: string): Promise<void> {
     this.adopt(await this.api.detachSource(sourceId));
+  }
+
+  /** When a source's agent prompts are shown: before every run, or once per
+   *  action until accepted. */
+  async setPromptPolicy(sourceId: string, policy: ipc.SourcePromptPolicy): Promise<void> {
+    this.adopt(await this.api.setSourcePromptPolicy(sourceId, policy));
   }
 
   /** One view's cached payload + freshness, straight from Rust. */

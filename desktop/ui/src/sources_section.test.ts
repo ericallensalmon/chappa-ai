@@ -23,6 +23,9 @@ function source(id: string, over: Partial<Source> = {}): Source {
       { name: "prs", pollSeconds: 300, asOf: null, nextUtc: null, refreshing: true, lastError: "the source answered 500", hasPayload: false },
     ],
     warning: null,
+    promptPolicy: "first_time",
+    promptsShown: [],
+    jobs: [],
     ...over,
   };
 }
@@ -34,6 +37,10 @@ function fakeApi(initial: SourcesListing) {
       listing = l;
     },
     listSources: vi.fn(async () => listing),
+    setSourcePromptPolicy: vi.fn(async (id: string, policy: "first_time" | "always") => {
+      listing = { ...listing, sources: listing.sources.map((s) => (s.id === id ? { ...s, promptPolicy: policy } : s)) };
+      return listing;
+    }),
     sourceTrustAnswer: vi.fn(async (id: string, trust: boolean) => {
       listing = {
         ...listing,
@@ -236,7 +243,7 @@ describe("SettingsPane — Sources tab", () => {
     const api = fakeApi({ sources: [source("a")], hiddenViews: [] });
     const pane = new SettingsPane({ store: harness.store, sources: new SourcesStore(api) });
     const labels = [...pane.element.querySelectorAll<HTMLButtonElement>(".chappa-settings-tab")].map((b) => b.textContent);
-    expect(labels).toEqual(["Terminal", "Agents", "Sources", "Timers"]);
+    expect(labels).toEqual(["Terminal", "Agents", "Sources", "Security", "Timers"]);
     pane.open("sources");
     await FLUSH();
     expect(pane.activeTab).toBe("sources");

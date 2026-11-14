@@ -42,6 +42,7 @@ function stubApi(): { api: TerminalApi; onFrame: (() => ((buf: ArrayBuffer) => v
     addProject: vi.fn(async () => ({ id: 1, name: "p", path: "/p", icon: null, notificationLevel: null })),
     renameProject: vi.fn(async () => {}),
     setProjectIdentity: vi.fn(async () => {}),
+    setProjectSecretScan: vi.fn(async () => {}),
     removeProject: vi.fn(async () => {}),
     pickDirectory: vi.fn(async () => null),
     openProject: vi.fn(async () => ({

@@ -106,7 +106,25 @@ export function defaultSettings(): Settings {
     clipboardWrites: "ask",
     // Empty = the OS default handler (matches `project_model`).
     editorCommand: "",
+    // Automatic: on when gitleaks is installed (matches `project_model`).
+    secretScanBeforeAgents: null,
+    secretScanPolicy: "block-agents",
+    secretScanProgram: "",
   };
+}
+
+/** The two secret-scan policies, in picker order. */
+export const SECRET_SCAN_POLICIES = ["warn", "block-agents"] as const;
+
+/** Anything but a known policy is the default: a hand-edited or newer value
+ *  must never fall through to `warn`. */
+export function clampSecretScanPolicy(v: unknown): ipc.SecretScanPolicy {
+  return (SECRET_SCAN_POLICIES as readonly unknown[]).includes(v) ? (v as ipc.SecretScanPolicy) : "block-agents";
+}
+
+/** `true` / `false` stay; anything else (null, a string) is automatic. */
+export function clampTristate(v: unknown): boolean | null {
+  return typeof v === "boolean" ? v : null;
 }
 
 /** The editor picker's presets. A UI convenience only: choosing one fills
@@ -247,6 +265,9 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     agentReapOrphans: s.agentReapOrphans !== false,
     clipboardWrites: clampClipboardWrites(s.clipboardWrites),
     editorCommand: clampEditorCommand(s.editorCommand),
+    secretScanBeforeAgents: clampTristate(s.secretScanBeforeAgents),
+    secretScanPolicy: clampSecretScanPolicy(s.secretScanPolicy),
+    secretScanProgram: clampEditorCommand(s.secretScanProgram),
   };
 }
 

@@ -25,6 +25,20 @@ export const SESSION_CAPTURE_KINDS: readonly SessionCaptureKind[] = ["json", "re
 
 /** The placeholder in `resume_argv` that the saved id replaces. */
 export const SESSION_ID_SLOT = "{session_id}";
+/** The placeholder in `prompt_argv` that the first prompt replaces. */
+export const PROMPT_SLOT = "{prompt}";
+
+/** Mirror of Rust's `prompt_argv_template`: claude and codex take the first
+ *  prompt as a positional argument; the rest have it typed. */
+export function promptArgvFor(toolType: AgentToolType): string[] {
+  switch (toolType) {
+    case "claude":
+    case "codex":
+      return [PROMPT_SLOT];
+    default:
+      return [];
+  }
+}
 
 /** The per-type resume template (the Rust template, mirrored): the two
  *  machine-mode CLIs continue a session from their command line; nothing
@@ -100,6 +114,7 @@ export function templateFor(toolType: AgentToolType, os: HostOs = detectHostOs()
     // Always tty by default; the modal OFFERS json where a machine mode exists.
     transport: "tty",
     resume_argv: resumeArgvFor(toolType),
+    prompt_argv: promptArgvFor(toolType),
     session_capture: sessionCaptureFor(toolType),
   };
 }
@@ -112,6 +127,7 @@ export function cloneTool(t: AgentTool): AgentTool {
     env: { ...t.env },
     runtime: { ...t.runtime },
     resume_argv: [...(t.resume_argv ?? [])],
+    prompt_argv: [...(t.prompt_argv ?? [])],
     session_capture: { ...(t.session_capture ?? { kind: "none" }) },
   };
 }

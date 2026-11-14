@@ -53,6 +53,41 @@ impl Endpoint {
         validate_endpoint_path(path).map_err(|why| ManifestError::Invalid(format!("{what}: {why}")))?;
         Ok(Endpoint(path.to_owned()))
     }
+
+    /// A path a TRUSTED source's own payload named (a `panel` action's
+    /// `endpoint`). The caller has already found the path in the cached
+    /// payload — that lookup is the closed list for panels, as the manifest
+    /// is for views — and this applies the same shape rules.
+    pub(crate) fn named_in_payload(path: &str) -> Result<Self, String> {
+        validate_endpoint_path(path)?;
+        Ok(Endpoint(path.to_owned()))
+    }
+
+    /// This endpoint with its `{placeholder}` filled in (`jobs/{id}`,
+    /// `item/{key}`). The value is percent-encoded so a job id with `/`,
+    /// `?` or spaces stays one path segment and cannot reach another route.
+    pub fn with_placeholder(&self, name: &str, value: &str) -> Endpoint {
+        let slot = format!("{{{name}}}");
+        Endpoint(self.0.replace(&slot, &percent_encode(value)))
+    }
+
+    /// Whether the path carries `{name}` (a `jobs` path needs `{id}`).
+    pub fn has_placeholder(&self, name: &str) -> bool {
+        self.0.contains(&format!("{{{name}}}"))
+    }
+}
+
+/// RFC 3986 unreserved characters pass; everything else, byte by byte, is
+/// `%XX`. Strict on purpose: the value fills ONE path segment.
+pub fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// One view the source serves.
@@ -366,6 +401,23 @@ mod tests {
         assert_eq!(m.jobs.as_ref().unwrap().path(), "/api/jobs/{id}");
         assert_eq!(m.link_hosts, ["registry.example", "dev.example.test"]);
         assert_eq!(m.roots, ["/srv/example"]);
+    }
+
+    #[test]
+    fn placeholders_are_filled_with_one_encoded_segment() {
+        let jobs = fixture().jobs.unwrap();
+        assert!(jobs.has_placeholder("id"));
+        assert!(!jobs.has_placeholder("key"));
+        assert_eq!(jobs.with_placeholder("id", "job-1").path(), "/api/jobs/job-1");
+        assert_eq!(jobs.with_placeholder("id", "a/b?c=d e#f").path(), "/api/jobs/a%2Fb%3Fc%3Dd%20e%23f");
+        assert_eq!(jobs.with_placeholder("id", "../other").path(), "/api/jobs/..%2Fother");
+        assert_eq!(percent_encode("A-z_0.9~"), "A-z_0.9~");
+        assert_eq!(percent_encode("é"), "%C3%A9");
+        // A payload-named panel path gets the same shape rules as the manifest.
+        assert_eq!(Endpoint::named_in_payload("/api/panel/validate").unwrap().path(), "/api/panel/validate");
+        assert!(Endpoint::named_in_payload("http://10.0.0.5/x").is_err());
+        assert!(Endpoint::named_in_payload("/api/../x").is_err());
+        assert!(Endpoint::named_in_payload("api/panel").is_err());
     }
 
     #[test]

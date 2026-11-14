@@ -230,7 +230,7 @@ pub(crate) fn default_shell() -> String {
 /// `project_model::settings::split_command_line` for the naive-split caveat).
 /// Empty command with no (or an unknown/disabled) profile keeps today's
 /// `default_shell()` behavior unchanged.
-fn to_pty_spec(dto: PtySpecDto, settings: &Settings) -> PtySpec {
+pub(crate) fn to_pty_spec(dto: PtySpecDto, settings: &Settings) -> PtySpec {
     let (command, mut args) = if dto.command.is_empty() {
         match dto
             .profile

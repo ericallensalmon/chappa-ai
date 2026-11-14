@@ -170,6 +170,16 @@ pub struct InputRecord {
     pub bytes_len: usize,
     pub text: String,
     pub submit: bool,
+    /// Who caused the input when it was not the user at the keyboard or an
+    /// unattributed control call: `source:<id>` for a launch or call a
+    /// source action made. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// How the text reached the program when not through the pty:
+    /// `argv` (a first prompt passed on the command line) or `launch` (the
+    /// spawn itself, recorded for attribution; `bytes_len` is 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// Bound on the per-process input journal ("last 100").
@@ -1502,11 +1512,20 @@ impl Registry {
     /// Journal one delivery WITHOUT a pty write (the json
     /// transport writes its own stdin line; the audit trail is the same).
     pub fn record_input(&self, id: TermId, bytes_len: usize, text: String, submit: bool) {
+        self.record_input_as(id, bytes_len, text, submit, None, None);
+    }
+
+    /// [`Registry::record_input`] with attribution: `actor` names who caused
+    /// it (`source:<id>`), `via` how it travelled when not through the pty
+    /// (`argv`, `launch`).
+    pub fn record_input_as(&self, id: TermId, bytes_len: usize, text: String, submit: bool, actor: Option<&str>, via: Option<&str>) {
         let record = InputRecord {
             ts: epoch_ms(),
             bytes_len,
             text,
             submit,
+            actor: actor.map(str::to_owned),
+            via: via.map(str::to_owned),
         };
         if let Ok(mut inner) = self.inner.lock() {
             if let Some(entry) = inner.entries.get_mut(&id) {

@@ -25,6 +25,9 @@ function source(id: string, over: Partial<Source> = {}): Source {
     version: "0.1.0",
     views: [{ name: "work", pollSeconds: 60, asOf: null, nextUtc: null, refreshing: false, lastError: null, hasPayload: false }],
     warning: null,
+    promptPolicy: "first_time",
+    promptsShown: [],
+    jobs: [],
     ...over,
   };
 }
@@ -126,6 +129,10 @@ describe("SourcesStore", () => {
         listing = l;
       },
       listSources: vi.fn(async () => listing),
+      setSourcePromptPolicy: vi.fn(async (id: string, policy: "first_time" | "always") => {
+        listing = { ...listing, sources: listing.sources.map((s) => (s.id === id ? { ...s, promptPolicy: policy } : s)) };
+        return listing;
+      }),
       sourceTrustAnswer: vi.fn(async (id: string, trust: boolean) => {
         listing = {
           ...listing,

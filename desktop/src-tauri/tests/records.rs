@@ -214,6 +214,7 @@ fn host_tool(tools: &AgentToolsState, name: &str) -> AgentTool {
             max_busy: None,
             transport: Default::default(),
             resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
         })
@@ -460,6 +461,7 @@ fn agent_record(id: &str, name: &str) -> AgentRecord {
         parent_record_id: None,
         extra_args: vec![],
         prompt: None,
+        working_dir: None,
         last_run: None,
     }
 }
@@ -541,6 +543,7 @@ fn a_run_left_open_by_a_crash_is_reconciled_at_launch() {
                 parent_record_id: None,
                 extra_args: vec![],
                 prompt: None,
+                working_dir: None,
                 last_run: Some(open.clone()),
             },
         )

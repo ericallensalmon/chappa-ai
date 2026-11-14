@@ -256,6 +256,56 @@ impl<'de> Deserialize<'de> for ClipboardWrites {
     }
 }
 
+/// What a secret finding in an agent's working tree does to the launch.
+/// Default [`SecretScanPolicy::BlockAgents`]: a credential sitting in the
+/// folder an agent is about to read is one `cat` away from its context and
+/// its provider's logs, so the launch waits until the user has seen the
+/// finding and either fixed it or acknowledged it into the local baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecretScanPolicy {
+    /// Launch, and raise a notification naming the file and rule.
+    Warn,
+    /// Refuse the launch until the finding is fixed or acknowledged.
+    #[default]
+    BlockAgents,
+}
+
+impl SecretScanPolicy {
+    /// Lenient parse: anything but the two known words is the default.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "warn" => Self::Warn,
+            "block-agents" => Self::BlockAgents,
+            _ => Self::default(),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::BlockAgents => "block-agents",
+        }
+    }
+}
+
+/// Same lenient rule as [`ClipboardWrites`]: a bad value loads as the
+/// default instead of resetting every other setting.
+impl<'de> Deserialize<'de> for SecretScanPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().map(Self::parse).unwrap_or_default())
+    }
+}
+
+/// `secret_scan_before_agents` on the wire: `true`, `false`, or `null` for
+/// "automatic" (on when a scanner is installed). A non-boolean hand edit
+/// reads as automatic rather than failing the parse.
+fn deserialize_tristate<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool())
+}
+
 /// `editor_command` — how a ctrl+clicked file path opens: a command template
 /// with `{path}`, `{line}` and `{col}` placeholders, e.g.
 /// `code --goto {path}:{line}:{col}`. Default EMPTY = the OS default handler
@@ -322,6 +372,17 @@ pub struct Settings {
     /// Consumed Rust-side at click time, so there is no broadcast work.
     #[serde(deserialize_with = "deserialize_editor_command")]
     pub editor_command: String,
+    /// Scan an agent's working tree for secrets (untracked and ignored
+    /// files included) before it launches. `None` = automatic: on when the
+    /// scanner is installed, off otherwise. A project can override it in
+    /// its own stored preferences.
+    #[serde(deserialize_with = "deserialize_tristate")]
+    pub secret_scan_before_agents: Option<bool>,
+    /// What a finding does to the launch.
+    pub secret_scan_policy: SecretScanPolicy,
+    /// Path of the gitleaks executable to use. Empty = the one on `PATH`.
+    #[serde(deserialize_with = "deserialize_editor_command")]
+    pub secret_scan_program: String,
 }
 
 impl Default for Settings {
@@ -355,6 +416,9 @@ impl Default for Settings {
             agent_reap_orphans: default_agent_reap_orphans(),
             clipboard_writes: ClipboardWrites::default(),
             editor_command: String::new(),
+            secret_scan_before_agents: None,
+            secret_scan_policy: SecretScanPolicy::default(),
+            secret_scan_program: String::new(),
         }
     }
 }
@@ -421,6 +485,10 @@ impl Settings {
         let trimmed = self.editor_command.trim();
         if trimmed.len() != self.editor_command.len() {
             self.editor_command = trimmed.to_owned();
+        }
+        let trimmed = self.secret_scan_program.trim();
+        if trimmed.len() != self.secret_scan_program.len() {
+            self.secret_scan_program = trimmed.to_owned();
         }
     }
 
@@ -956,6 +1024,9 @@ mod tests {
             "agentReapOrphans",
             "clipboardWrites",
             "editorCommand",
+            "secretScanBeforeAgents",
+            "secretScanPolicy",
+            "secretScanProgram",
         ] {
             assert!(json.get(key).is_some(), "missing wire key {key}");
         }
@@ -963,6 +1034,31 @@ mod tests {
         assert!(json.get("copy_on_select").is_none());
         assert!(json.get("ctrl_v_pastes").is_none());
         assert!(json.get("ctrl_c_copy_only").is_none());
+    }
+
+    #[test]
+    fn secret_scan_settings_default_to_automatic_and_block_and_survive_bad_values() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.secret_scan_before_agents, None, "automatic until the user decides");
+        assert_eq!(defaults.secret_scan_policy, SecretScanPolicy::BlockAgents);
+        assert_eq!(defaults.secret_scan_program, "");
+        let json = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(json["secretScanBeforeAgents"], serde_json::Value::Null);
+        assert_eq!(json["secretScanPolicy"], "block-agents");
+        for (raw, enabled, policy) in [
+            (serde_json::json!({"secretScanBeforeAgents": true, "secretScanPolicy": "warn"}), Some(true), SecretScanPolicy::Warn),
+            (serde_json::json!({"secretScanBeforeAgents": false, "secretScanPolicy": "block-agents"}), Some(false), SecretScanPolicy::BlockAgents),
+            (serde_json::json!({"secretScanBeforeAgents": "yes", "secretScanPolicy": "stop"}), None, SecretScanPolicy::BlockAgents),
+            (serde_json::json!({"secretScanBeforeAgents": 1, "secretScanPolicy": 7, "fontSize": 16}), None, SecretScanPolicy::BlockAgents),
+        ] {
+            let s: Settings = serde_json::from_value(raw).unwrap();
+            assert_eq!(s.secret_scan_before_agents, enabled);
+            assert_eq!(s.secret_scan_policy, policy);
+        }
+        let mut s = Settings::default();
+        s.secret_scan_program = "  C:\\tools\\gitleaks.exe \n".into();
+        s.normalize();
+        assert_eq!(s.secret_scan_program, "C:\\tools\\gitleaks.exe");
     }
 
     #[test]

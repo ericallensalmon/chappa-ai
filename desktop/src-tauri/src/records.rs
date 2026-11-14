@@ -855,6 +855,7 @@ impl Records {
                     project_id: scope.project_id(),
                     name: Some(agent.name),
                     extra_args: agent.extra_args,
+                    working_dir: agent.working_dir,
                     record_id: Some(record_id.to_owned()),
                     ..SpawnAgentRequest::default()
                 };
@@ -1056,6 +1057,7 @@ impl Records {
             project_id: scope.project_id(),
             name: Some(agent.name),
             extra_args: agent.extra_args,
+            working_dir: agent.working_dir,
             record_id: Some(rid()),
             resume: Some(ResumeSpec { session_id: session_id.clone() }),
             ..SpawnAgentRequest::default()

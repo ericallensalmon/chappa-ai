@@ -275,7 +275,7 @@ describe("SettingsPane — full-window layout", () => {
     expect(pane.element.style.overflow).toBe("hidden");
     // One panel per tab, each with at least one section.
     const panels = [...column.querySelectorAll<HTMLElement>(".chappa-settings-panel")];
-    expect(panels.map((p) => p.dataset.tab)).toEqual(["terminal", "agents", "sources", "timers"]);
+    expect(panels.map((p) => p.dataset.tab)).toEqual(["terminal", "agents", "sources", "security", "timers"]);
     for (const p of panels) expect(p.querySelectorAll(".chappa-settings-section").length).toBeGreaterThan(0);
     pane.dispose();
   });
@@ -367,14 +367,14 @@ describe("SettingsPane — tabs", () => {
   it("shows Terminal first and exactly one tab's panel at a time", async () => {
     localStorage.removeItem(TAB_KEY);
     const { pane } = await makePane();
-    expect(tabs(pane).map((t) => t.textContent)).toEqual(["Terminal", "Agents", "Sources", "Timers"]);
+    expect(tabs(pane).map((t) => t.textContent)).toEqual(["Terminal", "Agents", "Sources", "Security", "Timers"]);
     expect(pane.activeTab).toBe("terminal");
     expect(visiblePanels(pane)).toEqual(["terminal"]);
-    expect(tabs(pane).map((t) => t.getAttribute("aria-selected"))).toEqual(["true", "false", "false", "false"]);
+    expect(tabs(pane).map((t) => t.getAttribute("aria-selected"))).toEqual(["true", "false", "false", "false", "false"]);
     tabs(pane)[1].click();
     expect(pane.activeTab).toBe("agents");
     expect(visiblePanels(pane)).toEqual(["agents"]);
-    expect(tabs(pane).map((t) => t.getAttribute("aria-selected"))).toEqual(["false", "true", "false", "false"]);
+    expect(tabs(pane).map((t) => t.getAttribute("aria-selected"))).toEqual(["false", "true", "false", "false", "false"]);
     // The timer knobs live on their own tab, not under Agents.
     expect(pane.element.querySelector('[data-tab="timers"] [data-setting="timerConfirmMs"]')).not.toBeNull();
     expect(pane.element.querySelector('[data-tab="agents"] [data-setting="timerConfirmMs"]')).toBeNull();
@@ -392,6 +392,8 @@ describe("SettingsPane — tabs", () => {
     key("ArrowRight");
     expect(pane.activeTab).toBe("sources");
     key("ArrowRight");
+    expect(pane.activeTab).toBe("security");
+    key("ArrowRight");
     key("ArrowRight"); // wraps
     expect(pane.activeTab).toBe("terminal");
     key("ArrowLeft"); // wraps the other way
@@ -406,7 +408,7 @@ describe("SettingsPane — tabs", () => {
   it("remembers the last tab across panes, and a bogus stored value falls back to Terminal", async () => {
     localStorage.removeItem(TAB_KEY);
     const first = await makePane();
-    tabs(first.pane)[3].click();
+    tabs(first.pane)[4].click();
     expect(localStorage.getItem(TAB_KEY)).toBe("timers");
     first.pane.dispose();
     const second = await makePane();
@@ -442,11 +444,12 @@ describe("SettingsPane — Projects tab", () => {
   const TAB_KEY = "chappa.settings.tab";
   const adapter = () => ({
     list: () => [
-      { id: 1, name: "chappa-ai", path: "/p/chappa-ai", initials: null, color: null, open: true },
-      { id: 2, name: "notes", path: "/p/notes", initials: "NT", color: "pink", open: false },
+      { id: 1, name: "chappa-ai", path: "/p/chappa-ai", initials: null, color: null, open: true, secretScan: null },
+      { id: 2, name: "notes", path: "/p/notes", initials: "NT", color: "pink", open: false, secretScan: false },
     ],
     rename: async () => {},
     setIdentity: async () => {},
+    setSecretScan: async () => {},
     remove: async () => {},
     add: async () => {},
   });
@@ -455,7 +458,7 @@ describe("SettingsPane — Projects tab", () => {
     localStorage.removeItem(TAB_KEY);
     const bare = await makePane();
     expect([...bare.pane.element.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual([
-      "Terminal", "Agents", "Sources", "Timers",
+      "Terminal", "Agents", "Sources", "Security", "Timers",
     ]);
     bare.pane.dispose();
 
@@ -464,7 +467,7 @@ describe("SettingsPane — Projects tab", () => {
     const pane = new SettingsPane({ store: harness.store, projects: adapter() });
     pane.open("projects");
     expect([...pane.element.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual([
-      "Terminal", "Projects", "Agents", "Sources", "Timers",
+      "Terminal", "Projects", "Agents", "Sources", "Security", "Timers",
     ]);
     expect(pane.activeTab).toBe("projects");
     const rows = [...pane.element.querySelectorAll<HTMLElement>('[data-tab="projects"] .chappa-projects-row')];

@@ -33,11 +33,13 @@ use crate::agent_json::{
     TurnReceipt, TURN_RECEIPT_WAIT_DEFAULT_MS, TURN_RECEIPT_WAIT_MAX_MS,
 };
 use crate::agent_tools::{
-    docker_exec_prefix, resume_args, AgentTool, AgentToolsState, EnvFlags, Runtime, ToolType, Transport,
+    docker_exec_prefix, prompt_args, resume_args, AgentTool, AgentToolsState, EnvFlags, Runtime, ToolType, Transport,
 };
 use crate::open_path::{parse_mounts, Mount};
 use crate::projects::Projects;
 use crate::records::{Records, Scope};
+use crate::roots::check_cwd;
+use crate::startup_questions::StartupQuestion;
 use crate::registry::{
     emit_created, emit_session, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink,
     JsonEvent, NullSink, Registry, RunRecorder, TermId,
@@ -70,6 +72,12 @@ pub const SHUTDOWN_CAP: Duration = Duration::from_secs(5);
 /// A queued `prompt` waits at most this long for the ready gate — the MCP
 /// client's read timeout is 30 s, so the response must come back before it.
 pub const PROMPT_WAIT_CAP: Duration = Duration::from_secs(20);
+/// How often the gate reads the screen for a startup question while it
+/// waits.
+pub const SCREEN_CHECK_EVERY: Duration = Duration::from_millis(200);
+/// The receipt reason of a first prompt that travelled on the command line
+/// (`prompt_argv`) and was therefore never typed.
+pub const PROMPT_VIA_ARGV: &str = "argv";
 /// Where the pid-recording wrapper writes inside the container.
 pub const PID_DIR: &str = "/tmp/.chappa-ai";
 /// Env var carrying the spawn uuid into the container-side process, so the
@@ -687,12 +695,34 @@ pub enum GateStep {
     /// Stop without writing: `"exited"`, `"not-ready"`, or `"blocked"` (the
     /// cap passed while the program still reported itself blocked).
     GiveUp(&'static str),
+    /// Stop without writing: the cap passed while a known startup or
+    /// permission question was still on screen. The receipt names it.
+    Held(&'static StartupQuestion),
 }
 
-/// `blocked`: the program reports it is waiting on a person (`OSC
-/// 777;status;blocked`). Its quiet is a question on screen, not a prompt
-/// ready for input, so the gate stays shut until the program reports
-/// anything else, it exits, or the cap passes.
+impl GateStep {
+    /// The receipt's `reason` for a step that did not write.
+    pub fn reason(self) -> Option<String> {
+        match self {
+            GateStep::Write { .. } => None,
+            GateStep::GiveUp(reason) => Some(reason.to_owned()),
+            GateStep::Held(question) => Some(crate::startup_questions::held_reason(question)),
+        }
+    }
+}
+
+/// Why the gate is held shut although the pty may be quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    None,
+    /// The program reports it is waiting on a person (`OSC 777;status;blocked`).
+    Blocked,
+    /// A known startup / permission question is on screen
+    /// ([`crate::startup_questions`]). Its Enter must come from the user.
+    Question(&'static StartupQuestion),
+}
+
+/// [`gate_step_held`] with the one hold the status channel reports.
 pub fn gate_step(
     view: IoView,
     now_ms: u64,
@@ -701,8 +731,26 @@ pub fn gate_step(
     waited: Duration,
     blocked: bool,
 ) -> Option<GateStep> {
-    if blocked && view.child_alive {
-        return (waited >= policy.cap).then_some(GateStep::GiveUp("blocked"));
+    gate_step_held(view, now_ms, first_output_ms, policy, waited, if blocked { Hold::Blocked } else { Hold::None })
+}
+
+/// A hold means the program's quiet is a question on screen, not a prompt
+/// ready for input, so the gate stays shut until the hold lifts, the child
+/// exits, or the cap passes — and a hold NEVER times out into a write.
+pub fn gate_step_held(
+    view: IoView,
+    now_ms: u64,
+    first_output_ms: Option<u64>,
+    policy: DeliveryPolicy,
+    waited: Duration,
+    hold: Hold,
+) -> Option<GateStep> {
+    if view.child_alive {
+        match hold {
+            Hold::None => {}
+            Hold::Blocked => return (waited >= policy.cap).then_some(GateStep::GiveUp("blocked")),
+            Hold::Question(q) => return (waited >= policy.cap).then_some(GateStep::Held(q)),
+        }
     }
     let gate = ReadyGate {
         quiet_ms: policy.quiet_ms,
@@ -749,18 +797,31 @@ pub fn deliver_prompt_when_ready(
     // The counters carry only the LAST byte's time; the first byte is
     // observed here (the gate polls every 25 ms, so it is at most that late).
     let mut first_output_ms: Option<u64> = None;
+    // The screen is read for a startup question every [`SCREEN_CHECK_EVERY`]
+    // (a grid dump is a round trip to the actor; 25 ms would be busywork),
+    // and only once there is output to read.
+    let mut screen_checked_at: Option<Instant> = None;
+    let mut question: Option<&'static StartupQuestion> = None;
     let by_timeout = loop {
         let view = IoView::of(&handle);
         if first_output_ms.is_none() && view.has_output {
             first_output_ms = Some(epoch_ms());
         }
-        let blocked = registry.program_status(id) == Some(ProgramStatus::Blocked);
-        match gate_step(view, epoch_ms(), first_output_ms, policy, started.elapsed(), blocked) {
+        if view.has_output && screen_checked_at.map_or(true, |t| t.elapsed() >= SCREEN_CHECK_EVERY) {
+            screen_checked_at = Some(Instant::now());
+            question = crate::startup_questions::detect_startup_question(&handle.dump_text(0));
+        }
+        let hold = if registry.program_status(id) == Some(ProgramStatus::Blocked) {
+            Hold::Blocked
+        } else {
+            question.map_or(Hold::None, Hold::Question)
+        };
+        match gate_step_held(view, epoch_ms(), first_output_ms, policy, started.elapsed(), hold) {
             Some(GateStep::Write { by_timeout }) => break by_timeout,
-            Some(GateStep::GiveUp(reason)) => {
+            Some(step) => {
                 return PromptReceipt {
                     delivered: false,
-                    reason: Some(reason.to_owned()),
+                    reason: step.reason(),
                     waited_ms: Some(started.elapsed().as_millis() as u64),
                     seq_before: None,
                     seq_after: None,
@@ -1658,10 +1719,27 @@ pub struct SpawnAgentRequest {
     /// again. `close_on_exit` implies this.
     #[serde(default)]
     pub ephemeral: bool,
+    /// The folder to start in instead of the project root. It must resolve
+    /// inside a cwd root (the project's directory or one of its git
+    /// worktrees — every open project's when there is no `project_id` — or
+    /// a folder a trusted source may use); anything else refuses the spawn
+    /// with the reason. Remembered on the record, so a start of the stopped
+    /// row lands in the same folder.
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    /// Extra environment for the child, applied over the tool's own env
+    /// and under the identity variables. Names must be `[A-Z_][A-Z0-9_]*`.
+    #[serde(default)]
+    pub env: IndexMap<String, String>,
     /// Internal: start THIS existing record again (a new run on the same
     /// record) instead of creating a record. Never on the wire.
     #[serde(skip)]
     pub record_id: Option<String>,
+    /// Internal: who caused this spawn when it was not the user — a source
+    /// action records `source:<id>` in the row's input journal. Never on the
+    /// wire.
+    #[serde(skip)]
+    pub journal_actor: Option<String>,
     /// Internal: continue a saved provider session instead of starting a
     /// fresh one (`records::Records::resume` sets it). Never on the wire.
     #[serde(skip)]
@@ -1736,6 +1814,24 @@ pub fn spawn_agent_with(
         ),
         None => None,
     };
+    // The working directory: the project root, or a folder inside a cwd
+    // root when the request names one.
+    let working_dir = req.working_dir.as_deref().map(str::trim).filter(|w| !w.is_empty());
+    let cwd: Option<PathBuf> = match working_dir {
+        Some(dir) => Some(check_cwd(&ctx.projects.cwd_roots(req.project_id), dir).into_result()?),
+        None => project.as_ref().map(|(_, root)| root.clone()),
+    };
+    crate::sources::actions::validate_env(&req.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())?;
+    // Secrets in the folder the agent is about to read are looked for
+    // BEFORE anything is spawned; a blocking finding is the error here.
+    let scan_notice = match &cwd {
+        Some(dir) if tool.runtime.container().is_none() => {
+            let project_root = project.as_ref().map(|(_, root)| root.as_path()).unwrap_or(dir.as_path());
+            let pref = req.project_id.and_then(|id| ctx.projects.secret_scan_pref(id));
+            crate::secret_scan::gate_launch(&settings, pref, project_root, dir)?
+        }
+        _ => None,
+    };
     let uuid = new_uuid()?;
     // The guard check and the entry that makes the NEXT check see this
     // spawn happen under one lock: two concurrent spawns can otherwise both
@@ -1762,7 +1858,12 @@ pub fn spawn_agent_with(
         |p| ctx.registry.handle(p).is_some(),
     );
     let identity = identity_env(id, req.project_id, tool.id, &uuid);
-    let env = merge_env(&[], &tool.env, &identity);
+    // inherited < tool.env < the request's env < identity.
+    let mut tool_env = tool.env.clone();
+    for (k, v) in &req.env {
+        tool_env.insert(k.clone(), v.clone());
+    }
+    let env = merge_env(&[], &tool_env, &identity);
     // A json-transport tool is planned as its machine-mode
     // variant (flags prepended, docker `-i` only — a pipe, not a tty).
     let json_mode = match tool.transport {
@@ -1790,14 +1891,19 @@ pub fn spawn_agent_with(
             planned
         }
     };
-    let plan = build_spawn_plan(
-        &planned_tool,
-        &req.extra_args,
-        &env,
-        project.as_ref().map(|(_, root)| root.clone()),
-        &uuid,
-        with_wrapper,
-    );
+    let prompt = req.prompt.as_deref().filter(|p| !p.is_empty());
+    // A tty tool with a `prompt_argv` gets its first prompt on the command
+    // line, LAST (after the tool's args and the extra args, so a flag among
+    // them never swallows it), and nothing is typed: an argv prompt cannot
+    // answer a startup question. A resumed session gets no first prompt
+    // either way; the json transport hands the prompt to its adapter.
+    let prompt_on_argv = json_mode.is_none() && req.resume.is_none() && !tool.prompt_argv.is_empty() && prompt.is_some();
+    let extra_args: Vec<String> = if prompt_on_argv {
+        [req.extra_args.clone(), prompt_args(&tool.prompt_argv, prompt.unwrap_or_default())].concat()
+    } else {
+        req.extra_args.clone()
+    };
+    let plan = build_spawn_plan(&planned_tool, &extra_args, &env, cwd.clone(), &uuid, with_wrapper);
     let cols = req.cols.unwrap_or(80).clamp(1, 4096);
     let rows = req.rows.unwrap_or(24).clamp(1, 4096);
     let cfg = ActorConfig {
@@ -1937,7 +2043,20 @@ pub fn spawn_agent_with(
     if let Some(state) = &container {
         ctx.registry.update_bridge(id, state.clone(), Bridge::Ok);
     }
-    let prompt = req.prompt.as_deref().filter(|p| !p.is_empty());
+    // Attribution: a spawn a source action caused is on the row's journal
+    // before anything else is, under the source's actor id.
+    if let Some(actor) = req.journal_actor.as_deref() {
+        let launch = format!(
+            "launch {} {} in {}",
+            plan.command,
+            plan.args.iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
+            cwd.as_deref().map(crate::roots::display).unwrap_or_else(|| "the home directory".to_owned())
+        );
+        ctx.registry.record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
+    }
+    if let Some(notice) = &scan_notice {
+        crate::secret_scan::emit_notice(created_app.as_ref(), id, notice);
+    }
     let prompt_receipt = match &json_agent {
         Some(agent) => match json_boot(ctx.registry, agent, prompt) {
             Ok(receipt) => receipt,
@@ -1948,6 +2067,17 @@ pub fn spawn_agent_with(
                 return Err(err);
             }
         },
+        None if prompt_on_argv => prompt.map(|p| {
+            ctx.registry.record_input_as(id, 0, p.to_owned(), true, req.journal_actor.as_deref(), Some(PROMPT_VIA_ARGV));
+            PromptReceipt {
+                delivered: true,
+                reason: Some(PROMPT_VIA_ARGV.to_owned()),
+                waited_ms: Some(0),
+                seq_before: None,
+                seq_after: None,
+                had_output_within_ms: None,
+            }
+        }),
         None => prompt.map(|p| {
             deliver_prompt_when_ready(
                 ctx.registry,
@@ -2027,6 +2157,7 @@ fn agent_record(
             parent_record_id: parent_process_id.and_then(|parent| registry.record_of(parent)),
             extra_args: req.extra_args.clone(),
             prompt: req.prompt.clone().filter(|p| !p.is_empty()),
+            working_dir: req.working_dir.clone().filter(|w| !w.trim().is_empty()),
             last_run: None,
         },
     )?;
@@ -2431,6 +2562,37 @@ mod tests {
         let dead = IoView { has_output: true, last_output_ms: Some(10_000), child_alive: false };
         assert_eq!(readiness(dead, 10_100, gate(Some(10_000))), Readiness::Exited);
         assert_eq!(readiness(dead, 20_000, gate(Some(10_000))), Readiness::Exited, "a dead child is never 'ready'");
+    }
+
+    /// A startup question on screen holds the gate like `blocked` does: a
+    /// quiet pty does not open it, the max-wait fallback does not open it,
+    /// and at the cap the step names the question instead of writing.
+    #[test]
+    fn a_startup_question_holds_the_gate_and_never_times_out_into_a_write() {
+        let question = &crate::startup_questions::STARTUP_QUESTIONS[0];
+        let quiet = IoView { has_output: true, last_output_ms: Some(10_000), child_alive: true };
+        let policy = DeliveryPolicy::spawn_prompt(750, 5_000);
+        let hold = Hold::Question(question);
+        // Quiet for long enough to be ready, but held: keep waiting.
+        assert_eq!(gate_step_held(quiet, 20_000, Some(10_000), policy, Duration::from_secs(10), hold), None);
+        // Past the max-wait fallback too: still no write.
+        assert_eq!(gate_step_held(quiet, 60_000, Some(10_000), policy, Duration::from_secs(19), hold), None);
+        // At the cap: give up, naming the question — the receipt reason.
+        let step = gate_step_held(quiet, 60_000, Some(10_000), policy, PROMPT_WAIT_CAP, hold).unwrap();
+        assert_eq!(step, GateStep::Held(question));
+        assert_eq!(step.reason().as_deref(), Some("held: waiting on the folder-trust question"));
+        // The question answered (hold lifted) → the ordinary gate decides.
+        assert_eq!(
+            gate_step_held(quiet, 20_000, Some(10_000), policy, Duration::from_secs(10), Hold::None),
+            Some(GateStep::Write { by_timeout: false })
+        );
+        // A dead child is `exited`, held or not.
+        let dead = IoView { child_alive: false, ..quiet };
+        assert_eq!(gate_step_held(dead, 20_000, Some(10_000), policy, Duration::from_secs(1), hold), Some(GateStep::GiveUp("exited")));
+        // The bool entry point is the `blocked` hold.
+        assert_eq!(gate_step(quiet, 20_000, Some(10_000), policy, PROMPT_WAIT_CAP, true), Some(GateStep::GiveUp("blocked")));
+        assert_eq!(GateStep::GiveUp("not-ready").reason().as_deref(), Some("not-ready"));
+        assert_eq!(GateStep::Write { by_timeout: true }.reason(), None);
     }
 
     /// Review fix: a TUI that repaints every few ms never yields 750 ms of

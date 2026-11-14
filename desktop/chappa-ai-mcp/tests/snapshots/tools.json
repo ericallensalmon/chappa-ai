@@ -160,7 +160,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM — an element containing spaces reaches the child as ONE argument, so pass [\"--prompt\", \"two words here\"], never a pre-joined string. The child gets CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID / CHAPPA_AI_AGENT_TOOL_ID in its env and the reply carries agent_instructions to prepend to your first message. `prompt` is queued until the TUI is ready (first output, then agent_ready_quiet_ms of silence — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout) and delivered as one atomic write with Enter; prompt_receipt tells you whether it landed (delivered=false, reason=exited when the child died first). Busy guards refuse when the tool's max_busy or the container's max_busy_in_container is reached, naming the busy processes; force=true overrides. Docker-exec replies include container {status, uptime_s, mem_bytes, mem_limit_bytes} so you can decline the next spawn with evidence. The reply's `agent.parent_process_id` is the process that spawned you (null for a root) — the rail nests this row under it. The spawn creates a durable agent RECORD (`record_id` in the reply): the row survives exit and close as a stopped row that can be started again (start_record) and keeps a run history (get_record_runs). ephemeral=true opts out (no record; the row vanishes on close). close_on_exit=true implies ephemeral and makes the row close itself when the child exits; a bash-hosted tool never exits on its own, so end its command line with `; exit` (or spawn with extra_args [\"-lc\", \"<command>\"]) and the row reaps when the run returns.",
+    "description": "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM — an element containing spaces reaches the child as ONE argument, so pass [\"--prompt\", \"two words here\"], never a pre-joined string. The child gets CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID / CHAPPA_AI_AGENT_TOOL_ID in its env and the reply carries agent_instructions to prepend to your first message. `prompt`: a tool with a prompt_argv (claude and codex by default) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv) — it can never answer a startup question; otherwise it is queued until the TUI is ready (first output, then agent_ready_quiet_ms of silence — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), held while a known startup or permission question is on screen (delivered=false, reason=`held: waiting on <question>` if the cap passes while it is still there), and delivered as one atomic write with Enter; prompt_receipt tells you whether it landed (delivered=false, reason=exited when the child died first). `working_dir` starts the agent in a folder other than the project root: it must be inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else the spawn is refused with the reason. The folder is scanned for secrets first when the app's Security setting is on (default when gitleaks is installed); a blocking finding refuses the spawn with `secret-scan-blocked:` + JSON naming file and rule (never a value) until it is fixed or acknowledged in the app. Busy guards refuse when the tool's max_busy or the container's max_busy_in_container is reached, naming the busy processes; force=true overrides. Docker-exec replies include container {status, uptime_s, mem_bytes, mem_limit_bytes} so you can decline the next spawn with evidence. The reply's `agent.parent_process_id` is the process that spawned you (null for a root) — the rail nests this row under it. The spawn creates a durable agent RECORD (`record_id` in the reply): the row survives exit and close as a stopped row that can be started again (start_record) and keeps a run history (get_record_runs). ephemeral=true opts out (no record; the row vanishes on close). close_on_exit=true implies ephemeral and makes the row close itself when the child exits; a bash-hosted tool never exits on its own, so end its command line with `; exit` (or spawn with extra_args [\"-lc\", \"<command>\"]) and the row reaps when the run returns.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -178,6 +178,13 @@
           "maximum": 4096,
           "minimum": 1,
           "type": "integer"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment over the tool's env (names [A-Z_][A-Z0-9_]*).",
+          "type": "object"
         },
         "ephemeral": {
           "description": "Spawn without a durable record (default false): the row vanishes on close and keeps no run history.",
@@ -212,7 +219,7 @@
           "type": "integer"
         },
         "prompt": {
-          "description": "First input, written once the TUI is ready (one atomic write + Enter).",
+          "description": "First input: on the command line for a tool with a prompt_argv (claude, codex), else written once the TUI is ready (one atomic write + Enter), held while a startup question is on screen.",
           "type": "string"
         },
         "rows": {
@@ -220,6 +227,10 @@
           "maximum": 4096,
           "minimum": 1,
           "type": "integer"
+        },
+        "working_dir": {
+          "description": "Absolute folder to start in instead of the project root; must be inside the project (or a git worktree of it) or a trusted source's root.",
+          "type": "string"
         }
       },
       "required": [

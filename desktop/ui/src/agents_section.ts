@@ -18,6 +18,7 @@ import { Segmented } from "./segmented";
 import {
   AGENT_TOOL_TYPES,
   SESSION_CAPTURE_KINDS,
+  PROMPT_SLOT,
   SESSION_ID_SLOT,
   runtimeSummary,
   templateFor,
@@ -718,6 +719,29 @@ export class AgentsSection {
     resumeWrap.append(resumeInput, resumeHint);
     field("Resume argv", resumeWrap);
 
+    // The first-prompt argv: one word per line, `{prompt}` substituted at
+    // spawn time. Empty = the prompt is typed once the TUI is ready.
+    const promptArgs = tool.prompt_argv ?? [];
+    const promptInput = document.createElement("textarea");
+    promptInput.value = promptArgs.join("\n");
+    promptInput.rows = Math.max(2, Math.min(4, promptArgs.length + 1));
+    promptInput.spellcheck = false;
+    promptInput.placeholder = `one argument per line, e.g. ${PROMPT_SLOT}`;
+    promptInput.style.cssText = `${INPUT_CSS}flex:1 1 auto;resize:vertical;`;
+    promptInput.dataset.field = "prompt_argv";
+    const promptWrap = document.createElement("div");
+    promptWrap.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;";
+    const promptHint = document.createElement("div");
+    promptHint.className = "chappa-agent-prompt-hint";
+    promptHint.style.cssText = HINT_CSS;
+    promptHint.textContent =
+      `${PROMPT_SLOT} is substituted with the first prompt and these words go LAST on the command line, so ` +
+      "nothing is typed into the terminal: a prompt on the command line cannot answer a startup question " +
+      "(folder trust, a new MCP server) by accident. Empty = the prompt is typed once the program is ready, " +
+      "and held back while such a question is on screen.";
+    promptWrap.append(promptInput, promptHint);
+    field("First prompt argv", promptWrap);
+
     // Env rows: key/value pairs, each deletable — the claude template's
     // CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 is one of these, visibly.
     const envWrap = document.createElement("div");
@@ -851,6 +875,10 @@ export class AgentsSection {
         max_busy: limit(busyInput),
         transport: this.store.hasMachineMode(typeSelect.value as AgentToolType) ? transport : "tty",
         resume_argv: resumeInput.value
+          .split("\n")
+          .map((a) => a.replace(/\r$/, ""))
+          .filter((a) => a.trim() !== ""),
+        prompt_argv: promptInput.value
           .split("\n")
           .map((a) => a.replace(/\r$/, ""))
           .filter((a) => a.trim() !== ""),
