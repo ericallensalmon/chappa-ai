@@ -7,7 +7,8 @@
 //! again here before anything runs, so a view cannot be talked into an
 //! action the payload does not carry. Then, per kind:
 //!
-//! - `link`: the https-and-trusted-host check, then the OS opener;
+//! - `link`: the trusted-host check (https, or plain http to this
+//!   machine), then the OS opener;
 //! - `panel`: fetched from the payload-named path and returned; the page
 //!   is kept, so its own actions are looked up and run the same way under
 //!   the view name `panel:<path>`;
@@ -40,8 +41,11 @@ use term_core::pty::PtySpec;
 use crate::agent_tools::AgentToolsState;
 use crate::agents::{spawn_agent_with, SpawnAgentRequest, SpawnContext};
 use crate::projects::Projects;
-use crate::records::Records;
-use crate::registry::{actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, ExitHandler, NullSink, Registry, TermId};
+use crate::records::{Records, Scope};
+use crate::registry::{
+    actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, ExitHandler, NullSink, RecordBinding, Registry, TermId,
+};
+use project_model::records::{new_record_id, JobRecord as ProjectJobRecord, RecordKind, Run, TailKind};
 use crate::roots::{check_cwd, Root};
 use crate::settings::SettingsState;
 use crate::sources::actions::{action_verdict, resolve_tool, validate_env, NoteRule, SourceAction, VerdictContext};
@@ -143,7 +147,7 @@ pub fn run_action(
             Ok(ActionOutcome::Opened { url })
         }
         SourceAction::Panel { endpoint, .. } => Ok(ActionOutcome::Panel { payload: deps.sources.panel(source_id, &endpoint)? }),
-        SourceAction::Endpoint { id, mutates, confirm, params, note: rule, .. } => {
+        SourceAction::Endpoint { id, label: action_label, mutates, confirm, params, note: rule } => {
             if mutates && confirm.is_none() {
                 return Err("a mutating action without a confirm text is not offered".into());
             }
@@ -193,7 +197,8 @@ pub fn run_action(
                     deps.sources.job_started(source_id, record);
                     match run {
                         Some(run) => {
-                            let term_id = spawn_job_run(deps, source_id, &info, &job_id, &run, &actor)?;
+                            let origin = JobOrigin { action_id: &id, action_label: &action_label, view, key };
+                            let term_id = spawn_job_run(deps, source_id, &info, &job_id, &origin, &run, &actor)?;
                             deps.sources.job_update(source_id, &job_id, |j| j.term_id = Some(term_id));
                             Ok(ActionOutcome::Run { job_id, term_id })
                         }
@@ -249,7 +254,7 @@ pub fn run_action(
         SourceAction::Terminal { label, cwd, command, env, .. } => {
             let cwd = check_cwd(&roots, &cwd).into_result()?;
             validate_env(&env)?;
-            let term_id = spawn_terminal_row(deps, &info, &label, &command, &cwd, &env, &actor, None)?;
+            let term_id = spawn_terminal_row(deps, &info, &label, &command, &cwd, &env, &actor, None, None)?;
             Ok(ActionOutcome::Launched { term_id, what: "terminal" })
         }
     }
@@ -264,9 +269,17 @@ fn journal_endpoint(deps: &ActionDeps, info: &SourceInfo, actor: &str, text: &st
     }
 }
 
+/// The durable record a terminal row runs for: a job's pane is a `job`
+/// record, bound before the spawn so even an instant exit lands on it.
+struct RowRecord {
+    binding: RecordBinding,
+    kind: RecordKind,
+}
+
 /// A terminal row in the source's project running `argv` (empty = the
 /// default shell) in `cwd`, journaled under the source. `on_exit` is the
-/// job runner's exit hook when the row is a job's run.
+/// job runner's exit hook and `record` its job record when the row is a
+/// job's run.
 #[allow(clippy::too_many_arguments)]
 fn spawn_terminal_row(
     deps: &ActionDeps,
@@ -277,6 +290,7 @@ fn spawn_terminal_row(
     env: &BTreeMap<String, String>,
     actor: &str,
     on_exit: Option<ExitHandler>,
+    record: Option<RowRecord>,
 ) -> Result<TermId, String> {
     let settings = deps.settings.snapshot();
     let spec = if argv.is_empty() {
@@ -303,9 +317,13 @@ fn spawn_terminal_row(
         }
     };
     let cfg = actor_config(spec.clone(), None, Some(&settings));
+    let (binding, record_kind) = match record {
+        Some(r) => (Some(r.binding), Some(r.kind)),
+        None => (None, None),
+    };
     let id = deps
         .registry
-        .create_terminal_with_exit(cfg, Arc::new(NullSink), deps.app.clone(), name.to_owned(), on_exit, None)?;
+        .create_terminal_with_exit(cfg, Arc::new(NullSink), deps.app.clone(), name.to_owned(), on_exit, binding.clone())?;
     if let Some(project_id) = info.project_id {
         deps.registry.set_project_shell(id, project_id);
     }
@@ -326,8 +344,9 @@ fn spawn_terminal_row(
                 project_id: info.project_id,
                 agent_tool_id: None,
                 parent_process_id: None,
-                record_id: None,
-                last_run: None,
+                record_id: binding.map(|b| b.record_id),
+                last_run: deps.registry.run_head(id),
+                record_kind,
             },
         );
     }
@@ -368,13 +387,38 @@ pub fn parse_run_block(run: &Value) -> Result<RunBlock, String> {
     Ok(RunBlock { argv, cwd, env, title: run["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned) })
 }
 
+/// Which action of which view started a job (what its record says).
+struct JobOrigin<'a> {
+    action_id: &'a str,
+    action_label: &'a str,
+    view: &'a str,
+    key: Option<&'a str>,
+}
+
 /// Spawn a job's `run` in a pane of the source's project; on exit the
 /// pane's text (capped) goes back to the source as the job's exit report.
-fn spawn_job_run(deps: &ActionDeps, source_id: &str, info: &SourceInfo, job_id: &str, run: &Value, actor: &str) -> Result<TermId, String> {
+///
+/// The pane is a durable `job` record (in the source's project, or the
+/// workspace for an attached source): its run — start, end, exit code, the
+/// automatic tail, a summary the job posts — outlives the pane, so the
+/// dashboard and the record card show it like any other run. The record
+/// keeps the source's job id; the source's own job log stays the source's.
+/// A record the store refuses only costs the history: the job still runs.
+#[allow(clippy::too_many_arguments)]
+fn spawn_job_run(
+    deps: &ActionDeps,
+    source_id: &str,
+    info: &SourceInfo,
+    job_id: &str,
+    origin: &JobOrigin<'_>,
+    run: &Value,
+    actor: &str,
+) -> Result<TermId, String> {
     let run = parse_run_block(run)?;
     let roots = roots_for(deps, info);
     let cwd = check_cwd(&roots, &run.cwd).into_result()?;
     let title = run.title.clone().unwrap_or_else(|| format!("{} job {job_id}", info.label));
+    let record = job_record(deps, source_id, info, job_id, origin, &title, &run.argv, &cwd);
     let (sources, registry, source_id, job_id_owned) = (deps.sources.clone(), deps.registry.clone(), source_id.to_owned(), job_id.to_owned());
     let on_exit: ExitHandler = Arc::new(move |term_id, exit_code, _closed| {
         let (sources, registry, source_id, job_id) = (sources.clone(), registry.clone(), source_id.clone(), job_id_owned.clone());
@@ -382,7 +426,62 @@ fn spawn_job_run(deps: &ActionDeps, source_id: &str, info: &SourceInfo, job_id: 
         // terminal's event stream.
         std::thread::spawn(move || report_job_exit(&sources, &registry, &source_id, &job_id, term_id, exit_code));
     });
-    spawn_terminal_row(deps, info, &title, &run.argv, &cwd, &run.env, actor, Some(on_exit))
+    let record_id = record.as_ref().map(|r| r.binding.record_id.clone());
+    let run_uuid = record.as_ref().map(|r| r.binding.run_uuid.clone());
+    match spawn_terminal_row(deps, info, &title, &run.argv, &cwd, &run.env, actor, Some(on_exit), record) {
+        Ok(id) => Ok(id),
+        Err(e) => {
+            // The run began in the store but no terminal ever ran it.
+            if let (Some(record_id), Some(run_uuid)) = (record_id, run_uuid) {
+                use crate::registry::RunRecorder;
+                deps.records.run_stopped(&record_id, &run_uuid, epoch_ms());
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Write the job's record and its first (only) run before the pane exists.
+#[allow(clippy::too_many_arguments)]
+fn job_record(
+    deps: &ActionDeps,
+    source_id: &str,
+    info: &SourceInfo,
+    job_id: &str,
+    origin: &JobOrigin<'_>,
+    title: &str,
+    argv: &[String],
+    cwd: &std::path::Path,
+) -> Option<RowRecord> {
+    let scope = info.project_id.map_or(Scope::Workspace, Scope::Project);
+    let made = (|| -> Result<RowRecord, String> {
+        let record = ProjectJobRecord {
+            record_id: new_record_id()?,
+            name: title.to_owned(),
+            source_id: source_id.to_owned(),
+            source_label: info.label.clone(),
+            action_id: origin.action_id.to_owned(),
+            action_label: origin.action_label.to_owned(),
+            view: origin.view.to_owned(),
+            key: origin.key.map(str::to_owned),
+            job_id: job_id.to_owned(),
+            argv: argv.to_vec(),
+            cwd: Some(crate::roots::display(cwd)),
+            last_run: None,
+        };
+        let record_id = record.record_id.clone();
+        deps.records.add_job_record(scope, record)?;
+        let run_uuid = crate::control_http::random_hex(16).map_err(|e| format!("cannot generate a run uuid: {e}"))?;
+        deps.records.begin_run(scope, RecordKind::Job, &record_id, &Run::begin(run_uuid.clone(), epoch_ms(), TailKind::Text))?;
+        Ok(RowRecord { binding: RecordBinding { record_id, run_uuid }, kind: RecordKind::Job })
+    })();
+    match made {
+        Ok(r) => Some(r),
+        Err(e) => {
+            log::warn!("[sources] job {job_id} of {}: its pane leaves no record: {e}", info.label);
+            None
+        }
+    }
 }
 
 /// `POST {jobs}/{id}` with `{exitCode, endedUtc, output}` once the run's
@@ -537,12 +636,19 @@ pub async fn source_panel(window: tauri::Window, sources: State<'_, Sources>, so
         .map_err(|e| e.to_string())?
 }
 
-/// Open a link a trusted source handed over, after the https + host check.
+/// Open a link a trusted source handed over, after the host check (https,
+/// or plain http to this machine). Async: a plain-http name is looked up
+/// first, which must not hold the UI thread.
 #[tauri::command]
-pub fn open_source_link(window: tauri::Window, sources: State<'_, Sources>, source_id: String, url: String) -> Result<(), String> {
+pub async fn open_source_link(window: tauri::Window, sources: State<'_, Sources>, source_id: String, url: String) -> Result<(), String> {
     main_window_only(&window)?;
-    sources.link_check(&source_id, &url)?;
-    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("could not open {url}: {e}"))
+    let sources = sources.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sources.link_check(&source_id, &url)?;
+        tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("could not open {url}: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// `first_time` | `always`: when a source's agent prompts are shown.

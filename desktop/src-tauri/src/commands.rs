@@ -374,6 +374,7 @@ fn spawn_plain_terminal(
             parent_process_id: None,
             record_id: None,
             last_run: None,
+            record_kind: None,
         },
     );
     Ok(id)
@@ -456,6 +457,7 @@ fn spawn_terminal_record_with(
                 parent_process_id: None,
                 record_id: Some(record.record_id.clone()),
                 last_run: registry.run_head(id),
+                record_kind: None,
             },
         );
     }

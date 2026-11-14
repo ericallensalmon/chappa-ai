@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use project_model::records::{RunHead, Session, SessionSource, SummarySource, TailKind, TAIL_LINES};
+use project_model::records::{RecordKind, RunHead, Session, SessionSource, SummarySource, TailKind, TAIL_LINES};
 use project_model::settings::Settings;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -336,6 +336,11 @@ pub struct CreatedEvent {
     /// adding a second row. `None` for an ephemeral spawn.
     pub record_id: Option<String>,
     pub last_run: Option<RunHead>,
+    /// The record's kind when the row kind alone does not say it: a source
+    /// job's pane is a `terminal` row whose record is a `job` (no start
+    /// again, its own card). Absent for every other spawn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_kind: Option<RecordKind>,
 }
 
 /// The `term://created` broadcast seam. The real impl forwards to

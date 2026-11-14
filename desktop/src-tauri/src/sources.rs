@@ -1103,12 +1103,16 @@ impl Sources {
         Ok((found.action, Self::info_of(state)))
     }
 
-    /// Rule for links a trusted source hands over: https, on a host the
-    /// user trusted with the manifest.
+    /// Rule for links a trusted source hands over: on a host the user
+    /// trusted with the manifest, https — or plain http to this machine
+    /// (see `sources::links`). A plain-http name is looked up here, with a
+    /// deadline, after the lock is released; call it off the UI thread.
     pub fn link_check(&self, source_id: &str, url: &str) -> Result<(), String> {
-        let inner = self.lock();
-        let state = Self::trusted_state(&inner, source_id)?;
-        let hosts = state.manifest.as_ref().map(|m| m.link_hosts.clone()).unwrap_or_default();
+        let hosts = {
+            let inner = self.lock();
+            let state = Self::trusted_state(&inner, source_id)?;
+            state.manifest.as_ref().map(|m| m.link_hosts.clone()).unwrap_or_default()
+        };
         links::source_link_check(url, &hosts).map(|_| ())
     }
 

@@ -10,7 +10,9 @@
 //   record — nothing attached: the row's stored record renders as a centered
 //            card ("<name> is stopped", a hint, the actions, keycap hints)
 //            with the last run's outcome, its summary (markdown) and its
-//            stored tail underneath.
+//            stored tail underneath. A source job's card has no actions: it
+//            says where it came from and that running it again is the
+//            source's own action.
 //
 // One RecordPane instance is mounted in the stack and re-rendered per
 // activation. The strings and the view are built by pure functions so they
@@ -92,10 +94,19 @@ export function summaryStripText(summary: RunSummary, expanded: boolean): string
   return `Summary ${expanded ? "▾" : "▸"} ${firstLine(summary.text)}`;
 }
 
+/** Where a source job's record came from. */
+export interface JobOrigin {
+  sourceLabel: string;
+  actionLabel: string;
+  jobId: string;
+}
+
 export interface RecordPaneInput {
   kind: RecordPaneKind;
   name: string;
   lastRun: PaneRun | null;
+  /** A job record's origin (null while it is not known yet). */
+  job?: JobOrigin | null;
   /** The agent's tool has a way to continue a saved session. */
   canResume?: boolean;
   /** The agent's tool is set up to capture session ids at all. */
@@ -130,6 +141,8 @@ export interface RecordView {
   sessionTitle: string | null;
   /** The last run's summary, rendered above the tail. */
   summary: SummaryView | null;
+  /** Jobs only: `Stack local · Start db · job j1`. */
+  origin: string | null;
 }
 
 /** The session line of an agent card. A saved id names the provider and
@@ -152,13 +165,27 @@ const GENERIC_TITLE: Record<RecordPaneKind, string> = {
   agent: "Agent is stopped",
   terminal: "Terminal is stopped",
   command: "Process is stopped",
+  job: "Source job",
 };
 
 const HINT: Record<RecordPaneKind, string> = {
   agent: "Start it to begin a new session.",
   terminal: "Start it to resume this shell.",
   command: "Start it to run this process.",
+  job: "To run it again, use the action in its source; a job is not restarted from here.",
 };
+
+/** A job's origin in one line: `Stack local · Start db · job j1`. */
+export function jobOriginText(job: JobOrigin): string {
+  return [job.sourceLabel, job.actionLabel, `job ${job.jobId}`].filter((p) => p.trim() !== "").join(" · ");
+}
+
+/** The hint for a job, naming its source when known. */
+function jobHint(job: JobOrigin | null | undefined): string {
+  return job?.sourceLabel
+    ? `To run it again, use the action in ${job.sourceLabel}; a job is not restarted from here.`
+    : HINT.job;
+}
 
 /** The start label: an agent always begins a NEW session. */
 export function startLabel(kind: RecordPaneKind): string {
@@ -206,6 +233,19 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
     };
     if (posted) summary = { ...posted, ended: lastRun.ended, endedTitle: lastRun.endedTitle };
   }
+  if (input.kind === "job") {
+    // History only: no start, no resume — re-running is the source's action.
+    return {
+      title: name || GENERIC_TITLE.job,
+      hint: jobHint(input.job),
+      actions: [],
+      lastRun,
+      session: null,
+      sessionTitle: null,
+      summary,
+      origin: input.job ? jobOriginText(input.job) : null,
+    };
+  }
   const actions: RecordAction[] = [];
   // Resuming comes first: the primary key continues the conversation when
   // one was saved and the tool can pick it up; a fresh start sends nothing.
@@ -221,6 +261,7 @@ export function recordView(input: RecordPaneInput, now: number): RecordView {
     session: input.kind === "agent" ? sessionLine(run, input.captures ?? false) : null,
     sessionTitle: input.kind === "agent" && run?.session ? run.session.session_id : null,
     summary,
+    origin: null,
   };
 }
 
@@ -259,6 +300,8 @@ export const RECORD_PANE_CSS = `${MARKDOWN_CSS}
 .chappa-record-hint{font:13px system-ui,sans-serif;color:#8b949e;}
 .chappa-record-session{font:12px ui-monospace,monospace;color:#6b7280;}
 .chappa-record-session:empty{display:none;}
+.chappa-record-origin{font:12px ui-monospace,monospace;color:#8b949e;text-align:center;word-break:break-word;}
+.chappa-record-origin:empty{display:none;}
 .chappa-record-failure{font:13px system-ui,sans-serif;color:#f0883e;text-align:center;max-width:520px;word-break:break-word;}
 .chappa-record-failure:empty{display:none;}
 .chappa-record-actions{display:flex;flex-direction:column;align-items:stretch;gap:6px;margin-top:4px;}
@@ -322,6 +365,8 @@ export class RecordPane {
   private readonly title: HTMLElement;
   private readonly hint: HTMLElement;
   private readonly session: HTMLElement;
+  private readonly origin: HTMLElement;
+  private readonly startKeys: HTMLElement[];
   private readonly failure: HTMLElement;
   private readonly actions: HTMLElement;
   private readonly run: HTMLElement;
@@ -344,6 +389,8 @@ export class RecordPane {
     this.hint.className = "chappa-record-hint";
     this.session = document.createElement("div");
     this.session.className = "chappa-record-session";
+    this.origin = document.createElement("div");
+    this.origin.className = "chappa-record-origin";
     this.failure = document.createElement("div");
     this.failure.className = "chappa-record-failure";
     this.actions = document.createElement("div");
@@ -354,8 +401,10 @@ export class RecordPane {
     startKeys.append(keycap("S"), " or ", keycap("Enter"));
     const newKeys = document.createElement("span");
     newKeys.append(keycap("Ctrl+T"));
-    keys.append(label("Start"), startKeys, label("New agent"), newKeys);
-    card.append(this.title, this.hint, this.session, this.failure, this.actions, keys);
+    const startLabelEl = label("Start");
+    this.startKeys = [startLabelEl, startKeys];
+    keys.append(startLabelEl, startKeys, label("New agent"), newKeys);
+    card.append(this.title, this.origin, this.hint, this.session, this.failure, this.actions, keys);
     this.run = document.createElement("div");
     this.run.className = "chappa-record-run";
     // The run's summary, above the tail; empty (and hidden) without one.
@@ -373,6 +422,9 @@ export class RecordPane {
     this.hint.textContent = view.hint;
     this.session.textContent = view.session ?? "";
     this.session.title = view.sessionTitle ?? "";
+    this.origin.textContent = view.origin ?? "";
+    // No action, no start keys (a source job's card).
+    for (const el of this.startKeys) el.style.display = view.actions.length > 0 ? "" : "none";
     this.failure.textContent = "";
     this.actions.textContent = "";
     for (const action of view.actions) {

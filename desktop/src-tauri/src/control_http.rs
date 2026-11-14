@@ -1212,6 +1212,7 @@ fn spawn_terminal(state: &ControlState, _: &Params, _: &str, body: &str) -> Resp
                         parent_process_id: None,
                         record_id: None,
                         last_run: None,
+                        record_kind: None,
                     },
                 );
             }
@@ -1507,6 +1508,7 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
                         parent_process_id: resp.agent.parent_process_id,
                         record_id: resp.record_id.clone(),
                         last_run: state.registry.run_head(resp.process_id),
+                        record_kind: None,
                     },
                 );
             }

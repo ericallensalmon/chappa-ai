@@ -5981,6 +5981,74 @@ describe("App record rows and the record pane", () => {
     teardown(app, root);
   });
 
+  function jobRecord(over: Partial<ipc.RecordDto> = {}): ipc.RecordDto {
+    return {
+      record_id: "j1",
+      kind: "job",
+      name: "Seed data",
+      project_id: 1,
+      status: "exited",
+      term_id: null,
+      last_run: { run_uuid: "rj", status: "exited", started_at_ms: 1000, ended_at_ms: 61_000, exit_code: 0, success: true, tail_kind: "text", tail_len: 1 },
+      job: {
+        source_id: "src-1",
+        source_label: "Fixture",
+        action_id: "run-seed",
+        action_label: "Seed",
+        view: "work",
+        key: "ABC-1",
+        job_id: "job-1",
+        argv: ["node", "-e", "1"],
+        cwd: "C:\\code\\x",
+      },
+      ...over,
+    };
+  }
+
+  it("a source job's record files under the project's TERMINALS with no start, and its card offers nothing to start", async () => {
+    const { api, root, app } = await mounted([jobRecord()], { project: true });
+    const row = root.querySelector<HTMLElement>(".chappa-project-term-list .chappa-record-row")!;
+    expect(row.querySelector(".chappa-rail-name")?.textContent).toBe("Seed data");
+    expect(row.querySelector(".chappa-record-start")).toBeNull();
+    expect(row.title).toContain("Fixture");
+    row.click();
+    await FLUSH();
+    expect(root.querySelector(".chappa-record-title")?.textContent).toBe("Seed data");
+    expect(root.querySelector(".chappa-record-origin")?.textContent).toBe("Fixture · Seed · job job-1");
+    expect(root.querySelector(".chappa-record-hint")?.textContent).toContain("use the action in Fixture");
+    expect(root.querySelectorAll(".chappa-record-action")).toHaveLength(0);
+    key(pane(root), { key: "s" });
+    key(pane(root), { key: "Enter" });
+    await FLUSH();
+    expect(api.startRecord).not.toHaveBeenCalled();
+    teardown(app, root);
+  });
+
+  it("a job pane announced with record_kind job binds as a job: no start strip once it exits, a job card once closed", async () => {
+    const { api, root, app } = await mounted([], { project: true });
+    vi.mocked(api.listRecords).mockResolvedValue([jobRecord({ record_id: "j9", status: "running", term_id: 50 })]);
+    drive(app).applyCreated({
+      term_id: 50,
+      name: "Seed data",
+      kind: "terminal",
+      project_id: 1,
+      agent_tool_id: null,
+      parent_process_id: null,
+      record_id: "j9",
+      record_kind: "job",
+    });
+    await FLUSH();
+    const records = (app as unknown as { records: Map<string, { kind: string; job: { jobId: string } | null }> }).records;
+    expect(records.get("j9")?.kind).toBe("job");
+    expect(records.get("j9")?.job?.jobId).toBe("job-1");
+    // The pane goes (closed): the row stays as a stopped job row, no ▶.
+    drive(app).dropEntry(50, false);
+    const row = root.querySelector<HTMLElement>(".chappa-project-term-list .chappa-record-row")!;
+    expect(row).not.toBeNull();
+    expect(row.querySelector(".chappa-record-start")).toBeNull();
+    teardown(app, root);
+  });
+
   it("clicking a stopped row fronts its card with the name, last run and stored tail", async () => {
     const { api, root, app } = await mounted([agentRecord()]);
     vi.mocked(api.getRecordRuns).mockResolvedValue([

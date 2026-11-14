@@ -2106,6 +2106,7 @@ pub fn spawn_agent_with(
                 parent_process_id,
                 record_id: record_id.clone(),
                 last_run: ctx.registry.run_head(id),
+                record_kind: None,
             },
         );
     }

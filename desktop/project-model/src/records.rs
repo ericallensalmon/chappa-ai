@@ -11,7 +11,11 @@
 //!   record state (`record_id`, `last_run`) rides the per-command
 //!   `ProcessOverride` so an untouched file stays byte-identical;
 //! - an **agent** — the durable half of a spawn request ([`AgentRecord`]);
-//! - a **terminal** — a shell ([`TerminalRecord`]).
+//! - a **terminal** — a shell ([`TerminalRecord`]);
+//! - a **job** — the pane a source opened to run one of its jobs
+//!   ([`JobRecord`]). It is history, not a recipe: running the job again is
+//!   the source's own action again (which mints a new job id and a new
+//!   record), so a job record is never started or resumed from here.
 //!
 //! Every record keeps `last_run`: the denormalized head of the run ledger
 //! (`runs` in coordination.db, last [`RUNS_RETAINED`] per record), so the
@@ -34,6 +38,11 @@ pub const TAIL_LINES: usize = 200;
 /// Runs kept per record in the ledger; older rows are pruned on insert.
 pub const RUNS_RETAINED: usize = 20;
 
+/// Job records kept per project (and in the workspace). Every run of a
+/// source job is a new record, so without a cap a busy stack would grow
+/// projects.json forever; the oldest finished ones go first.
+pub const JOB_RECORDS_RETAINED: usize = 50;
+
 /// A fresh record id: 16 random bytes as lowercase hex, the same form as a
 /// spawn uuid. An RNG failure is an error, never a weaker fallback — two
 /// records sharing an id would merge their histories.
@@ -50,6 +59,7 @@ pub enum RecordKind {
     Command,
     Agent,
     Terminal,
+    Job,
 }
 
 impl RecordKind {
@@ -58,7 +68,21 @@ impl RecordKind {
             RecordKind::Command => "command",
             RecordKind::Agent => "agent",
             RecordKind::Terminal => "terminal",
+            RecordKind::Job => "job",
         }
+    }
+
+    /// Whether a record of this kind can be started again from its row. A
+    /// job cannot: what it ran belongs to the source, and running it again
+    /// is the source's action (a new job, a new record) — never a replay of
+    /// an old argv the source may no longer stand behind.
+    pub fn can_start(self) -> bool {
+        !matches!(self, RecordKind::Job)
+    }
+
+    /// Whether a record of this kind can continue a provider session.
+    pub fn can_resume(self) -> bool {
+        matches!(self, RecordKind::Agent)
     }
 }
 
@@ -478,6 +502,54 @@ pub struct TerminalRecord {
     pub last_run: Option<Run>,
 }
 
+/// The pane a source opened for one of its jobs (a `202` answer with a
+/// `run` block): which source and action started it, the source's own job
+/// id (the link back to the source's job log), and the run itself. The
+/// argv and folder are kept for display — what ran, where — not to run
+/// them again (see [`RecordKind::can_start`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobRecord {
+    pub record_id: String,
+    /// The pane's title.
+    pub name: String,
+    /// The app's id for the source (its registry key).
+    pub source_id: String,
+    /// The source as the user knows it (its manifest label).
+    pub source_label: String,
+    pub action_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub action_label: String,
+    /// The view and item key the action was offered on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub view: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The source's id for the job.
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<Run>,
+}
+
+/// Keep the newest [`JOB_RECORDS_RETAINED`] job records of one bucket,
+/// dropping the oldest FINISHED ones first (a job still running is never
+/// dropped). Returns the record ids that went, so the ledger can follow.
+pub fn prune_job_records(jobs: &mut Vec<JobRecord>) -> Vec<String> {
+    let mut dropped = Vec::new();
+    while jobs.len() > JOB_RECORDS_RETAINED {
+        // Records are appended in creation order: the first finished one is
+        // the oldest.
+        match jobs.iter().position(|j| !j.last_run.as_ref().is_some_and(Run::is_open)) {
+            Some(i) => dropped.push(jobs.remove(i).record_id),
+            None => break,
+        }
+    }
+    dropped
+}
+
 /// Where a record was found: its kind and, for a command, the name it is
 /// keyed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -497,6 +569,22 @@ pub struct StoredRecord {
     pub last_run: Option<Run>,
     pub agent: Option<AgentRecord>,
     pub terminal: Option<TerminalRecord>,
+    pub job: Option<JobRecord>,
+}
+
+impl StoredRecord {
+    /// A job record as the stores list it.
+    pub fn of_job(job: &JobRecord) -> Self {
+        Self {
+            record_id: job.record_id.clone(),
+            kind: RecordKind::Job,
+            name: job.name.clone(),
+            last_run: job.last_run.clone(),
+            agent: None,
+            terminal: None,
+            job: Some(job.clone()),
+        }
+    }
 }
 
 /// Reconcile every run in `runs` that is still open (see
@@ -726,5 +814,71 @@ mod tests {
         assert_eq!(terminal.shell_profile, None);
         assert_eq!(terminal.cwd, None);
         assert_eq!(terminal.last_run, None);
+    }
+
+    fn job(id: &str, open: bool) -> JobRecord {
+        let mut run = Run::begin(format!("run-{id}"), 1, TailKind::Text);
+        if !open {
+            run.finish(2, Some(0), true, vec![json!("done")]);
+        }
+        JobRecord {
+            record_id: id.into(),
+            name: "local db: start".into(),
+            source_id: "src-1".into(),
+            source_label: "Stack local".into(),
+            action_id: "start".into(),
+            action_label: "Start".into(),
+            view: "environment".into(),
+            key: Some("db".into()),
+            job_id: "j1".into(),
+            argv: vec!["chappa-stack".into(), "run-job".into(), "j1".into()],
+            cwd: Some("/srv/example".into()),
+            last_run: Some(run),
+        }
+    }
+
+    /// A job record round-trips with its run, and a sparse one (only the
+    /// required keys) loads.
+    #[test]
+    fn job_records_round_trip() {
+        let j = job("job-a", false);
+        let text = serde_json::to_string(&j).unwrap();
+        let back: JobRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, j);
+        assert_eq!(serde_json::to_value(RecordKind::Job).unwrap(), json!("job"));
+        assert_eq!(RecordKind::Job.as_str(), "job");
+        let sparse: JobRecord = serde_json::from_str(
+            r#"{"record_id":"r","name":"n","source_id":"s","source_label":"S","action_id":"a","job_id":"j"}"#,
+        )
+        .unwrap();
+        assert_eq!((sparse.action_label.as_str(), sparse.key.as_ref(), sparse.last_run.as_ref()), ("", None, None));
+        let stored = StoredRecord::of_job(&j);
+        assert_eq!((stored.kind, stored.job.as_ref()), (RecordKind::Job, Some(&j)));
+    }
+
+    /// Only agents resume; every kind but a job starts again.
+    #[test]
+    fn a_job_record_is_neither_started_nor_resumed() {
+        assert!(!RecordKind::Job.can_start() && !RecordKind::Job.can_resume());
+        assert!(RecordKind::Agent.can_start() && RecordKind::Agent.can_resume());
+        for kind in [RecordKind::Command, RecordKind::Terminal] {
+            assert!(kind.can_start() && !kind.can_resume(), "{kind:?}");
+        }
+    }
+
+    /// The cap drops the oldest finished job records, never a running one.
+    #[test]
+    fn job_records_are_capped_oldest_finished_first() {
+        let mut jobs: Vec<JobRecord> = vec![job("open-0", true)];
+        for i in 0..JOB_RECORDS_RETAINED {
+            jobs.push(job(&format!("done-{i}"), false));
+        }
+        let dropped = prune_job_records(&mut jobs);
+        assert_eq!(dropped, vec!["done-0".to_owned()]);
+        assert_eq!(jobs.len(), JOB_RECORDS_RETAINED);
+        assert_eq!(jobs[0].record_id, "open-0", "a running job stays");
+        let mut all_open: Vec<JobRecord> =
+            (0..JOB_RECORDS_RETAINED + 2).map(|i| job(&format!("o{i}"), true)).collect();
+        assert!(prune_job_records(&mut all_open).is_empty());
     }
 }

@@ -81,6 +81,25 @@ describe("cardView", () => {
     expect(v.endedAtMs).toBe(61_000);
   });
 
+  it("a source job's card has its origin, no start or restart, and says how to run it again", () => {
+    const job = { sourceLabel: "Stack local", actionLabel: "Start", jobId: "j1" };
+    const stopped = cardView(stoppedAgent({ key: "rec:j1", kind: "job", name: "local db: start", recordId: "j1", job }), NOW);
+    expect(stopped.kindLabel).toBe("job");
+    expect(stopped.actions).toEqual([]);
+    expect(stopped.origin).toBe("Stack local · Start · job j1");
+    expect(stopped.note).toContain("use the action in Stack local");
+    expect(stopped.run).toBe("last run · exit 0 · ran 1m 0s · ended 2 min ago");
+    expect(stopped.recorded).toBe(true);
+    // Running: only Stop (closing the pane keeps the record); exited but
+    // still attached: nothing.
+    const running = cardView(stoppedAgent({ kind: "job", recordId: "j1", job, live: live() }), NOW);
+    expect(running.actions.map((a) => a.id)).toEqual(["stop"]);
+    const frozen = cardView(stoppedAgent({ kind: "job", recordId: "j1", job, live: live({ status: "exited", exitCode: 0, endedAtMs: 61_000 }) }), NOW);
+    expect(frozen.actions).toEqual([]);
+    // Other kinds carry no origin or note.
+    expect(cardView(stoppedAgent(), NOW)).toMatchObject({ origin: null, note: null });
+  });
+
   it("a record that never ran is stopped with only a start", () => {
     const v = cardView(stoppedAgent({ kind: "terminal", name: "pwsh", lastRun: null }), NOW);
     expect(v.status).toBe("stopped");
@@ -259,6 +278,27 @@ describe("Dashboard", () => {
     ]),
     group("ws", "Workspace", [stoppedAgent({ key: "rec:t1", kind: "terminal", name: "pwsh", lastRun: null })]),
   ];
+
+  it("draws a job card with its origin and note, no hover actions, and a history to open", async () => {
+    const loadRuns = vi.fn(async (): Promise<ipc.RunDto[]> => [
+      { run_uuid: "r", status: "exited", started_at_ms: 1000, ended_at_ms: 61_000, exit_code: 0, success: true, tail_kind: "text", tail: ["seeded"] } as ipc.RunDto,
+    ]);
+    const { dash } = make({ loadRuns });
+    const job = { sourceLabel: "Fixture", actionLabel: "Seed", jobId: "job-1" };
+    dash.update([group("p:1", "app", [stoppedAgent({ key: "rec:j1", kind: "job", name: "Seed data", recordId: "j1", job })])], NOW);
+    const card = cardEl(dash, "rec:j1");
+    expect(card.querySelector(".chappa-dash-kind")?.textContent).toBe("job");
+    expect(card.querySelector(".chappa-dash-origin")?.textContent).toBe("Fixture · Seed · job job-1");
+    expect(card.querySelector(".chappa-dash-note")?.textContent).toContain("use the action in Fixture");
+    expect(card.querySelectorAll(".chappa-dash-action")).toHaveLength(0);
+    const toggle = card.querySelector<HTMLButtonElement>(".chappa-dash-history-toggle")!;
+    expect(toggle.style.display).toBe("");
+    toggle.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(loadRuns).toHaveBeenCalledWith("rec:j1");
+    dash.dispose();
+  });
 
   it("draws one group per input in order, with the badge, name and totals, cards ordered", () => {
     const { dash } = make();

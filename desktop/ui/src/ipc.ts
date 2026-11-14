@@ -508,8 +508,25 @@ export function spawnAgent(
 
 // --- durable records ------------------------------------------------
 
-/** The record kinds: a project or workspace command, an agent, a shell. */
-export type RecordKind = "command" | "agent" | "terminal";
+/** The record kinds: a project or workspace command, an agent, a shell, or
+ *  the pane a source opened for one of its jobs (history only: a job is run
+ *  again through the source's own action, never started from its record). */
+export type RecordKind = "command" | "agent" | "terminal" | "job";
+
+/** A job record's facts: the source and action that ran it and the
+ *  source's own job id (`sourceJob(source_id, job_id)` reads the source's
+ *  log entry for it). */
+export interface JobFactsDto {
+  source_id: string;
+  source_label: string;
+  action_id: string;
+  action_label: string;
+  view: string;
+  key: string | null;
+  job_id: string;
+  argv: string[];
+  cwd: string | null;
+}
 
 /** What a run's automatic tail holds: screen text lines, or the typed
  *  events of a json-transport agent. */
@@ -609,6 +626,7 @@ export interface RecordDto {
     shell_profile: string | null;
     cwd: string | null;
   };
+  job?: JobFactsDto;
 }
 
 /** What `startRecord` answers: the new terminal and run (a project command
@@ -783,6 +801,9 @@ export interface TerminalCreatedEvent {
    *  older fixtures still type. */
   record_id?: string | null;
   last_run?: RunHeadDto | null;
+  /** Sent only when the row kind does not say it: a source job's pane is a
+   *  `terminal` row whose record is a `job`. */
+  record_kind?: RecordKind;
 }
 
 /** A `term://session` payload: a run learned (or changed) the provider
@@ -1637,7 +1658,8 @@ export function sourcePanel(sourceId: string, path: string): Promise<unknown> {
   return call("source_panel", { sourceId, path });
 }
 
-/** Open a link from a source, after Rust's https + trusted-host check. */
+/** Open a link from a source, after Rust's trusted-host check (https, or
+ *  plain http to this machine). */
 export function openSourceLink(sourceId: string, url: string): Promise<void> {
   return call("open_source_link", { sourceId, url });
 }

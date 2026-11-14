@@ -22,6 +22,7 @@ import {
   formatDuration,
   frozenStripText,
   lastRunText,
+  type JobOrigin,
   recordView,
   runOutcome,
   runSummary,
@@ -69,6 +70,8 @@ export interface CardInput {
   lastRun: PaneRun | null;
   canResume?: boolean;
   captures?: boolean;
+  /** A source job's origin (its record knows it). */
+  job?: JobOrigin | null;
   /** The attached terminal, or null when the row is stopped. */
   live: CardLive | null;
   /** The newest line the row produced, for a card without a summary (a
@@ -110,13 +113,16 @@ export interface CardView {
   line: string | null;
   session: string | null;
   sessionTitle: string | null;
+  /** A source job's origin line, and the card's word on running it again. */
+  origin: string | null;
+  note: string | null;
   actions: CardAction[];
   /** When the newest run ended (ordering of stopped cards). */
   endedAtMs: number | null;
   recorded: boolean;
 }
 
-const KIND_LABEL: Record<RecordPaneKind, string> = { agent: "agent", terminal: "shell", command: "command" };
+const KIND_LABEL: Record<RecordPaneKind, string> = { agent: "agent", terminal: "shell", command: "command", job: "job" };
 
 function isLiveStatus(status: string): boolean {
   return status === "starting" || status === "running";
@@ -126,9 +132,12 @@ function isLiveStatus(status: string): boolean {
  *  while a terminal is attached. */
 export function cardView(input: CardInput, now: number): CardView {
   const view = recordView(
-    { kind: input.kind, name: input.name, lastRun: input.lastRun, canResume: input.canResume, captures: input.captures },
+    { kind: input.kind, name: input.name, lastRun: input.lastRun, canResume: input.canResume, captures: input.captures, job: input.job },
     now,
   );
+  // A source job is never started or restarted from its card: running it
+  // again is the source's own action, which the card says instead.
+  const isJob = input.kind === "job";
   const live = input.live;
   const isLive = live !== null && isLiveStatus(live.status);
   let status: string;
@@ -154,7 +163,7 @@ export function cardView(input: CardInput, now: number): CardView {
         }
       : null;
     actions = isLive
-      ? input.recordId !== null || input.kind === "command"
+      ? !isJob && (input.recordId !== null || input.kind === "command")
         ? [
             { id: "stop", label: "■ Stop" },
             { id: "restart", label: "⟲ Restart" },
@@ -192,6 +201,8 @@ export function cardView(input: CardInput, now: number): CardView {
     line: summary ? null : (input.lastText?.trim() || null),
     session: view.session,
     sessionTitle: view.sessionTitle,
+    origin: view.origin,
+    note: isJob ? view.hint : null,
     actions,
     endedAtMs,
     recorded: input.recordId !== null,
@@ -333,7 +344,9 @@ export const DASHBOARD_CSS = `${MARKDOWN_CSS}
 .chappa-dash-activity{flex:none;width:7px;height:7px;border-radius:50%;background:#5ea6ff;}
 .chappa-dash-run,.chappa-dash-session,.chappa-dash-line{font:11px ui-monospace,monospace;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-dash-session{color:#6b7280;}
-.chappa-dash-run:empty,.chappa-dash-session:empty,.chappa-dash-line:empty,.chappa-dash-summary:empty{display:none;}
+.chappa-dash-origin{font:11px ui-monospace,monospace;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chappa-dash-note{font:11px system-ui,sans-serif;color:#6b7280;}
+.chappa-dash-run:empty,.chappa-dash-session:empty,.chappa-dash-line:empty,.chappa-dash-summary:empty,.chappa-dash-origin:empty,.chappa-dash-note:empty{display:none;}
 .chappa-dash-summary{max-height:8.5em;overflow:hidden;padding:5px 7px;border:1px solid #1c1f24;border-radius:5px;background:#0f1114;}
 .chappa-dash-summary .chappa-md{font-size:12px;}
 .chappa-dash-actions{position:absolute;top:6px;right:8px;display:none;gap:4px;padding-left:6px;background:#121417;}
@@ -383,6 +396,8 @@ interface CardRefs {
   summary: HTMLElement;
   line: HTMLElement;
   session: HTMLElement;
+  origin: HTMLElement;
+  note: HTMLElement;
   actions: HTMLElement;
   historyToggle: HTMLButtonElement;
   history: HTMLElement;
@@ -592,6 +607,10 @@ export class Dashboard {
     line.className = "chappa-dash-line";
     const session = document.createElement("div");
     session.className = "chappa-dash-session";
+    const origin = document.createElement("div");
+    origin.className = "chappa-dash-origin";
+    const noteEl = document.createElement("div");
+    noteEl.className = "chappa-dash-note";
     const actions = document.createElement("div");
     actions.className = "chappa-dash-actions";
     const historyToggle = document.createElement("button");
@@ -599,7 +618,7 @@ export class Dashboard {
     historyToggle.className = "chappa-dash-history-toggle";
     const history = document.createElement("div");
     history.className = "chappa-dash-history";
-    el.append(top, run, summary, line, session, historyToggle, history, actions);
+    el.append(top, origin, run, summary, line, session, noteEl, historyToggle, history, actions);
     refs = {
       el,
       dot,
@@ -612,6 +631,8 @@ export class Dashboard {
       summary,
       line,
       session,
+      origin,
+      note: noteEl,
       actions,
       historyToggle,
       history,
@@ -679,6 +700,9 @@ export class Dashboard {
     refs.line.title = view.line ?? "";
     refs.session.textContent = view.session ?? "";
     refs.session.title = view.sessionTitle ?? "";
+    refs.origin.textContent = view.origin ?? "";
+    refs.origin.title = view.origin ?? "";
+    refs.note.textContent = view.note ?? "";
     const actionsSig = view.actions.map((a) => `${a.id}:${a.label}`).join("|");
     if (actionsSig !== refs.actionsSig) {
       refs.actionsSig = actionsSig;

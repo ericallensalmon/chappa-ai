@@ -319,6 +319,7 @@ fn created_broadcast_records_every_spawn_kind() {
                 agent_tool_id: tool_id,
                 record_id: None,
                 last_run: None,
+                record_kind: None,
             },
         );
     }

@@ -6,6 +6,7 @@ import {
   formatAgo,
   formatDuration,
   frozenStripText,
+  jobOriginText,
   paneState,
   recordView,
   runSummary,
@@ -48,6 +49,50 @@ describe("paneState", () => {
 describe("recordView", () => {
   const NOW = 1_700_000_600_000;
 
+  it("gives a source job no start or resume, says where it came from and how to run it again", () => {
+    const run = { status: "exited", started_at_ms: NOW - 65_000, ended_at_ms: NOW - 5_000, exit_code: 0 };
+    const view = recordView(
+      { kind: "job", name: "local db: start", lastRun: run, job: { sourceLabel: "Stack local", actionLabel: "Start", jobId: "j1" } },
+      NOW,
+    );
+    expect(view.actions).toEqual([]);
+    expect(view.title).toBe("local db: start");
+    expect(view.origin).toBe("Stack local · Start · job j1");
+    expect(view.hint).toBe("To run it again, use the action in Stack local; a job is not restarted from here.");
+    expect(view.session).toBeNull();
+    expect(view.lastRun?.outcome).toBe("exit 0");
+    const bare = recordView({ kind: "job", name: "", lastRun: null }, NOW);
+    expect(bare.origin).toBeNull();
+    expect(bare.title).toBe("Source job");
+    expect(bare.hint).toContain("use the action in its source");
+    expect(jobOriginText({ sourceLabel: "Fixture", actionLabel: "", jobId: "job-2" })).toBe("Fixture · job job-2");
+  });
+
+  it("draws a job card with its origin, no action buttons and no start keys", () => {
+    const pane = new RecordPane({ onAction: vi.fn(), onNewAgent: vi.fn() });
+    const onAction = vi.fn();
+    const keyed = new RecordPane({ onAction, onNewAgent: vi.fn() });
+    const view = recordView(
+      { kind: "job", name: "Seed data", lastRun: null, job: { sourceLabel: "Fixture", actionLabel: "Seed", jobId: "job-1" } },
+      NOW,
+    );
+    pane.show(view);
+    expect(pane.host.querySelector(".chappa-record-origin")?.textContent).toBe("Fixture · Seed · job job-1");
+    expect(pane.host.querySelectorAll(".chappa-record-action")).toHaveLength(0);
+    const keys = [...pane.host.querySelectorAll<HTMLElement>(".chappa-record-keys > span")];
+    expect(keys[0].style.display).toBe("none");
+    expect(keys[1].style.display).toBe("none");
+    keyed.show(view);
+    keyed.host.dispatchEvent(new KeyboardEvent("keydown", { key: "s", bubbles: true }));
+    expect(onAction).not.toHaveBeenCalled();
+    // A later card with an action shows the keys again.
+    pane.show(recordView({ kind: "terminal", name: "pwsh", lastRun: null }, NOW));
+    expect(keys[0].style.display).toBe("");
+    expect(pane.host.querySelector(".chappa-record-origin")?.textContent).toBe("");
+    pane.dispose();
+    keyed.dispose();
+  });
+
   it("names the row in the title, with the kind's hint and start label", () => {
     expect(recordView({ kind: "agent", name: "claude", lastRun: null }, NOW)).toEqual({
       title: "claude is stopped",
@@ -57,6 +102,7 @@ describe("recordView", () => {
       session: "Resume unavailable",
       sessionTitle: null,
       summary: null,
+      origin: null,
     });
     expect(recordView({ kind: "terminal", name: "pwsh", lastRun: null }, NOW)).toEqual({
       title: "pwsh is stopped",
@@ -66,6 +112,7 @@ describe("recordView", () => {
       session: null,
       sessionTitle: null,
       summary: null,
+      origin: null,
     });
     expect(recordView({ kind: "command", name: "server", lastRun: null }, NOW)).toEqual({
       title: "server is stopped",
@@ -75,6 +122,7 @@ describe("recordView", () => {
       session: null,
       sessionTitle: null,
       summary: null,
+      origin: null,
     });
   });
 

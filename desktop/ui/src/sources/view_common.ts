@@ -22,7 +22,8 @@ export interface SourceViewDeps {
   actions(sourceId: string, view: string, key: string | null): Promise<ipc.SourceActionDto[]>;
   /** `source_run_action`; only ever called through `runAction`. */
   run: typeof ipc.sourceRunAction;
-  /** Open a source's link after Rust's https + trusted-host check. */
+  /** Open a source's link after Rust's trusted-host check (https, or plain
+   *  http to this machine). */
   openLink(sourceId: string, url: string): Promise<void>;
   /** Fetch a panel's page again (`source_panel`), to re-poll it while it
    *  is open. Absent where no page can be shown. */
@@ -390,7 +391,8 @@ export class ActionsCell {
   }
 }
 
-/** Open a source's link; a refusal (host not trusted, not https) is said. */
+/** Open a source's link; a refusal (host not trusted, plain http to
+ *  another machine) is said. */
 export function openChecked(deps: SourceViewDeps, sourceId: string, url: string): void {
   void deps.openLink(sourceId, url).catch((e) => deps.say(e instanceof Error ? e.message : String(e), "error"));
 }

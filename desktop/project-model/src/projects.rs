@@ -18,8 +18,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    new_record_id, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, RecordKind, RecordRef,
-    Run, RunUpdate, StoredRecord, TerminalRecord,
+    new_record_id, prune_job_records, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, JobRecord,
+    RecordKind, RecordRef, Run, RunUpdate, StoredRecord, TerminalRecord,
 };
 use crate::yml::ProcessDef;
 
@@ -109,6 +109,10 @@ pub struct Project {
     /// The project's terminal (shell) records, likewise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terminals: Vec<TerminalRecord>,
+    /// The panes the project's sources opened for their jobs, likewise
+    /// (capped: see `records::JOB_RECORDS_RETAINED`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<JobRecord>,
 }
 
 /// Everything chappa-ai stores about one project process OUTSIDE the yml
@@ -307,6 +311,7 @@ impl ProjectStore {
             processes: None,
             agents: Vec::new(),
             terminals: Vec::new(),
+            jobs: Vec::new(),
         };
         self.projects.push(project.clone());
         self.save()?;
@@ -621,6 +626,17 @@ impl ProjectStore {
         self.save()
     }
 
+    /// Store a new job record under project `id`, dropping the oldest
+    /// finished job records past the cap; answers the dropped ids (their
+    /// ledger rows go too).
+    pub fn add_job_record(&mut self, id: u32, record: JobRecord) -> Result<Vec<String>, String> {
+        let project = self.project_mut(id)?;
+        project.jobs.push(record);
+        let dropped = prune_job_records(&mut project.jobs);
+        self.save()?;
+        Ok(dropped)
+    }
+
     /// Locate a record by id: the owning project and what kind of record
     /// it is (a command is named by its process key).
     pub fn find_record(&self, record_id: &str) -> Option<(u32, RecordRef)> {
@@ -635,10 +651,13 @@ impl ProjectStore {
             if let Some(a) = p.agents.iter().find(|a| a.record_id == record_id) {
                 return Some((p.id, RecordRef { kind: RecordKind::Agent, name: a.name.clone() }));
             }
-            p.terminals
+            if let Some(t) = p.terminals.iter().find(|t| t.record_id == record_id) {
+                return Some((p.id, RecordRef { kind: RecordKind::Terminal, name: t.name.clone() }));
+            }
+            p.jobs
                 .iter()
-                .find(|t| t.record_id == record_id)
-                .map(|t| (p.id, RecordRef { kind: RecordKind::Terminal, name: t.name.clone() }))
+                .find(|j| j.record_id == record_id)
+                .map(|j| (p.id, RecordRef { kind: RecordKind::Job, name: j.name.clone() }))
         })
     }
 
@@ -650,7 +669,7 @@ impl ProjectStore {
     }
 
     /// Every record of project `id`: commands with a record id first (in
-    /// override-map order), then agents, then terminals.
+    /// override-map order), then agents, then terminals, then jobs.
     pub fn records_of(&self, id: u32) -> Vec<StoredRecord> {
         self.get(id).map(records_of).unwrap_or_default()
     }
@@ -693,7 +712,7 @@ impl ProjectStore {
         Ok(outcome)
     }
 
-    /// Delete an agent or terminal record. A command record is its
+    /// Delete an agent, terminal or job record. A command record is its
     /// definition: deleting the command (`remove_process_override` on the
     /// way) is how a command record goes, so a command id answers `None`
     /// here and nothing changes.
@@ -706,7 +725,12 @@ impl ProjectStore {
             }
             let terminals = p.terminals.len();
             p.terminals.retain(|t| t.record_id != record_id);
-            (p.terminals.len() != terminals).then_some((p.id, RecordKind::Terminal))
+            if p.terminals.len() != terminals {
+                return Some((p.id, RecordKind::Terminal));
+            }
+            let jobs = p.jobs.len();
+            p.jobs.retain(|j| j.record_id != record_id);
+            (p.jobs.len() != jobs).then_some((p.id, RecordKind::Job))
         });
         if removed.is_some() {
             self.save()?;
@@ -799,6 +823,7 @@ fn records_of(p: &Project) -> Vec<StoredRecord> {
                 last_run: o.last_run.clone(),
                 agent: None,
                 terminal: None,
+                job: None,
             })
         });
     let agents = p.agents.iter().map(|a| StoredRecord {
@@ -808,6 +833,7 @@ fn records_of(p: &Project) -> Vec<StoredRecord> {
         last_run: a.last_run.clone(),
         agent: Some(a.clone()),
         terminal: None,
+        job: None,
     });
     let terminals = p.terminals.iter().map(|t| StoredRecord {
         record_id: t.record_id.clone(),
@@ -816,8 +842,10 @@ fn records_of(p: &Project) -> Vec<StoredRecord> {
         last_run: t.last_run.clone(),
         agent: None,
         terminal: Some(t.clone()),
+        job: None,
     });
-    commands.chain(agents).chain(terminals).collect()
+    let jobs = p.jobs.iter().map(StoredRecord::of_job);
+    commands.chain(agents).chain(terminals).chain(jobs).collect()
 }
 
 /// The `last_run` slot of `record_id` inside one project row.
@@ -832,10 +860,10 @@ fn run_slot_in<'a>(p: &'a mut Project, record_id: &str) -> Option<&'a mut Option
     if let Some(a) = p.agents.iter_mut().find(|a| a.record_id == record_id) {
         return Some(&mut a.last_run);
     }
-    p.terminals
-        .iter_mut()
-        .find(|t| t.record_id == record_id)
-        .map(|t| &mut t.last_run)
+    if let Some(t) = p.terminals.iter_mut().find(|t| t.record_id == record_id) {
+        return Some(&mut t.last_run);
+    }
+    p.jobs.iter_mut().find(|j| j.record_id == record_id).map(|j| &mut j.last_run)
 }
 
 /// Every stored run of one project row, mutably (the crash reconcile).
@@ -847,7 +875,8 @@ fn runs_of_mut(p: &mut Project) -> impl Iterator<Item = &mut Run> {
         .filter_map(|o| o.last_run.as_mut());
     let agents = p.agents.iter_mut().filter_map(|a| a.last_run.as_mut());
     let terminals = p.terminals.iter_mut().filter_map(|t| t.last_run.as_mut());
-    commands.chain(agents).chain(terminals)
+    let jobs = p.jobs.iter_mut().filter_map(|j| j.last_run.as_mut());
+    commands.chain(agents).chain(terminals).chain(jobs)
 }
 
 #[cfg(test)]
@@ -1455,6 +1484,75 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&after).unwrap(),
             serde_json::from_str::<serde_json::Value>(&before).unwrap(),
             "the row is back to what it was before any record"
+        );
+    }
+
+    /// A source job's pane is a record of its own kind under the project:
+    /// it round-trips through the file with the source, action and job id,
+    /// takes its run's exit under the run-uuid rule, reconciles a crash, is
+    /// capped, and is removed like a shell record.
+    #[test]
+    fn job_records_live_under_their_project_and_are_capped() {
+        use crate::records::{JobRecord, JOB_RECORDS_RETAINED};
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("projects.json");
+        let mut store = ProjectStore::new(store_path.clone());
+        store.add("/code/a".into(), "a".into(), None).unwrap();
+        let before = fs::read_to_string(&store_path).unwrap();
+        let job = |id: &str| JobRecord {
+            record_id: id.into(),
+            name: "local db: start".into(),
+            source_id: "src-1".into(),
+            source_label: "Stack local".into(),
+            action_id: "start".into(),
+            action_label: "Start".into(),
+            view: "environment".into(),
+            key: Some("db".into()),
+            job_id: format!("j-{id}"),
+            argv: vec!["chappa-stack".into(), "run-job".into()],
+            cwd: Some("/code/a".into()),
+            last_run: Some(Run::begin(format!("run-{id}"), 1, TailKind::Text)),
+        };
+        assert_eq!(store.add_job_record(1, job("job-1")).unwrap(), Vec::<String>::new());
+        assert!(store.add_job_record(9, job("x")).is_err());
+        assert_eq!(
+            store.find_record("job-1"),
+            Some((1, RecordRef { kind: RecordKind::Job, name: "local db: start".into() }))
+        );
+        assert_eq!(
+            store.update_run("job-1", "run-job-1", |r| r.finish(5, Some(0), true, vec!["seeded".into()])).unwrap(),
+            RunUpdate::Applied
+        );
+        let reopened = ProjectStore::new(store_path.clone());
+        let (owner, rec) = reopened.record("job-1").unwrap();
+        assert_eq!((owner, rec.kind), (1, RecordKind::Job));
+        let facts = rec.job.unwrap();
+        assert_eq!((facts.source_label.as_str(), facts.job_id.as_str()), ("Stack local", "j-job-1"));
+        assert_eq!(rec.last_run.unwrap().exit_code, Some(0));
+
+        // A crash reconcile reaches job runs too.
+        store.add_job_record(1, job("job-2")).unwrap();
+        let mut crashed = ProjectStore::new(store_path.clone());
+        assert_eq!(crashed.reconcile_crashed_runs().unwrap(), vec!["run-job-2".to_owned()]);
+
+        // The cap: finished records go oldest first.
+        let mut capped = ProjectStore::new(store_path.clone());
+        for i in 0..JOB_RECORDS_RETAINED {
+            let mut j = job(&format!("more-{i}"));
+            j.last_run.as_mut().unwrap().finish(2, Some(0), true, vec![]);
+            capped.add_job_record(1, j).unwrap();
+        }
+        assert!(capped.find_record("job-1").is_none() && capped.find_record("job-2").is_none());
+        assert_eq!(capped.records_of(1).len(), JOB_RECORDS_RETAINED);
+
+        for id in capped.record_ids_of(1) {
+            assert_eq!(capped.remove_record(&id).unwrap(), Some((1, RecordKind::Job)));
+        }
+        let after = fs::read_to_string(&store_path).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&after).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&before).unwrap(),
+            "no job keys are left once the records are gone"
         );
     }
 

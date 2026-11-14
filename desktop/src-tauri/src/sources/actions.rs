@@ -11,7 +11,8 @@
 //! - `terminal`: a shell or an argv in a folder, same folder and env rules;
 //! - `endpoint`: a POST back to the source; one that `mutates` without a
 //!   `confirm` text is not rendered at all (and logged once per source);
-//! - `link`: opens only `https://` on a trusted host;
+//! - `link`: opens `https://` on a trusted host, or plain `http://` when that
+//!   trusted host is this machine (`links.rs`);
 //! - `panel`: a drill-in page fetched from a path the payload named.
 //!
 //! Nothing here performs an action. [`action_verdict`] answers "may the
@@ -27,7 +28,7 @@ use serde_json::Value;
 use crate::agent_tools::AgentTool;
 use crate::roots::{check_cwd, Root, RootsVerdict};
 
-use super::links::source_link_check;
+use super::links::source_link_shape_check;
 use super::manifest::validate_endpoint_path;
 
 /// Whether an endpoint action wants a note from the user.
@@ -410,7 +411,8 @@ pub fn action_verdict(action: &SourceAction, ctx: &VerdictContext<'_>) -> Action
             tool: None,
         },
         SourceAction::Endpoint { .. } => ActionVerdict::ok(),
-        SourceAction::Link { url, .. } => match source_link_check(url, ctx.link_hosts) {
+        // Listing never waits on a name lookup; opening does the full check.
+        SourceAction::Link { url, .. } => match source_link_shape_check(url, ctx.link_hosts) {
             Ok(_) => ActionVerdict::ok(),
             Err(why) => ActionVerdict::disabled(why),
         },
@@ -606,7 +608,10 @@ mod tests {
 
         let link = |url: &str| SourceAction::Link { id: "l".into(), label: "L".into(), url: url.into() };
         assert!(action_verdict(&link("https://github.com/x"), &ctx).enabled);
-        assert!(action_verdict(&link("http://github.com/x"), &ctx).reason.unwrap().contains("only https"));
+        // Listing never looks a name up: plain http on a trusted name is
+        // offered, and opening it decides by the lookup (`links.rs`).
+        assert!(action_verdict(&link("http://github.com/x"), &ctx).enabled);
+        assert!(action_verdict(&link("ftp://github.com/x"), &ctx).reason.unwrap().contains("only https"));
         assert!(action_verdict(&link("https://gist.github.com/x"), &ctx).reason.unwrap().contains("not by subdomain"));
 
         let panel = |ep: &str| SourceAction::Panel { id: "p".into(), label: "P".into(), endpoint: ep.into() };

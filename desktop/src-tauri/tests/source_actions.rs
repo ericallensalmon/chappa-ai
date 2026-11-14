@@ -20,7 +20,12 @@ use std::time::{Duration, Instant};
 use app_lib::agent_tools::{AgentTool, AgentToolsState, Runtime, ToolType};
 use app_lib::agents::{spawn_agent_headless, FakeDocker, SpawnAgentRequest, SpawnContext, PROMPT_VIA_ARGV};
 use app_lib::projects::Projects;
-use app_lib::records::Records;
+use app_lib::coordination::Coordination;
+use app_lib::records::{Records, StartDeps};
+use app_lib::workspace::Workspace;
+use project_model::records::RecordKind;
+use project_model::workspace::WorkspaceStore;
+use term_core::status::ProcessStatus;
 use app_lib::registry::{EventSink, JsonEvent, Registry};
 use term_core::actor::ActorConfig;
 use term_core::pty::PtySpec;
@@ -150,6 +155,10 @@ fn stage() -> Option<Stage> {
     // The source's process row: a plain shell standing in for the launched
     // command, so endpoint calls have a row to be journaled on.
     let registry = Registry::with_docker(FakeDocker::new());
+    // Real stores and an in-memory ledger: a job's pane leaves a record.
+    let workspace = Workspace::with_store(WorkspaceStore::new(dir.path().join("workspace.json")));
+    let records = Records::new(projects.clone(), workspace, Coordination::in_memory().unwrap());
+    registry.set_run_recorder(Arc::new(records.clone()));
     let (shell, shell_args) = echo_tool();
     let source_row = registry
         .create_terminal(
@@ -193,7 +202,7 @@ fn stage() -> Option<Stage> {
         tools,
         settings: SettingsState::default(),
         projects,
-        records: Records::default(),
+        records,
         sources,
         app: None,
     };
@@ -275,10 +284,41 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     assert_eq!(journal[0].via.as_deref(), Some("launch"));
     assert!(journal[0].text.contains("node"), "{journal:?}");
 
+    // The pane is a durable `job` record in the source's project: which
+    // source and action ran it, the source's job id, the run's end with its
+    // exit code and the automatic tail.
+    let record_id = deps.registry.record_of(term_id).expect("the run pane is bound to a record");
+    let (scope, record) = wait_for("the job run's exit on its record", Duration::from_secs(20), || {
+        deps.records.get(&record_id).filter(|(_, r)| r.last_run.as_ref().is_some_and(|run| !run.is_open()))
+    });
+    assert_eq!(scope.project_id(), Some(st.project_id));
+    assert_eq!(record.kind, RecordKind::Job);
+    let facts = record.job.as_ref().unwrap();
+    assert_eq!((facts.source_id.as_str(), facts.action_id.as_str(), facts.job_id.as_str()), (sid, "run-seed", job_id.as_str()));
+    assert_eq!((facts.view.as_str(), facts.key.as_deref()), ("work", Some("ABC-1")));
+    assert_eq!(facts.argv.first().map(String::as_str), Some("node"));
+    let last = record.last_run.as_ref().unwrap();
+    assert_eq!((last.status, last.exit_code), (ProcessStatus::Exited, Some(0)));
+    assert!(last.tail.iter().any(|l| l.as_str().is_some_and(|l| l.contains("seeded"))), "{:?}", last.tail);
+    let listed = deps.records.list(&deps.registry);
+    let dto = listed.iter().find(|r| r.record_id == record_id).unwrap();
+    assert_eq!(dto.job.as_ref().unwrap().job_id, job_id);
+    // A job record never starts again: that is the source's own action.
+    let refused = deps
+        .records
+        .start(StartDeps { registry: &deps.registry, tools: &deps.tools, settings: &deps.settings, app: None }, &record_id, None, 0)
+        .unwrap_err();
+    assert_eq!(refused.status(), 409);
+    assert!(refused.message().contains("run the action in"), "{refused:?}");
+    // Closing the pane keeps the record and its outcome.
+    deps.registry.close(term_id);
+    let (_, kept) = deps.records.get(&record_id).expect("closing the pane keeps the record");
+    assert_eq!(kept.last_run.unwrap().exit_code, Some(0));
+
     // Links: the host rule, exact. Panels: only payload-named paths.
     deps.sources.link_check(sid, "https://registry.example/tracker/ABC-1").unwrap();
     assert!(deps.sources.link_check(sid, "https://evil.example/").unwrap_err().contains("not one of the hosts"));
-    assert!(deps.sources.link_check(sid, "http://registry.example/").unwrap_err().contains("only https"));
+    assert!(deps.sources.link_check(sid, "http://registry.example/").unwrap_err().contains("plain http is only opened for addresses on this machine"));
     assert!(deps.sources.link_check(sid, "https://api.registry.example/").is_err());
     match run("work", Some("ABC-1"), "validate", false, None).unwrap() {
         ActionOutcome::Panel { payload } => assert_eq!(payload["title"], "Validate"),

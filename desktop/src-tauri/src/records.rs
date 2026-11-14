@@ -54,8 +54,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use project_model::records::{
-    AgentRecord, AgentRecordPatch, RecordKind, Run, RunHead, RunUpdate, Session, SessionSource, StoredRecord,
-    SummarySource, TailKind, TerminalRecord, RUNS_RETAINED,
+    AgentRecord, AgentRecordPatch, JobRecord, RecordKind, Run, RunHead, RunUpdate, Session, SessionSource,
+    StoredRecord, SummarySource, TailKind, TerminalRecord, RUNS_RETAINED,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -514,6 +514,23 @@ pub struct RecordDto {
     pub agent: Option<AgentFacts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal: Option<TerminalFacts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobFacts>,
+}
+
+/// A job record's facts: which source and action ran it, and the source's
+/// own job id (the link back to the source's job log, `source_job`).
+#[derive(Debug, Clone, Serialize)]
+pub struct JobFacts {
+    pub source_id: String,
+    pub source_label: String,
+    pub action_id: String,
+    pub action_label: String,
+    pub view: String,
+    pub key: Option<String>,
+    pub job_id: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
 }
 
 /// The agent record minus what the row already carries.
@@ -649,6 +666,20 @@ impl Records {
             Scope::Project(id) => parts.projects.store_access(|s| s.add_terminal_record(id, record))?,
             Scope::Workspace => parts.workspace.store()?.add_terminal_record(record),
         }
+    }
+
+    /// Store a new job record in its scope. The stores cap job records;
+    /// the ledger rows of any they dropped go with them.
+    pub fn add_job_record(&self, scope: Scope, record: JobRecord) -> Result<(), String> {
+        let parts = self.parts();
+        let dropped = match scope {
+            Scope::Project(id) => parts.projects.store_access(|s| s.add_job_record(id, record))??,
+            Scope::Workspace => parts.workspace.store()?.add_job_record(record)?,
+        };
+        if let Err(e) = parts.ledger.delete_records(&dropped) {
+            log::warn!("[records] ledger prune of {} dropped job records failed: {e}", dropped.len());
+        }
+        Ok(())
     }
 
     /// A new run begins on `record_id`: the store head and a ledger row.
@@ -819,7 +850,8 @@ impl Records {
     /// channel when the frontend asked; `None` is a headless (control) start
     /// that reads back through `/output` and broadcasts `term://created` so
     /// the open webview adopts it. An agent starts a NEW session: its stored
-    /// prompt is kept for display and never replayed.
+    /// prompt is kept for display and never replayed. A job record does not
+    /// start at all: running the job again is the source's own action.
     pub fn start(
         &self,
         deps: StartDeps<'_>,
@@ -830,6 +862,12 @@ impl Records {
         let (scope, record) = self
             .get(record_id)
             .ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
+        if !record.kind.can_start() {
+            let source = record.job.as_ref().map(|j| j.source_label.as_str()).unwrap_or("its source");
+            return Err(RecordError::Unavailable(format!(
+                "record {record_id} is a source job; it is not started from its record — run the action in {source} again"
+            )));
+        }
         if let Some((term_id, head)) = deps.registry.term_of_record(record_id) {
             if matches!(head.status, ProcessStatus::Starting | ProcessStatus::Running) {
                 // Already live: idempotent, like every other start.
@@ -886,6 +924,7 @@ impl Records {
                                 parent_process_id: resp.agent.parent_process_id,
                                 record_id: Some(record_id.to_owned()),
                                 last_run: deps.registry.run_head(resp.process_id),
+                                record_kind: None,
                             },
                         );
                     }
@@ -906,6 +945,9 @@ impl Records {
                     deps.app.as_ref(),
                 )?;
                 (Some(id), false)
+            }
+            (RecordKind::Job, _) => {
+                return Err(RecordError::Unavailable(format!("record {record_id} is a source job and does not start")))
             }
             (RecordKind::Command, Scope::Project(project_id)) => match frames {
                 Some(frames) => {
@@ -1097,6 +1139,7 @@ impl Records {
                         parent_process_id: resp.agent.parent_process_id,
                         record_id: Some(rid()),
                         last_run: deps.registry.run_head(term_id),
+                        record_kind: None,
                     },
                 );
             }
@@ -1248,6 +1291,17 @@ fn record_dto(registry: &Registry, scope: Scope, record: StoredRecord) -> Record
         terminal: record.terminal.map(|t| TerminalFacts {
             shell_profile: t.shell_profile,
             cwd: t.cwd,
+        }),
+        job: record.job.map(|j| JobFacts {
+            source_id: j.source_id,
+            source_label: j.source_label,
+            action_id: j.action_id,
+            action_label: j.action_label,
+            view: j.view,
+            key: j.key,
+            job_id: j.job_id,
+            argv: j.argv,
+            cwd: j.cwd,
         }),
     }
 }
@@ -1448,8 +1502,11 @@ pub const DOC: &str = "Every rail row that outlives its terminal has a RECORD: a
 never a terminal id — those restart at 1 every launch) that points at its CURRENT terminal only while \
 one is live. Kinds: `command` (a project or workspace process definition), `agent` (the durable half \
 of a spawn: tool, project, name, extra_args, the prompt it was spawned with — never replayed), \
-`terminal` (a shell: profile + cwd). Project records live on the project's row in `projects.json`, \
-project-less agents and shells in `workspace.json`; every row surface (`/processes`, `term://created`, \
+`terminal` (a shell: profile + cwd), `job` (the pane a source opened for one of its jobs: source, \
+action, the source's job id, argv and folder — history only; running the job again is the source's \
+action, so `start` answers 409 for it; the newest 50 per project / workspace are kept). Project \
+records live on the project's row in `projects.json`, project-less agents, shells and attached \
+sources' jobs in `workspace.json`; every row surface (`/processes`, `term://created`, \
 the rail rows, project and workspace command rows) carries `record_id` and `last_run`.\n\n\
 `last_run` is the head of the record's run ledger minus the tail: `{run_uuid, status: running | \
 exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, \

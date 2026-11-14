@@ -551,7 +551,9 @@ export interface WorkspaceCommandRow {
  */
 export interface RecordRow {
   recordId: string;
-  kind: "agent" | "terminal";
+  /** A `job` is the pane a source opened for one of its jobs: it files
+   *  with the shells, and is never started again from its row. */
+  kind: "agent" | "terminal" | "job";
   name: string;
   /** The owning project, or null for the workspace. */
   projectId: number | null;
@@ -573,6 +575,8 @@ export interface RecordRow {
     notificationLevel: string | null;
   } | null;
   terminal: { shellProfile: string | null; cwd: string | null } | null;
+  /** A job record's origin: the source, its action, the source's job id. */
+  job: { sourceId: string; sourceLabel: string; actionLabel: string; jobId: string } | null;
   /** A start from this window is in flight (double-press guard). */
   starting: boolean;
 }
@@ -2458,6 +2462,7 @@ export class App {
         project_id: p.project_id,
         agent_tool_id: p.agent_tool_id,
         parent_id: p.parent_process_id ?? null,
+        record_kind: p.record_kind,
       });
       this.renderRail();
       return;
@@ -2471,13 +2476,14 @@ export class App {
       // The broadcast carries the parent so the row nests immediately.
       parent_id: p.parent_process_id ?? null,
       record_id: p.record_id ?? null,
+      record_kind: p.record_kind,
       ended_at_ms: p.last_run?.ended_at_ms ?? null,
       summary: runSummary(p.last_run),
     });
   }
 
-  /** The stored agent and shell records (`list_records`), as stopped rows
-   *  until a terminal binds to them. */
+  /** The stored agent, shell and source-job records (`list_records`), as
+   *  stopped rows until a terminal binds to them. */
   private async loadRecords(): Promise<void> {
     let list: ipc.RecordDto[];
     try {
@@ -2508,6 +2514,8 @@ export class App {
       project_id: number | null;
       agent_tool_id: number | null;
       parent_id: number | null;
+      /** The record's kind when the row kind does not say it (a job). */
+      record_kind?: ipc.RecordKind;
     },
   ): void {
     if (f.kind === "process") return;
@@ -2515,7 +2523,7 @@ export class App {
     if (!rec) {
       rec = {
         recordId,
-        kind: f.kind,
+        kind: f.record_kind === "job" ? "job" : f.kind,
         name: f.name,
         projectId: f.project_id,
         status: "running",
@@ -2531,10 +2539,14 @@ export class App {
                 notificationLevel: null,
               }
             : null,
-        terminal: f.kind === "terminal" ? { shellProfile: null, cwd: null } : null,
+        terminal: f.kind === "terminal" && f.record_kind !== "job" ? { shellProfile: null, cwd: null } : null,
+        job: null,
         starting: false,
       };
       this.records.set(recordId, rec);
+      // A job's origin (source, action, job id) is on the stored record;
+      // the broadcast does not carry it.
+      if (rec.kind === "job") void this.refreshRecordFacts(recordId);
     }
     rec.termId = termId;
     if (this.paneFor?.kind === "record" && this.paneFor.recordId === recordId && !rec.starting) {
@@ -2596,6 +2608,8 @@ export class App {
     /** The record the terminal runs for: a stopped row showing it binds
      *  the terminal in place (no second row). */
     record_id?: string | null;
+    /** The record's kind when the row kind does not say it (a job). */
+    record_kind?: ipc.RecordKind;
     /** The snapshot's status (the reconcile knows it; a broadcast is a
      *  fresh spawn, so "starting"). */
     status?: RailStatus;
@@ -3587,8 +3601,9 @@ export class App {
       count += 1;
       this.railList.appendChild(this.buildTerminalRow(id, entry));
     }
-    // Stopped workspace shells follow the live ones and count in the total.
-    for (const rec of this.stoppedRecords("terminal")) {
+    // Stopped workspace shells (and attached sources' job panes) follow the
+    // live ones and count in the total.
+    for (const rec of this.stoppedShellRecords()) {
       if (rec.projectId !== null) continue;
       count += 1;
       this.railList.appendChild(this.buildRecordRow(rec, "chappa-workspace-record-row"));
@@ -3617,6 +3632,30 @@ export class App {
       out.push(rec);
     }
     return out;
+  }
+
+  /** The stopped rows of the TERMINALS sections: shells, and the panes
+   *  sources opened for their jobs (live, those are terminal rows too). */
+  private stoppedShellRecords(): RecordRow[] {
+    return [...this.stoppedRecords("terminal"), ...this.stoppedRecords("job")];
+  }
+
+  /** Fill in a record's stored facts (a job's origin) from the list, for a
+   *  row this window first learned from a broadcast. */
+  private async refreshRecordFacts(recordId: string): Promise<void> {
+    let list: ipc.RecordDto[];
+    try {
+      list = (await this.api.listRecords()) ?? [];
+    } catch {
+      return;
+    }
+    const dto = list.find((r) => r.record_id === recordId);
+    const rec = this.records.get(recordId);
+    if (!dto || !rec) return;
+    rec.job = recordRowFromDto(dto).job;
+    if (this.isPaneFor(recordId)) this.showRecordPane({ kind: "record", recordId });
+    this.renderRail();
+    this.renderDashboard();
   }
 
   /** A stopped agent record renders in the expanded project's AGENTS
@@ -3714,6 +3753,12 @@ export class App {
         project.classList.add("chappa-rail-project");
         row.append(project);
       }
+    }
+    // A job is run again from its source, never from its row: no ▶.
+    if (rec.kind === "job") {
+      row.classList.add("chappa-job-row");
+      if (rec.job) row.title = `${rec.name} (${rec.status}) — ${rec.job.sourceLabel}`;
+      return row;
     }
     const start = document.createElement("button");
     start.className = "chappa-record-start";
@@ -4962,7 +5007,7 @@ export class App {
     if (!rec) return null;
     const { canResume, captures } = this.resumeFacts(rec);
     return {
-      view: recordView({ kind: rec.kind, name: rec.name, lastRun: rec.lastRun, canResume, captures }, now),
+      view: recordView({ kind: rec.kind, name: rec.name, lastRun: rec.lastRun, canResume, captures, job: rec.job }, now),
       recordId: rec.recordId,
     };
   }
@@ -5075,6 +5120,8 @@ export class App {
   async startRecordRow(recordId: string, opts: { resume?: boolean; sessionId?: string } = {}): Promise<void> {
     const rec = this.records.get(recordId);
     if (!rec || rec.starting) return;
+    // A source job is history: running it again is the source's action.
+    if (rec.kind === "job") return;
     const attachedId = this.liveTermOf(recordId);
     const attached = attachedId !== null ? this.entries.get(attachedId) : undefined;
     if (attachedId !== null && attached && isLive(attached.status)) {
@@ -5286,6 +5333,7 @@ export class App {
   /** What the strip's button starts: the record, the project command, or
    *  the workspace command behind the entry — nothing for an ephemeral row. */
   private frozenStart(entry: RailEntry, rec: RecordRow | null): { label: string; run: () => void } | null {
+    if (rec?.kind === "job") return null;
     if (rec) return { label: startLabel(rec.kind), run: () => void this.startRecordRow(rec.recordId) };
     if (entry.kind === "process" && entry.process) {
       const { projectId, name } = entry.process;
@@ -5458,6 +5506,7 @@ export class App {
         lastRun: rec.lastRun,
         canResume,
         captures,
+        job: rec.job,
         live: termId !== null && entry ? this.entryLive(termId, entry) : null,
         lastText: (termId !== null ? this.lastText.get(termId) : undefined) ?? this.dashTails.get(rec.recordId) ?? null,
       });
@@ -6953,7 +7002,7 @@ export class App {
     const recs =
       this.expandedProjectId === null
         ? []
-        : this.stoppedRecords("terminal").filter((r) => r.projectId === this.expandedProjectId);
+        : this.stoppedShellRecords().filter((r) => r.projectId === this.expandedProjectId);
     // Cheap signature over what a row actually renders (id, displayed title,
     // status, badges, active accent). "\u001f" — the ESCAPE SEQUENCE, never a
     // literal control byte in source — is the join separator; none of the
@@ -8153,13 +8202,14 @@ function wsRowFromDto(dto: ipc.WorkspaceCommandDto): WorkspaceCommandRow {
   };
 }
 
-/** A stored agent or shell record as its row. Nothing is attached until a
- *  live terminal (list_terminals / term://created) binds to it. */
+/** A stored agent, shell or source-job record as its row. Nothing is
+ *  attached until a live terminal (list_terminals / term://created) binds
+ *  to it. */
 function recordRowFromDto(r: ipc.RecordDto): RecordRow {
   const status = r.status as RailStatus;
   return {
     recordId: r.record_id,
-    kind: r.kind === "agent" ? "agent" : "terminal",
+    kind: r.kind === "agent" ? "agent" : r.kind === "job" ? "job" : "terminal",
     name: r.name,
     projectId: r.project_id,
     // Shown only while nothing is attached, when "running" cannot be true.
@@ -8176,6 +8226,14 @@ function recordRowFromDto(r: ipc.RecordDto): RecordRow {
         }
       : null,
     terminal: r.terminal ? { shellProfile: r.terminal.shell_profile, cwd: r.terminal.cwd } : null,
+    job: r.job
+      ? {
+          sourceId: r.job.source_id,
+          sourceLabel: r.job.source_label,
+          actionLabel: r.job.action_label || r.job.action_id,
+          jobId: r.job.job_id,
+        }
+      : null,
     starting: false,
   };
 }

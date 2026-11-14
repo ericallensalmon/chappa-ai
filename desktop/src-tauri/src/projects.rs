@@ -741,6 +741,7 @@ fn spawn_process(
             parent_process_id: None,
             record_id,
             last_run: registry.run_head(term_id),
+            record_kind: None,
         },
     );
     if start_watcher {

@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use crate::atomic;
 use crate::projects::ProcessOverride;
 use crate::records::{
-    new_record_id, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, RecordKind, RecordRef,
-    Run, RunUpdate, StoredRecord, TerminalRecord,
+    new_record_id, prune_job_records, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, JobRecord,
+    RecordKind, RecordRef, Run, RunUpdate, StoredRecord, TerminalRecord,
 };
 use crate::yml::ProcessDef;
 
@@ -58,11 +58,14 @@ pub struct WorkspaceFile {
     pub agents: Vec<AgentRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terminals: Vec<TerminalRecord>,
+    /// Panes attached sources (no project) opened for their jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<JobRecord>,
 }
 
 impl WorkspaceFile {
     /// Every record in the file: commands with a record id (in map order),
-    /// then agents, then terminals.
+    /// then agents, then terminals, then jobs.
     pub fn records(&self) -> Vec<StoredRecord> {
         let commands = self.process_overrides.iter().filter_map(|(name, o)| {
             o.record_id.as_ref().map(|record_id| StoredRecord {
@@ -72,6 +75,7 @@ impl WorkspaceFile {
                 last_run: o.last_run.clone(),
                 agent: None,
                 terminal: None,
+                job: None,
             })
         });
         let agents = self.agents.iter().map(|a| StoredRecord {
@@ -81,6 +85,7 @@ impl WorkspaceFile {
             last_run: a.last_run.clone(),
             agent: Some(a.clone()),
             terminal: None,
+            job: None,
         });
         let terminals = self.terminals.iter().map(|t| StoredRecord {
             record_id: t.record_id.clone(),
@@ -89,8 +94,10 @@ impl WorkspaceFile {
             last_run: t.last_run.clone(),
             agent: None,
             terminal: Some(t.clone()),
+            job: None,
         });
-        commands.chain(agents).chain(terminals).collect()
+        let jobs = self.jobs.iter().map(StoredRecord::of_job);
+        commands.chain(agents).chain(terminals).chain(jobs).collect()
     }
 
     /// The `last_run` slot of `record_id`, whatever its kind.
@@ -105,17 +112,21 @@ impl WorkspaceFile {
         if let Some(a) = self.agents.iter_mut().find(|a| a.record_id == record_id) {
             return Some(&mut a.last_run);
         }
-        self.terminals
+        if let Some(t) = self.terminals.iter_mut().find(|t| t.record_id == record_id) {
+            return Some(&mut t.last_run);
+        }
+        self.jobs
             .iter_mut()
-            .find(|t| t.record_id == record_id)
-            .map(|t| &mut t.last_run)
+            .find(|j| j.record_id == record_id)
+            .map(|j| &mut j.last_run)
     }
 
     fn runs_mut(&mut self) -> impl Iterator<Item = &mut Run> {
         let commands = self.process_overrides.values_mut().filter_map(|o| o.last_run.as_mut());
         let agents = self.agents.iter_mut().filter_map(|a| a.last_run.as_mut());
         let terminals = self.terminals.iter_mut().filter_map(|t| t.last_run.as_mut());
-        commands.chain(agents).chain(terminals)
+        let jobs = self.jobs.iter_mut().filter_map(|j| j.last_run.as_mut());
+        commands.chain(agents).chain(terminals).chain(jobs)
     }
 }
 
@@ -319,6 +330,18 @@ impl WorkspaceStore {
         self.write_atomic(&file)
     }
 
+    /// Store a new job record, dropping the oldest finished ones past
+    /// [`crate::records::JOB_RECORDS_RETAINED`]; answers the dropped ids
+    /// (their ledger rows go too).
+    pub fn add_job_record(&self, record: JobRecord) -> Result<Vec<String>, String> {
+        let _guard = self.guard();
+        let mut file = self.read();
+        file.jobs.push(record);
+        let dropped = prune_job_records(&mut file.jobs);
+        self.write_atomic(&file)?;
+        Ok(dropped)
+    }
+
     /// Locate a record by id.
     pub fn find_record(&self, record_id: &str) -> Option<RecordRef> {
         self.load()
@@ -369,8 +392,8 @@ impl WorkspaceStore {
         Ok(outcome)
     }
 
-    /// Delete an agent or terminal record (a command record goes with its
-    /// definition through [`Self::delete_command`]).
+    /// Delete an agent, terminal or job record (a command record goes with
+    /// its definition through [`Self::delete_command`]).
     pub fn remove_record(&self, record_id: &str) -> Result<Option<RecordKind>, String> {
         let _guard = self.guard();
         let mut file = self.read();
@@ -381,7 +404,13 @@ impl WorkspaceStore {
         } else {
             let terminals = file.terminals.len();
             file.terminals.retain(|t| t.record_id != record_id);
-            (file.terminals.len() != terminals).then_some(RecordKind::Terminal)
+            if file.terminals.len() != terminals {
+                Some(RecordKind::Terminal)
+            } else {
+                let jobs = file.jobs.len();
+                file.jobs.retain(|j| j.record_id != record_id);
+                (file.jobs.len() != jobs).then_some(RecordKind::Job)
+            }
         };
         if removed.is_some() {
             self.write_atomic(&file)?;
@@ -684,5 +713,42 @@ mod tests {
         s.save_command(None, "second", no_auto).unwrap();
         s.save_command(None, "third", def("echo c")).unwrap();
         assert_eq!(s.auto_start_commands(), vec!["first", "third"]);
+    }
+
+    /// An attached source's job pane is a workspace record of kind `job`:
+    /// its run follows the run rule, and it is removed like any other
+    /// record.
+    #[test]
+    fn workspace_job_records_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let dropped = s
+            .add_job_record(JobRecord {
+                record_id: "job-1".into(),
+                name: "Seed data".into(),
+                source_id: "src".into(),
+                source_label: "Fixture".into(),
+                action_id: "run-seed".into(),
+                action_label: "Seed".into(),
+                view: "work".into(),
+                key: Some("ABC-1".into()),
+                job_id: "job-7".into(),
+                argv: vec![],
+                cwd: None,
+                last_run: Some(Run::begin("run-j", 1, Default::default())),
+            })
+            .unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(s.find_record("job-1"), Some(RecordRef { kind: RecordKind::Job, name: "Seed data".into() }));
+        assert_eq!(
+            s.update_run("job-1", "run-j", |r| r.finish(3, Some(1), false, vec![])).unwrap(),
+            RunUpdate::Applied
+        );
+        let rec = s.record("job-1").unwrap();
+        assert_eq!((rec.kind, rec.job.unwrap().job_id.as_str()), (RecordKind::Job, "job-7"));
+        assert_eq!(rec.last_run.unwrap().exit_code, Some(1));
+        assert_eq!(s.remove_record("job-1").unwrap(), Some(RecordKind::Job));
+        let text = std::fs::read_to_string(dir.path().join("workspace.json")).unwrap();
+        assert!(!text.contains("jobs"), "{text}");
     }
 }
