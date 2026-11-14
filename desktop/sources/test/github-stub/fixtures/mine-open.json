@@ -1,0 +1,311 @@
+{
+  "data": {
+    "search": {
+      "issueCount": 4,
+      "nodes": [
+        {
+          "id": "PR_owner/repo_1",
+          "number": 1,
+          "title": "Retry the login request",
+          "url": "https://github.com/owner/repo/pull/1",
+          "body": "Fixes #12. Also touches owner/repo#13; unrelated to other/lib#14.",
+          "isDraft": false,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "12-login-retry",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "owner/repo"
+          },
+          "author": {
+            "login": "alex",
+            "name": "Alex"
+          },
+          "reviewDecision": "CHANGES_REQUESTED",
+          "mergeable": "CONFLICTING",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": [
+              {
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "__DAYS_AGO_1__",
+                "author": {
+                  "login": "sam",
+                  "name": "Sam"
+                }
+              }
+            ]
+          },
+          "reviewThreads": {
+            "nodes": [
+              {
+                "isResolved": false,
+                "first": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "sam"
+                      }
+                    }
+                  ]
+                },
+                "last": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "sam"
+                      },
+                      "createdAt": "__DAYS_AGO_1__"
+                    }
+                  ]
+                }
+              },
+              {
+                "isResolved": true,
+                "first": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "sam"
+                      }
+                    }
+                  ]
+                },
+                "last": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "alex"
+                      },
+                      "createdAt": "__DAYS_AGO_1__"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "state": "SUCCESS",
+                    "contexts": {
+                      "nodes": [
+                        {
+                          "__typename": "CheckRun",
+                          "name": "build",
+                          "status": "COMPLETED",
+                          "conclusion": "FAILURE"
+                        },
+                        {
+                          "__typename": "CheckRun",
+                          "name": "lint",
+                          "status": "COMPLETED",
+                          "conclusion": "FAILURE"
+                        },
+                        {
+                          "__typename": "CheckRun",
+                          "name": "unit",
+                          "status": "COMPLETED",
+                          "conclusion": "SUCCESS"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "PR_owner/repo_2",
+          "number": 2,
+          "title": "Sketch the settings page",
+          "url": "https://github.com/owner/repo/pull/2",
+          "body": "",
+          "isDraft": true,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "change-2",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "owner/repo"
+          },
+          "author": {
+            "login": "alex",
+            "name": "Alex"
+          },
+          "reviewDecision": null,
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "state": "SUCCESS",
+                    "contexts": {
+                      "nodes": [
+                        {
+                          "__typename": "CheckRun",
+                          "name": "build",
+                          "status": "IN_PROGRESS",
+                          "conclusion": null
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "PR_owner/repo_3",
+          "number": 3,
+          "title": "Bump the parser",
+          "url": "https://github.com/owner/repo/pull/3",
+          "body": "",
+          "isDraft": false,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "change-3",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "owner/repo"
+          },
+          "author": {
+            "login": "alex",
+            "name": "Alex"
+          },
+          "reviewDecision": "APPROVED",
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": [
+              {
+                "state": "APPROVED",
+                "submittedAt": "__DAYS_AGO_1__",
+                "author": {
+                  "login": "sam",
+                  "name": "Sam"
+                }
+              }
+            ]
+          },
+          "reviewThreads": {
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "state": "SUCCESS",
+                    "contexts": {
+                      "nodes": [
+                        {
+                          "__typename": "CheckRun",
+                          "name": "build",
+                          "status": "COMPLETED",
+                          "conclusion": "SUCCESS"
+                        },
+                        {
+                          "__typename": "StatusContext",
+                          "context": "deploy-preview",
+                          "state": "SUCCESS"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "PR_owner/repo_4",
+          "number": 4,
+          "title": "Document the config file",
+          "url": "https://github.com/owner/repo/pull/4",
+          "body": "",
+          "isDraft": false,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "change-4",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "owner/repo"
+          },
+          "author": {
+            "login": "alex",
+            "name": "Alex"
+          },
+          "reviewDecision": "REVIEW_REQUIRED",
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": [
+              {
+                "asCodeOwner": false,
+                "requestedReviewer": {
+                  "__typename": "User",
+                  "login": "sam",
+                  "name": "Sam"
+                }
+              }
+            ]
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "state": "SUCCESS",
+                    "contexts": {
+                      "nodes": [
+                        {
+                          "__typename": "CheckRun",
+                          "name": "build",
+                          "status": "COMPLETED",
+                          "conclusion": "SUCCESS"
+                        },
+                        {
+                          "__typename": "StatusContext",
+                          "context": "e2e",
+                          "state": "PENDING"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

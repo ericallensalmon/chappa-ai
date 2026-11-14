@@ -1,0 +1,196 @@
+{
+  "data": {
+    "search": {
+      "issueCount": 3,
+      "nodes": [
+        {
+          "id": "PR_other/lib_10",
+          "number": 10,
+          "title": "Drop the old flag",
+          "url": "https://github.com/other/lib/pull/10",
+          "body": "",
+          "isDraft": false,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "change-10",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "other/lib"
+          },
+          "author": {
+            "login": "sam",
+            "name": "Sam"
+          },
+          "reviewDecision": null,
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": [
+              {
+                "isResolved": false,
+                "first": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "alex"
+                      }
+                    }
+                  ]
+                },
+                "last": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "sam"
+                      },
+                      "createdAt": "__DAYS_AGO_1__"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": null
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "PR_other/lib_11",
+          "number": 11,
+          "title": "Tidy the examples",
+          "url": "https://github.com/other/lib/pull/11",
+          "body": "",
+          "isDraft": false,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "change-11",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "other/lib"
+          },
+          "author": {
+            "login": "sam",
+            "name": "Sam"
+          },
+          "reviewDecision": null,
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": [
+              {
+                "isResolved": false,
+                "first": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "alex"
+                      }
+                    }
+                  ]
+                },
+                "last": {
+                  "nodes": [
+                    {
+                      "author": {
+                        "login": "alex"
+                      },
+                      "createdAt": "__DAYS_AGO_1__"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": null
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "PR_other/lib_7",
+          "number": 7,
+          "title": "Add a streaming reader",
+          "url": "https://github.com/other/lib/pull/7",
+          "body": "",
+          "isDraft": false,
+          "state": "OPEN",
+          "closedAt": null,
+          "mergedAt": null,
+          "headRefName": "change-7",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "other/lib"
+          },
+          "author": {
+            "login": "sam",
+            "name": "Sam"
+          },
+          "reviewDecision": null,
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": [
+              {
+                "asCodeOwner": false,
+                "requestedReviewer": {
+                  "__typename": "User",
+                  "login": "alex",
+                  "name": "Alex"
+                }
+              }
+            ]
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": {
+                    "state": "SUCCESS",
+                    "contexts": {
+                      "nodes": [
+                        {
+                          "__typename": "CheckRun",
+                          "name": "build",
+                          "status": "COMPLETED",
+                          "conclusion": "SUCCESS"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -172,6 +172,42 @@ curl "http://127.0.0.1:5055/chappa/v1/identity?challenge=$(printf 'ab%.0s' $(seq
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:5055/chappa/v1/manifest
 ```
 
+## GitHub source
+
+`github/` is a real source: it serves the PRs view for the GitHub
+account the `gh` CLI is logged in to. It asks `gh api graphql` for the
+data, so neither the app nor the source ever holds a GitHub token.
+
+Requirements: `gh` on `PATH` (or named by `GH_BIN`) and logged in
+(`gh auth login`). Without either it answers an empty list with one
+clear error instead of failing.
+
+```yaml
+commands:
+  github-source:
+    command: [node, sources/github/index.mjs]
+    source: {}
+```
+
+What it serves:
+
+- `GET /api/prs`: open PRs you wrote (role `mine`) plus the ones merged
+  or closed in the last 14 days (bucket `recent`), and open PRs where
+  your review is requested, you reviewed, or you commented (role
+  `reviewing`), up to 100 per role. Buckets and reasons are computed in
+  `github/buckets.mjs` from the review decision, requested reviewers (a
+  team request alone puts a PR in `group`), latest reviews, check runs
+  and statuses, mergeability and review threads. `workKeys` lists the
+  same-repository issues the body or branch name points at
+  (`owner/repo#12`).
+- Link actions (the PR, its files, its checks) and one endpoint action,
+  `refresh`, which changes nothing on GitHub.
+
+GitHub is asked at most once a minute (`CHAPPA_GITHUB_REFRESH_SECONDS`)
+however often the app polls; the last list is served with
+`refreshing: true` while a fetch runs. A search that fails is named in
+`freshness.errors` and the others still render.
+
 Tests (Node 22, no packages):
 
 ```sh

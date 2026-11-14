@@ -1,0 +1,89 @@
+{
+  "data": {
+    "search": {
+      "issueCount": 2,
+      "nodes": [
+        {
+          "id": "PR_owner/repo_5",
+          "number": 5,
+          "title": "Fix the typo in the help text",
+          "url": "https://github.com/owner/repo/pull/5",
+          "body": "",
+          "isDraft": false,
+          "state": "MERGED",
+          "closedAt": "__DAYS_AGO_2__",
+          "mergedAt": "__DAYS_AGO_2__",
+          "headRefName": "change-5",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "owner/repo"
+          },
+          "author": {
+            "login": "alex",
+            "name": "Alex"
+          },
+          "reviewDecision": null,
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": null
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "PR_owner/repo_6",
+          "number": 6,
+          "title": "Try another cache layout",
+          "url": "https://github.com/owner/repo/pull/6",
+          "body": "",
+          "isDraft": false,
+          "state": "CLOSED",
+          "closedAt": "__DAYS_AGO_30__",
+          "mergedAt": null,
+          "headRefName": "change-6",
+          "baseRefName": "main",
+          "repository": {
+            "nameWithOwner": "owner/repo"
+          },
+          "author": {
+            "login": "alex",
+            "name": "Alex"
+          },
+          "reviewDecision": null,
+          "mergeable": "MERGEABLE",
+          "reviewRequests": {
+            "nodes": []
+          },
+          "latestReviews": {
+            "nodes": []
+          },
+          "reviewThreads": {
+            "nodes": []
+          },
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "statusCheckRollup": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
