@@ -12,13 +12,12 @@
 //! displayed, masked ([`mask`]). A raw sample lives in memory only while the
 //! rules run and is dropped afterwards.
 //!
-//! This module is the skeleton the rule engine and the scanner runner build
-//! on. What is here now: the types, the hook stdout shapes, the masking and
-//! tallying helpers, and the two traits the engine and runner implement.
-//! What comes later: the rule engine (patterns, allow lists, thresholds,
-//! `luhn` / `iban` / `email-mx-shape` validators) behind [`DataSampler`],
-//! and the gitleaks-backed [`SecretScanner`] with its redaction, baseline
-//! and incremental rescan.
+//! This module holds the shared types, the hook stdout shapes, the masking
+//! and tallying helpers, and the two traits the data rule engine and the
+//! secret scanners implement. The secret-scan runner (file listing,
+//! gitleaks and hook scanners, baseline, policy verdicts) is [`secrets`].
+//! The data rule engine (patterns, allow lists, thresholds, `luhn` /
+//! `iban` / `email-mx-shape` validators) behind [`DataSampler`] comes later.
 //!
 //! # Hook stdout shapes
 //!
@@ -40,9 +39,12 @@
 //!                   "column": "email", "count": 12, "severity": "bad" } ] }
 //! ```
 //!
-//! A secret scanner prints gitleaks-style JSON. Only `RuleID`, `File`,
-//! `StartLine` and `Commit` are read from it; `Secret`, `Match` and `Line`
-//! are ignored even when present, and `--redact` is always passed.
+//! A secret scanner prints gitleaks-style JSON or SARIF. Only the rule id,
+//! file, start line and commit are read from it; `Secret`, `Match`, `Line`
+//! and every other field are ignored even when present, and gitleaks always
+//! runs with `--redact` (see [`secrets`]).
+
+pub mod secrets;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -288,8 +290,10 @@ pub enum HookOutput {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SafetyError {
-    #[error("hook output is not valid JSON: {0}")]
-    Json(#[from] serde_json::Error),
+    /// Holds the error's category and position only: a JSON parser's own
+    /// message can quote the offending text, which here may be a value.
+    #[error("hook output is not valid JSON ({0})")]
+    Json(String),
     #[error("sample too large: {values} values (cap {SAMPLE_VALUE_CAP})")]
     TooManyValues { values: usize },
     #[error("sample too large: {bytes} bytes (cap {SAMPLE_BYTE_CAP})")]
@@ -298,6 +302,29 @@ pub enum SafetyError {
     Hook(String),
     #[error("scanner failed: {0}")]
     Scanner(String),
+    #[error("{what} timed out after {seconds}s")]
+    Timeout { what: String, seconds: u64 },
+    #[error("cannot scan: {0}")]
+    InvalidTarget(String),
+    #[error("{}: {message}", path.display())]
+    Io { path: PathBuf, message: String },
+}
+
+/// A JSON error by category and position, without the text it choked on.
+pub(crate) fn json_brief(e: &serde_json::Error) -> String {
+    let kind = match e.classify() {
+        serde_json::error::Category::Io => "read error",
+        serde_json::error::Category::Syntax => "syntax error",
+        serde_json::error::Category::Data => "unexpected shape",
+        serde_json::error::Category::Eof => "truncated",
+    };
+    format!("{kind} at line {} column {}", e.line(), e.column())
+}
+
+impl From<serde_json::Error> for SafetyError {
+    fn from(e: serde_json::Error) -> Self {
+        SafetyError::Json(json_brief(&e))
+    }
 }
 
 /// Parse `marker` stdout.
@@ -475,6 +502,16 @@ mod tests {
             parse_sample(&big),
             Err(SafetyError::TooManyBytes { .. })
         ));
+    }
+
+    #[test]
+    fn json_errors_do_not_quote_values() {
+        let err = parse_sample(r#"[{"table":"t","column":"c","values":[123456789]}]"#).unwrap_err();
+        let shown = format!("{err} {err:?}");
+        assert!(!shown.contains("123456789"), "{shown}");
+        assert!(shown.contains("unexpected shape"), "{shown}");
+        let err = parse_marker(r#"{"scrubbed": "4111111111111111"}"#).unwrap_err();
+        assert!(!format!("{err} {err:?}").contains("4111"), "{err:?}");
     }
 
     #[test]

@@ -16,10 +16,11 @@
 //! | [`provenance`] | what a component was built from, how stale that is, and image-label mapping |
 //! | [`driver`] | the engine-facing traits and the nine component states, with fakes for tests |
 //! | [`intent`] | the per-instance desired-state record and the active-item file under `.work/` |
-//! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value |
+//! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value, and the secret-scan runner ([`safety::secrets`]) |
 //!
-//! Nothing here spawns an engine. The only process this crate ever runs is
-//! `git` (see [`provenance::GitCli`]), argv only, and only when asked.
+//! Nothing here spawns an engine. The only processes this crate runs are
+//! `git` (see [`provenance::GitCli`]) and, for secret scanning, the
+//! configured scanner (gitleaks or a hook), argv only and only when asked.
 //!
 //! # Where the definition lives
 //!
