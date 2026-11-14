@@ -16,8 +16,10 @@
 //! and tallying helpers, and the two traits the data rule engine and the
 //! secret scanners implement. The secret-scan runner (file listing,
 //! gitleaks and hook scanners, baseline, policy verdicts) is [`secrets`].
-//! The data rule engine (patterns, allow lists, thresholds, `luhn` /
-//! `iban` / `email-mx-shape` validators) behind [`DataSampler`] comes later.
+//! The data rule engine (rules file, patterns, allow lists, thresholds,
+//! `luhn` / `iban` / `email-mx-shape` validators, marker verdicts and the
+//! `onFinding` / `unscanned` policy) that consumes [`DataSampler`] output is
+//! [`data`].
 //!
 //! # Hook stdout shapes
 //!
@@ -44,6 +46,7 @@
 //! and every other field are ignored even when present, and gitleaks always
 //! runs with `--redact` (see [`secrets`]).
 
+pub mod data;
 pub mod secrets;
 
 use indexmap::IndexMap;

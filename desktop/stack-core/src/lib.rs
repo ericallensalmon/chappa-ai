@@ -16,7 +16,7 @@
 //! | [`provenance`] | what a component was built from, how stale that is, and image-label mapping |
 //! | [`driver`] | the engine-facing traits and the nine component states, with fakes for tests |
 //! | [`intent`] | the per-instance desired-state record and the active-item file under `.work/` |
-//! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value, and the secret-scan runner ([`safety::secrets`]) |
+//! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value, the data-safety rule engine ([`safety::data`]) and the secret-scan runner ([`safety::secrets`]) |
 //! | [`cli`] | the one [`cli::EngineCli`] trait every engine call goes through (argv, env, cwd, timeout, captured output), the real runner and a recording fake |
 //! | [`jobs`] | run blocks and the steps an applied plan is made of |
 //! | [`hosts`] | the hosts-file check for the stack hostname and the elevated fix |
