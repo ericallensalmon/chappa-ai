@@ -569,18 +569,43 @@ fn a_timer_body_waits_for_genuine_quiet_and_gives_up_at_the_cap() {
     let spawn = DeliveryPolicy::spawn_prompt(750, 5_000);
     // 6 s of continuous output: the spawn prompt goes in by timeout, a timer
     // body keeps waiting.
-    assert_eq!(gate_step(streaming(6_000), 6_000, first, spawn, Duration::from_millis(6_000)), Some(GateStep::Write { by_timeout: true }));
-    assert_eq!(gate_step(streaming(6_000), 6_000, first, timer, Duration::from_millis(6_000)), None, "still mid-turn");
-    assert_eq!(gate_step(streaming(29_000), 29_000, first, timer, Duration::from_millis(29_000)), None);
+    assert_eq!(gate_step(streaming(6_000), 6_000, first, spawn, Duration::from_millis(6_000), false), Some(GateStep::Write { by_timeout: true }));
+    assert_eq!(gate_step(streaming(6_000), 6_000, first, timer, Duration::from_millis(6_000), false), None, "still mid-turn");
+    assert_eq!(gate_step(streaming(29_000), 29_000, first, timer, Duration::from_millis(29_000), false), None);
     // Quiet for 750 ms: write, and not "by timeout".
     let quiet = IoView { has_output: true, last_output_ms: Some(20_000), child_alive: true };
-    assert_eq!(gate_step(quiet, 20_750, first, timer, Duration::from_millis(20_750)), Some(GateStep::Write { by_timeout: false }));
-    assert_eq!(gate_step(quiet, 20_749, first, timer, Duration::from_millis(20_749)), None);
+    assert_eq!(gate_step(quiet, 20_750, first, timer, Duration::from_millis(20_750), false), Some(GateStep::Write { by_timeout: false }));
+    assert_eq!(gate_step(quiet, 20_749, first, timer, Duration::from_millis(20_749), false), None);
     // Quiet never comes: `not-ready` exactly at the cap.
-    assert_eq!(gate_step(streaming(30_000), 30_000, first, timer, Duration::from_millis(30_000)), Some(GateStep::GiveUp("not-ready")));
+    assert_eq!(gate_step(streaming(30_000), 30_000, first, timer, Duration::from_millis(30_000), false), Some(GateStep::GiveUp("not-ready")));
     // A dead child is `exited` before anything else.
     let dead = IoView { has_output: true, last_output_ms: Some(0), child_alive: false };
-    assert_eq!(gate_step(dead, 1_000, first, timer, Duration::from_millis(1_000)), Some(GateStep::GiveUp("exited")));
+    assert_eq!(gate_step(dead, 1_000, first, timer, Duration::from_millis(1_000), false), Some(GateStep::GiveUp("exited")));
+}
+
+/// A program that reports itself blocked is waiting on a person: its quiet
+/// does not open the gate for a timer body or a queued spawn prompt (nor
+/// does the spawn prompt's ready-by-timeout fallback). At the cap the
+/// answer is `blocked`; a dead child is still `exited` first.
+#[test]
+fn a_blocked_program_holds_every_delivery_until_the_cap() {
+    let quiet = IoView { has_output: true, last_output_ms: Some(1_000), child_alive: true };
+    let streaming = |now: u64| IoView { has_output: true, last_output_ms: Some(now - 10), child_alive: true };
+    let first = Some(0);
+    let timer = DeliveryPolicy::quiet_only(750, Duration::from_millis(30_000));
+    let spawn = DeliveryPolicy::spawn_prompt(750, 5_000);
+    for policy in [timer, spawn] {
+        assert_eq!(gate_step(quiet, 20_000, first, policy, Duration::from_millis(5_000), true), None, "quiet but blocked");
+        assert_eq!(
+            gate_step(quiet, 20_000, first, policy, Duration::from_millis(5_000), false),
+            Some(GateStep::Write { by_timeout: false }),
+            "unblocked: the same quiet opens it"
+        );
+    }
+    assert_eq!(gate_step(streaming(6_000), 6_000, first, spawn, Duration::from_millis(6_000), true), None, "no timeout fallback while blocked");
+    assert_eq!(gate_step(quiet, 40_000, first, timer, Duration::from_millis(30_000), true), Some(GateStep::GiveUp("blocked")));
+    let dead = IoView { has_output: true, last_output_ms: Some(0), child_alive: false };
+    assert_eq!(gate_step(dead, 1_000, first, timer, Duration::from_millis(1_000), true), Some(GateStep::GiveUp("exited")));
 }
 
 // ---- the service (fake clock + fake probe + fake deliverer + real db) --------

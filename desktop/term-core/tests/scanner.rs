@@ -3,6 +3,7 @@
 use term_core::scanner::{
     cap_summary, KittyEvent, OscEvent, OscScanner, PromptMarkKind, SUMMARY_MAX_BYTES, SUMMARY_TRUNCATED_MARKER,
 };
+use term_core::status::ProgramStatus;
 
 /// Feed a single byte at a time — the harshest chunking, plus the exact
 /// boundary splits the scanner has to survive.
@@ -68,6 +69,61 @@ fn osc_777_session_announces_an_id() {
     assert!(s.feed(b"]777;session").is_empty());
     let split = feed_one_byte_at_a_time(&mut s, b"]777;session;abc\\");
     assert_eq!(split, vec![OscEvent::Session("abc".into())]);
+}
+
+fn status(state: ProgramStatus) -> Vec<OscEvent> {
+    vec![OscEvent::Status { state }]
+}
+
+/// `OSC 777;status;<state>`: each of the five words, BEL or ST terminated,
+/// reassembled across chunks, surrounded by ordinary output.
+#[test]
+fn osc_777_status_reports_each_state() {
+    let mut s = OscScanner::new();
+    for (word, state) in [
+        ("working", ProgramStatus::Working),
+        ("blocked", ProgramStatus::Blocked),
+        ("done", ProgramStatus::Done),
+        ("failed", ProgramStatus::Failed),
+        ("idle", ProgramStatus::Idle),
+    ] {
+        assert_eq!(s.feed(format!("\x1b]777;status;{word}\x07").as_bytes()), status(state), "{word} BEL");
+        assert_eq!(s.feed(format!("out \x1b]777;status;{word}\x1b\\ more").as_bytes()), status(state), "{word} ST");
+        assert_eq!(state.as_str(), word);
+    }
+    let split = feed_one_byte_at_a_time(&mut s, b"\x1b]777;status;blocked\x1b\\");
+    assert_eq!(split, status(ProgramStatus::Blocked));
+    // Split at the sub-key / value boundary and inside the terminator.
+    let mut ev = s.feed(b"\x1b]777;stat");
+    ev.extend(s.feed(b"us;do"));
+    ev.extend(s.feed(b"ne\x1b"));
+    ev.extend(s.feed(b"\\"));
+    assert_eq!(ev, status(ProgramStatus::Done));
+}
+
+/// Only the exact lowercase word is a status: no case folding, no
+/// surrounding blanks, nothing after it, and an empty value is nothing. The
+/// scanner is back in ground state for the next sequence after each.
+#[test]
+fn osc_777_status_ignores_anything_but_the_exact_word() {
+    let mut s = OscScanner::new();
+    for bad in [
+        "Blocked",
+        "BLOCKED",
+        " blocked",
+        "blocked ",
+        "blocked;extra",
+        "blockedx",
+        "block",
+        "waiting",
+        "",
+    ] {
+        assert!(s.feed(format!("\x1b]777;status;{bad}\x07").as_bytes()).is_empty(), "{bad:?}");
+    }
+    assert!(s.feed(b"\x1b]777;status\x07").is_empty(), "no value field");
+    assert!(s.feed(b"\x1b]777;statuses;done\x07").is_empty(), "not the sub-key");
+    assert!(s.feed(b"\x1b]777;Status;done\x07").is_empty(), "sub-key is case-sensitive too");
+    assert_eq!(s.feed(b"\x1b]777;status;idle\x07"), status(ProgramStatus::Idle), "still scanning");
 }
 
 fn summary(text: &str) -> Vec<OscEvent> {

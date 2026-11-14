@@ -45,6 +45,7 @@ use crate::keys::{
     encode_key, encode_mouse, encode_paste, Key, KeyEvent, ModeSnapshot, MouseEvent, MouseProto,
 };
 use crate::pty::{self, ExitStatus, PtySession, PtySpec};
+use crate::status::ProgramStatus;
 use crate::scanner::{KittyEvent, OscEvent, OscScanner, PromptMarkKind};
 use crate::session::{LineMatcher, SessionMatcher};
 
@@ -344,6 +345,9 @@ pub enum TermEvent {
     Summary {
         text: String,
     },
+    /// The child reported what it is doing (`OSC 777;status;<state>`). One
+    /// event per report, in stream order, like [`TermEvent::Summary`].
+    Status(ProgramStatus),
     Exited(ExitStatus),
 }
 
@@ -1264,6 +1268,9 @@ impl Actor {
                 }
                 OscEvent::Summary { text } => {
                     let _ = self.events.send(TermEvent::Summary { text });
+                }
+                OscEvent::Status { state } => {
+                    let _ = self.events.send(TermEvent::Status(state));
                 }
                 OscEvent::Kitty(_) => {} // handled pre-advance above
             }

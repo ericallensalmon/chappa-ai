@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   Dashboard,
+  attentionText,
   cardView,
   historyRowText,
   isActiveCard,
@@ -164,6 +165,21 @@ describe("orderCards", () => {
   });
 });
 
+describe("program status on a card", () => {
+  it("is carried while live and dropped when stopped; the mark text names it", () => {
+    const blocked = cardView(stoppedAgent({ live: live({ attention: "agent-waiting", programStatus: "blocked" }) }), NOW);
+    expect(blocked.programStatus).toBe("blocked");
+    expect(attentionText(blocked)).toBe("blocked, waiting for you");
+    const ended = cardView(stoppedAgent({ live: live({ status: "exited", attention: "badge", programStatus: "done" }) }), NOW);
+    expect(ended.programStatus).toBeNull();
+    expect(ended.attention).toBeNull();
+    expect(attentionText({ attention: "agent-waiting", programStatus: null })).toBe("waiting for your input");
+    expect(attentionText({ attention: "badge", programStatus: "failed" })).toBe("reported failed");
+    expect(attentionText({ attention: "badge", programStatus: "idle" })).toBe("needs attention");
+    expect(attentionText({ attention: null, programStatus: "working" })).toBe("");
+  });
+});
+
 describe("matchesFilter / isActiveCard", () => {
   it("every word must match the name, kind, status or group, in any case", () => {
     const v = view({ name: "Claude Reviewer", kindLabel: "agent", status: "exited" });
@@ -280,6 +296,34 @@ describe("Dashboard", () => {
     expect([...dash.host.querySelectorAll<HTMLElement>(".chappa-dash-card")].map((c) => c.dataset.key)).toEqual(["cmd:1:server"]);
     dash.host.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(opts.onClose).toHaveBeenCalledTimes(1);
+    dash.dispose();
+  });
+
+  it("a program reporting blocked sorts and looks like a waiting agent; done and failed badge like a bell", () => {
+    const { dash } = make();
+    dash.update(
+      [
+        group("ws", "Workspace", [
+          stoppedAgent({ key: "term:1", kind: "terminal", name: "tests", recordId: null, live: live({ attention: "badge", programStatus: "done" }) }),
+          stoppedAgent({ key: "term:2", kind: "terminal", name: "deploy", recordId: null, live: live({ attention: "agent-waiting", programStatus: "blocked" }) }),
+          stoppedAgent({ key: "term:3", kind: "terminal", name: "build", recordId: null, live: live({ programStatus: "working" }) }),
+          stoppedAgent({ key: "term:4", kind: "terminal", name: "lint", recordId: null, live: live({ attention: "badge", programStatus: "failed" }) }),
+        ]),
+      ],
+      NOW,
+    );
+    expect(keys(dash, "ws")).toEqual(["term:2", "term:1", "term:4", "term:3"]);
+    const blocked = cardEl(dash, "term:2");
+    expect(blocked.dataset.attention).toBe("agent-waiting");
+    expect(blocked.title).toBe("deploy — blocked, waiting for you");
+    expect(blocked.querySelector(".chappa-dash-mark")?.textContent).toBe("⌨");
+    expect(blocked.querySelector<HTMLElement>(".chappa-dash-mark")?.title).toBe("blocked, waiting for you");
+    const done = cardEl(dash, "term:1");
+    expect(done.dataset.attention).toBe("badge");
+    expect(done.querySelector(".chappa-dash-mark")?.textContent).toBe("!");
+    expect(done.querySelector<HTMLElement>(".chappa-dash-mark")?.title).toBe("reported done");
+    expect(cardEl(dash, "term:4").querySelector<HTMLElement>(".chappa-dash-mark")?.title).toBe("reported failed");
+    expect(cardEl(dash, "term:3").dataset.attention).toBeUndefined();
     dash.dispose();
   });
 

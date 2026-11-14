@@ -6776,3 +6776,107 @@ describe("App record rows and the record pane", () => {
     });
   });
 });
+
+// --- program status (OSC 777;status) ---------------------------------
+
+describe("program status", () => {
+  type StatusDriver = NotifyDriver & {
+    applyProgramStatus: (p: ipc.TerminalProgramStatusEvent) => void;
+    entries: Map<number, RailEntry>;
+    collectActiveRows: () => ActiveRow[];
+    center: NotifyCenter;
+  };
+  const report = (id: number, status: ipc.ProgramStatus): ipc.TerminalProgramStatusEvent => ({
+    event: "term://program_status",
+    term_id: id,
+    seq: 0,
+    status,
+  });
+  const railRow = (root: HTMLElement, name: string): HTMLElement =>
+    [...root.querySelectorAll<HTMLElement>(".chappa-rail-item")].find((r) => r.textContent?.includes(name))!;
+
+  it("blocked is the agent-waiting tier and notifies under the process name; working clears it", async () => {
+    const { api, notified } = stubApi();
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => false });
+    await app.mount();
+    await app.newShell(); // id 1, hidden once id 2 opens
+    await app.newShell(); // id 2 is active
+    await FLUSH();
+    const d = drive(app) as unknown as StatusDriver;
+    d.windowFocused = false;
+    d.applyProgramStatus(report(1, "blocked"));
+    expect(d.entries.get(1)!.programStatus).toBe("blocked");
+    const row = root.querySelector<HTMLElement>(".chappa-rail-item.attention")!;
+    expect(row.dataset.attention).toBe("agent-waiting");
+    expect(row.title).toContain("blocked, waiting for you");
+    expect(d.collectActiveRows()[0]).toMatchObject({ termId: 1, attention: "agent-waiting" });
+    // The notify decision ran, titled with the row's name.
+    expect(notified).toEqual([["shell", "blocked, waiting for you"]]);
+    expect(d.center.entries[0]).toMatchObject({ termId: 1, title: "shell", body: "blocked, waiting for you" });
+    // A repeat is not news.
+    d.applyProgramStatus(report(1, "blocked"));
+    expect(notified.length).toBe(1);
+    // Working takes the tier down (the notify badge stays until viewed,
+    // as it does for an agent that was waiting).
+    d.applyProgramStatus(report(1, "working"));
+    expect(d.entries.get(1)!.programStatus).toBe("working");
+    expect(d.collectActiveRows().find((r) => r.termId === 1)?.attention).toBe("badge");
+    expect(railRow(root, "shell").dataset.attention).toBeUndefined();
+    panelDispose(app);
+  });
+
+  it("done / failed badge a hidden row like a bell until it is viewed; idle takes that badge down", async () => {
+    const { api } = stubApi();
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => false });
+    await app.mount();
+    await app.newShell();
+    await app.newShell();
+    await FLUSH();
+    const d = drive(app) as unknown as StatusDriver;
+    d.windowFocused = true;
+    d.applyProgramStatus(report(1, "done"));
+    expect(d.entries.get(1)!.bell).toBe(true);
+    expect(d.entries.get(1)!.statusBadge).toBe(true);
+    expect(root.querySelectorAll(".chappa-rail-bell").length).toBe(1);
+    expect(d.collectActiveRows().find((r) => r.termId === 1)?.attention).toBe("badge");
+    // Idle: the badge the report raised comes down.
+    d.applyProgramStatus(report(1, "idle"));
+    expect(d.entries.get(1)!.bell).toBe(false);
+    expect(root.querySelectorAll(".chappa-rail-bell").length).toBe(0);
+    // Failed, then viewed: activation clears it like any bell.
+    d.applyProgramStatus(report(1, "failed"));
+    expect(d.entries.get(1)!.bell).toBe(true);
+    app.activate(1);
+    expect(d.entries.get(1)!.bell).toBe(false);
+    expect(d.entries.get(1)!.statusBadge).toBe(false);
+    // A report on the row in view raises nothing.
+    d.applyProgramStatus(report(1, "done"));
+    expect(d.entries.get(1)!.bell).toBe(false);
+    // A real bell is not taken down by a later working report.
+    app.activate(2);
+    d.applyBell(bellEvent(1));
+    d.applyProgramStatus(report(1, "working"));
+    expect(d.entries.get(1)!.bell).toBe(true);
+    panelDispose(app);
+  });
+
+  it("the reducer drops the status on a dead entry and ignores a report there", () => {
+    const entry = {
+      id: 1,
+      name: "x",
+      status: "running",
+      exitCode: null,
+      title: null,
+      activity: false,
+      bell: false,
+      attention: null,
+    } as unknown as RailEntry;
+    const blocked = railReducer(entry, { type: "programStatus", status: "blocked" });
+    expect(blocked.programStatus).toBe("blocked");
+    const dead = railReducer(blocked, { type: "status", status: "exited", exitCode: 0 });
+    expect(dead.programStatus).toBeNull();
+    expect(railReducer(dead, { type: "programStatus", status: "blocked" }).programStatus).toBeNull();
+  });
+});

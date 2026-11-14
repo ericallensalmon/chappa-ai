@@ -26,6 +26,7 @@ use tauri::{AppHandle, Emitter, State};
 pub use term_core::actor::epoch_ms;
 use term_core::actor::{ActorConfig, TermHandle};
 use term_core::pty::PtySpec;
+use term_core::status::ProgramStatus;
 
 use crate::agent_json::{
     event_json, machine_mode, AgentEvent, AgentEventKind, JsonAgent, JsonHooks, SpawnRecipe,
@@ -683,17 +684,26 @@ impl DeliveryPolicy {
 pub enum GateStep {
     /// Write now. `by_timeout` = the `max_wait_ms` fallback opened the gate.
     Write { by_timeout: bool },
-    /// Stop without writing: `"exited"` or `"not-ready"`.
+    /// Stop without writing: `"exited"`, `"not-ready"`, or `"blocked"` (the
+    /// cap passed while the program still reported itself blocked).
     GiveUp(&'static str),
 }
 
+/// `blocked`: the program reports it is waiting on a person (`OSC
+/// 777;status;blocked`). Its quiet is a question on screen, not a prompt
+/// ready for input, so the gate stays shut until the program reports
+/// anything else, it exits, or the cap passes.
 pub fn gate_step(
     view: IoView,
     now_ms: u64,
     first_output_ms: Option<u64>,
     policy: DeliveryPolicy,
     waited: Duration,
+    blocked: bool,
 ) -> Option<GateStep> {
+    if blocked && view.child_alive {
+        return (waited >= policy.cap).then_some(GateStep::GiveUp("blocked"));
+    }
     let gate = ReadyGate {
         quiet_ms: policy.quiet_ms,
         // `None` = the fallback never applies: `now - first >= u64::MAX` is
@@ -744,7 +754,8 @@ pub fn deliver_prompt_when_ready(
         if first_output_ms.is_none() && view.has_output {
             first_output_ms = Some(epoch_ms());
         }
-        match gate_step(view, epoch_ms(), first_output_ms, policy, started.elapsed()) {
+        let blocked = registry.program_status(id) == Some(ProgramStatus::Blocked);
+        match gate_step(view, epoch_ms(), first_output_ms, policy, started.elapsed(), blocked) {
             Some(GateStep::Write { by_timeout }) => break by_timeout,
             Some(GateStep::GiveUp(reason)) => {
                 return PromptReceipt {

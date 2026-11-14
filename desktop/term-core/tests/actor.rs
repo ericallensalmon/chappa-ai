@@ -11,6 +11,7 @@ use term_core::actor::{
     FrameKind, Point, SearchNavDir, SelectionKind, SelectionOp, SessionSource, TermEvent,
 };
 use term_core::session::SessionMatcher;
+use term_core::status::ProgramStatus;
 
 use term_core::color::Rgba;
 use term_core::pty::{ExitStatus, PtySpec};
@@ -2033,4 +2034,27 @@ fn summary_posts_are_emitted_once_each_and_before_the_exit() {
     }
     assert_eq!(seen, vec!["first draft".to_owned(), "## Final\nall green".to_owned()]);
     assert!(rx.try_iter().all(|e| !matches!(e, TermEvent::Summary { .. })), "nothing after the exit");
+}
+
+/// Each `OSC 777;status` report reaches the embedder once, in order, and a
+/// value that is not one of the five words is dropped without an event.
+#[test]
+fn status_reports_are_emitted_in_order_and_before_the_exit() {
+    let (handle, rx, _sink) = test_actor(40, 5);
+    handle.feed(b"\x1b]777;status;working\x07step 1\r\n");
+    handle.feed(b"\x1b]777;status;Blocked\x07\x1b]777;status;blocked\x1b\\");
+    handle.feed(b"\x1b]777;status;done\x07");
+    handle.note_child_exit(ExitStatus { code: Some(0), success: true });
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(TermEvent::Status(state)) => seen.push(state),
+            Ok(TermEvent::Exited(_)) => break,
+            Ok(_) => continue,
+            Err(e) => panic!("no Exited event: {e}"),
+        }
+    }
+    assert_eq!(seen, vec![ProgramStatus::Working, ProgramStatus::Blocked, ProgramStatus::Done]);
 }

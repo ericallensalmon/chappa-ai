@@ -372,6 +372,14 @@ export interface RailEntry {
   /** The summary the current run posted (`term://summary`), for the
    *  frozen strip; cleared when the entry comes back to life (a new run). */
   summary?: RunSummary | null;
+  /** What the running program last reported (`term://program_status`).
+   *  `blocked` is attention at the agent-waiting tier (see
+   *  {@link isWaiting}); dropped with a dead status. */
+  programStatus?: ipc.ProgramStatus | null;
+  /** The current bell badge was raised by a `done` / `failed` report, so
+   *  a later `working` / `idle` report may take it down again. Cleared
+   *  with the badge on activation. */
+  statusBadge?: boolean;
   /** Rail-row kind: "process" entries are started project processes
    *  and render in the project section, NOT the terminals list. Absent
    *  (default) = a plain shell row.
@@ -617,7 +625,20 @@ export type RailAction =
    *  entry: a process that is gone is never "waiting". */
   | { type: "attention"; attention: Attention }
   /** The current run posted (or replaced) its summary. */
-  | { type: "summary"; summary: RunSummary | null };
+  | { type: "summary"; summary: RunSummary | null }
+  /** The program reported what it is doing. Ignored on a dead entry. A
+   *  `working` / `idle` report takes down a badge a `done` / `failed`
+   *  report raised. */
+  | { type: "programStatus"; status: ipc.ProgramStatus | null }
+  /** The bell badge just raised came from a `done` / `failed` report. */
+  | { type: "statusBadge" };
+
+/** The agent-waiting tier: a json agent that said it wants input, or any
+ *  live program reporting `blocked`. Both are facts the process stated;
+ *  both outrank a bell. */
+export function isWaiting(entry: Pick<RailEntry, "attention" | "programStatus" | "status">): boolean {
+  return isLive(entry.status) && (entry.attention === "agent-waiting" || entry.programStatus === "blocked");
+}
 
 export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
   switch (action.type) {
@@ -629,6 +650,8 @@ export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
         status: action.status,
         exitCode: action.exitCode,
         attention: isLive(action.status) ? entry.attention : null,
+        // An ended run reports nothing (the backend clears it too).
+        programStatus: isLive(action.status) ? (entry.programStatus ?? null) : null,
         // The first observed death keeps its time; a repeat does not reset it.
         endedAtMs: isLive(action.status) ? null : (entry.endedAtMs ?? action.at ?? null),
         // Dead → live is a NEW run (a restart into the same terminal): the
@@ -637,6 +660,17 @@ export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
       };
     case "summary":
       return { ...entry, summary: action.summary };
+    case "programStatus": {
+      if (!isLive(entry.status)) return { ...entry, programStatus: null };
+      const clears = action.status === "working" || action.status === "idle";
+      return {
+        ...entry,
+        programStatus: action.status,
+        ...(clears && entry.statusBadge ? { bell: false, statusBadge: false } : {}),
+      };
+    }
+    case "statusBadge":
+      return { ...entry, statusBadge: true };
     case "attention":
       return { ...entry, attention: isLive(entry.status) ? action.attention : null };
     case "title":
@@ -646,7 +680,7 @@ export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
     case "bell":
       return { ...entry, bell: true };
     case "activate":
-      return { ...entry, activity: false, bell: false };
+      return { ...entry, activity: false, bell: false, statusBadge: false };
   }
 }
 
@@ -2434,6 +2468,7 @@ export class App {
           exit_code: t.exit_code ?? null,
           ended_at_ms: t.last_run?.ended_at_ms ?? null,
           summary: runSummary(t.last_run),
+          program_status: t.program_status ?? null,
         });
       }
     } catch {
@@ -2470,6 +2505,8 @@ export class App {
     ended_at_ms?: number | null;
     /** The current run's summary as the snapshot knows it. */
     summary?: RunSummary | null;
+    /** What the program last reported, as the snapshot knows it. */
+    program_status?: ipc.ProgramStatus | null;
   }): void {
     const id = f.term_id;
     if (this.seen.has(id) || this.entries.has(id)) return;
@@ -2492,6 +2529,7 @@ export class App {
       endedAtMs: isLive(status) ? null : (f.ended_at_ms ?? null),
       ...(f.record_id && f.kind !== "process" ? { recordId: f.record_id } : {}),
       ...(f.summary ? { summary: f.summary } : {}),
+      ...(f.program_status && isLive(status) ? { programStatus: f.program_status } : {}),
     };
     if (f.kind === "agent") {
       entry = {
@@ -2905,6 +2943,8 @@ export class App {
     // A run posted (or replaced) its summary: the frozen strip and the
     // record card show it without a reload.
     on<ipc.TerminalSummaryEvent>("term://summary", (p) => this.applySummary(p));
+    // The program said what it is doing: attention, a badge, a notification.
+    on<ipc.TerminalProgramStatusEvent>("term://program_status", (p) => this.applyProgramStatus(p));
     on<ipc.TerminalEventDto>("term://status", (p) => {
       const entry = this.entries.get(p.term_id);
       if (!entry) return;
@@ -3726,12 +3766,15 @@ export class App {
         row.append(transport);
       }
     }
-    // The typed attention tier (agent-waiting): read off the entry,
-    // never recomputed here.
-    if (entry.attention !== null) {
+    // The typed attention tier (agent-waiting, or a program reporting
+    // `blocked`): read off the entry, never recomputed here.
+    if (isWaiting(entry)) {
+      row.classList.add("attention");
+      row.dataset.attention = "agent-waiting";
+      row.title = `${row.title} — ${entry.attention === "agent-waiting" ? "waiting for your input" : "blocked, waiting for you"}`;
+    } else if (entry.attention !== null) {
       row.classList.add("attention");
       row.dataset.attention = entry.attention;
-      if (entry.attention === "agent-waiting") row.title = `${row.title} — waiting for your input`;
     }
     row.append(cpu);
 
@@ -4186,6 +4229,57 @@ export class App {
     const body = "waiting for your input";
     const d = decide("notify", this.levelForEntry(fresh), id === this.activeId, this.windowFocused, body);
     this.routeDecision(id, fresh, "notify", d, this.entryLabel(fresh), body);
+  }
+
+  /**
+   * `term://program_status` — the program reported what it is doing.
+   *  - `blocked`: the agent-waiting tier (rail ring, ACTIVE and dashboard
+   *    order) and the SAME notify decision an agent waiting for input runs,
+   *    titled with the process name;
+   *  - `done` / `failed`: the bell's decision, so a hidden row badges until
+   *    it is viewed (activation clears it like any bell);
+   *  - `working` / `idle`: take down what `blocked` / `done` / `failed` put
+   *    up (a bell that really rang stays).
+   * A repeat of the current status is not news.
+   */
+  applyProgramStatus(p: ipc.TerminalProgramStatusEvent): void {
+    const entry = this.entries.get(p.term_id);
+    if (!entry || !isLive(entry.status) || entry.programStatus === p.status) return;
+    let next = railReducer(entry, { type: "programStatus", status: p.status });
+    this.entries.set(p.term_id, next);
+    if (entry.statusBadge && !next.statusBadge && entry.kind === "process" && entry.process) {
+      const row = this.rowFor(entry.process.projectId, entry.process.name);
+      if (row && row.termId === entry.id) {
+        row.bell = false;
+        this.updateProcessBadges(row);
+      }
+    }
+    const active = p.term_id === this.activeId;
+    if (p.status === "blocked") {
+      const body = "blocked, waiting for you";
+      const d = decide("notify", this.levelForEntry(next), active, this.windowFocused, body);
+      this.routeDecision(p.term_id, next, "notify", d, this.entryLabel(next), body);
+    } else if (p.status === "done" || p.status === "failed") {
+      const d = decide("bell", this.levelForEntry(next), active, this.windowFocused);
+      this.routeDecision(p.term_id, next, "bell", d, this.entryLabel(next), p.status);
+      if (d.badge) {
+        next = railReducer(this.entries.get(p.term_id) ?? next, { type: "statusBadge" });
+        this.entries.set(p.term_id, next);
+      }
+    }
+    if (entry.kind === "process") {
+      // Process rows have no rail row: their card and ACTIVE row show it.
+      this.renderActiveSection();
+      this.renderDashboard();
+    } else {
+      this.renderRail();
+    }
+  }
+
+  /** A running process card whose terminal reports `blocked`. */
+  private processWaiting(row: ProcessRow): boolean {
+    const entry = row.termId !== null ? this.entries.get(row.termId) : undefined;
+    return entry !== undefined && isWaiting(entry);
   }
 
   /** Flip the typed waiting tier on an agent entry through the reducer
@@ -5218,11 +5312,11 @@ export class App {
       status: entry.status,
       exitCode: entry.exitCode,
       endedAtMs: entry.endedAtMs ?? null,
-      attention:
-        entry.attention === "agent-waiting" ? "agent-waiting" : entry.bell || bridgeFault(entry.agent) ? "badge" : null,
+      attention: isWaiting(entry) ? "agent-waiting" : entry.bell || bridgeFault(entry.agent) ? "badge" : null,
       activity: entry.activity,
       stats: this.stats.get(termId),
       summary: entry.summary ?? null,
+      programStatus: entry.programStatus ?? null,
     };
   }
 
@@ -5242,10 +5336,11 @@ export class App {
       status,
       exitCode,
       endedAtMs: entry?.endedAtMs ?? null,
-      attention: bell ? "badge" : null,
+      attention: entry && isWaiting(entry) ? "agent-waiting" : bell ? "badge" : null,
       activity,
       stats: termId !== null ? this.stats.get(termId) : null,
       summary: entry?.summary ?? null,
+      programStatus: entry?.programStatus ?? null,
     };
   }
 
@@ -6139,7 +6234,7 @@ export class App {
           termId: row.termId,
           processName: row.name,
           status: row.status,
-          attention: row.bell ? "badge" : null,
+          attention: this.processWaiting(row) ? "agent-waiting" : row.bell ? "badge" : null,
           activity: row.activity,
         });
       }
@@ -6153,7 +6248,7 @@ export class App {
       // The typed awaiting_input fact is the `agent-waiting` tier
       // on the entry itself — it outranks the heuristic badge and clears on
       // the next send, not on activation.
-      const waiting = entry.attention === "agent-waiting";
+      const waiting = isWaiting(entry);
       if (!entry.bell && !entry.activity && !fault && !waiting) continue;
       rows.push({
         kind: "terminal",

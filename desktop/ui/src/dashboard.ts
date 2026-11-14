@@ -32,7 +32,9 @@ import {
 import { statsChip, statsTooltip, sumStats, totalsLabel, type TermStats } from "./stats";
 import { renderEvents } from "./transcript";
 
-/** A row's attention, as the rail derives it (typed waiting outranks a bell). */
+/** A row's attention, as the rail derives it (typed waiting outranks a
+ *  bell). A program reporting `blocked` is at the `agent-waiting` tier; one
+ *  reporting `done` / `failed` badges like a bell until the row is viewed. */
 export type CardAttention = null | "badge" | "agent-waiting";
 
 /** The facts of a row whose terminal is attached in this window. */
@@ -48,6 +50,8 @@ export interface CardLive {
   stats: TermStats | null;
   /** What the current run posted about itself. */
   summary: RunSummary | null;
+  /** What the running program last reported (`OSC 777;status`). */
+  programStatus?: ipc.ProgramStatus | null;
 }
 
 /** One card's data, as the app assembles it from a row. */
@@ -93,6 +97,8 @@ export interface CardView {
   stats: string;
   statsTitle: string;
   attention: CardAttention;
+  /** What the running program last reported; null when stopped. */
+  programStatus: ipc.ProgramStatus | null;
   activity: boolean;
   /** The run line: an attached dead terminal's strip text, a stopped row's
    *  last run, nothing while live. */
@@ -177,6 +183,7 @@ export function cardView(input: CardInput, now: number): CardView {
     stats,
     statsTitle: stats && live?.stats ? statsTooltip(live.stats) : "",
     attention: isLive ? (live?.attention ?? null) : null,
+    programStatus: isLive ? (live?.programStatus ?? null) : null,
     activity: live?.activity ?? false,
     run,
     runTitle,
@@ -195,6 +202,19 @@ function restingStatus(run: PaneRun): string {
   if (run.status === "exited" || run.status === "failed" || run.status === "stopped") return run.status;
   // A run left "running" by a crash or a lost event is not running now.
   return "stopped";
+}
+
+/** What a card's attention mark says: whose fact it is and what it means. */
+export function attentionText(view: Pick<CardView, "attention" | "programStatus">): string {
+  if (view.attention === "agent-waiting") {
+    return view.programStatus === "blocked" ? "blocked, waiting for you" : "waiting for your input";
+  }
+  if (view.attention === "badge") {
+    return view.programStatus === "done" || view.programStatus === "failed"
+      ? `reported ${view.programStatus}`
+      : "needs attention";
+  }
+  return "";
 }
 
 /** Attention first (typed waiting above a bell), then live rows, then the
@@ -637,7 +657,7 @@ export class Dashboard {
     if (view.attention !== null) el.dataset.attention = view.attention;
     else delete el.dataset.attention;
     el.dataset.status = view.status;
-    el.title = view.attention === "agent-waiting" ? `${view.name} — waiting for your input` : view.name;
+    el.title = view.attention === "agent-waiting" ? `${view.name} — ${attentionText(view)}` : view.name;
     refs.dot.className = `chappa-status-dot ${view.status}${view.live ? "" : " dim"}`;
     refs.dot.title = view.status;
     refs.name.textContent = view.name;
@@ -646,7 +666,7 @@ export class Dashboard {
     refs.stats.title = view.statsTitle;
     refs.activity.style.display = view.activity ? "" : "none";
     refs.mark.textContent = view.attention === "agent-waiting" ? "⌨" : view.attention === "badge" ? "!" : "";
-    refs.mark.title = view.attention === "agent-waiting" ? "waiting for your input" : view.attention ? "needs attention" : "";
+    refs.mark.title = attentionText(view);
     refs.run.textContent = view.run ?? "";
     refs.run.title = view.runTitle ?? "";
     const text = view.summary?.text ?? null;

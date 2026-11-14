@@ -30,6 +30,7 @@ use term_core::actor::{
     self, epoch_ms, spawn_actor, spawn_actor_nopty, ActorConfig, FrameKind, MarkKind, TermEvent,
     TermHandle,
 };
+use term_core::status::ProgramStatus;
 
 use crate::agent_json::JsonAgent;
 use crate::event_ring::{EventRing, Sequenced};
@@ -85,6 +86,12 @@ pub const TERM_SESSION: &str = "term://session";
 /// replaced). Carries `{term_id, record_id, run_uuid, summary,
 /// summary_source}`.
 pub const TERM_SUMMARY: &str = "term://summary";
+
+/// The `term://program_status` event name: the running program reported
+/// what it is doing (`OSC 777;status;<state>`). Carries `{term_id,
+/// status}`. Only a change is broadcast; the row's status is cleared when
+/// the run exits (the webview drops it with the dead status).
+pub const TERM_PROGRAM_STATUS: &str = "term://program_status";
 
 /// Called by the pump when a terminal's child exits: `(term_id, exit_code,
 /// success)`. The project runner uses this to drive `auto_restart`
@@ -222,6 +229,11 @@ pub struct ControlSnapshot {
     /// The current run minus its tail (the tail is fetched through the
     /// records routes); `null` for an ephemeral row.
     pub last_run: Option<RunHead>,
+    /// What the running program last reported about itself
+    /// (`OSC 777;status`: working | blocked | done | failed | idle), `null`
+    /// when it never did or the run ended. `blocked` holds timer and
+    /// queued-prompt deliveries the way the ready gate's quiet window does.
+    pub program_status: Option<ProgramStatus>,
 }
 
 /// Which durable record a spawn belongs to, and which run it is. Passed INTO
@@ -431,6 +443,9 @@ pub struct RailRow {
     /// both `None` for an ephemeral row.
     pub record_id: Option<String>,
     pub last_run: Option<RunHead>,
+    /// What the running program last reported about itself
+    /// (`OSC 777;status`), `None` when it never did or the run ended.
+    pub program_status: Option<ProgramStatus>,
 }
 
 /// The registry's projection of one agent for the pure guards:
@@ -522,6 +537,9 @@ struct Entry {
     session: Option<Session>,
     /// The run's summary as last posted — the live row's `last_run.summary`.
     summary: Option<(String, SummarySource)>,
+    /// What the program last reported about itself (`OSC 777;status`).
+    /// Cleared at exit; a new run is a new entry, so it starts empty.
+    program_status: Option<ProgramStatus>,
 }
 
 struct Inner {
@@ -732,6 +750,26 @@ impl Registry {
             }
         }
         SummaryOutcome::Stored { binding, changed }
+    }
+
+    /// The program reported what it is doing. Kept only while the run is
+    /// open (starting or running). Returns whether the row's status changed
+    /// (`None` for an unknown or ended terminal), so a repeat is not news.
+    pub fn record_program_status(&self, id: TermId, state: ProgramStatus) -> Option<bool> {
+        let mut inner = self.inner.lock().ok()?;
+        let entry = inner.entries.get_mut(&id)?;
+        if !matches!(entry.status, ProcessStatus::Starting | ProcessStatus::Running) {
+            return None;
+        }
+        let changed = entry.program_status != Some(state);
+        entry.program_status = Some(state);
+        Some(changed)
+    }
+
+    /// What the program behind `id` last reported, `None` when it never did,
+    /// the run ended, or there is no such terminal.
+    pub fn program_status(&self, id: TermId) -> Option<ProgramStatus> {
+        self.inner.lock().ok()?.entries.get(&id)?.program_status
     }
 
     /// The provider name a session learned on entry `id` is filed under:
@@ -953,6 +991,7 @@ impl Registry {
             success: None,
             session: None,
             summary: None,
+            program_status: None,
         };
         inner.entries.insert(id, entry);
         // Entry in place before the pump starts, so the pump can never race a
@@ -1765,6 +1804,20 @@ fn spawn_pump(
                         push(term_id, seq, TERM_SUMMARY, &sink, &registry, summary_map(binding.as_ref(), &text, SummarySource::Osc));
                     }
                 }
+                TermEvent::Status(state) => {
+                    // The program reported what it is doing. Only a change
+                    // is news; the webview derives attention from it.
+                    if registry_owned.record_program_status(term_id, state) == Some(true) {
+                        push(
+                            term_id,
+                            seq,
+                            TERM_PROGRAM_STATUS,
+                            &sink,
+                            &registry,
+                            json_map(&[("status", json!(state))]),
+                        );
+                    }
+                }
                 TermEvent::Exited(status) => {
                     apply_status(
                         term_id,
@@ -1791,6 +1844,9 @@ fn spawn_pump(
                                 entry.exit_code = status.code;
                                 entry.ended_at_ms = Some(ended_at_ms);
                                 entry.success = Some(status.success);
+                                // An ended run reports nothing: a `blocked`
+                                // left behind would hold deliveries forever.
+                                entry.program_status = None;
                                 (entry.on_exit.clone(), entry.close_on_exit, Some(entry.handle.clone()))
                             } else {
                                 (None, false, None)
@@ -2064,6 +2120,7 @@ fn rail_row(id: TermId, entry: &Entry) -> RailRow {
         parent_process_id: entry.agent.as_ref().and_then(|meta| meta.parent_process_id),
         record_id: entry.record.clone(),
         last_run: entry.record.as_ref().map(|_| run_head(entry)),
+        program_status: entry.program_status,
     }
 }
 
@@ -2082,6 +2139,7 @@ fn control_snapshot(id: TermId, entry: &Entry) -> ControlSnapshot {
         close_on_exit: entry.close_on_exit,
         record_id: entry.record.clone(),
         last_run: entry.record.as_ref().map(|_| run_head(entry)),
+        program_status: entry.program_status,
     }
 }
 

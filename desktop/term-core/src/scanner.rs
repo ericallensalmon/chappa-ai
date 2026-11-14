@@ -1,8 +1,10 @@
 //! Byte-stream pre-scan for OSC 9/99/777/133 (ported from an
-//! earlier standalone spike). OSC 777 carries three sub-keys here: `notify`
+//! earlier standalone spike). OSC 777 carries four sub-keys here: `notify`
 //! (a desktop notification), `session` (the process names the
-//! conversation it is running, for a later resume) and `summary` (the
-//! process says what its run was about, shown after it exits).
+//! conversation it is running, for a later resume), `summary` (the
+//! process says what its run was about, shown after it exits) and `status`
+//! (the process says whether it is working, blocked on a person, done,
+//! failed or idle).
 //!
 //! `OscScanner` sits in front of `alacritty_terminal`'s parser (which drops
 //! these sequences) and tees OSC payloads out as structured events while
@@ -23,6 +25,7 @@
 //! the real parse pipeline.
 //!
 use crate::scan;
+use crate::status::ProgramStatus;
 
 /// Default cap on the OSC payload we buffer per sequence. Sequences longer
 /// than this are dropped (the event is not delivered) but still consumed so
@@ -116,6 +119,10 @@ pub enum OscEvent {
     /// (markdown, literal newlines allowed), shown after it exits. Already
     /// normalized by [`cap_summary`]; a later post replaces an earlier one.
     Summary { text: String },
+    /// `OSC 777;status;<working|blocked|done|failed|idle>`: the process
+    /// reports what it is doing. Only the exact lowercase word counts; any
+    /// other value yields no event.
+    Status { state: ProgramStatus },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,8 +364,8 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
         }
         b"777" => {
             // Windows Terminal notify: `777;notify;title;body`; our own
-            // `777;session;<id>` and `777;summary;<text>` ride the same
-            // number.
+            // `777;session;<id>`, `777;summary;<text>` and
+            // `777;status;<state>` ride the same number.
             let sub = params.next().unwrap_or_default();
             match sub {
                 b"notify" => {
@@ -374,6 +381,7 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
                     (!id.is_empty()).then_some(OscEvent::Session(id))
                 }
                 b"summary" => cap_summary(&lossy(&join_rest(&mut params))).map(|text| OscEvent::Summary { text }),
+                b"status" => ProgramStatus::parse(&join_rest(&mut params)).map(|state| OscEvent::Status { state }),
                 _ => None,
             }
         }

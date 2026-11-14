@@ -204,7 +204,7 @@ pub const ROUTES: &[Route] = &[
         method: "GET",
         path: "/processes",
         fields: &[],
-        description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`) or, when `last_run.session` holds the provider's session id, resumed (`POST /records/{record_id}/resume`); both are null for an ephemeral row. Stats fields will ride along here.",
+        description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`) or, when `last_run.session` holds the provider's session id, resumed (`POST /records/{record_id}/resume`); both are null for an ephemeral row. `program_status` is what the program last reported with `OSC 777;status;<working|blocked|done|failed|idle>` (null when it never did or the run ended); `blocked` is the same attention as an agent waiting for input and holds timer and queued-prompt deliveries. Stats fields will ride along here.",
         handler: list_processes,
     },
     Route {
@@ -1756,7 +1756,16 @@ pub fn render_api_doc() -> String {
          Close order for a docker json agent is the same as for a pty agent: container side first,\n\
          then the host `docker exec -i` client, then the pid file.\n\
          `prompt` on a json spawn is the first message; its `prompt_receipt` is the turn receipt\n\
-         (`seq_before`/`seq_after` are event-ring cursors there, `had_output_within_ms` = delivered).\n",
+         (`seq_before`/`seq_after` are event-ring cursors there, `had_output_within_ms` = delivered).\n\n\
+         **Program status.** Any process can say what it is doing by printing\n\
+         `OSC 777;status;<working|blocked|done|failed|idle>` (BEL or ST terminated; only the exact\n\
+         lowercase word counts): `printf '\\033]777;status;blocked\\007'`. The row's `program_status`\n\
+         carries the last report (null when it never reported, and cleared when the run exits), and a\n\
+         change broadcasts `term://program_status {term_id, status}`. `blocked` is attention at the\n\
+         agent-waiting rank and HOLDS deliveries through the ready gate (timer bodies and a queued spawn\n\
+         prompt) until the program reports anything else; at the cap the receipt says `reason: blocked`.\n\
+         `done` / `failed` badge the row like a bell until it is viewed; `working` / `idle` clear both.\n\
+         Raw `send_input` / `send_bytes` writes are not held.\n",
     );
     out.push_str("\n## Coordination\n\n");
     out.push_str(

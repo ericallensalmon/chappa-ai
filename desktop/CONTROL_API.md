@@ -32,7 +32,7 @@ not a public API. Localhost only, no CLI binary.
 |---|---|---|---|
 | `GET` | `/` | — | This route table as JSON (discoverability), plus `instance` {pid, config_dir} — which running chappa-ai answered, so two instances (or a stale one holding the port) are diagnosable. |
 | `GET` | `/identity` | `challenge` | The ONE route that needs no token: it lets a client check that this server is the app BEFORE sending the token to it (anything else can bind this port first). `challenge` = 32 random bytes as lowercase hex. Answers {addr, nonce, proof}: addr = the address this server bound, nonce = a random value fresh for this run (both also in the owner-only `<app-config>/control_endpoint`, written after each successful bind), proof = hex BLAKE3 keyed hash of `challenge 0x00 addr 0x00 nonce` under the key BLAKE3-derive_key("chappa-ai control-surface identity proof v1", token). A client recomputes the proof from its own token, checks addr/nonce against the endpoint file, and only then sends its authenticated request on the same keep-alive connection. |
-| `GET` | `/processes` | — | Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`) or, when `last_run.session` holds the provider's session id, resumed (`POST /records/{record_id}/resume`); both are null for an ephemeral row. Stats fields will ride along here. |
+| `GET` | `/processes` | — | Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`) or, when `last_run.session` holds the provider's session id, resumed (`POST /records/{record_id}/resume`); both are null for an ephemeral row. `program_status` is what the program last reported with `OSC 777;status;<working\|blocked\|done\|failed\|idle>` (null when it never did or the run ended); `blocked` is the same attention as an agent waiting for input and holds timer and queued-prompt deliveries. Stats fields will ride along here. |
 | `POST` | `/processes` | `command?`, `args?`, `cwd?`, `name?`, `cols?`, `rows?`, `env?` | Spawn a terminal. `command` + `args` reach the OS verbatim (never re-split); no command = the default shell; `env` = {NAME: value} applied over the inherited environment. cols/rows 1..=4096. Returns {id, name}. Ephemeral: the row has no record and vanishes on close. |
 | `GET` | `/processes/{id}` | — | One process row (same shape as the listing). has_output=false means still booting; child_alive=false means the child has exited. |
 | `GET` | `/processes/{id}/output` | `lines?`, `offset?` | Terminal text. Default = the WHOLE current screen. `lines`=N adds the last N scrollback lines above it; `offset`=O (with lines) returns a history-only window skipping the O most recent scrollback lines. No silent cap. |
@@ -153,6 +153,16 @@ Close order for a docker json agent is the same as for a pty agent: container si
 then the host `docker exec -i` client, then the pid file.
 `prompt` on a json spawn is the first message; its `prompt_receipt` is the turn receipt
 (`seq_before`/`seq_after` are event-ring cursors there, `had_output_within_ms` = delivered).
+
+**Program status.** Any process can say what it is doing by printing
+`OSC 777;status;<working|blocked|done|failed|idle>` (BEL or ST terminated; only the exact
+lowercase word counts): `printf '\033]777;status;blocked\007'`. The row's `program_status`
+carries the last report (null when it never reported, and cleared when the run exits), and a
+change broadcasts `term://program_status {term_id, status}`. `blocked` is attention at the
+agent-waiting rank and HOLDS deliveries through the ready gate (timer bodies and a queued spawn
+prompt) until the program reports anything else; at the cap the receipt says `reason: blocked`.
+`done` / `failed` badge the row like a bell until it is viewed; `working` / `idle` clear both.
+Raw `send_input` / `send_bytes` writes are not held.
 
 ## Coordination
 

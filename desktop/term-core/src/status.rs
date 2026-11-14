@@ -34,6 +34,44 @@ impl ProcessStatus {
     }
 }
 
+/// What a running program says it is doing (`OSC 777;status;<state>`),
+/// as opposed to [`ProcessStatus`], which is what the app observed of the
+/// process itself. `Blocked` means it is waiting on a person; `Done` /
+/// `Failed` report the end of a unit of work while the process lives on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgramStatus {
+    Working,
+    Blocked,
+    Done,
+    Failed,
+    Idle,
+}
+
+impl ProgramStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProgramStatus::Working => "working",
+            ProgramStatus::Blocked => "blocked",
+            ProgramStatus::Done => "done",
+            ProgramStatus::Failed => "failed",
+            ProgramStatus::Idle => "idle",
+        }
+    }
+
+    /// The exact lowercase word, nothing around it; anything else is `None`.
+    pub fn parse(word: &[u8]) -> Option<Self> {
+        match word {
+            b"working" => Some(ProgramStatus::Working),
+            b"blocked" => Some(ProgramStatus::Blocked),
+            b"done" => Some(ProgramStatus::Done),
+            b"failed" => Some(ProgramStatus::Failed),
+            b"idle" => Some(ProgramStatus::Idle),
+            _ => None,
+        }
+    }
+}
+
 /// A registry-observed event that can move a process between statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusEvent {

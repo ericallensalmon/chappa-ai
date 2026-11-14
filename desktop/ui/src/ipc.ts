@@ -741,6 +741,9 @@ export interface TerminalInfoDto {
    *  spawn_terminal, an opted-out agent). */
   record_id?: string | null;
   last_run?: RunHeadDto | null;
+  /** What the running program last reported about itself
+   *  (`OSC 777;status`); null when it never did or the run ended. */
+  program_status?: ProgramStatus | null;
 }
 
 export function listTerminals(): Promise<TerminalInfoDto[]> {
@@ -797,6 +800,21 @@ export interface TerminalSummaryEvent {
   run_uuid: string | null;
   summary: string;
   summary_source: SummarySource;
+}
+
+/** What a running program says it is doing (`OSC 777;status;<state>`):
+ *  `blocked` = waiting on a person, `done` / `failed` = a unit of work
+ *  ended while the process lives on. */
+export type ProgramStatus = "working" | "blocked" | "done" | "failed" | "idle";
+
+/** A `term://program_status` payload: the program reported a different
+ *  status. The backend clears it when the run exits (no event; the dead
+ *  status drops it here too). */
+export interface TerminalProgramStatusEvent {
+  event: string;
+  term_id: number;
+  seq: number;
+  status: ProgramStatus;
 }
 
 /** A `term://closed` broadcast payload: `{term_id, reason}` where

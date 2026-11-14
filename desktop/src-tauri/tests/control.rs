@@ -413,6 +413,7 @@ fn the_control_row_keeps_its_exact_wire_shape() {
             "last_run",
             "name",
             "output_bytes",
+            "program_status",
             "project_id",
             "record_id",
             "rows",

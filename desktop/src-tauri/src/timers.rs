@@ -1400,6 +1400,7 @@ impl Deliverer for PromptDeliverer {
         let detail = match receipt.reason.as_deref() {
             Some("exited") => Some(PROCESS_GONE.to_owned()),
             Some("not-ready") => Some(format!("not ready within {timeout_ms} ms")),
+            Some("blocked") => Some(format!("held: the process reported blocked for {timeout_ms} ms")),
             _ => None,
         };
         Delivery {
