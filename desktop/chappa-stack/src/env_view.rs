@@ -10,11 +10,12 @@
 //! | `probe` | the component's probe rule, run while it runs |
 //! | `links` | its `http(s)` outputs; the `url` output is the browser one |
 //! | `hint` | why a red or amber state is what it is |
-//! | `badges` | staleness (`newer prebuilt`, `behind 2` …), "no data-safety check" on an unscanned persistent component, the mode |
-//! | `actions` | the component's verbs, its `logs` terminal, its links |
-//! | `alerts` | red components with their cause, engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check |
-//! | `facts` | the stack (instance, slot, port block, bound item, channel, with the stack-wide actions), engines and versions, the memory budget, relay listeners, the data-safety rules hash |
-//! | `banners` | definition warnings or errors; the hosts-file fix |
+//! | `badges` | staleness (`newer prebuilt`, `behind 2` …), "no data-safety check" on an unscanned persistent component, the data-safety state of a checked one, the mode |
+//! | `actions` | the component's verbs, its data-safety check, its `logs` terminal, its links |
+//! | `alerts` | red components with their cause, engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check, data that is not clean (`bad`) or not checked (`warn` under `unscanned: warn`) |
+//! | `facts` | the stack (instance, slot, port block, bound item, channel, with the stack-wide actions), engines and versions, the memory budget, relay listeners, data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
+//! | `banners` | definition warnings or errors; the hosts-file fix; agents blocked by data safety (with the acknowledge action) |
+//! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //!
 //! `summary` is left out: the view counts the components itself, and a
 //! summary is only worth sending when it knows more than the rows do.
@@ -34,6 +35,7 @@ use stack_core::probe::ProbeOutcome;
 use stack_core::runner::{ComponentReport, Observation};
 
 use crate::actions::{logs_action, Offered};
+use crate::data_safety::{self, InstanceSafety, SafetyState};
 use crate::procs::ProcessTable;
 use crate::project::Loaded;
 use crate::relay::RelayState;
@@ -53,7 +55,7 @@ pub struct EnvInputs<'a> {
     pub relay: Option<RelayState>,
     pub processes: &'a ProcessTable,
     pub exe: &'a Path,
-    pub rules_hash: Option<String>,
+    pub safety: &'a InstanceSafety,
     pub now_utc: &'a str,
 }
 
@@ -284,12 +286,39 @@ fn component(inp: &EnvInputs<'_>, r: &ComponentReport) -> Value {
         })
         .collect();
     if let Some(d) = def {
-        if d.persistence.is_some() && d.data_safety.is_none() {
+        if d.persistence.is_some() && !data_safety::has_check(d) {
             badges.push(badge(
                 "no data-safety check",
                 "warn",
                 Some("This component keeps data and nothing checks that data is scrubbed; it counts as sensitive.".into()),
             ));
+        }
+    }
+    if let Some(cs) = inp.safety.component(id).filter(|c| c.has_check) {
+        let verdict = cs.entry.as_ref().and_then(|e| e.verdict.as_ref());
+        match cs.state {
+            SafetyState::NotClean => badges.push(badge(
+                "data not clean",
+                "bad",
+                verdict.map(|v| data_safety::problems(v, true).join("; ")),
+            )),
+            SafetyState::Error => {
+                badges.push(badge("data-safety check failed", "bad", cs.error.clone()))
+            }
+            SafetyState::Acknowledged => badges.push(badge(
+                "data acknowledged",
+                "warn",
+                cs.entry
+                    .as_ref()
+                    .and_then(|e| e.ack.as_ref())
+                    .map(|a| format!("Acknowledged by {} at {}: {}", a.who, a.at_utc, a.why)),
+            )),
+            SafetyState::Unscanned => badges.push(badge(
+                "data not checked yet",
+                "warn",
+                Some("Its data-safety check has not run since it started.".into()),
+            )),
+            SafetyState::Clean => {}
         }
     }
     if !badges.is_empty() {
@@ -301,6 +330,9 @@ fn component(inp: &EnvInputs<'_>, r: &ComponentReport) -> Value {
         .filter(|o| o.key.as_deref() == Some(id.as_str()))
         .map(|o| o.to_json(&inp.obs.state.fingerprint()))
         .collect();
+    if inp.safety.checkable.iter().any(|c| c == id) {
+        actions.push(data_safety::check_action(Some(id)));
+    }
     let process_log: Option<PathBuf> = inp.processes.processes.get(id).map(|e| e.log.clone());
     if let Some(l) = logs_action(
         inp.inst,
@@ -463,14 +495,157 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
         sections.push(json!({ "id": "relay", "title": "Relay", "rows": rows }));
     }
 
-    if let Some(hash) = &inp.rules_hash {
-        sections.push(json!({
-            "id": "data-safety",
-            "title": "Data safety",
-            "rows": [row("Rules", format!("hash {}", &hash[..hash.len().min(16)]))],
-        }));
+    if inp.safety.configured {
+        sections.push(data_safety_facts(inp.safety));
     }
     sections
+}
+
+fn short_hash(h: &str) -> &str {
+    &h[..h.len().min(12)]
+}
+
+fn state_words(s: SafetyState) -> &'static str {
+    match s {
+        SafetyState::Clean => "clean",
+        SafetyState::NotClean => "not clean",
+        SafetyState::Acknowledged => "acknowledged",
+        SafetyState::Unscanned => "not checked",
+        SafetyState::Error => "cannot be judged",
+    }
+}
+
+fn data_safety_facts(s: &InstanceSafety) -> Value {
+    let wire = s.wire();
+    let mut rows = vec![row("State", state_words(s.state))];
+    rows.push(row(
+        "Policy",
+        format!(
+            "on findings: {} · unscanned: {}",
+            s.on_finding, s.unscanned_policy
+        ),
+    ));
+    rows.push(row(
+        "Last scan",
+        s.last_scan().unwrap_or("never").to_string(),
+    ));
+    let marker = &wire["marker"];
+    if marker.is_object() {
+        let mut parts = vec![if marker["scrubbed"] == true {
+            "scrubbed".to_string()
+        } else {
+            "not attested".to_string()
+        }];
+        if let Some(v) = marker["version"].as_str() {
+            parts.push(format!("version {v}"));
+        }
+        if let Some(at) = marker["at"].as_str() {
+            parts.push(format!("at {at}"));
+        }
+        rows.push(row("Marker", parts.join(" · ")));
+    }
+    let rules = match (&s.current_rules, s.rules_hash()) {
+        (None, _) => "none configured".to_string(),
+        (Some(Err(e)), _) => format!("cannot be read: {e}"),
+        (Some(Ok(now)), Some(used)) if &used != now => format!(
+            "hash {} (changed since the last scan, which used {})",
+            short_hash(now),
+            short_hash(&used)
+        ),
+        (Some(Ok(now)), _) => format!("hash {}", short_hash(now)),
+    };
+    rows.push(row("Rules", rules));
+    if let Some(a) = wire["ack"].as_object() {
+        rows.push(row(
+            "Acknowledged",
+            format!(
+                "by {} at {}: {}",
+                a["by"].as_str().unwrap_or_default(),
+                a["atUtc"].as_str().unwrap_or_default(),
+                a["note"].as_str().unwrap_or_default()
+            ),
+        ));
+    }
+    for c in &s.components {
+        let detail = match (c.state, c.entry.as_ref().and_then(|e| e.verdict.as_ref())) {
+            (SafetyState::Error, _) => c.error.clone(),
+            (SafetyState::Unscanned, _) if !c.has_check => {
+                Some("keeps data; no check declared".to_string())
+            }
+            (SafetyState::Unscanned, _) => Some("not checked since it started".to_string()),
+            (_, Some(v)) => Some(data_safety::verdict_line(v)),
+            _ => None,
+        };
+        let value = match detail {
+            Some(d) if !d.starts_with(state_words(c.state)) => {
+                format!("{} · {d}", state_words(c.state))
+            }
+            Some(d) => d,
+            None => state_words(c.state).to_string(),
+        };
+        rows.push(row(&c.id, value));
+    }
+    let mut actions = Vec::new();
+    if !s.checkable.is_empty() {
+        actions.push(data_safety::check_action(None));
+    }
+    if let Some(a) = s.ack_action() {
+        actions.push(a);
+    }
+    let mut section = json!({ "id": "data-safety", "title": "Data safety", "rows": rows });
+    if !actions.is_empty() {
+        section["actions"] = actions.into();
+    }
+    section
+}
+
+/// One alert per component whose data is not clean, cannot be judged, or
+/// is not checked.
+fn data_safety_alerts(s: &InstanceSafety) -> Vec<Value> {
+    let mut out = Vec::new();
+    for c in &s.components {
+        let effect = data_safety::policy_effect(c.policy)
+            .map(|e| format!(" — {e}"))
+            .unwrap_or_default();
+        let (text, severity) = match c.state {
+            SafetyState::NotClean => {
+                let why = c
+                    .entry
+                    .as_ref()
+                    .and_then(|e| e.verdict.as_ref())
+                    .map(|v| data_safety::problems(v, false).join("; "))
+                    .unwrap_or_else(|| "not clean".into());
+                (format!("{}: {why}{effect}", c.id), "bad")
+            }
+            SafetyState::Error => (
+                format!(
+                    "{}: the data-safety check could not be judged ({}){effect}",
+                    c.id,
+                    c.error.as_deref().unwrap_or("no verdict")
+                ),
+                "bad",
+            ),
+            SafetyState::Unscanned => {
+                let why = if c.has_check {
+                    "has a data-safety check that has not run since it started"
+                } else {
+                    "keeps data and has no data-safety check"
+                };
+                let severity = if c
+                    .policy
+                    .is_some_and(stack_core::safety::Policy::blocks_agents)
+                {
+                    "bad"
+                } else {
+                    "warn"
+                };
+                (format!("{} {why}{effect}", c.id), severity)
+            }
+            SafetyState::Clean | SafetyState::Acknowledged => continue,
+        };
+        out.push(json!({ "text": text, "severity": severity, "componentId": c.id }));
+    }
+    out
 }
 
 fn alerts(inp: &EnvInputs<'_>, components: &[Value]) -> Vec<Value> {
@@ -526,6 +701,7 @@ fn alerts(inp: &EnvInputs<'_>, components: &[Value]) -> Vec<Value> {
         }
         out.push(json!({ "text": note, "severity": "warn" }));
     }
+    out.extend(data_safety_alerts(inp.safety));
     out
 }
 
@@ -581,6 +757,26 @@ fn banners(inp: &EnvInputs<'_>) -> Vec<Value> {
             out.push(b);
         }
     }
+    let s = inp.safety;
+    if s.blocks_agents() {
+        let lines: Vec<String> = data_safety_alerts(s)
+            .iter()
+            .filter_map(|a| a["text"].as_str().map(str::to_string))
+            .collect();
+        let mut b = json!({
+            "id": "data-safety",
+            "tone": "bad",
+            "title": format!(
+                "Agents are blocked on {}: its data is not known to be scrubbed",
+                s.instance
+            ),
+            "lines": lines,
+        });
+        if let Some(a) = s.ack_action() {
+            b["actions"] = json!([a]);
+        }
+        out.push(b);
+    }
     out
 }
 
@@ -618,13 +814,28 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
         "facts": facts(inp),
         "alerts": alerts,
         "banners": banners(inp),
+        "dataSafety": inp.safety.wire(),
     })
 }
 
 /// A payload for a project whose definition cannot be loaded: no rows,
-/// one banner saying why.
-pub fn unavailable(reason: &str, now_utc: &str) -> Value {
+/// one banner saying why, and a data-safety block that says it cannot
+/// tell (`instance` is `<stack>/<slot>` as configured).
+pub fn unavailable(reason: &str, now_utc: &str, instance: &str) -> Value {
     json!({
+        "dataSafety": {
+            "instance": instance,
+            "state": SafetyState::Error.as_str(),
+            "policy": null,
+            "blocksAgents": false,
+            "lastScanUtc": null,
+            "rulesHash": null,
+            "marker": null,
+            "findings": [],
+            "unscanned": [],
+            "ack": null,
+            "ackActionId": data_safety::ACK_ACTION_ID,
+        },
         "freshness": { "asOf": now_utc, "errors": [{ "source": "definition", "message": reason }] },
         "groups": [],
         "components": [],

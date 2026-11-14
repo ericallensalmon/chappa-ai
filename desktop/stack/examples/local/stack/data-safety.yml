@@ -1,0 +1,64 @@
+# Data-safety detection rules for the example stack: a copy of the starter
+# file (`desktop/stack/data-safety.starter.yml`) with two rules turned on,
+# `email-real-domain` and `card-number`. The stack points at it with
+# `dataSafety: { rules: stack/data-safety.yml }`.
+# A component's `sample` hook prints rows of sampled values; each rule below
+# counts how many values in each table.column look like real personal data.
+# Findings carry the rule, table, column and count, never the values.
+#
+# Remove the leading `#` from a rule's lines to turn it on, then adjust it
+# to your schema.
+#
+# Keys per rule:
+#   id         unique name (letters, digits, `.`, `_`, `-`)
+#   pattern    regex; every match in a value is a candidate
+#   allow      regexes tested against the matched text; a hit drops it
+#   threshold  values per table.column before it counts (default 1)
+#   validate   luhn | iban | email-mx-shape, applied to each candidate
+#   columns    regexes on the whole "table.column" name; omit for all
+#   severity   warn | bad (default bad)
+#
+# Patterns have no look-around or backreferences (matching stays linear in
+# the input). Match broadly with `pattern` and exclude with `allow`.
+rules:
+  # An email address on a domain that is not a test or documentation one.
+  - id: email-real-domain
+    pattern: '(?i)[^@\s]+@[^@\s]+\.[a-z]{2,}'
+    allow: ['(?i)@example\.(com|org|net)$', '(?i)@test\.invalid$']
+    threshold: 1
+#
+#  # The same, decided by shape instead of an allow list: any address that
+#  # could receive mail (test TLDs and documentation domains never can).
+#  - id: email-deliverable
+#    pattern: '[^@\s<>,;"()]+@[^@\s<>,;"()]+'
+#    validate: email-mx-shape
+#
+  # A payment card number: 13 to 19 digits that pass the Luhn check.
+  - id: card-number
+    pattern: '\b(?:\d[ -]?){13,19}\b'
+    validate: luhn
+#
+#  # A value that is a bank account number in IBAN form (the country's
+#  # length and the mod-97 check). No pattern: the whole value is checked.
+#  - id: iban
+#    validate: iban
+#
+#  # A US social security number, minus the ranges never issued.
+#  - id: us-ssn
+#    pattern: '\b\d{3}-\d{2}-\d{4}\b'
+#    allow: ['^000-', '^666-', '^9\d\d-', '^\d{3}-00-', '-0000$']
+#
+#  # A phone number, minus the 555 numbers reserved for fiction. A few
+#  # look-alikes (order numbers, timestamps) are noise, hence the threshold;
+#  # add `columns:` to look only at phone columns.
+#  - id: phone
+#    pattern: '\+?\d[\d ().-]{8,}\d'
+#    allow: ['^\+?1?[ .-]?\(?555\)?']
+#    threshold: 5
+#
+#  # A domain-specific identifier: here, any external id in the customers
+#  # table that is not one of the generated TEST- ids.
+#  - id: custom-customer-ids
+#    columns: ['customers\..*_external_id']
+#    pattern: '.+'
+#    allow: ['^TEST-']

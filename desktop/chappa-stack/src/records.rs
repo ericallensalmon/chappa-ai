@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `<id>.json` | the action, target, slot, the exact argv, `mutates`, status, exit code, start and end times, the paths of the other two, and the stored work (the plan the user approved) |
 //! | `<id>.log` | the console output (the job's own copy; the pane shows the same lines live) |
-//! | `<id>.result.json` | the structured outcome the views read: the steps with their exit codes and times, the components' resolved provenance, the notes |
+//! | `<id>.result.json` | the structured outcome the views read: the steps with their exit codes and times, the components' resolved provenance, the data-safety verdicts (counts only), the notes |
 //!
 //! Ids are `j<UTC>-<random>` (`j20261114T120000Z-3fa9c1`), so a folder
 //! listing sorts by time. Retention keeps a record while it is younger
@@ -55,6 +55,13 @@ pub enum JobWork {
     Restart { component: String },
     /// Remove unreferenced images and prune build caches.
     Gc,
+    /// Run the data-safety checks of these components now, record the
+    /// verdicts and apply the stack's policy (see [`crate::data_safety`]).
+    DataSafety {
+        components: Vec<String>,
+        /// What asked for it: `manual` or `every`.
+        trigger: String,
+    },
 }
 
 /// The app's report when the pane that ran the job exits.
@@ -144,6 +151,10 @@ pub struct JobResult {
     pub provenance: IndexMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The data-safety verdict per component checked by this job: counts
+    /// and statuses, never a sampled value.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub data_safety: IndexMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

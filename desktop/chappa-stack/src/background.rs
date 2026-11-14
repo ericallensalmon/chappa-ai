@@ -10,6 +10,9 @@
 //!   the reachability alerts: `docker info` alone can take seconds, so the
 //!   same refresher asks every [`FACTS_TTL`].
 //!
+//! - **Periodic work** registered with [`Background::add_periodic`]: the
+//!   source's `every:` data-safety schedule looks here for due checks.
+//!
 //! Status registers what it wants on every call ([`Background::want_digest`],
 //! [`Background::want_engine`]); the refresher picks it up within
 //! [`TICK`]. Nothing here blocks a reader for longer than a lock held
@@ -18,7 +21,7 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,9 +60,16 @@ struct Caches {
     facts: IndexMap<String, FactsEntry>,
 }
 
+/// Work the refresher does on every pass, after the caches. It must not
+/// wait long: a slow task delays the next digest and facts refresh.
+pub trait Periodic {
+    fn tick(&self);
+}
+
 /// The shared caches and the refresher that fills them.
 pub struct Background {
     caches: Mutex<Caches>,
+    periodic: Mutex<Vec<Weak<dyn Periodic + Send + Sync>>>,
     wake: Condvar,
     stop: AtomicBool,
     digest_ttl: Duration,
@@ -74,6 +84,7 @@ impl Background {
     pub fn with_ttls(digest_ttl: Duration, facts_ttl: Duration) -> Arc<Background> {
         Arc::new(Background {
             caches: Mutex::new(Caches::default()),
+            periodic: Mutex::new(Vec::new()),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             digest_ttl,
@@ -145,6 +156,26 @@ impl Background {
                 e.fetched = Some(Instant::now());
             }
         }
+        let tasks: Vec<Arc<dyn Periodic + Send + Sync>> = {
+            let mut list = self.periodic.lock().unwrap_or_else(|p| p.into_inner());
+            list.retain(|w| w.strong_count() > 0);
+            list.iter().filter_map(Weak::upgrade).collect()
+        };
+        for t in tasks {
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            t.tick();
+        }
+    }
+
+    /// Run `task` on every pass while it lives (held weakly, so a dropped
+    /// source stops being ticked).
+    pub fn add_periodic(&self, task: Weak<dyn Periodic + Send + Sync>) {
+        self.periodic
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(task);
     }
 
     /// Queue a channel reference for the refresher (no-op when known).

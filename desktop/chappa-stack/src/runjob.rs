@@ -21,8 +21,19 @@
 //! 5. on a failed step the remaining steps are skipped, except the intent
 //!    record, which is still written: the user asked for these components
 //!    to run, so one that did not start shows as a problem, not as idle;
-//! 6. `<id>.result.json`, then the record's final status; the exit code is
-//!    0 done, 1 a step failed, 2 refused before running anything.
+//! 6. the data-safety checks of the components the plan started (see
+//!    [`crate::data_safety`]): under `block-up` right after each start
+//!    step, so a verdict that is not clean ends the job before anything
+//!    else starts; otherwise once the steps are done. A component the
+//!    policy says must not stay up (`stop`, `block-up`) is stopped through
+//!    the planner, its volume kept, and the job fails;
+//! 7. `<id>.result.json`, then the record's final status; the exit code is
+//!    0 done, 1 a step failed (or data safety stopped something), 2
+//!    refused before running anything.
+//!
+//! A `data-safety-check` job runs the checks of the components it names
+//! that are running, records the verdicts, applies `stop` / `block-up`
+//! the same way, and fails when any verdict is not clean.
 
 use std::fs::File;
 use std::io::Write;
@@ -32,14 +43,17 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use stack_core::checks::EngineChecker;
+use stack_core::definition::ScanWhen;
 use stack_core::definition::StacksDocument;
-use stack_core::driver::{Check, Outcome};
+use stack_core::driver::{Check, Outcome, ResolvedInstance};
 use stack_core::images::ProvenanceCache;
 use stack_core::intent::utc_now;
 use stack_core::jobs::{JobStep, LocalStep, RunBlock};
-use stack_core::planner::{PlanError, Step, Verb};
-use stack_core::runner::{ApplyOptions, RunnerError};
+use stack_core::planner::{Change, PlanError, Step, Verb};
+use stack_core::runner::{ApplyOptions, RunnerError, StackRunner};
+use stack_core::safety::Policy;
 
+use crate::data_safety::{self, CheckEntry, SafetyState, Trigger, AFTER_UP_ATTEMPTS};
 use crate::procs::{log_path, ProcessEntry, ProcessTable};
 use crate::project::Loaded;
 use crate::records::{JobRecord, JobResult, JobStatus, JobWork, StepOutcome};
@@ -123,6 +137,7 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
         components: IndexMap::new(),
         provenance: IndexMap::new(),
         notes: Vec::new(),
+        data_safety: IndexMap::new(),
         error: None,
     };
     let code = match execute(world, project_dir, &work_dir, &rec, &mut out, &mut result) {
@@ -273,6 +288,23 @@ fn execute(
             })?;
             vec![JobStep::run(component, run)]
         }
+        JobWork::DataSafety {
+            components,
+            trigger,
+        } => {
+            return data_safety_job(
+                world,
+                &loaded,
+                &runner,
+                &inst,
+                work_dir,
+                rec,
+                components,
+                Trigger::parse(trigger),
+                out,
+                result,
+            );
+        }
         JobWork::Gc => {
             out.say("listing images…");
             let plans = runner
@@ -296,15 +328,116 @@ fn execute(
     }
     let forget_processes =
         matches!(&rec.work, JobWork::Plan { plan, .. } if plan.verb == Verb::Down);
-    run_steps(
-        world,
-        work_dir,
-        &inst.id,
-        &steps,
-        forget_processes,
-        out,
-        result,
-    )?;
+    // Data-safety checks after up: under `block-up` right after each start
+    // step (a verdict that is not clean ends the job there), otherwise once
+    // the steps are done.
+    let (gated, after_up): (Vec<String>, Vec<String>) = match &rec.work {
+        JobWork::Plan { plan, .. } => {
+            let started: Vec<&str> = plan
+                .steps
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Start { component } | Step::Recreate { component, .. } => {
+                        Some(component.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let wanted: Vec<String> = data_safety::components_for(&loaded, ScanWhen::AfterUp)
+                .into_iter()
+                .filter(|c| started.contains(&c.as_str()))
+                .collect();
+            if data_safety::blocks_up(&loaded) {
+                (wanted, Vec::new())
+            } else {
+                (Vec::new(), wanted)
+            }
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    let mut started_ok: Vec<String> = Vec::new();
+    let mut checked: Vec<(String, CheckEntry)> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
+    let steps_result = {
+        let mut gate = |step: &JobStep, out: &mut Out<'_>| -> Option<String> {
+            let c = start_of(step)?;
+            if !started_ok.iter().any(|s| s == c) {
+                started_ok.push(c.to_string());
+            }
+            if !gated.iter().any(|g| g == c) || checked.iter().any(|(d, _)| d == c) {
+                return None;
+            }
+            let entry = check_now(
+                world,
+                &loaded,
+                &runner,
+                &inst,
+                work_dir,
+                c,
+                Trigger::AfterUp,
+                &rec.id,
+                AFTER_UP_ATTEMPTS,
+                out,
+            );
+            let (state, _) = data_safety::judged(&loaded, &entry);
+            checked.push((c.to_string(), entry));
+            if matches!(state, SafetyState::NotClean | SafetyState::Error) {
+                blocked.push(c.to_string());
+                Some(format!(
+                    "data safety: {c} is not clean, so up stops before the instance is ready (policy block-up)"
+                ))
+            } else {
+                None
+            }
+        };
+        run_steps(
+            world,
+            work_dir,
+            &inst.id,
+            &steps,
+            forget_processes,
+            out,
+            result,
+            &mut gate,
+        )
+    };
+    for c in &after_up {
+        if started_ok.contains(c) && !checked.iter().any(|(d, _)| d == c) {
+            let entry = check_now(
+                world,
+                &loaded,
+                &runner,
+                &inst,
+                work_dir,
+                c,
+                Trigger::AfterUp,
+                &rec.id,
+                AFTER_UP_ATTEMPTS,
+                out,
+            );
+            checked.push((c.clone(), entry));
+        }
+    }
+    let mut to_stop = blocked.clone();
+    let mut stopped_by_policy = Vec::new();
+    for (c, entry) in &checked {
+        let (state, policy) = data_safety::judged(&loaded, entry);
+        result
+            .data_safety
+            .insert(c.clone(), data_safety::result_value(entry, state));
+        let bad = matches!(state, SafetyState::NotClean | SafetyState::Error);
+        if bad && policy == Some(Policy::Stop) && !to_stop.contains(c) {
+            to_stop.push(c.clone());
+            stopped_by_policy.push(c.clone());
+        }
+    }
+    let stop_result = if to_stop.is_empty() {
+        Ok(())
+    } else {
+        stop_for_data_safety(world, &runner, &inst, work_dir, &to_stop, out, result)
+    };
+    steps_result?;
+    stop_result?;
     if let JobWork::Plan { plan, .. } = &rec.work {
         // A process that was already stopped gets no stop step from `down`;
         // its entry goes with the rest of the instance.
@@ -331,6 +464,216 @@ fn execute(
             serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
         );
     }
+    if !stopped_by_policy.is_empty() {
+        return Err((
+            EXIT_FAILED,
+            format!(
+                "data safety: {} not clean, so stopped (policy stop; the volume is kept)",
+                stopped_by_policy.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The component a run step starts, if it is a start (`compose up` of a
+/// container, or a process component's start).
+fn start_of(step: &JobStep) -> Option<&str> {
+    match step {
+        JobStep::Run { run, component }
+            if run.env.contains_key(INSTANCE_ENV) || StepKind::of(run) == StepKind::ComposeUp =>
+        {
+            Some(component)
+        }
+        _ => None,
+    }
+}
+
+/// Check one component now and record the verdict, saying what came of it
+/// (never what a hook printed).
+#[allow(clippy::too_many_arguments)]
+fn check_now(
+    world: &World,
+    loaded: &Loaded,
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    work_dir: &Path,
+    component: &str,
+    trigger: Trigger,
+    job_id: &str,
+    attempts: u32,
+    out: &mut Out<'_>,
+) -> CheckEntry {
+    out.say(&format!(
+        "data safety: checking {component} ({})",
+        trigger.as_str()
+    ));
+    let table = ProcessTable::load(work_dir, &inst.id);
+    let obs = runner.observe(inst, &table.statuses(&*world.procs)).ok();
+    let run = data_safety::run_check(
+        world,
+        loaded,
+        inst,
+        obs.as_ref(),
+        component,
+        attempts,
+        &mut |l| out.say(l),
+    );
+    let now = world.clock.now_utc();
+    let entry = match data_safety::record(
+        work_dir,
+        &inst.id,
+        component,
+        &run,
+        trigger,
+        Some(job_id),
+        &now,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            out.say(&format!("  cannot record the verdict: {e}"));
+            CheckEntry {
+                scanned_utc: now,
+                trigger: trigger.as_str().to_string(),
+                job_id: Some(job_id.to_string()),
+                verdict: run.verdict.clone(),
+                error: run.error.clone(),
+                ack: None,
+            }
+        }
+    };
+    match (&entry.verdict, &entry.error) {
+        (Some(v), _) => {
+            let mut line = format!(
+                "{} {component}: {}",
+                if v.clean { "✓" } else { "✗" },
+                data_safety::verdict_line(v)
+            );
+            if let Some(a) = &entry.ack {
+                line.push_str(&format!(" (still acknowledged by {})", a.who));
+            }
+            out.say(&line);
+        }
+        (None, e) => out.say(&format!(
+            "✗ {component}: the check could not be judged: {}",
+            e.as_deref().unwrap_or("no verdict")
+        )),
+    }
+    entry
+}
+
+/// Stop components whose data is not clean, through the planner, keeping
+/// their volumes.
+fn stop_for_data_safety(
+    world: &World,
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    work_dir: &Path,
+    components: &[String],
+    out: &mut Out<'_>,
+    result: &mut JobResult,
+) -> Result<(), Failure> {
+    out.say(&format!(
+        "data safety: stopping {} (the volume is kept)",
+        components.join(", ")
+    ));
+    let table = ProcessTable::load(work_dir, &inst.id);
+    let obs = runner
+        .observe(inst, &table.statuses(&*world.procs))
+        .map_err(|e| {
+            (
+                EXIT_FAILED,
+                format!("cannot look at the stack to stop it: {e}"),
+            )
+        })?;
+    let change = Change::StopComponents {
+        components: components.to_vec(),
+    };
+    let plan = runner
+        .plan(&obs, &change)
+        .map_err(|e| (EXIT_FAILED, format!("cannot plan the stop: {e}")))?;
+    let applied = runner
+        .apply(inst, &obs, &plan, &ApplyOptions::default())
+        .map_err(|e| (EXIT_FAILED, format!("cannot apply the stop: {e}")))?;
+    for s in &applied.steps {
+        out.say(&format!("  · {}", s.describe()));
+    }
+    run_steps(
+        world,
+        work_dir,
+        &inst.id,
+        &applied.steps,
+        false,
+        out,
+        result,
+        &mut |_, _| None,
+    )
+}
+
+/// A `data-safety-check` job: check each named component that runs,
+/// record the verdicts, and stop the ones `stop` (or `block-up`, which
+/// outside `up` means the same) says must not stay up. Fails when any is
+/// not clean.
+#[allow(clippy::too_many_arguments)]
+fn data_safety_job(
+    world: &World,
+    loaded: &Loaded,
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    work_dir: &Path,
+    rec: &JobRecord,
+    components: &[String],
+    trigger: Trigger,
+    out: &mut Out<'_>,
+    result: &mut JobResult,
+) -> Result<(), Failure> {
+    let table = ProcessTable::load(work_dir, &inst.id);
+    let obs = runner
+        .observe(inst, &table.statuses(&*world.procs))
+        .map_err(|e| (EXIT_REFUSED, e.to_string()))?;
+    let mut checked = Vec::new();
+    for c in components {
+        let declared = loaded
+            .stack
+            .components
+            .get(c)
+            .is_some_and(data_safety::has_check);
+        if !declared {
+            out.say(&format!("· {c}: declares no data-safety check"));
+            continue;
+        }
+        if !obs.actual.get(c).is_some_and(|a| a.running) {
+            out.say(&format!("· {c}: not running; nothing to check"));
+            continue;
+        }
+        let entry = check_now(
+            world, loaded, runner, inst, work_dir, c, trigger, &rec.id, 1, out,
+        );
+        checked.push((c.clone(), entry));
+    }
+    let mut to_stop = Vec::new();
+    let mut bad = Vec::new();
+    for (c, entry) in &checked {
+        let (state, policy) = data_safety::judged(loaded, entry);
+        result
+            .data_safety
+            .insert(c.clone(), data_safety::result_value(entry, state));
+        if matches!(state, SafetyState::NotClean | SafetyState::Error) {
+            bad.push(c.clone());
+            if matches!(policy, Some(Policy::Stop | Policy::BlockUp)) {
+                to_stop.push(c.clone());
+            }
+        }
+    }
+    if !to_stop.is_empty() {
+        stop_for_data_safety(world, runner, inst, work_dir, &to_stop, out, result)?;
+    }
+    if !bad.is_empty() {
+        return Err((
+            EXIT_FAILED,
+            format!("data safety: {} not clean", bad.join(", ")),
+        ));
+    }
     Ok(())
 }
 
@@ -338,6 +681,10 @@ fn is_intent_write(step: &JobStep) -> bool {
     matches!(step, JobStep::Local { step: LocalStep::WriteFile { what, .. } } if what == "intent record")
 }
 
+/// Run steps in order. After each step that succeeded, `gate` may end the
+/// run with a reason (the remaining steps are then skipped like after a
+/// failure).
+#[allow(clippy::too_many_arguments)]
 fn run_steps(
     world: &World,
     work_dir: &Path,
@@ -346,6 +693,7 @@ fn run_steps(
     forget_processes: bool,
     out: &mut Out<'_>,
     result: &mut JobResult,
+    gate: &mut dyn FnMut(&JobStep, &mut Out<'_>) -> Option<String>,
 ) -> Result<(), Failure> {
     let mut failure: Option<String> = None;
     for step in steps {
@@ -363,13 +711,21 @@ fn run_steps(
         let outcome = run_step(world, work_dir, instance, step, forget_processes, out);
         let seconds = (t.elapsed().as_secs_f64() * 10.0).round() / 10.0;
         match outcome {
-            Ok(code) => result.steps.push(StepOutcome {
-                step: step.describe(),
-                status: "done".into(),
-                exit_code: code,
-                seconds,
-                error: None,
-            }),
+            Ok(code) => {
+                result.steps.push(StepOutcome {
+                    step: step.describe(),
+                    status: "done".into(),
+                    exit_code: code,
+                    seconds,
+                    error: None,
+                });
+                if let Some(why) = gate(step, out) {
+                    out.say(&format!("✗ {why}"));
+                    if failure.is_none() {
+                        failure = Some(why);
+                    }
+                }
+            }
             Err((code, why)) => {
                 out.say(&format!("✗ {}: {why}", step.describe()));
                 result.steps.push(StepOutcome {

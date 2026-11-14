@@ -104,7 +104,7 @@ An untrusted source is not polled.
 
 Every list response is `{ "freshness": {...}, "items": [...] }` plus
 view-specific fields (`banners`, or for the environment `groups`,
-`components`, `summary`, `facts`, `alerts`). Unknown fields are ignored.
+`components`, `summary`, `facts`, `alerts`, `dataSafety`). Unknown fields are ignored.
 A non-2xx reply carries `{kind, message, detail?}`.
 
 ## Actions
@@ -162,6 +162,52 @@ Reply with one of:
   cannot host a pane, so run the job yourself and answer `202 {jobId}`.
 - `503`: the outcome is uncertain. The app tells the user it may or may
   not have happened and never retries a mutating call itself.
+
+An endpoint action with `note: "required"` asks the user for a note
+before it is sent; the source refuses the call without one. The app may
+name who acted in an `X-Chappa-Actor` request header.
+
+## Data safety on the Environment view
+
+A source that runs databases can say whether their data is known to be
+scrubbed. The Environment answer then carries one top-level `dataSafety`
+object for the instance it serves (the stack runner, `chappa-stack`,
+sends it always):
+
+```json
+"dataSafety": {
+  "instance": "local/0",
+  "state": "not-clean",
+  "policy": "block-agents",
+  "blocksAgents": true,
+  "lastScanUtc": "2026-11-14T12:00:00Z",
+  "rulesHash": "3f2a…",
+  "marker": { "scrubbed": true, "version": "2026-11", "at": "2026-11-01T00:00:00Z" },
+  "findings": [
+    { "rule": "card-number", "table": "payments", "column": "card", "count": 2, "severity": "bad" }
+  ],
+  "unscanned": [],
+  "ack": null,
+  "ackActionId": "data-safety-ack"
+}
+```
+
+| field | meaning |
+|---|---|
+| `instance` | `<stack>/<slot>` |
+| `state` | `clean`, `not-clean` (findings, a missing or negative scrub marker, a sample that could not be checked), `acknowledged` (not clean, and someone acknowledged exactly this result), `unscanned` (a component keeps data and nothing checks it, or its check has not run since it started), `error` (the check could not be judged: a broken rules file, a hook that cannot be filled in). The worst over the components: `error` > `not-clean` > `unscanned` > `acknowledged` > `clean` |
+| `policy` | the strongest policy in force: `warn` < `block-agents` < `stop` < `block-up`; `null` when none is |
+| `blocksAgents` | **the one field to enforce on**: true exactly when `policy` is set and is not `warn`. While it is true, the app launches no new agent into anything bound to the instance |
+| `lastScanUtc`, `rulesHash` | the newest check and the rules file it used |
+| `marker` | the scrub attestation: `scrubbed` only when every checked marker says so; `null` when no marker was checked |
+| `findings` | counts per rule and place. Never a value |
+| `unscanned` | the components counted as unscanned |
+| `ack` | the acknowledgement in force: `{by, note, atUtc}`, or `null` |
+| `ackActionId` | the endpoint action that acknowledges. It is offered (on the data-safety banner and facts section, `key: null`, `mutates: true`, `note: "required"`, a `confirm` naming the findings) only while `state` is `not-clean`; it lasts until a check reports anything different |
+
+When the source cannot read its definition at all, it still sends the
+block, with `state: "error"`, `policy: null` and `blocksAgents: false`:
+it cannot tell, and what that means is the app's decision.
 
 ## Run the fixture by hand
 

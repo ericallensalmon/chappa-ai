@@ -15,6 +15,7 @@
 //! | [`server`] | the routes, loopback-only bind, the request pool |
 //! | [`project`] | which project, stack and slot; the definition read fresh per request |
 //! | [`commands`] | `chappa.yml` `processes:` as the process driver's command table |
+//! | [`data_safety`] | data-safety hooks run, judged and recorded; the `dataSafety` block the app enforces on |
 //! | [`env_view`] | the Environment payload from the runner's status |
 //! | [`actions`] | the verbs offered, planned for their confirm text |
 //! | [`records`] | job records under `.work/jobs/`, exit reports, retention |
@@ -28,6 +29,7 @@
 pub mod actions;
 pub mod background;
 pub mod commands;
+pub mod data_safety;
 pub mod env_view;
 pub mod identity;
 pub mod procs;

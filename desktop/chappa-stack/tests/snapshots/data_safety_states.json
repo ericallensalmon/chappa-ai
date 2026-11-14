@@ -1,0 +1,128 @@
+{
+  "acknowledged": {
+    "ack": {
+      "atUtc": "2026-11-14T12:00:00Z",
+      "by": "dev-1",
+      "note": "fixture rows, known"
+    },
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": false,
+    "findings": [
+      {
+        "column": "email",
+        "count": 1,
+        "rule": "email-real-domain",
+        "severity": "bad",
+        "table": "customers"
+      },
+      {
+        "column": "card",
+        "count": 1,
+        "rule": "card-number",
+        "severity": "bad",
+        "table": "payments"
+      }
+    ],
+    "instance": "app/0",
+    "lastScanUtc": "2026-11-14T12:00:00Z",
+    "marker": {
+      "at": "2026-11-01T00:00:00Z",
+      "scrubbed": true,
+      "version": "2026-11"
+    },
+    "policy": null,
+    "rulesHash": "<rules hash>",
+    "state": "acknowledged",
+    "unscanned": []
+  },
+  "clean": {
+    "ack": null,
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": false,
+    "findings": [],
+    "instance": "app/0",
+    "lastScanUtc": "2026-11-14T12:00:00Z",
+    "marker": {
+      "at": "2026-11-01T00:00:00Z",
+      "scrubbed": true,
+      "version": "2026-11"
+    },
+    "policy": null,
+    "rulesHash": "<rules hash>",
+    "state": "clean",
+    "unscanned": []
+  },
+  "error": {
+    "ack": null,
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": true,
+    "findings": [],
+    "instance": "app/0",
+    "lastScanUtc": "2026-11-14T12:00:00Z",
+    "marker": null,
+    "policy": "block-agents",
+    "rulesHash": null,
+    "state": "error",
+    "unscanned": []
+  },
+  "not-clean": {
+    "ack": null,
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": true,
+    "findings": [
+      {
+        "column": "email",
+        "count": 1,
+        "rule": "email-real-domain",
+        "severity": "bad",
+        "table": "customers"
+      },
+      {
+        "column": "card",
+        "count": 1,
+        "rule": "card-number",
+        "severity": "bad",
+        "table": "payments"
+      }
+    ],
+    "instance": "app/0",
+    "lastScanUtc": "2026-11-14T12:00:00Z",
+    "marker": {
+      "at": "2026-11-01T00:00:00Z",
+      "scrubbed": true,
+      "version": "2026-11"
+    },
+    "policy": "block-agents",
+    "rulesHash": "<rules hash>",
+    "state": "not-clean",
+    "unscanned": []
+  },
+  "unreadable": {
+    "ack": null,
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": false,
+    "findings": [],
+    "instance": "unknown/0",
+    "lastScanUtc": null,
+    "marker": null,
+    "policy": null,
+    "rulesHash": null,
+    "state": "error",
+    "unscanned": []
+  },
+  "unscanned": {
+    "ack": null,
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": false,
+    "findings": [],
+    "instance": "app/0",
+    "lastScanUtc": null,
+    "marker": null,
+    "policy": "warn",
+    "rulesHash": "<rules hash>",
+    "state": "unscanned",
+    "unscanned": [
+      "db"
+    ]
+  }
+}

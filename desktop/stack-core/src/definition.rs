@@ -673,6 +673,66 @@ pub enum ScanTrigger {
     Every { every: String },
 }
 
+/// A [`ScanTrigger`] read: the moments a check runs at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanWhen {
+    /// Right after the component is brought up by a job.
+    AfterUp,
+    /// After a snapshot or saved state is restored into it.
+    AfterRestore,
+    /// Before a snapshot of its data is taken.
+    BeforeSnapshot,
+    /// Periodically while it runs.
+    Every(std::time::Duration),
+}
+
+/// The shortest `every:` accepted. A check samples the database, so more
+/// often than this is load, not safety.
+pub const MIN_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl ScanTrigger {
+    /// `after-up`, `after-restore`, `before-snapshot`, or `every: <n><unit>`
+    /// with unit `s`, `m`, `h` or `d` (at least [`MIN_SCAN_INTERVAL`]).
+    pub fn parse(&self) -> Result<ScanWhen, String> {
+        match self {
+            ScanTrigger::Named(n) => match n.as_str() {
+                "after-up" => Ok(ScanWhen::AfterUp),
+                "after-restore" => Ok(ScanWhen::AfterRestore),
+                "before-snapshot" => Ok(ScanWhen::BeforeSnapshot),
+                other => Err(format!(
+                    "`{other}` is not a check time (after-up, after-restore, before-snapshot, every: <duration>)"
+                )),
+            },
+            ScanTrigger::Every { every } => {
+                let d = parse_interval(every).ok_or_else(|| {
+                    format!("`every: {every}` is not a duration such as 30m, 6h or 1d")
+                })?;
+                if d < MIN_SCAN_INTERVAL {
+                    return Err(format!(
+                        "`every: {every}` is shorter than the minimum of one minute"
+                    ));
+                }
+                Ok(ScanWhen::Every(d))
+            }
+        }
+    }
+}
+
+/// `90s`, `30m`, `6h`, `1d`: a whole number and one unit.
+pub fn parse_interval(text: &str) -> Option<std::time::Duration> {
+    let t = text.trim();
+    let unit = t.chars().last()?;
+    let n: u64 = t[..t.len() - unit.len_utf8()].parse().ok()?;
+    let secs = match unit {
+        's' => n,
+        'm' => n.checked_mul(60)?,
+        'h' => n.checked_mul(3600)?,
+        'd' => n.checked_mul(86_400)?,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentDataSafetyDef {
@@ -1239,6 +1299,8 @@ pub enum Rule {
     UnscannedPersistentComponent,
     /// A component samples its data but the stack names no rules file.
     SampleWithoutRules,
+    /// A data-safety `when:` entry that is not a known check time.
+    InvalidScanTrigger,
     WorkDirNotIgnored,
     StateDirNotIgnored,
     PortLayout,
@@ -1726,6 +1788,17 @@ fn validate_stack(
                     "{name} has a sample check but no data-safety rules; its sample is not checked unless the hook reports findings itself"
                 ),
             );
+        }
+        if let Some(ds) = &c.data_safety {
+            for (i, w) in ds.when.iter().enumerate() {
+                if let Err(message) = w.parse() {
+                    err(
+                        Rule::InvalidScanTrigger,
+                        format!("{cpath}.dataSafety.when[{i}]"),
+                        message,
+                    );
+                }
+            }
         }
         if let Some(d) = &c.data {
             if d.strategy == DataStrategy::Snapshot && c.persistence.is_none() {
@@ -2298,6 +2371,53 @@ stacks:
         let diags = validate(&marker_only, &ValidationContext::default());
         assert!(by_rule(&diags, Rule::SampleWithoutRules).is_empty());
         assert!(by_rule(&diags, Rule::UnscannedPersistentComponent).is_empty());
+    }
+
+    #[test]
+    fn check_times_are_read_and_unknown_ones_are_errors() {
+        use std::time::Duration;
+        let named = |n: &str| ScanTrigger::Named(n.into());
+        let every = |e: &str| ScanTrigger::Every { every: e.into() };
+        assert_eq!(named("after-up").parse(), Ok(ScanWhen::AfterUp));
+        assert_eq!(named("after-restore").parse(), Ok(ScanWhen::AfterRestore));
+        assert_eq!(
+            named("before-snapshot").parse(),
+            Ok(ScanWhen::BeforeSnapshot)
+        );
+        assert_eq!(
+            every("6h").parse(),
+            Ok(ScanWhen::Every(Duration::from_secs(6 * 3600)))
+        );
+        assert_eq!(
+            every("90s").parse(),
+            Ok(ScanWhen::Every(Duration::from_secs(90)))
+        );
+        assert_eq!(
+            every("1d").parse(),
+            Ok(ScanWhen::Every(Duration::from_secs(86_400)))
+        );
+        assert_eq!(every("1m").parse(), Ok(ScanWhen::Every(MIN_SCAN_INTERVAL)));
+        for bad in ["59s", "6", "h", "6 hours", "-1h", "1.5h", ""] {
+            assert!(every(bad).parse().is_err(), "{bad}");
+        }
+        assert!(named("after_up").parse().is_err());
+
+        let diags = validate(&example(), &ValidationContext::default());
+        assert!(by_rule(&diags, Rule::InvalidScanTrigger).is_empty());
+        let mut doc = example();
+        doc.stacks["app"].components["db"]
+            .data_safety
+            .as_mut()
+            .unwrap()
+            .when = vec![named("after-up"), named("on-boot"), every("10s")];
+        let diags = validate(&doc, &ValidationContext::default());
+        let e = by_rule(&diags, Rule::InvalidScanTrigger);
+        assert_eq!(e.len(), 2, "{diags:#?}");
+        assert_eq!(e[0].severity, Severity::Error);
+        assert_eq!(e[0].path, "stacks.app.components.db.dataSafety.when[1]");
+        assert!(e[0].message.contains("`on-boot` is not a check time"));
+        assert_eq!(e[1].path, "stacks.app.components.db.dataSafety.when[2]");
+        assert!(e[1].message.contains("shorter than the minimum"));
     }
 
     #[test]

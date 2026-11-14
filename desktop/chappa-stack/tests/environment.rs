@@ -402,7 +402,18 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
         .iter()
         .filter_map(|a| a["componentId"].as_str())
         .collect();
-    assert_eq!(alerted, ["search", "worker", "mailer", "seed"]);
+    // (and db, which keeps data with no data-safety check: a warning)
+    assert_eq!(alerted, ["search", "worker", "mailer", "seed", "db"]);
+    let db_alert = env["alerts"].as_array().unwrap().last().unwrap();
+    assert_eq!(db_alert["severity"], "warn");
+    assert_eq!(
+        db_alert["text"],
+        "db keeps data and has no data-safety check"
+    );
+    assert_eq!(env["dataSafety"]["state"], "unscanned");
+    assert_eq!(env["dataSafety"]["policy"], "warn");
+    assert_eq!(env["dataSafety"]["blocksAgents"], false);
+    assert_eq!(env["dataSafety"]["unscanned"], serde_json::json!(["db"]));
     // facts: the stack (with its actions), engines, memory
     let stack = &env["facts"][0];
     assert_eq!(stack["id"], "stack");

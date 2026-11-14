@@ -6,9 +6,12 @@
 //! | `GET /chappa/v1/identity?challenge=<64 hex>` | none (that is its point) | `{proof}` |
 //! | `GET /chappa/v1/manifest` | bearer | the manifest |
 //! | `GET /api/environment` | bearer | the Environment payload |
-//! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `409` unconfirmed / no longer offered / stale plan, `404` unknown target |
+//! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement, `409` unconfirmed / no longer offered / stale plan / note missing, `404` unknown target |
 //! | `GET /api/jobs/{id}` | bearer | `{state: running\|done\|failed, log?, exitCode?, error?}` |
 //! | `POST /api/jobs/{id}` | bearer | the pane's exit report, recorded; `200 {}` |
+//!
+//! `X-Chappa-Actor` on an actions call names who acted (an acknowledgement
+//! records it); without it the actor is "the app".
 //!
 //! The listener binds a loopback address only, and every route but the
 //! identity check needs the bearer token, compared in constant time.
@@ -25,17 +28,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use indexmap::IndexMap;
+use std::sync::Weak;
+
+use stack_core::driver::ResolvedInstance;
 use stack_core::hosts::{check_hosts_file, check_hosts_text, HostOs};
 use stack_core::intent::utc_now;
-use stack_core::safety::data::DataRules;
+use stack_core::runner::Observation;
 
 use crate::actions::{all_actions, channel_for, Offered};
-use crate::background::Background;
+use crate::background::{Background, Periodic};
+use crate::data_safety::{
+    self, CheckStore, InstanceSafety, SafetyState, ACK_ACTION_ID, ACTOR_CAP, CHECK_ACTION_ID,
+    DEFAULT_ACTOR, NOTE_CAP, SCHEDULE_TICK_SECS,
+};
 use crate::env_view::{self, EnvInputs};
 use crate::identity::{is_valid_challenge, Token, IDENTITY_PATH, MANIFEST_PATH};
 use crate::procs::ProcessTable;
 use crate::project::{Loaded, ProjectConfig};
-use crate::records::{self, JobRecord, JobStatus};
+use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
 use crate::world::World;
 
@@ -43,6 +54,7 @@ pub const ENVIRONMENT_PATH: &str = "/api/environment";
 pub const ACTIONS_PATH: &str = "/api/actions";
 pub const JOBS_PREFIX: &str = "/api/jobs/";
 pub const RUNS_JOBS_HEADER: &str = "X-Chappa-Runs-Jobs";
+pub const ACTOR_HEADER: &str = "X-Chappa-Actor";
 /// How often the app should poll the Environment view, in seconds.
 pub const POLL_SECONDS: u64 = 15;
 /// Request threads.
@@ -74,6 +86,15 @@ pub fn parse_listen_addr(text: &str) -> Result<SocketAddr, String> {
 /// One response: status and JSON body.
 pub type Reply = (u16, Value);
 
+/// What the request headers say about the caller.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Caller {
+    /// `X-Chappa-Runs-Jobs: 1`: the caller runs a job's CLI in a pane.
+    pub runs_jobs: bool,
+    /// `X-Chappa-Actor`, when sent.
+    pub actor: Option<String>,
+}
+
 fn error(status: u16, kind: &str, message: impl Into<String>) -> Reply {
     (status, json!({ "kind": kind, "message": message.into() }))
 }
@@ -90,6 +111,10 @@ pub struct Source {
     /// Serialises action acceptance, so two clicks cannot both plan
     /// against the same state.
     accepting: Mutex<()>,
+    /// When the data-safety schedule last looked (clock seconds).
+    last_tick: Mutex<Option<u64>>,
+    /// Periodic check jobs started and maybe still running, per component.
+    in_flight: Mutex<IndexMap<String, String>>,
 }
 
 impl Source {
@@ -108,15 +133,20 @@ impl Source {
         if let Ok(abs) = std::path::absolute(&config.dir) {
             config.dir = abs;
         }
-        Arc::new(Source {
+        let source = Arc::new(Source {
             world,
             config,
             token,
             addr,
-            background,
+            background: background.clone(),
             relay: Mutex::new(Relay::default()),
             accepting: Mutex::new(()),
-        })
+            last_tick: Mutex::new(None),
+            in_flight: Mutex::new(IndexMap::new()),
+        });
+        let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
+        background.add_periodic(weak);
+        source
     }
 
     fn load(&self) -> Result<Loaded, String> {
@@ -134,6 +164,22 @@ impl Source {
         url: &str,
         auth: Option<&str>,
         runs_jobs: bool,
+        body: &str,
+    ) -> Reply {
+        let caller = Caller {
+            runs_jobs,
+            actor: None,
+        };
+        self.handle_as(method, url, auth, &caller, body)
+    }
+
+    /// [`Source::handle`] with everything the headers say about the caller.
+    pub fn handle_as(
+        &self,
+        method: &str,
+        url: &str,
+        auth: Option<&str>,
+        caller: &Caller,
         body: &str,
     ) -> Reply {
         let (path, query) = url.split_once('?').unwrap_or((url, ""));
@@ -161,7 +207,7 @@ impl Source {
             ("GET", MANIFEST_PATH) => (200, self.manifest()),
             ("GET", ENVIRONMENT_PATH) => (200, self.environment()),
             ("POST", ACTIONS_PATH) => match serde_json::from_str::<Value>(body) {
-                Ok(v) => self.action(&v, runs_jobs),
+                Ok(v) => self.action_as(&v, caller),
                 Err(e) => error(400, "bad-request", format!("the body is not JSON: {e}")),
             },
             (m, p) if p.starts_with(JOBS_PREFIX) => {
@@ -216,13 +262,17 @@ impl Source {
     /// on `docker info`: those come from the background caches.
     pub fn environment(&self) -> Value {
         let now = utc_now();
+        let instance = data_safety::instance_name(
+            self.config.stack.as_deref().unwrap_or("unknown"),
+            self.config.slot,
+        );
         let loaded = match self.load() {
             Ok(l) => l,
-            Err(e) => return env_view::unavailable(&e, &now),
+            Err(e) => return env_view::unavailable(&e, &now, &instance),
         };
         match self.environment_of(&loaded, &now) {
             Ok(v) => v,
-            Err(e) => env_view::unavailable(&e, &now),
+            Err(e) => env_view::unavailable(&e, &now, &loaded_instance(&loaded)),
         }
     }
 
@@ -278,13 +328,7 @@ impl Source {
             relay.reconcile(&wanted);
             relay.state(planned)
         });
-        let rules_hash = loaded
-            .stack
-            .data_safety
-            .as_ref()
-            .and_then(|d| d.rules.as_ref())
-            .and_then(|r| DataRules::load(&loaded.dir.join(r)).ok())
-            .map(|r| r.hash);
+        let safety = Self::safety(loaded, &work_dir, &inst, &obs);
         let errors: Vec<(String, String)> = obs
             .notes
             .iter()
@@ -302,15 +346,39 @@ impl Source {
             relay: relay_state,
             processes: &table,
             exe: &self.world.exe,
-            rules_hash,
+            safety: &safety,
             now_utc: now,
         };
         Ok(env_view::environment(&inputs, &errors))
     }
 
+    /// The instance's data safety now.
+    fn safety(
+        loaded: &Loaded,
+        work_dir: &std::path::Path,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+    ) -> InstanceSafety {
+        let store = CheckStore::load(work_dir, &inst.id);
+        let running = |c: &str| obs.actual.get(c).is_some_and(|a| a.running);
+        data_safety::summarize(loaded, &running, &store, data_safety::current_rules(loaded))
+    }
+
+    /// `POST {actions}` from a caller that sent no actor.
+    pub fn action(&self, body: &Value, runs_jobs: bool) -> Reply {
+        let caller = Caller {
+            runs_jobs,
+            actor: None,
+        };
+        self.action_as(body, &caller)
+    }
+
     /// `POST {actions}`: plan again, check it is what was confirmed, store
     /// it as a job, and hand back the pane to run it in (or run it here).
-    pub fn action(&self, body: &Value, runs_jobs: bool) -> Reply {
+    /// The data-safety actions are answered by [`Self::ack_action`] and
+    /// [`Self::check_action`].
+    pub fn action_as(&self, body: &Value, caller: &Caller) -> Reply {
+        let runs_jobs = caller.runs_jobs;
         let _one_at_a_time = self.accepting.lock().unwrap_or_else(|p| p.into_inner());
         let Some(id) = body.get("id").and_then(Value::as_str) else {
             return error(400, "bad-request", "the body names no action `id`");
@@ -359,6 +427,12 @@ impl Source {
             .as_deref()
             .map(|k| format!("`{k}`"))
             .unwrap_or_else(|| "the stack".to_string());
+        if id == ACK_ACTION_ID {
+            return self.ack_action(body, caller, &loaded, &inst, &obs);
+        }
+        if id == CHECK_ACTION_ID {
+            return self.check_action(key.as_deref(), runs_jobs, &loaded, &inst, &obs, &now);
+        }
         let channel = channel_for(&obs, &self.config.channel);
         let offered = all_actions(&runner, &inst, &obs, &channel);
         let Some(chosen) = offered.into_iter().find(|o| o.id == id && o.key == key) else {
@@ -386,7 +460,24 @@ impl Source {
                 ),
             );
         }
-        let job_id = match records::new_job_id(&now) {
+        self.start_job(&loaded, &inst, &obs, &chosen, true, runs_jobs, &now)
+    }
+
+    /// Store `chosen` as a job and hand back the pane to run it in, or run
+    /// it here when the caller hosts no pane.
+    #[allow(clippy::too_many_arguments)]
+    fn start_job(
+        &self,
+        loaded: &Loaded,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        chosen: &Offered,
+        mutates: bool,
+        runs_jobs: bool,
+        now: &str,
+    ) -> Reply {
+        let work_dir = loaded.work_dir();
+        let job_id = match records::new_job_id(now) {
             Ok(i) => i,
             Err(e) => return error(500, "job", e),
         };
@@ -410,11 +501,11 @@ impl Source {
             instance: inst.id.clone(),
             argv: argv.clone(),
             cwd: loaded.dir.clone(),
-            mutates: true,
+            mutates,
             confirm: chosen.confirm.clone(),
             status: JobStatus::Pending,
             exit_code: None,
-            created_utc: now.clone(),
+            created_utc: now.to_string(),
             started_utc: None,
             ended_utc: None,
             runner_pid: None,
@@ -428,7 +519,7 @@ impl Source {
         if let Err(e) = rec.save(&work_dir) {
             return error(500, "job", format!("cannot record the job: {e}"));
         }
-        records::prune(&work_dir, &records::retention(&loaded.stack), &now);
+        records::prune(&work_dir, &records::retention(&loaded.stack), now);
         self.background.invalidate_facts();
         if runs_jobs {
             return (
@@ -453,6 +544,203 @@ impl Source {
                 });
                 error(500, "spawn", e)
             }
+        }
+    }
+
+    /// `data-safety-ack`: record who acknowledged what the last checks
+    /// found, with a note, on every not-clean component. Offered only while
+    /// the instance is `not-clean`; refused unconfirmed, without a note, or
+    /// when the findings changed since the confirm was shown.
+    fn ack_action(
+        &self,
+        body: &Value,
+        caller: &Caller,
+        loaded: &Loaded,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+    ) -> Reply {
+        let work_dir = loaded.work_dir();
+        let safety = Self::safety(loaded, &work_dir, inst, obs);
+        if safety.state != SafetyState::NotClean {
+            return error(
+                409,
+                "not-offered",
+                format!(
+                    "there is nothing to acknowledge: the data-safety state of {} is {}",
+                    safety.instance,
+                    safety.state.as_str()
+                ),
+            );
+        }
+        if body.get("confirmed").and_then(Value::as_bool) != Some(true) {
+            return error(
+                409,
+                "confirmation-required",
+                "an acknowledgement must be confirmed",
+            );
+        }
+        let fingerprint = body.pointer("/params/fingerprint").and_then(Value::as_str);
+        if fingerprint != Some(safety.ack_fingerprint().as_str()) {
+            return error(
+                409,
+                "stale-plan",
+                format!(
+                    "the findings changed since this was shown; now: {}",
+                    safety.ack_confirm()
+                ),
+            );
+        }
+        let note = data_safety::clean_text(
+            body.get("note").and_then(Value::as_str).unwrap_or(""),
+            NOTE_CAP,
+        );
+        if note.is_empty() {
+            return error(
+                409,
+                "note-required",
+                "an acknowledgement needs a note saying why",
+            );
+        }
+        let who = caller
+            .actor
+            .as_deref()
+            .map(|a| data_safety::clean_text(a, ACTOR_CAP))
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| DEFAULT_ACTOR.to_string());
+        let at = self.world.clock.now_utc();
+        match safety.acknowledge_all(&work_dir, &inst.id, &who, &note, &at) {
+            Ok(n) => (
+                200,
+                json!({
+                    "message": format!(
+                        "Acknowledged the findings of {n} component{} on {}",
+                        if n == 1 { "" } else { "s" },
+                        safety.instance
+                    )
+                }),
+            ),
+            Err(e) => error(500, "data-safety", e),
+        }
+    }
+
+    /// `data-safety-check`: check one component (`key`) or every running
+    /// one with a check, now, as a job.
+    fn check_action(
+        &self,
+        key: Option<&str>,
+        runs_jobs: bool,
+        loaded: &Loaded,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        now: &str,
+    ) -> Reply {
+        let work_dir = loaded.work_dir();
+        let safety = Self::safety(loaded, &work_dir, inst, obs);
+        let components: Vec<String> = match key {
+            Some(k) if safety.checkable.iter().any(|c| c == k) => vec![k.to_string()],
+            Some(k) => {
+                return error(
+                    409,
+                    "not-offered",
+                    format!("`{k}` has no data-safety check, or is not running"),
+                )
+            }
+            None if safety.checkable.is_empty() => {
+                return error(
+                    409,
+                    "not-offered",
+                    "no component with a data-safety check is running",
+                )
+            }
+            None => safety.checkable.clone(),
+        };
+        let chosen = Offered {
+            id: CHECK_ACTION_ID.to_string(),
+            key: key.map(str::to_string),
+            label: "Data-safety check".to_string(),
+            confirm: format!("Check {} now.", components.join(", ")),
+            work: JobWork::DataSafety {
+                components,
+                trigger: data_safety::Trigger::Manual.as_str().to_string(),
+            },
+        };
+        self.start_job(loaded, inst, obs, &chosen, false, runs_jobs, now)
+    }
+
+    /// The `every:` schedule: at most once per [`SCHEDULE_TICK_SECS`] of
+    /// the world's clock, start a headless check job for the running
+    /// components whose interval has passed. The job ids started.
+    pub fn data_safety_tick(&self) -> Vec<String> {
+        let now_secs = self.world.clock.now_secs();
+        {
+            let mut last = self.last_tick.lock().unwrap_or_else(|p| p.into_inner());
+            if last.is_some_and(|t| now_secs < t.saturating_add(SCHEDULE_TICK_SECS)) {
+                return Vec::new();
+            }
+            *last = Some(now_secs);
+        }
+        let Ok(loaded) = self.load() else {
+            return Vec::new();
+        };
+        if loaded.has_errors() || !data_safety::any_periodic(&loaded) {
+            return Vec::new();
+        }
+        let work_dir = loaded.work_dir();
+        let Ok(runner_inst) = loaded.runner(&self.world, &utc_now()).instance(loaded.slot) else {
+            return Vec::new();
+        };
+        let inst = runner_inst.0;
+        let store = CheckStore::load(&work_dir, &inst.id).unwrap_or_default();
+        let due = data_safety::due(&loaded, &store, now_secs);
+        if due.is_empty() {
+            return Vec::new();
+        }
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+        in_flight.retain(|_, id| {
+            JobRecord::load(&work_dir, id)
+                .ok()
+                .flatten()
+                .is_some_and(|r| !r.status.finished())
+        });
+        let due: Vec<String> = due
+            .into_iter()
+            .filter(|c| !in_flight.contains_key(c))
+            .collect();
+        if due.is_empty() {
+            return Vec::new();
+        }
+        let now = self.world.clock.now_utc();
+        let runner = loaded.runner(&self.world, &now);
+        let table = ProcessTable::load(&work_dir, &inst.id);
+        let Ok(obs) = runner.observe(&inst, &table.statuses(&*self.world.procs)) else {
+            return Vec::new();
+        };
+        let due: Vec<String> = due
+            .into_iter()
+            .filter(|c| obs.actual.get(c).is_some_and(|a| a.running))
+            .collect();
+        if due.is_empty() {
+            return Vec::new();
+        }
+        let chosen = Offered {
+            id: CHECK_ACTION_ID.to_string(),
+            key: None,
+            label: "Data-safety check".to_string(),
+            confirm: format!("Check {} (every:).", due.join(", ")),
+            work: JobWork::DataSafety {
+                components: due.clone(),
+                trigger: data_safety::Trigger::Every.as_str().to_string(),
+            },
+        };
+        let (status, body) = self.start_job(&loaded, &inst, &obs, &chosen, false, false, &now);
+        match body.get("jobId").and_then(Value::as_str) {
+            Some(id) if status == 202 => {
+                for c in &due {
+                    in_flight.insert(c.clone(), id.to_string());
+                }
+                vec![id.to_string()]
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -515,6 +803,10 @@ impl Source {
     }
 }
 
+fn loaded_instance(loaded: &Loaded) -> String {
+    data_safety::instance_name(&loaded.stack_name, loaded.slot)
+}
+
 /// Bind the listener on a loopback address.
 pub fn bind(addr: &str) -> Result<(tiny_http::Server, SocketAddr), String> {
     let wanted = parse_listen_addr(addr)?;
@@ -560,13 +852,16 @@ fn respond(source: &Source, mut request: tiny_http::Request) {
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
     let auth = header(&request, "Authorization").map(str::to_string);
-    let runs_jobs = header(&request, RUNS_JOBS_HEADER).map(str::trim) == Some("1");
+    let caller = Caller {
+        runs_jobs: header(&request, RUNS_JOBS_HEADER).map(str::trim) == Some("1"),
+        actor: header(&request, ACTOR_HEADER).map(str::to_string),
+    };
     let mut body = String::new();
     if method == "POST" && source.token.authorizes(auth.as_deref()) {
         let _ = request.as_reader().take(MAX_BODY).read_to_string(&mut body);
     }
     let (status, value) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        source.handle(&method, &url, auth.as_deref(), runs_jobs, &body)
+        source.handle_as(&method, &url, auth.as_deref(), &caller, &body)
     })) {
         Ok(r) => r,
         Err(_) => error(500, "internal", "the request handler failed"),
@@ -581,4 +876,10 @@ fn respond(source: &Source, mut request: tiny_http::Request) {
                 .expect("static header"),
         );
     let _ = request.respond(response);
+}
+
+impl Periodic for Source {
+    fn tick(&self) {
+        self.data_safety_tick();
+    }
 }

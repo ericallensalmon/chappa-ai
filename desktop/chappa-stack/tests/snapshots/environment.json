@@ -19,6 +19,11 @@
       "componentId": "seed",
       "severity": "bad",
       "text": "seed failed: exited with code 2"
+    },
+    {
+      "componentId": "db",
+      "severity": "warn",
+      "text": "db keeps data and has no data-safety check"
     }
   ],
   "banners": [
@@ -612,6 +617,21 @@
       "uptime": null
     }
   ],
+  "dataSafety": {
+    "ack": null,
+    "ackActionId": "data-safety-ack",
+    "blocksAgents": false,
+    "findings": [],
+    "instance": "env/0",
+    "lastScanUtc": null,
+    "marker": null,
+    "policy": "warn",
+    "rulesHash": null,
+    "state": "unscanned",
+    "unscanned": [
+      "db"
+    ]
+  },
   "facts": [
     {
       "actions": [
@@ -714,6 +734,32 @@
         }
       ],
       "title": "Engines"
+    },
+    {
+      "id": "data-safety",
+      "rows": [
+        {
+          "label": "State",
+          "value": "not checked"
+        },
+        {
+          "label": "Policy",
+          "value": "on findings: block-agents · unscanned: warn"
+        },
+        {
+          "label": "Last scan",
+          "value": "never"
+        },
+        {
+          "label": "Rules",
+          "value": "none configured"
+        },
+        {
+          "label": "db",
+          "value": "not checked · keeps data; no check declared"
+        }
+      ],
+      "title": "Data safety"
     }
   ],
   "freshness": {

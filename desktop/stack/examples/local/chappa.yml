@@ -36,6 +36,12 @@ stacks:
   local:
     slots: { count: 2, portBase: 14000, portStride: 100 }
     hostname: dev.example.test
+    # Data safety: the rules say what real data looks like; db's hooks
+    # print its scrub marker and a sample. Not clean blocks agents.
+    dataSafety:
+      rules: stack/data-safety.yml
+      onFinding: block-agents
+      unscanned: warn
     groups:
       core: { engine: docker }
       apis: { engine: podman }
@@ -48,6 +54,12 @@ stacks:
         modes:
           prebuilt: { image: postgres, tag: "16" }
         persistence: { volume: db-data }
+        # Stand-in hooks (node scripts that print fixtures); a real stack
+        # runs them in the container, as the scripts' comments show.
+        dataSafety:
+          marker: [node, stack/marker-db.js]
+          sample: [node, stack/sample-db.js]
+          when: [after-up, every: 6h]
         ports: 1
         outputs:
           url: "postgres://app:app@{hostname}:{port:db}/app"

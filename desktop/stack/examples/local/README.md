@@ -15,6 +15,9 @@ own ports, containers and database volume.
 chappa.yml               processes + the `stacks:` definition
 stack/core.compose.yml   db + migrate (no published ports)
 stack/apis.compose.yml   api (no published ports)
+stack/data-safety.yml    detection rules: the starter file, two rules on
+stack/marker-db.js       db's stand-in scrub-marker hook
+stack/sample-db.js       db's stand-in sample hook (prints test fixtures)
 .gitignore               .work/ and .chappa/stack-state/ stay local
 ```
 
@@ -54,10 +57,38 @@ loopback on the host and to each engine's gateway inside its containers
 
 ## Validation
 
-The definition validates without errors. It carries one warning on
-purpose: `db` is persistent and has no data-safety check, so its data
-counts as sensitive. For a throwaway local database that is the honest
-floor; a real project adds a `dataSafety` marker or sample hook.
+The definition validates without errors or warnings.
+
+## Data safety
+
+`db` keeps data, so it has a data-safety check. The stack names its
+rules (`stack/data-safety.yml`, a copy of the starter file with
+`email-real-domain` and `card-number` turned on) and its policy
+(`onFinding: block-agents`); `db` names two hooks and when they run
+(`after-up` and `every: 6h`):
+
+- `marker: [node, stack/marker-db.js]` prints a scrub marker,
+  `{"scrubbed": true, "version": "example-1", ...}`;
+- `sample: [node, stack/sample-db.js]` prints sampled rows,
+  `[{"table": "customers", "column": "email", "values": [...]}, ...]`.
+
+Both are stand-ins that print fixed test data (documentation-domain
+addresses, no card numbers) without touching the database, so they need
+`node` on the PATH and the check comes out clean. A real stack runs the
+hooks in the container (`[docker, exec, "{container}", ...]`), as the
+scripts' comments show.
+
+After every job that starts `db`, the job runs the check and prints the
+verdict (counts only, never a value). The source checks again every six
+hours while `db` runs, and **Run data-safety check** on the row or in the
+**Data safety** facts section checks now. The verdict is kept in
+`.work/instances/local-0/data-safety.json` and shown as the payload's
+`dataSafety` block, the Data safety facts and, when not clean, an alert,
+a `data not clean` badge and a banner saying agents are blocked, with
+**Acknowledge findings** (it asks for a note).
+
+To see a finding, add the test card number `4111 1111 1111 1111` to the
+`card` values in `stack/sample-db.js` and run the check again.
 
 ## Running it in the app
 

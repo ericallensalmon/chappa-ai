@@ -19,6 +19,7 @@ use stack_core::checks::{PortProbe, StdPortProbe};
 use stack_core::cli::{CliError, CliOutput, CliRunner, EngineCli, Invocation};
 use stack_core::compose::{CliGatewayResolver, Gateway, GatewayResolver};
 use stack_core::definition::{ContainerOs, EngineRef};
+use stack_core::intent::format_utc;
 use stack_core::jobs::RunBlock;
 use stack_core::probe::{ProbeHttp, ProbeResponse, StdHttp};
 use stack_core::provenance::{GitCli, GitError, GitFacts};
@@ -49,10 +50,17 @@ pub struct World {
     /// How long a freshly started process component must stay alive to
     /// count as started.
     pub settle: Duration,
+    /// What time it is: data-safety scan times and the `every:` schedule.
+    pub clock: Shared<dyn Clock + Send + Sync>,
+    /// The pause between attempts of a data-safety hook run right after
+    /// up, while a database may still be starting.
+    pub hook_retry: Duration,
 }
 
 /// The default for [`World::settle`].
 pub const PROCESS_SETTLE: Duration = Duration::from_millis(1500);
+/// The default for [`World::hook_retry`].
+pub const HOOK_RETRY: Duration = Duration::from_secs(3);
 
 impl World {
     /// The real machine: engines, git and HTTP for real.
@@ -71,6 +79,8 @@ impl World {
             spawner: Arc::new(DetachedSpawner),
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("chappa-stack")),
             settle: PROCESS_SETTLE,
+            clock: Arc::new(SystemClock),
+            hook_retry: HOOK_RETRY,
         }
     }
 }
@@ -190,6 +200,50 @@ impl<T: GitFacts> GitFacts for Locked<T> {
     }
     fn commit_exists(&self, repo: &Path, sha: &str) -> Result<bool, GitError> {
         self.with(|g| g.commit_exists(repo, sha))
+    }
+}
+
+// ----------------------------------------------------------------- clock
+
+/// The time, as UTC text (`2026-11-14T12:00:00Z`) and as epoch seconds.
+pub trait Clock {
+    fn now_secs(&self) -> u64;
+    fn now_utc(&self) -> String {
+        format_utc(self.now_secs())
+    }
+}
+
+/// The machine's clock.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_secs(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+/// A clock that moves only when told to (tests of the schedule).
+pub struct ManualClock(pub std::sync::atomic::AtomicU64);
+
+impl ManualClock {
+    pub fn at(utc: &str) -> Arc<ManualClock> {
+        Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(
+            stack_core::compose::parse_utc(utc).unwrap_or(0),
+        )))
+    }
+
+    pub fn advance(&self, by: Duration) {
+        self.0
+            .fetch_add(by.as_secs(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_secs(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

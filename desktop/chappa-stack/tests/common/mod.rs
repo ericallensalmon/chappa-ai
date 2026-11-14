@@ -13,7 +13,7 @@ use std::time::Duration;
 use chappa_stack::identity::Token;
 use chappa_stack::project::ProjectConfig;
 use chappa_stack::server::Source;
-use chappa_stack::world::{CliSteps, Locked, ProcessHost, ThreadSpawner, World};
+use chappa_stack::world::{CliSteps, Locked, ProcessHost, SystemClock, ThreadSpawner, World};
 use serde_json::Value;
 use stack_core::checks::FakePorts;
 use stack_core::cli::FakeCli;
@@ -165,6 +165,8 @@ pub fn fakes(cli: FakeCli, http: FakeHttp) -> Fakes {
         spawner: Arc::new(ThreadSpawner),
         exe: PathBuf::from("/opt/chappa/chappa-stack"),
         settle: Duration::ZERO,
+        clock: Arc::new(SystemClock),
+        hook_retry: Duration::ZERO,
     };
     Fakes {
         cli,

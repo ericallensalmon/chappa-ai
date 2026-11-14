@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use stack_core::cli::{CliOutput, FakeCli};
 use stack_core::compose::{FakeGateways, Gateway};
 use stack_core::definition::{
-    has_errors, validate, Mode, Rule, Severity, StackDef, StacksDocument, ValidationContext,
+    has_errors, validate, Mode, Rule, StackDef, StacksDocument, ValidationContext,
 };
 use stack_core::driver::{ComponentState, ResolvedInstance};
 use stack_core::intent::{ActiveRecord, Desired};
@@ -221,7 +221,7 @@ fn writes(steps: &[JobStep]) -> Vec<(&str, &Path, &str)> {
 // ------------------------------------------------------------- validation
 
 #[test]
-fn the_example_loads_and_validates_with_only_the_data_safety_warning() {
+fn the_example_loads_and_validates_without_findings() {
     let dir = example_source();
     let (path, doc) = StacksDocument::load_from_project(&dir).unwrap().unwrap();
     assert!(path.ends_with("chappa.yml"));
@@ -233,11 +233,21 @@ fn the_example_loads_and_validates_with_only_the_data_safety_warning() {
         },
     );
     assert!(!has_errors(&diags), "{diags:#?}");
-    // The database has no data-safety check; for a throwaway local stack
-    // that is the honest floor, and the warning says so.
+    // The database keeps data and has a data-safety check with a rules
+    // file, so neither the unscanned nor the sample-without-rules warning
+    // applies.
     let rules: Vec<Rule> = diags.iter().map(|d| d.rule).collect();
-    assert_eq!(rules, [Rule::UnscannedPersistentComponent], "{diags:#?}");
-    assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+    assert_eq!(rules, Vec::<Rule>::new(), "{diags:#?}");
+    let db_check = stack_core_db_check(&doc);
+    assert!(db_check.marker.is_some() && db_check.sample.is_some());
+    let rules_file = doc.stacks["local"]
+        .data_safety
+        .as_ref()
+        .and_then(|d| d.rules.clone())
+        .unwrap();
+    let loaded = stack_core::safety::data::DataRules::load(&dir.join(rules_file)).unwrap();
+    let ids: Vec<&str> = loaded.rules.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["email-real-domain", "card-number"]);
 
     let stack = &doc.stacks["local"];
     assert_eq!(stack.groups["core"].engine.as_deref(), Some("docker"));
@@ -1401,4 +1411,11 @@ fn gc_keeps_what_is_running_pinned_or_kept_and_removes_the_rest() {
             "podman image prune -f",
         ]
     );
+}
+
+fn stack_core_db_check(doc: &StacksDocument) -> stack_core::definition::ComponentDataSafetyDef {
+    doc.stacks["local"].components["db"]
+        .data_safety
+        .clone()
+        .expect("db declares a data-safety check")
 }
