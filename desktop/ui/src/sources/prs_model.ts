@@ -1,7 +1,17 @@
 // The PRs view's model: every trusted source's PRs payload merged into one
-// list, split into the My / Reviewing tabs and grouped by bucket. Pure (no
-// DOM, no ipc): the view and the Needs you model both read it, and the tests
-// feed it the fixture payloads.
+// list, split into three tabs, and the rule for which PRs need the user.
+// Pure (no DOM, no ipc): the view, the Needs you model and the rail count
+// all read it, and the tests feed it the fixture payloads.
+//
+// The tabs:
+//  - My PRs: every PR I authored, grouped by bucket;
+//  - Reviewing: the reviews I am actively on: required of me by name, or
+//    ones I already engaged with (replied, mythreads, voted); open or draft;
+//  - All: every open or draft review, grouped by how I am on it (required
+//    by name, optional, or one group per team that brought it to me): the
+//    inbox to pull from when there is time.
+// A PR may sit in Reviewing and All both; its bucket chip shows its state
+// in either.
 //
 // A payload arrives exactly as the source sent it, so nothing here trusts its
 // shape: a row missing a required field is skipped and counted, an optional
@@ -65,6 +75,13 @@ export interface PrRow {
   /** One line each, markdown links reduced to their text. */
   reasons: string[];
   chips: Chip[];
+  /** My review is required by name (`me.required`), as the fresher
+   *  payload says: two sources that disagree do not merge their `me`. */
+  required: boolean;
+  /** The teams (`reviewers[].isGroup`) on the PR, in the source's order. */
+  teams: string[];
+  /** Whether it needs the user: {@link attentionOf}. */
+  attention: "yes" | "folded" | "no";
   /** The source whose payload supplied the fields (the fresher one). */
   primary: PrOrigin;
   /** Every source that served the row, the primary first. */
@@ -72,12 +89,19 @@ export interface PrRow {
 }
 
 export interface PrGroup {
-  bucket: Bucket | "other";
+  /** Stable within its tab: the bucket for bucket groups; `required`,
+   *  `optional`, `team:<name, case folded>` or `team` in the All tab. */
+  id: string;
+  /** Set on bucket groups (My PRs, Reviewing). */
+  bucket?: Bucket | "other";
   label: string;
-  /** Collapsed by default with its count (the `waiting` bucket). */
+  /** Collapsed by default with its count (the `waiting` bucket, and the
+   *  team groups of the All tab). */
   folded: boolean;
   rows: PrRow[];
 }
+
+export type PrsTab = "mine" | "reviewing" | "all";
 
 /** What the freshness line shows for a view fed by several sources. */
 export interface FreshnessSummary {
@@ -94,39 +118,87 @@ export interface FreshnessSummary {
 export interface PrsModel {
   mine: PrGroup[];
   reviewing: PrGroup[];
+  all: PrGroup[];
   /** Rows per tab (the tab labels show them). */
-  counts: { mine: number; reviewing: number };
+  counts: Record<PrsTab, number>;
   freshness: FreshnessSummary;
   needsUpdate: NeedsUpdate[];
   /** At least one source has served a payload. */
   hasData: boolean;
 }
 
-/** Bucket order and labels per role, as the source contract's table lists them. */
-export const BUCKETS: Record<Pr["role"], { bucket: Bucket; label: string; needsYou: "yes" | "folded" | "no" }[]> = {
+/** Whether a bucket needs the user: always, shown but not counted, only
+ *  while my review is required by name, or never. */
+export type BucketNeed = "yes" | "folded" | "required" | "no";
+
+export interface BucketInfo {
+  bucket: Bucket;
+  /** The group heading. */
+  label: string;
+  needsYou: BucketNeed;
+  /** The chip every row in the bucket carries, so its state shows in any tab. */
+  chip: Chip;
+}
+
+/** Bucket order, labels and chips per role ("needs me" buckets first). */
+export const BUCKETS: Record<Pr["role"], BucketInfo[]> = {
   mine: [
-    { bucket: "action", label: "Blocked on me", needsYou: "yes" },
-    { bucket: "draft", label: "Still a draft", needsYou: "yes" },
-    { bucket: "ready", label: "Approved and green", needsYou: "yes" },
-    { bucket: "waiting", label: "Waiting on reviewers", needsYou: "folded" },
-    { bucket: "recent", label: "Merged or closed lately", needsYou: "no" },
+    { bucket: "action", label: "Blocked on me", needsYou: "yes", chip: { text: "blocked on me", tone: "bad" } },
+    { bucket: "draft", label: "Still a draft", needsYou: "yes", chip: { text: "draft", tone: "warn" } },
+    { bucket: "ready", label: "Approved and green", needsYou: "yes", chip: { text: "ready to merge", tone: "ok" } },
+    { bucket: "waiting", label: "Waiting on reviewers", needsYou: "folded", chip: { text: "waiting on reviewers", tone: "muted" } },
+    { bucket: "recent", label: "Merged or closed lately", needsYou: "no", chip: { text: "closed lately", tone: "muted" } },
   ],
   reviewing: [
-    { bucket: "replied", label: "The author answered my thread", needsYou: "yes" },
-    { bucket: "vote", label: "Required reviewer, not voted", needsYou: "yes" },
-    { bucket: "mythreads", label: "I commented; nothing new", needsYou: "no" },
-    { bucket: "voted", label: "I voted; nothing new", needsYou: "no" },
-    { bucket: "group", label: "Only via a group", needsYou: "no" },
+    { bucket: "replied", label: "The author answered my thread", needsYou: "yes", chip: { text: "author replied", tone: "warn" } },
+    { bucket: "vote", label: "My vote is asked for", needsYou: "required", chip: { text: "vote asked", tone: "info" } },
+    { bucket: "mythreads", label: "I commented; nothing new", needsYou: "no", chip: { text: "you commented", tone: "muted" } },
+    { bucket: "voted", label: "I voted; nothing new", needsYou: "no", chip: { text: "you voted", tone: "muted" } },
+    { bucket: "group", label: "Only via a team", needsYou: "no", chip: { text: "via a team", tone: "muted" } },
   ],
 };
+
+/** The reviewing buckets that mean I already engaged with the PR. */
+const ENGAGED: ReadonlySet<string> = new Set(["replied", "mythreads", "voted"]);
 
 /** Buckets that fold by default: present, counted, out of the way. */
 const FOLDED: ReadonlySet<string> = new Set(["waiting"]);
 
-/** Where a PR stands for Needs you. A bucket this app does not know (a later
- *  contract addition) or one in the wrong role is "no". */
-export function needsYouOf(role: Pr["role"], bucket: string): "yes" | "folded" | "no" {
-  return BUCKETS[role].find((b) => b.bucket === bucket)?.needsYou ?? "no";
+/** Where a bucket stands for Needs you, given whether my review is
+ *  required by name. A bucket this app does not know (a later contract
+ *  addition) or one in the wrong role is "no". */
+export function needsYouOf(role: Pr["role"], bucket: string, required = false): "yes" | "folded" | "no" {
+  const need = BUCKETS[role].find((b) => b.bucket === bucket)?.needsYou ?? "no";
+  if (need === "required") return required ? "yes" : "no";
+  return need;
+}
+
+const isOpen = (state: Pr["state"]): boolean => state === "open" || state === "draft";
+
+/**
+ * Whether a PR needs the user (Needs you, its badge, the PRs rail count,
+ * notifications):
+ *  - mine: `action`, `draft`, `ready`; `waiting` is shown folded, never
+ *    counted; `recent` never;
+ *  - reviewing, open or draft only: `replied` (the author answered me), or
+ *    `vote` while my review is required by name. `mythreads` / `voted` mean
+ *    the ball is with the author. An optional or team-only review never
+ *    needs the user: it waits in the All tab.
+ */
+export function attentionOf(pr: { role: Pr["role"]; bucket: string; required: boolean; state: Pr["state"] }): "yes" | "folded" | "no" {
+  if (pr.role === "reviewing" && !isOpen(pr.state)) return "no";
+  return needsYouOf(pr.role, pr.bucket, pr.required);
+}
+
+/** Whether a review belongs in the Reviewing tab: open or draft, and
+ *  required of me by name or already engaged with. */
+export function inReviewing(row: Pick<PrRow, "role" | "state" | "required" | "bucket">): boolean {
+  return row.role === "reviewing" && isOpen(row.state) && (row.required || ENGAGED.has(row.bucket));
+}
+
+/** Whether a review belongs in the All tab: every open or draft one. */
+export function inAll(row: Pick<PrRow, "role" | "state">): boolean {
+  return row.role === "reviewing" && isOpen(row.state);
 }
 
 /** The identity two sources agree on: forge and repo (case folded, as
@@ -417,13 +489,15 @@ export function buildPrsModel(payloads: ViewPayload[], needsUpdate: NeedsUpdate[
     }
     if (skipped > 0) freshness.errors.push(skippedLine(p.sourceLabel, skipped, usable.length > 1));
   }
-  const all = [...rows.values()].map((r) => r.row);
-  const mine = groupsFor("mine", all.filter((r) => r.role === "mine"));
-  const reviewing = groupsFor("reviewing", all.filter((r) => r.role === "reviewing"));
+  const merged = [...rows.values()].map((r) => r.row);
+  const mineRows = merged.filter((r) => r.role === "mine");
+  const reviewingRows = merged.filter(inReviewing);
+  const allRows = merged.filter(inAll);
   return {
-    mine,
-    reviewing,
-    counts: { mine: all.filter((r) => r.role === "mine").length, reviewing: all.filter((r) => r.role === "reviewing").length },
+    mine: groupsFor("mine", mineRows),
+    reviewing: groupsFor("reviewing", reviewingRows),
+    all: groupsForAll(allRows),
+    counts: { mine: mineRows.length, reviewing: reviewingRows.length, all: allRows.length },
     freshness,
     needsUpdate: stale,
     hasData: usable.some((p) => p.payload !== null && p.payload !== undefined),
@@ -431,9 +505,20 @@ export function buildPrsModel(payloads: ViewPayload[], needsUpdate: NeedsUpdate[
 }
 
 function toRow(id: string, pr: Pr, primary: PrOrigin, origins: PrOrigin[]): PrRow {
-  const known = BUCKETS[pr.role].some((b) => b.bucket === pr.bucket);
+  const info = BUCKETS[pr.role].find((b) => b.bucket === pr.bucket);
+  const bucket: PrRow["bucket"] = info ? pr.bucket : "other";
   const branch =
     pr.sourceBranch || pr.targetBranch ? `${pr.sourceBranch ?? "?"} → ${pr.targetBranch ?? "?"}` : null;
+  const required = pr.me?.required === true;
+  const teams = uniqueFolded((pr.reviewers ?? []).filter((r) => r.isGroup).map((r) => oneLine(r.name)).filter(Boolean));
+  // The bucket chip leads (an unknown bucket shows its raw name); a fact
+  // chip with the same text, such as a draft's state, is not repeated. A
+  // PR reached only through several teams is listed under the first; the
+  // others show as chips.
+  const lead: Chip[] = info ? [{ ...info.chip, title: info.label }] : oneLine(pr.bucket) ? [{ text: oneLine(pr.bucket), tone: "muted" }] : [];
+  if (bucket === "group" && !required) for (const t of teams.slice(1)) lead.push({ text: `also via ${t}`, tone: "muted" });
+  const seen = new Set(lead.map((c) => c.text.toLowerCase()));
+  const chips = [...lead, ...chipsFor(pr).filter((c) => !seen.has(c.text.toLowerCase()))];
   return {
     id,
     forge: pr.forge,
@@ -445,9 +530,12 @@ function toRow(id: string, pr: Pr, primary: PrOrigin, origins: PrOrigin[]): PrRo
     branch,
     state: pr.state,
     role: pr.role,
-    bucket: known ? pr.bucket : "other",
+    bucket,
     reasons: pr.reasons.map(oneLine).filter(Boolean),
-    chips: chipsFor(pr),
+    chips,
+    required,
+    teams,
+    attention: attentionOf({ role: pr.role, bucket, required, state: pr.state }),
     primary,
     origins,
   };
@@ -459,24 +547,68 @@ function groupsFor(role: Pr["role"], rows: PrRow[]): PrGroup[] {
   const groups: PrGroup[] = [];
   for (const b of BUCKETS[role]) {
     const inBucket = rows.filter((r) => r.bucket === b.bucket);
-    if (inBucket.length) groups.push({ bucket: b.bucket, label: b.label, folded: FOLDED.has(b.bucket), rows: inBucket });
+    if (inBucket.length) groups.push({ id: b.bucket, bucket: b.bucket, label: b.label, folded: FOLDED.has(b.bucket), rows: inBucket });
   }
   const other = rows.filter((r) => r.bucket === "other");
-  if (other.length) groups.push({ bucket: "other", label: "Other", folded: false, rows: other });
+  if (other.length) groups.push({ id: "other", bucket: "other", label: "Other", folded: false, rows: other });
   return groups;
 }
 
-/** The rows of a model that need the user ("yes" buckets), and the folded
- *  ones (shown, not counted). */
+/** Case-folded duplicates dropped, the first spelling kept. */
+function uniqueFolded(names: string[]): string[] {
+  const seen = new Set<string>();
+  return names.filter((n) => {
+    const k = n.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/** Where a review sits in the All tab: required by name, optional (named
+ *  but not required, not team-only), or under the first team that brought
+ *  it to me ("Through a team" when the source named none). */
+function allGroupOf(row: PrRow): { id: string; label: string; team: boolean } {
+  if (row.required) return { id: "required", label: "Required by name", team: false };
+  if (row.bucket !== "group") return { id: "optional", label: "Optional", team: false };
+  const team = row.teams[0];
+  return team ? { id: `team:${team.toLowerCase()}`, label: team, team: true } : { id: "team", label: "Through a team", team: true };
+}
+
+/** The All tab's groups: Required by name, Optional, then one per team in
+ *  name order, "Through a team" last. Team groups start folded: they are
+ *  the long tail. Rows within a group keep bucket order, so the ones that
+ *  need me come first. */
+function groupsForAll(rows: PrRow[]): PrGroup[] {
+  const order: string[] = BUCKETS.reviewing.map((b) => b.bucket);
+  const rank = (r: PrRow): number => {
+    const i = order.indexOf(r.bucket);
+    return i < 0 ? order.length : i;
+  };
+  const byId = new Map<string, PrGroup>();
+  for (const row of [...rows].sort((a, b) => rank(a) - rank(b))) {
+    const g = allGroupOf(row);
+    const at = byId.get(g.id);
+    if (at) at.rows.push(row);
+    else byId.set(g.id, { id: g.id, label: g.label, folded: g.team, rows: [row] });
+  }
+  const place = (g: PrGroup): string =>
+    g.id === "required" ? "0" : g.id === "optional" ? "1" : g.id === "team" ? "3" : `2${g.label.toLowerCase()}`;
+  return [...byId.values()].sort((a, b) => (place(a) < place(b) ? -1 : place(a) > place(b) ? 1 : 0));
+}
+
+/** The rows of a model that need the user ({@link attentionOf} "yes":
+ *  Needs you, its badge, the PRs rail count, notifications), and the folded
+ *  ones (shown, not counted). Every review that needs the user is in the
+ *  Reviewing tab, so the two bucket-grouped tabs hold them all, in display
+ *  order. */
 export function prsNeedingYou(model: PrsModel): { yes: PrRow[]; folded: PrRow[] } {
   const yes: PrRow[] = [];
   const folded: PrRow[] = [];
   for (const g of [...model.mine, ...model.reviewing]) {
     for (const r of g.rows) {
-      if (r.bucket === "other") continue;
-      const n = needsYouOf(r.role, r.bucket);
-      if (n === "yes") yes.push(r);
-      else if (n === "folded") folded.push(r);
+      if (r.attention === "yes") yes.push(r);
+      else if (r.attention === "folded") folded.push(r);
     }
   }
   return { yes, folded };

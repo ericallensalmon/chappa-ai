@@ -105,7 +105,14 @@ export interface LocalStatus {
 
 /**
  * Which group a PR sits in. For role "mine": action, draft, ready, waiting,
- * recent. For role "reviewing": replied, vote, mythreads, voted, group.
+ * recent. For role "reviewing": replied (the author answered my thread),
+ * vote (my vote is asked for and not given), mythreads (I commented, nothing
+ * new), voted (I voted, nothing new), group (I am on it only through a team).
+ *
+ * The bucket says where the ball is; the app decides what needs the user
+ * from it: my PRs in action / draft / ready, and reviews in replied, or in
+ * vote while `me.required` is set. An optional or team-only review never
+ * raises attention, whatever its bucket.
  */
 export type Bucket =
   | "action" | "draft" | "ready" | "waiting" | "recent"
@@ -140,9 +147,12 @@ export interface Pr {
   /** The signed-in user as a reviewer (role "reviewing"). */
   me?: {
     /**
-     * The review is required of me. On a forge without a per-reviewer
-     * required flag (GitHub) this means "asked for by name, not only
-     * through a group".
+     * The review is required of me by name. Each source decides what that
+     * means on its forge: on one without a per-reviewer required flag
+     * (GitHub) it is "asked for by name, not only through a group". A
+     * required review is listed under Reviewing, and its `vote` bucket
+     * needs the user; one that is not required (optional, or team-only with
+     * bucket `group`) is listed under All only, and never needs the user.
      */
     required?: boolean;
     /**
@@ -152,7 +162,9 @@ export interface Pr {
      */
     vote?: "approved" | "approved-with-suggestions" | "waiting" | "rejected" | "none";
   } | null;
-  /** Other reviewers; `required` and `vote` read as on `me`. */
+  /** Other reviewers; `required` and `vote` read as on `me`. An entry with
+   *  `isGroup` is a team: a PR that reaches me only through a team (bucket
+   *  `group`) is listed under its first team's name, the others as chips. */
   reviewers?: (Person & { required?: boolean; isGroup?: boolean; vote?: string })[];
   checks?: {
     state: "passing" | "failing" | "pending" | "none";

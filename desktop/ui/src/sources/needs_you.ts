@@ -8,10 +8,16 @@
 //    row is viewed), handed in as the rail computed it, never re-derived;
 //  - Work items with an approval pending, or whose current status may only be
 //    left by a human;
-//  - PRs in the "yes" buckets (the folded `waiting` bucket is shown, not
-//    counted);
+//  - PRs that need the user (`attentionOf` in the PRs model: my PRs in
+//    action / draft / ready, reviews the author answered, and required
+//    reviews not yet voted; my PRs waiting on reviewers are shown folded,
+//    not counted; optional and team-only reviews never appear);
 //  - the attention items sources serve, grouped under their own headings.
-// The rail badge counts the "yes" rows.
+// The rail badge counts the rows that wait on a decision: agents waiting
+// and programs blocked, Work approvals, PRs and source attention. A
+// terminal at bell rank (a bell, or a program that reported done / failed)
+// is listed but not counted: a stray `\a` should not keep a number on the
+// rail.
 
 import { attentionText, type CardAttention } from "../dashboard";
 import type * as ipc from "../ipc";
@@ -62,6 +68,9 @@ export interface NeedsYouRow {
   tone: Tone;
   /** A folded row: listed under its section's fold, not counted. */
   folded: boolean;
+  /** Counted in the rail badge: false for folded rows and for terminals at
+   *  bell rank, which are listed but do not wait on a decision. */
+  counted: boolean;
   /** The source the row came from (null for terminals); a link it opens is
    *  checked against this source's trusted hosts. */
   sourceId: string | null;
@@ -81,7 +90,7 @@ export interface NeedsYouSection {
 
 export interface NeedsYouModel {
   sections: NeedsYouSection[];
-  /** The "yes" rows: the rail badge. */
+  /** The counted rows: the rail badge. */
   count: number;
   freshness: FreshnessSummary;
   needsUpdate: NeedsUpdate[];
@@ -175,6 +184,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
         detail: [attentionText({ attention: t.attention, programStatus: t.programStatus }), t.project].filter(Boolean).join(" · "),
         tone: t.attention === "agent-waiting" ? "info" : "warn",
         folded: false,
+        counted: t.attention === "agent-waiting",
         sourceId: null,
         sourceLabel: null,
         actions: [],
@@ -197,6 +207,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
         detail: w.detail,
         tone: "warn",
         folded: false,
+        counted: true,
         sourceId: p.sourceId,
         sourceLabel: p.sourceLabel,
         actions: Array.isArray(obj(raw)?.actions) && (obj(raw)!.actions as unknown[]).length > 0
@@ -217,6 +228,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
       detail: prDetail(r),
       tone: r.bucket === "action" ? "bad" : isFolded ? "muted" : "warn",
       folded: isFolded,
+      counted: !isFolded,
       sourceId: r.primary.sourceId,
       sourceLabel: r.primary.sourceLabel,
       actions: r.origins
@@ -245,6 +257,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
         detail: oneLine(str(a.detail) ?? ""),
         tone: SEVERITY_TONE[str(a.severity) ?? ""] ?? "info",
         folded: false,
+        counted: true,
         sourceId: p.sourceId,
         sourceLabel: p.sourceLabel,
         actions:
@@ -266,7 +279,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
     freshness.errors.push(...input.prs.freshness.errors);
     freshness.refreshing ||= input.prs.freshness.refreshing;
   }
-  const count = sections.reduce((n, s) => n + s.rows.filter((r) => !r.folded).length, 0);
+  const count = sections.reduce((n, s) => n + s.rows.filter((r) => r.counted).length, 0);
   return { sections, count, freshness, needsUpdate: stale };
 }
 

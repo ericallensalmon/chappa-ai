@@ -1,11 +1,12 @@
 // The PRs page: the merged pull requests of every trusted source serving
-// the view, in My / Reviewing tabs, grouped by bucket in the contract's
-// order. Built like the dashboard: the app hands it a plain model on every
-// change and the page repaints only the rows whose content changed (a poll
-// that changed one PR touches one row, and focus inside the page survives).
+// the view, in three tabs: My PRs and Reviewing grouped by bucket, All
+// grouped by how I am on each review (team groups start folded). Built like
+// the dashboard: the app hands it a plain model on every change and the
+// page repaints only the rows whose content changed (a poll that changed
+// one PR touches one row, and focus inside the page survives).
 
 import type { ActionTarget } from "./needs_you";
-import type { PrGroup, PrRow, PrsModel } from "./prs_model";
+import type { PrGroup, PrRow, PrsModel, PrsTab } from "./prs_model";
 import {
   ActionsCell,
   ViewFrame,
@@ -17,7 +18,14 @@ import {
   type SourceViewDeps,
 } from "./view_common";
 
-export type PrsTab = "mine" | "reviewing";
+export type { PrsTab } from "./prs_model";
+
+/** Tab order and labels. */
+export const PRS_TABS: { id: PrsTab; label: string }[] = [
+  { id: "mine", label: "My PRs" },
+  { id: "reviewing", label: "Reviewing" },
+  { id: "all", label: "All" },
+];
 
 /** What the page paints: the model plus what the app knows around it. */
 export interface PrsViewInput {
@@ -55,7 +63,9 @@ export function prsEmptyText(input: PrsViewInput, tab: PrsTab): string {
     return "No trusted source serves pull requests. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
   }
   if (!input.model.hasData) return `Waiting for the first answer from ${input.servedBy.join(", ")}.`;
-  return tab === "mine" ? "None of your pull requests is open or recent." : "Nothing is waiting on your review.";
+  if (tab === "mine") return "None of your pull requests is open or recent.";
+  if (tab === "reviewing") return "No review is required of you, and none you took part in is open.";
+  return "No open pull request lists you as a reviewer.";
 }
 
 /** The action targets of a merged row: every origin that carried actions. */
@@ -69,7 +79,8 @@ export class PrsView {
   private readonly frame: ViewFrame;
   private readonly tabs: Record<PrsTab, HTMLButtonElement>;
   private tab: PrsTab = "mine";
-  /** Buckets the user unfolded or folded, per tab; others keep their default. */
+  /** Groups the user unfolded or folded, per tab; others keep their
+   *  default. Kept for as long as the page lives (the session), not saved. */
   private readonly foldChoice = new Map<string, boolean>();
   private readonly groups = new Map<string, GroupRefs>();
   private readonly rows = new Map<string, RowRefs>();
@@ -90,7 +101,7 @@ export class PrsView {
       tabs.appendChild(b);
       return b;
     };
-    this.tabs = { mine: mk("mine"), reviewing: mk("reviewing") };
+    this.tabs = { mine: mk("mine"), reviewing: mk("reviewing"), all: mk("all") };
     this.frame.headerSlot.appendChild(tabs);
   }
 
@@ -130,8 +141,7 @@ export class PrsView {
     if (!input) return;
     const { model } = input;
     this.frame.paintStatus(model.freshness, model.needsUpdate, this.deps.now());
-    for (const id of ["mine", "reviewing"] as const) {
-      const label = id === "mine" ? "My PRs" : "Reviewing";
+    for (const { id, label } of PRS_TABS) {
       this.tabs[id].textContent = `${label} (${model.counts[id]})`;
       this.tabs[id].classList.toggle("active", id === this.tab);
       this.tabs[id].setAttribute("aria-selected", String(id === this.tab));
@@ -151,27 +161,28 @@ export class PrsView {
       truncate(refs.rows, g.rows.length);
     });
     truncate(this.frame.content, groups.length);
-    // Rows of the other tab stay cached; only rows gone from both are dropped.
-    const all = new Set([...model.mine, ...model.reviewing].flatMap((g) => g.rows.map((r) => r.id)));
+    // Rows of the other tabs stay cached; only rows gone from every tab are dropped.
+    const all = new Set([...model.mine, ...model.reviewing, ...model.all].flatMap((g) => g.rows.map((r) => r.id)));
     for (const id of [...this.rows.keys()]) if (!all.has(id)) this.rows.delete(id);
     for (const key of [...this.groups.keys()]) {
-      const [tab, bucket] = key.split("\u001f");
-      if (!model[tab as PrsTab].some((g) => g.bucket === bucket)) this.groups.delete(key);
+      const [tab, id] = key.split("\u001f");
+      if (!model[tab as PrsTab].some((g) => g.id === id)) this.groups.delete(key);
     }
     this.frame.empty.textContent = groups.length === 0 ? prsEmptyText(input, this.tab) : "";
   }
 
   private folded(tab: PrsTab, g: PrGroup): boolean {
-    return this.foldChoice.get(`${tab}\u001f${g.bucket}`) ?? g.folded;
+    return this.foldChoice.get(`${tab}\u001f${g.id}`) ?? g.folded;
   }
 
   private groupRefs(tab: PrsTab, g: PrGroup): GroupRefs {
-    const key = `${tab}\u001f${g.bucket}`;
+    const key = `${tab}\u001f${g.id}`;
     let refs = this.groups.get(key);
     if (refs) return refs;
     const el = document.createElement("section");
     el.className = "chappa-sv-group";
-    el.dataset.bucket = g.bucket;
+    el.dataset.group = g.id;
+    if (g.bucket) el.dataset.bucket = g.bucket;
     const head = document.createElement("button");
     head.type = "button";
     head.className = "chappa-sv-group-head";
@@ -184,7 +195,7 @@ export class PrsView {
     rows.className = "chappa-sv-rows";
     el.append(head, rows);
     head.addEventListener("click", () => {
-      const now = this.folded(tab, this.currentGroup(tab, g.bucket) ?? g);
+      const now = this.folded(tab, this.currentGroup(tab, g.id) ?? g);
       this.foldChoice.set(key, !now);
       this.paint();
     });
@@ -193,8 +204,8 @@ export class PrsView {
     return refs;
   }
 
-  private currentGroup(tab: PrsTab, bucket: string): PrGroup | undefined {
-    return this.input?.model[tab].find((g) => g.bucket === bucket);
+  private currentGroup(tab: PrsTab, id: string): PrGroup | undefined {
+    return this.input?.model[tab].find((g) => g.id === id);
   }
 
   private paintGroup(refs: GroupRefs, g: PrGroup): void {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BUCKETS,
+  attentionOf,
   buildPrsModel,
   chipsFor,
   needsYouOf,
@@ -12,17 +13,31 @@ import {
   stripMarkdownLinks,
   summarizeFreshness,
   type PrsModel,
+  type PrsTab,
 } from "./prs_model";
 import { fixture, payload, pr, prsBody } from "./test-utils";
 
-const buckets = (m: PrsModel, tab: "mine" | "reviewing"): string[] => m[tab].map((g) => g.bucket);
-const ids = (m: PrsModel, tab: "mine" | "reviewing"): string[] => m[tab].flatMap((g) => g.rows.map((r) => r.number));
+const buckets = (m: PrsModel, tab: PrsTab): string[] => m[tab].map((g) => g.id);
+const ids = (m: PrsModel, tab: PrsTab): string[] => m[tab].flatMap((g) => g.rows.map((r) => r.number));
+/** A review PR: open, role reviewing, in `bucket`, with `me` and reviewers as given. */
+const review = (number: string, bucket: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
+  pr(number, { role: "reviewing", bucket, author: { name: "Sam" }, ...over });
+const team = (name: string): Record<string, unknown> => ({ name, isGroup: true, vote: "none" });
 
 describe("the fixture's PRs", () => {
-  it("split into My / Reviewing, grouped in the contract's bucket order with its labels", () => {
+  it("split into My PRs / Reviewing / All, grouped in bucket order with their labels", () => {
     const m = buildPrsModel([payload("fx", fixture("prs"))]);
     expect(buckets(m, "mine")).toEqual(["action", "draft", "ready", "waiting", "recent"]);
-    expect(buckets(m, "reviewing")).toEqual(["replied", "vote", "mythreads", "voted", "group"]);
+    // Reviewing: required by name (#7) or already engaged (#6 replied, #8
+    // commented); the closed #9 and the team-only #10 are not in it.
+    expect(buckets(m, "reviewing")).toEqual(["replied", "vote", "mythreads"]);
+    expect(ids(m, "reviewing")).toEqual(["#6", "#7", "#8"]);
+    // All: every open review by how I am on it.
+    expect(m.all.map((g) => [g.id, g.label, g.folded, g.rows.map((r) => r.number)])).toEqual([
+      ["required", "Required by name", false, ["#7"]],
+      ["optional", "Optional", false, ["#6", "#8"]],
+      ["team:platform-team", "platform-team", true, ["#10"]],
+    ]);
     expect(m.mine.map((g) => g.label)).toEqual([
       "Blocked on me",
       "Still a draft",
@@ -30,7 +45,7 @@ describe("the fixture's PRs", () => {
       "Waiting on reviewers",
       "Merged or closed lately",
     ]);
-    expect(m.counts).toEqual({ mine: 5, reviewing: 5 });
+    expect(m.counts).toEqual({ mine: 5, reviewing: 3, all: 4 });
     // Waiting is folded (collapsed with its count), nothing else is.
     expect(m.mine.filter((g) => g.folded).map((g) => g.bucket)).toEqual(["waiting"]);
     expect(m.reviewing.some((g) => g.folded)).toBe(false);
@@ -49,22 +64,37 @@ describe("the fixture's PRs", () => {
       reasons: ["Checks are failing: lint", "1 thread needs your reply"],
       primary: { sourceId: "fx", key: "github:owner/repo:#1", hasActions: true },
     });
+    // The bucket chip leads, so the row's state shows in any tab.
     expect(one.chips).toEqual([
+      { text: "blocked on me", tone: "bad", title: "Blocked on me" },
       { text: "1 check failing", tone: "bad", title: "lint" },
       { text: "1 thread for me", tone: "warn", title: "2 open, 1 resolved" },
       { text: "conflicts", tone: "bad" },
       { text: "1 waiting for author", tone: "warn", title: "Sam" },
     ]);
     const vote = m.reviewing.find((g) => g.bucket === "vote")!.rows[0];
-    expect(vote.chips).toEqual([{ text: "required", tone: "info", title: "your review is required" }]);
-    const voted = m.reviewing.find((g) => g.bucket === "voted")!.rows[0];
-    expect(voted.chips.map((c) => c.text)).toEqual(["closed", "you rejected"]);
+    expect(vote.chips).toEqual([
+      { text: "vote asked", tone: "info", title: "My vote is asked for" },
+      { text: "required", tone: "info", title: "your review is required" },
+    ]);
+    expect(vote.required).toBe(true);
+    const team10 = m.all.find((g) => g.id === "team:platform-team")!.rows[0];
+    expect(team10.chips.map((c) => c.text)).toEqual(["via a team"]);
+    expect(team10.teams).toEqual(["platform-team"]);
     const draft = m.mine.find((g) => g.bucket === "draft")!.rows[0];
-    expect(draft.chips).toEqual([{ text: "draft", tone: "muted" }]);
+    // The bucket chip and the state chip say the same: one chip.
+    expect(draft.chips).toEqual([{ text: "draft", tone: "warn", title: "Still a draft" }]);
     expect(draft.primary.hasActions).toBe(false);
   });
 
-  it("the Needs you buckets: yes rows counted, waiting folded, the rest out", () => {
+  it("a closed review is in no tab; an open one carries its bucket chip beside its vote", () => {
+    const m = buildPrsModel([payload("fx", prsBody([review("#9", "voted", { state: "closed", me: { vote: "rejected" } })]))]);
+    expect(m.counts).toEqual({ mine: 0, reviewing: 0, all: 0 });
+    const closed = buildPrsModel([payload("fx", prsBody([review("#9", "voted", { me: { vote: "rejected" } })]))]).reviewing[0].rows[0];
+    expect(closed.chips.map((c) => c.text)).toEqual(["you voted", "you rejected"]);
+  });
+
+  it("the Needs you rows: yes rows counted, waiting folded, the rest out", () => {
     const { yes, folded } = prsNeedingYou(buildPrsModel([payload("fx", fixture("prs"))]));
     expect(yes.map((r) => r.number)).toEqual(["#1", "#2", "#3", "#6", "#7"]);
     expect(folded.map((r) => r.number)).toEqual(["#4"]);
@@ -72,7 +102,123 @@ describe("the fixture's PRs", () => {
     expect(needsYouOf("reviewing", "action")).toBe("no");
     expect(needsYouOf("mine", "brand-new-bucket")).toBe("no");
     expect(BUCKETS.mine.map((b) => b.needsYou)).toEqual(["yes", "yes", "yes", "folded", "no"]);
-    expect(BUCKETS.reviewing.map((b) => b.needsYou)).toEqual(["yes", "yes", "no", "no", "no"]);
+    expect(BUCKETS.reviewing.map((b) => b.needsYou)).toEqual(["yes", "required", "no", "no", "no"]);
+  });
+});
+
+describe("which PRs need the user", () => {
+  // Every bucket against how I am on the PR: required by name, optional
+  // (named, not required) and team-only. My own PRs have no `me`.
+  const cases: [role: "mine" | "reviewing", bucket: string, how: "required" | "optional" | "team" | "mine", want: "yes" | "folded" | "no"][] = [
+    ["mine", "action", "mine", "yes"],
+    ["mine", "draft", "mine", "yes"],
+    ["mine", "ready", "mine", "yes"],
+    ["mine", "waiting", "mine", "folded"],
+    ["mine", "recent", "mine", "no"],
+    ["reviewing", "replied", "required", "yes"],
+    ["reviewing", "replied", "optional", "yes"],
+    ["reviewing", "vote", "required", "yes"],
+    ["reviewing", "vote", "optional", "no"],
+    ["reviewing", "vote", "team", "no"],
+    ["reviewing", "mythreads", "required", "no"],
+    ["reviewing", "mythreads", "optional", "no"],
+    ["reviewing", "voted", "required", "no"],
+    ["reviewing", "voted", "optional", "no"],
+    ["reviewing", "group", "team", "no"],
+    ["reviewing", "group", "required", "no"],
+    ["reviewing", "later-bucket", "required", "no"],
+  ];
+  it.each(cases)("%s / %s / %s → %s", (role, bucket, how, want) => {
+    const me = how === "mine" ? null : { required: how === "required", vote: "none" };
+    const reviewers = how === "team" ? [team("web-team")] : [];
+    const row = buildPrsModel([payload("a", prsBody([pr("#1", { role, bucket, me, reviewers })]))]);
+    const all = [...row.mine, ...row.reviewing, ...row.all].flatMap((g) => g.rows);
+    expect(all[0].attention).toBe(want);
+    const { yes } = prsNeedingYou(row);
+    expect(yes.length).toBe(want === "yes" ? 1 : 0);
+  });
+
+  it("a review that is no longer open never needs the user", () => {
+    expect(attentionOf({ role: "reviewing", bucket: "replied", required: true, state: "merged" })).toBe("no");
+    expect(attentionOf({ role: "reviewing", bucket: "vote", required: true, state: "draft" })).toBe("yes");
+    expect(attentionOf({ role: "mine", bucket: "ready", required: false, state: "open" })).toBe("yes");
+  });
+});
+
+describe("the three tabs", () => {
+  it("Reviewing holds required-by-name and engaged reviews; All holds every open review", () => {
+    const m = buildPrsModel([
+      payload("a", prsBody([
+        review("#1", "vote", { me: { required: true, vote: "none" } }),
+        review("#2", "vote", { me: { required: false, vote: "none" } }),
+        review("#3", "mythreads", { me: { required: false, vote: "none" } }),
+        review("#4", "voted", { me: { required: false, vote: "approved" } }),
+        review("#5", "replied", { me: { required: false, vote: "waiting" } }),
+        review("#6", "group", { me: null, reviewers: [team("web-team")] }),
+        review("#7", "voted", { state: "draft", me: { required: true, vote: "approved" } }),
+        pr("#8", { bucket: "waiting" }),
+      ])),
+    ]);
+    expect(ids(m, "mine")).toEqual(["#8"]);
+    // Optional and not engaged (#2) and team-only (#6) stay out of Reviewing.
+    expect(m.reviewing.map((g) => [g.id, g.rows.map((r) => r.number)])).toEqual([
+      ["replied", ["#5"]],
+      ["vote", ["#1"]],
+      ["mythreads", ["#3"]],
+      ["voted", ["#4", "#7"]],
+    ]);
+    expect(m.counts).toEqual({ mine: 1, reviewing: 5, all: 7 });
+    expect(m.all.map((g) => [g.id, g.rows.map((r) => r.number)])).toEqual([
+      ["required", ["#1", "#7"]],
+      ["optional", ["#5", "#2", "#3", "#4"]],
+      ["team:web-team", ["#6"]],
+    ]);
+  });
+
+  it("All: one folded group per team in name order, the first team named, the others as chips, an unnamed team last", () => {
+    const m = buildPrsModel([
+      payload("a", prsBody([
+        review("#1", "group", { reviewers: [team("web-team"), { name: "Alex", required: true }, team("db-team")] }),
+        review("#2", "group", { reviewers: [team("api-team")] }),
+        review("#3", "group", { reviewers: [] }),
+        review("#4", "group", { reviewers: [team("Web-Team")] }),
+        review("#5", "replied", { me: { required: false, vote: "none" }, reviewers: [team("web-team")] }),
+      ])),
+    ]);
+    expect(m.all.map((g) => [g.id, g.label, g.folded, g.rows.map((r) => r.number)])).toEqual([
+      ["optional", "Optional", false, ["#5"]],
+      ["team:api-team", "api-team", true, ["#2"]],
+      // Team names fold case; the first spelling labels the group.
+      ["team:web-team", "web-team", true, ["#1", "#4"]],
+      ["team", "Through a team", true, ["#3"]],
+    ]);
+    const multi = m.all[2].rows[0];
+    expect(multi.chips.map((c) => c.text)).toEqual(["via a team", "also via db-team"]);
+    // A PR named through a team AND required of me by name is Required, no team chips.
+    const both = buildPrsModel([payload("a", prsBody([review("#9", "vote", { me: { required: true, vote: "none" }, reviewers: [team("web-team"), team("db-team")] })]))]);
+    expect(both.all.map((g) => g.id)).toEqual(["required"]);
+    expect(both.all[0].rows[0].chips.map((c) => c.text)).toEqual(["vote asked", "required"]);
+  });
+
+  it("one PR required by name in one source and team-only in another is one row; the fresher payload's `me` wins", () => {
+    const named = prsBody([review("#1", "vote", { me: { required: true, vote: "none" } })], "2026-01-15T10:00:00Z");
+    const viaTeam = prsBody([review("#1", "group", { me: null, reviewers: [team("web-team")] })], "2026-01-15T09:00:00Z");
+    for (const order of [[payload("a", named), payload("b", viaTeam)], [payload("b", viaTeam), payload("a", named)]]) {
+      const m = buildPrsModel(order);
+      expect(m.counts).toEqual({ mine: 0, reviewing: 1, all: 1 });
+      const row = m.reviewing[0].rows[0];
+      expect([row.required, row.bucket, row.attention, row.primary.sourceId]).toEqual([true, "vote", "yes", "a"]);
+      expect(row.origins.map((o) => o.sourceId)).toEqual(["a", "b"]);
+      expect(m.all.map((g) => g.id)).toEqual(["required"]);
+      expect(prsNeedingYou(m).yes.map((r) => r.id)).toEqual([row.id]);
+    }
+    // The other way round: the team-only payload is fresher, so the row is
+    // team-only and needs nothing, though the other source named me.
+    const stale = prsBody([review("#1", "vote", { me: { required: true, vote: "none" } })], "2026-01-15T08:00:00Z");
+    const m = buildPrsModel([payload("a", stale), payload("b", viaTeam)]);
+    expect(m.counts).toEqual({ mine: 0, reviewing: 0, all: 1 });
+    expect(m.all.map((g) => g.id)).toEqual(["team:web-team"]);
+    expect(prsNeedingYou(m).yes).toEqual([]);
   });
 });
 
@@ -125,7 +271,7 @@ describe("a payload read leniently", () => {
     expect(ids(m, "mine")).toEqual(["#1"]);
     expect(m.freshness.errors).toEqual(["3 pull requests could not be read"]);
     const row = m.mine[0].rows[0];
-    expect(row.chips).toEqual([]);
+    expect(row.chips).toEqual([{ text: "blocked on me", tone: "bad", title: "Blocked on me" }]);
     expect(row.branch).toBeNull();
   });
 
@@ -137,14 +283,19 @@ describe("a payload read leniently", () => {
     expect(parsed.state).toBe("open");
     expect(chipsFor(parsed)).toEqual([]);
     const m = buildPrsModel([payload("a", prsBody([bare]))]);
-    expect(m.reviewing.map((g) => [g.bucket, g.label])).toEqual([["other", "Other"]]);
-    // An empty title shows the repo and number instead.
-    expect(m.reviewing[0].rows[0].title).toBe("grp/app!7");
+    // Not required and not engaged: in All (as optional), not in Reviewing.
+    expect(m.reviewing).toEqual([]);
+    expect(m.all.map((g) => [g.id, g.rows.map((r) => r.bucket)])).toEqual([["optional", ["other"]]]);
+    // An empty title shows the repo and number instead; the raw bucket is its chip.
+    expect(m.all[0].rows[0].title).toBe("grp/app!7");
+    expect(m.all[0].rows[0].chips).toEqual([{ text: "later-bucket", tone: "muted" }]);
     expect(prsNeedingYou(m).yes).toEqual([]);
+    const required = buildPrsModel([payload("a", prsBody([{ ...bare, me: { required: true } }]))]);
+    expect(required.reviewing.map((g) => [g.bucket, g.label])).toEqual([["other", "Other"]]);
   });
 
   it("a payload with no items, or none at all yet, renders empty without throwing", () => {
-    expect(buildPrsModel([payload("a", { freshness: { asOf: null } })]).counts).toEqual({ mine: 0, reviewing: 0 });
+    expect(buildPrsModel([payload("a", { freshness: { asOf: null } })]).counts).toEqual({ mine: 0, reviewing: 0, all: 0 });
     const waiting = buildPrsModel([payload("a", null)]);
     expect(waiting.hasData).toBe(false);
     expect(waiting.freshness.asOf).toBeNull();

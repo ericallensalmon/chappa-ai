@@ -29,7 +29,9 @@ function input(payloads = [payload("fx", fixture("prs"), { sourceLabel: "Fixture
   return { model: buildPrsModel(payloads), servedBy: ["Fixture"], versions: { fx: 1 }, ...over };
 }
 
-const groups = (v: PrsView): string[] => [...v.host.querySelectorAll<HTMLElement>(".chappa-sv-content > .chappa-sv-group")].map((g) => g.dataset.bucket!);
+const groups = (v: PrsView): string[] => [...v.host.querySelectorAll<HTMLElement>(".chappa-sv-content > .chappa-sv-group")].map((g) => g.dataset.group!);
+const group = (v: PrsView, id: string): HTMLElement => v.host.querySelector<HTMLElement>(`.chappa-sv-content > .chappa-sv-group[data-group="${id}"]`)!;
+const tab = (v: PrsView, id: string): HTMLButtonElement => v.host.querySelector<HTMLButtonElement>(`.chappa-sv-tab[data-tab="${id}"]`)!;
 const rowsOf = (v: PrsView, bucket: string): string[] =>
   [...v.host.querySelectorAll<HTMLElement>(`.chappa-sv-group[data-bucket="${bucket}"] .chappa-pr-row`)].map((r) => r.dataset.id!);
 const row = (v: PrsView, id: string): HTMLElement => v.host.querySelector<HTMLElement>(`.chappa-pr-row[data-id="${id}"]`)!;
@@ -42,7 +44,8 @@ describe("PrsView", () => {
     expect(v.host.querySelector(".chappa-sv-fresh")?.textContent).toBe("as of 3 min ago");
     expect([...v.host.querySelectorAll(".chappa-sv-notice")].map((n) => n.textContent)).toEqual(["showing 10 of 24 pull requests"]);
     expect(v.host.querySelectorAll(".chappa-sv-error").length).toBe(0);
-    expect([...v.host.querySelectorAll(".chappa-sv-tab")].map((t) => t.textContent)).toEqual(["My PRs (5)", "Reviewing (5)"]);
+    expect([...v.host.querySelectorAll(".chappa-sv-tab")].map((t) => t.textContent)).toEqual(["My PRs (5)", "Reviewing (3)", "All (4)"]);
+    expect(tab(v, "mine").getAttribute("aria-selected")).toBe("true");
     expect(groups(v)).toEqual(["action", "draft", "ready", "waiting", "recent"]);
     expect(v.host.querySelector('.chappa-sv-group[data-bucket="action"] .chappa-sv-group-label')?.textContent).toBe("▾ Blocked on me");
     v.dispose();
@@ -56,6 +59,7 @@ describe("PrsView", () => {
     expect(r.querySelector(".chappa-sv-meta")?.textContent).toBe("owner/repo#1 · Alex · abc-1-health → main");
     expect([...r.querySelectorAll(".chappa-sv-reason")].map((x) => x.textContent)).toEqual(["Checks are failing: lint", "1 thread needs your reply"]);
     expect([...r.querySelectorAll<HTMLElement>(".chappa-sv-chip")].map((c) => `${c.dataset.tone}:${c.textContent}`)).toEqual([
+      "bad:blocked on me",
       "bad:1 check failing",
       "warn:1 thread for me",
       "bad:conflicts",
@@ -75,11 +79,74 @@ describe("PrsView", () => {
     expect(waiting.querySelector(".chappa-sv-rows")?.classList.contains("folded")).toBe(false);
     v.host.querySelector<HTMLButtonElement>('.chappa-sv-tab[data-tab="reviewing"]')!.click();
     expect(v.currentTab).toBe("reviewing");
-    expect(groups(v)).toEqual(["replied", "vote", "mythreads", "voted", "group"]);
+    expect(groups(v)).toEqual(["replied", "vote", "mythreads"]);
     // The choice survives a repaint.
     v.host.querySelector<HTMLButtonElement>('.chappa-sv-tab[data-tab="mine"]')!.click();
     v.update(input());
     expect(v.host.querySelector('.chappa-sv-group[data-bucket="waiting"] .chappa-sv-rows')?.classList.contains("folded")).toBe(false);
+    v.dispose();
+  });
+
+  it("All: groups by how I am on each review, team groups folded, each fold remembered across tabs and polls", () => {
+    const team = (name: string) => ({ name, isGroup: true });
+    const rev = (n: string, bucket: string, over: Record<string, unknown> = {}) => pr(n, { role: "reviewing", bucket, ...over });
+    const body = (extra: Record<string, unknown>[] = []) =>
+      prsBody([
+        rev("#1", "vote", { me: { required: true, vote: "none" } }),
+        rev("#2", "mythreads", { me: { required: false, vote: "none" } }),
+        rev("#3", "group", { reviewers: [team("web-team"), team("db-team")] }),
+        rev("#4", "group", { reviewers: [] }),
+        ...extra,
+      ]);
+    const v = new PrsView(deps());
+    v.update(input([payload("a", body())], { versions: { a: 1 } }));
+    expect(tab(v, "all").textContent).toBe("All (4)");
+    expect(tab(v, "reviewing").textContent).toBe("Reviewing (2)");
+    tab(v, "all").click();
+    expect(v.currentTab).toBe("all");
+    expect(tab(v, "all").getAttribute("aria-selected")).toBe("true");
+    expect(groups(v)).toEqual(["required", "optional", "team:web-team", "team"]);
+    const label = (id: string) => group(v, id).querySelector(".chappa-sv-group-label")?.textContent;
+    const folded = (id: string) => group(v, id).querySelector(".chappa-sv-rows")!.classList.contains("folded");
+    expect([label("required"), label("optional"), label("team:web-team"), label("team")]).toEqual([
+      "▾ Required by name",
+      "▾ Optional",
+      "▸ web-team",
+      "▸ Through a team",
+    ]);
+    expect([folded("required"), folded("optional"), folded("team:web-team"), folded("team")]).toEqual([false, false, true, true]);
+    expect(group(v, "team:web-team").querySelector(".chappa-sv-count")?.textContent).toBe("1");
+    expect(group(v, "team:web-team").querySelector(".chappa-sv-group-head")?.getAttribute("aria-expanded")).toBe("false");
+    // The other team shows as a chip; every row keeps its bucket chip.
+    const chips = (id: string) => [...row(v, id).querySelectorAll(".chappa-sv-chip")].map((c) => c.textContent);
+    expect(chips("github/owner/repo/#3")).toEqual(["via a team", "also via db-team"]);
+    expect(chips("github/owner/repo/#1")).toEqual(["vote asked", "required"]);
+    // Unfold a team, fold Optional: both survive a tab switch and a poll.
+    group(v, "team:web-team").querySelector<HTMLButtonElement>(".chappa-sv-group-head")!.click();
+    group(v, "optional").querySelector<HTMLButtonElement>(".chappa-sv-group-head")!.click();
+    expect([folded("optional"), folded("team:web-team")]).toEqual([true, false]);
+    tab(v, "reviewing").click();
+    // A required review sits in Reviewing and All both, as the same row.
+    const required = row(v, "github/owner/repo/#1");
+    expect(groups(v)).toEqual(["vote", "mythreads"]);
+    tab(v, "all").click();
+    expect(row(v, "github/owner/repo/#1")).toBe(required);
+    v.update(input([payload("a", body([rev("#5", "group", { reviewers: [team("api-team")] })]))], { versions: { a: 2 } }));
+    expect(groups(v)).toEqual(["required", "optional", "team:api-team", "team:web-team", "team"]);
+    // A team group that appears later starts folded too.
+    expect([folded("optional"), folded("team:web-team"), folded("team:api-team")]).toEqual([true, false, true]);
+    expect(v.host.querySelector(".chappa-sv-empty")?.textContent).toBe("");
+    v.dispose();
+  });
+
+  it("each tab says why it is empty", () => {
+    const v = new PrsView(deps());
+    v.update(input([payload("a", prsBody([pr("#1")]))]));
+    tab(v, "reviewing").click();
+    expect(v.host.querySelector(".chappa-sv-empty")?.textContent).toBe(prsEmptyText(input([payload("a", prsBody([]))]), "reviewing"));
+    tab(v, "all").click();
+    expect(v.host.querySelector(".chappa-sv-empty")?.textContent).toBe("No open pull request lists you as a reviewer.");
+    expect(groups(v)).toEqual([]);
     v.dispose();
   });
 

@@ -46,7 +46,47 @@ describe("buildNeedsYou", () => {
       ["shell", "needs attention"],
     ]);
     expect(rows.map((r) => r.terminalKey)).toEqual(["term:2", "cmd:1:tests", "term:1", "term:3"]);
-    expect(m.count).toBe(4);
+    // All four are listed; only the waiting and blocked ones count.
+    expect(rows.map((r) => r.counted)).toEqual([true, true, false, false]);
+    expect(m.count).toBe(2);
+  });
+
+  it("the badge counts waiting / blocked terminals, approvals, PRs and source attention, never a bell", () => {
+    const bells = buildNeedsYou({
+      ...empty,
+      terminals: [
+        term("term:1", { attention: "badge" }),
+        term("term:2", { attention: "badge", programStatus: "done" }),
+        term("term:3", { attention: "badge", programStatus: "failed" }),
+      ],
+    });
+    // Listed, so they can be found and cleared, but nothing to count.
+    expect(bells.sections[0].rows.length).toBe(3);
+    expect(bells.count).toBe(0);
+    const mixed = buildNeedsYou({
+      terminals: [term("term:1", { attention: "badge" }), term("term:2", { attention: "agent-waiting", programStatus: "blocked" })],
+      work: [payload("fx", fixture("work"))],
+      prs: buildPrsModel([
+        payload("p", prsBody([
+          pr("#1", { bucket: "ready" }),
+          pr("#2", { bucket: "waiting" }),
+          pr("#3", { role: "reviewing", bucket: "vote", me: { required: true, vote: "none" } }),
+          pr("#4", { role: "reviewing", bucket: "vote", me: { required: false, vote: "none" } }),
+          pr("#5", { role: "reviewing", bucket: "group", me: null, reviewers: [{ name: "web-team", isGroup: true }] }),
+          pr("#6", { role: "reviewing", bucket: "mythreads", me: { required: true, vote: "none" } }),
+        ])),
+      ]),
+      attention: [payload("fx", fixture("attention"))],
+    });
+    const prRows = mixed.sections.find((s) => s.id === "prs")!.rows;
+    // The optional vote, the team-only review and my commented one are not Needs you rows.
+    expect(prRows.map((r) => [r.title, r.folded, r.counted])).toEqual([
+      ["Change #1", false, true],
+      ["Change #3", false, true],
+      ["Change #2", true, false],
+    ]);
+    // 1 blocked terminal + 1 work approval + 2 PRs + 4 attention items.
+    expect(mixed.count).toBe(8);
   });
 
   it("the fixture: work approvals and human-exit gates, yes PRs, waiting folded, attention by group", () => {

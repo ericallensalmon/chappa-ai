@@ -70,7 +70,7 @@ import {
 import { firstLine } from "./markdown";
 import { Dashboard, tailLine, type CardActionId, type CardInput, type CardLive, type DashGroupInput } from "./dashboard";
 import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, visibleViews, type RailView, type SourcesStore } from "./sources_store";
-import { buildPrsModel, type PrsModel } from "./sources/prs_model";
+import { buildPrsModel, prsNeedingYou, type PrsModel } from "./sources/prs_model";
 import { SeenBaselines, buildNeedsYou, pollResult, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
 import { SourceViewsData, type DataView } from "./sources/views_data";
 import { PrsView } from "./sources/prs_view";
@@ -1078,6 +1078,8 @@ const APP_CSS = `
 .chappa-view-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-view-badge{flex:none;min-width:16px;height:16px;border-radius:8px;background:#f0b429;color:#0d0e10;font:600 10px ui-monospace,monospace;line-height:16px;text-align:center;padding:0 4px;box-sizing:border-box;}
 .chappa-view-badge:empty{display:none;}
+.chappa-views-hint{align-self:flex-start;margin:2px 8px 0;padding:2px 0;border:0;background:none;color:#f0b429;font:12px system-ui,sans-serif;text-align:left;cursor:pointer;}
+.chappa-views-hint:hover{text-decoration:underline;}
 /* The rail footer's notification bell + unread count, NEXT TO the
    settings gear. The banner stack and center drawer style themselves
    (notify_banners.ts / notify_drawer.ts). */
@@ -6354,11 +6356,17 @@ export class App {
     );
   }
 
-  /** Rebuild the rail's views section behind its signature. */
+  /** Rebuild the rail's views section behind its signature: one entry per
+   *  view (Needs you with its badge, PRs with the count of PRs that need
+   *  the user), then, while any source awaits the trust answer, a hint that
+   *  opens Settings ▸ Sources. A source that is merely down adds nothing:
+   *  its kept data still shows. */
   private renderRailViews(): void {
     const views = this.railViews();
     const count = this.needsYouModel?.count ?? 0;
-    const sig = `${views.join(",")}\u001f${count}\u001f${this.openViewName ?? ""}`;
+    const prsCount = views.includes("prs") ? prsNeedingYou(this.currentPrsModel()).yes.length : 0;
+    const review = this.viewsData.current.sources.filter((s) => s.status === "needs_review").length;
+    const sig = `${views.join(",")}\u001f${count}\u001f${prsCount}\u001f${review}\u001f${this.openViewName ?? ""}`;
     if (sig === this.viewsSig) return;
     this.viewsSig = sig;
     this.viewsSection.textContent = "";
@@ -6373,17 +6381,31 @@ export class App {
       name.textContent = VIEW_LABELS[view];
       const badge = document.createElement("span");
       badge.className = "chappa-view-badge";
-      if (view === "attention" && count > 0) badge.textContent = count > 99 ? "99+" : String(count);
+      const shown = view === "attention" ? count : view === "prs" ? prsCount : 0;
+      if (shown > 0) badge.textContent = shown > 99 ? "99+" : String(shown);
       el.append(name, badge);
+      const from = `${VIEW_LABELS[view]} from ${servedBy(this.viewsData.current, view).map((s) => s.label).join(", ")}`;
       el.title =
         view === "attention"
           ? count > 0
             ? `${count} waiting on you`
             : "Nothing needs you"
-          : `${VIEW_LABELS[view]} from ${servedBy(this.viewsData.current, view).map((s) => s.label).join(", ")}`;
+          : view === "prs" && prsCount > 0
+            ? `${from}: ${prsCount} need you`
+            : from;
       el.addEventListener("mousedown", (e) => e.preventDefault());
       el.addEventListener("click", () => this.toggleSourceView(view));
       this.viewsSection.appendChild(el);
+    }
+    if (review > 0) {
+      const hint = document.createElement("button");
+      hint.type = "button";
+      hint.className = "chappa-views-hint";
+      hint.textContent = review === 1 ? "1 source needs review" : `${review} sources need review`;
+      hint.title = "Review what a new source asks for in Settings ▸ Sources";
+      hint.addEventListener("mousedown", (e) => e.preventDefault());
+      hint.addEventListener("click", () => this.openSettings("sources"));
+      this.viewsSection.appendChild(hint);
     }
   }
 

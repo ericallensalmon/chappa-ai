@@ -7058,26 +7058,84 @@ describe("App source views", () => {
     root.remove();
   });
 
-  it("terminal attention is a Needs you row and counts; its click selects the terminal", async () => {
+  it("terminal attention is a Needs you row; a bell is listed but not counted, a waiting agent counts; a click selects the terminal", async () => {
     const { root, app } = await mountedWithSources({ sources: [], hiddenViews: [] });
     await app.newShell();
     await app.newShell();
+    await app.newShell();
     await FLUSH();
-    const [first] = [...vd(app).entries.keys()];
+    const [first, second] = [...vd(app).entries.keys()];
     const map = vd(app).entries;
     map.set(first, railReducer(map.get(first)!, { type: "status", status: "running", exitCode: null }));
     map.set(first, railReducer(map.get(first)!, { type: "bell" }));
     vd(app).renderRail();
+    // A bell alone puts no number on the rail.
+    expect(badge(root)).toBe("");
+    map.set(second, railReducer(map.get(second)!, { type: "status", status: "running", exitCode: null }));
+    map.set(second, railReducer(map.get(second)!, { type: "attention", attention: "agent-waiting" }));
+    vd(app).renderRail();
     expect(badge(root)).toBe("1");
     entry(root, "attention").click();
     const rows = [...page(root, "attention")!.querySelectorAll<HTMLElement>(".chappa-needs-row")];
-    expect(rows.map((r) => r.dataset.id)).toEqual([`term:term:${first}`]);
-    expect(rows[0].querySelector(".chappa-sv-detail")?.textContent).toBe("needs attention");
-    rows[0].querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
+    expect(rows.map((r) => r.dataset.id)).toEqual([`term:term:${second}`, `term:term:${first}`]);
+    expect(rows[1].querySelector(".chappa-sv-detail")?.textContent).toBe("needs attention");
+    rows[1].querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
     expect(vd(app).activeId).toBe(first);
     expect(page(root, "attention")?.classList.contains("active")).toBe(false);
-    // Activation cleared the bell: nothing needs you any more.
-    expect(badge(root)).toBe("");
+    // The waiting agent still counts.
+    expect(badge(root)).toBe("1");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("the PRs entry counts the PRs that need you; team-only and optional reviews never do", async () => {
+    const answers = fixtureAnswers();
+    const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
+    const prsBadge = (): string => entry(root, "prs").querySelector(".chappa-view-badge")?.textContent ?? "";
+    // #1-#3 mine (action, draft, ready), #6 replied, #7 required vote.
+    expect(prsBadge()).toBe("5");
+    expect(entry(root, "prs").title).toBe("PRs from fx: 5 need you");
+    const prs = sourceFixture("prs");
+    // #7 becomes optional, #10 (team-only) moves to the vote bucket: neither counts.
+    prs.items[6] = { ...prs.items[6], me: { required: false, vote: "none" } };
+    prs.items[9] = { ...prs.items[9], bucket: "vote" };
+    answers["fx/prs"] = prs;
+    sources.emit({ event: "view", source_id: "fx", view: "prs" });
+    await FLUSH();
+    await FLUSH();
+    expect(prsBadge()).toBe("4");
+    expect(badge(root)).toBe("9");
+    // Nothing left that needs you: no number, a plain title.
+    answers["fx/prs"] = { ...prs, items: prs.items.filter((p) => p.role === "reviewing" && p.bucket !== "replied") };
+    sources.emit({ event: "view", source_id: "fx", view: "prs" });
+    await FLUSH();
+    await FLUSH();
+    expect(prsBadge()).toBe("");
+    expect(entry(root, "prs").title).toBe("PRs from fx");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a source awaiting review shows a rail hint that opens Settings ▸ Sources; it goes once answered, and a down source adds none", async () => {
+    const pending = sourceRow("raw", ["prs"], { trusted: false, status: "needs_review" });
+    const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL), pending], hiddenViews: [] });
+    const hint = (): HTMLButtonElement | null => root.querySelector<HTMLButtonElement>(".chappa-views-section .chappa-views-hint");
+    expect(hint()?.textContent).toBe("1 source needs review");
+    // The hint sits after the view entries.
+    expect(root.querySelector(".chappa-views-section")?.lastElementChild).toBe(hint());
+    hint()!.click();
+    expect(app.settingsPaneElement?.style.display).toBe("flex");
+    expect(app.settingsPaneElement?.querySelector('.chappa-settings-tab[data-tab="sources"]')?.getAttribute("aria-selected")).toBe("true");
+    sources.setListing({ sources: [sourceRow("fx", ALL), pending, sourceRow("raw2", ["work"], { trusted: false, status: "needs_review" })], hiddenViews: [] });
+    sources.emit({ event: "sources" });
+    await FLUSH();
+    expect(hint()?.textContent).toBe("2 sources need review");
+    // Answered (trusted) and one down: no hint.
+    sources.setListing({ sources: [sourceRow("fx", ALL, { status: "down" }), sourceRow("raw", ["prs"])], hiddenViews: [] });
+    sources.emit({ event: "sources" });
+    await FLUSH();
+    expect(hint()).toBeNull();
+    expect(entries(root)).toEqual(["prs", "attention"]);
     panelDispose(app);
     root.remove();
   });
