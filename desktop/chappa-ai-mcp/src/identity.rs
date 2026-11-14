@@ -38,7 +38,7 @@
 //! itself, so asking it to sign chosen challenges reveals nothing usable as a
 //! bearer credential.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
@@ -213,59 +213,17 @@ pub fn probe_endpoint(endpoint_file: &Path, token: &str, connect_timeout: Durati
     Ok(ep)
 }
 
-/// Read exactly one `Content-Length`-framed reply off a keep-alive
-/// connection, bounded by [`MAX_IDENTITY_REPLY`]. Chunked framing is refused:
-/// the app answers this route with a small fixed-length body.
+/// Read exactly one reply off a keep-alive connection, bounded by
+/// [`MAX_IDENTITY_REPLY`]. The server writes nothing past this reply until
+/// the next request, so any leftover byte means something other than the
+/// app is talking, and the connection is not used for the token.
 fn read_one_reply(stream: &mut TcpStream) -> Result<(u16, Vec<u8>), String> {
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 2048];
-    let head_end = loop {
-        if let Some(pos) = crate::find(&raw, b"\r\n\r\n") {
-            break pos;
-        }
-        if raw.len() > MAX_IDENTITY_REPLY {
-            return Err("reply headers too large".into());
-        }
-        let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            return Err("connection closed".into());
-        }
-        raw.extend_from_slice(&buf[..n]);
-    };
-    let head = std::str::from_utf8(&raw[..head_end]).map_err(|_| "non-UTF-8 headers".to_owned())?;
-    let mut lines = head.split("\r\n");
-    let status: u16 = lines
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|s| s.parse().ok())
-        .ok_or("malformed status line")?;
-    let mut length = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else { continue };
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            length = value.trim().parse::<usize>().ok();
-        } else if name.trim().eq_ignore_ascii_case("transfer-encoding") {
-            return Err("unexpected transfer-encoding".into());
-        }
-    }
-    let length = length.ok_or("no content-length")?;
-    if length > MAX_IDENTITY_REPLY {
-        return Err("reply body too large".into());
-    }
-    let body_start = head_end + 4;
-    while raw.len() < body_start + length {
-        let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            return Err("connection closed mid-reply".into());
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    // The server writes nothing past this reply until the next request, so
-    // there is never a leftover to carry into the authenticated exchange.
-    if raw.len() != body_start + length {
+    let mut buffered = Vec::new();
+    let reply = crate::http::read_response(stream, &mut buffered, MAX_IDENTITY_REPLY).map_err(|e| e.to_string())?;
+    if !buffered.is_empty() {
         return Err("unexpected bytes after the reply".into());
     }
-    Ok((status, raw[body_start..].to_vec()))
+    Ok((reply.status, reply.body))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

@@ -58,6 +58,7 @@ use crate::registry::{
     RecordBinding, Registry, TermId,
 };
 use crate::settings::SettingsState;
+use crate::sources::Sources;
 
 /// One open project: the parsed yml (fresh at open), the trust hash, and the
 /// per-process runtime state. Display name/icon are not duplicated here — the
@@ -137,6 +138,10 @@ struct Inner {
     /// records service cannot be called back into from here); the ledger
     /// has its own connection mutex. Inert by default (tests).
     ledger: RunLedger,
+    /// The source registry: a `source:` command gets its address and token
+    /// from it at spawn and reports back when the process is gone. A clone
+    /// of the managed state; locked only after this lock, never before.
+    sources: Sources,
 }
 
 impl Default for Inner {
@@ -149,6 +154,7 @@ impl Default for Inner {
             settings: SettingsState::default(),
             shutting_down: false,
             ledger: RunLedger::default(),
+            sources: Sources::default(),
         }
     }
 }
@@ -222,7 +228,14 @@ impl From<String> for ControlError {
 impl Projects {
     /// Called once from setup: point the store at the app-config dir, keep the
     /// handle for events, and start the 500ms-alive ticker.
-    pub fn init(&self, app: &AppHandle, config_dir: PathBuf, settings: SettingsState, coordination: Coordination) {
+    pub fn init(
+        &self,
+        app: &AppHandle,
+        config_dir: PathBuf,
+        settings: SettingsState,
+        coordination: Coordination,
+        sources: Sources,
+    ) {
         // First-launch migration: every stored project materializes
         // `chappa.yml` from its store definitions, so the new project file
         // exists and nothing is lost — no user action and no behavior change
@@ -246,6 +259,7 @@ impl Projects {
             guard.app = Some(app.clone());
             guard.settings = settings;
             guard.ledger = RunLedger::new(coordination);
+            guard.sources = sources;
         }
         spawn_ticker(inner);
     }
@@ -540,6 +554,7 @@ fn spawn_process(
     registry: &Registry,
     app: &AppHandle,
     projects: Arc<Mutex<Inner>>,
+    sources: &Sources,
     project_id: u32,
     name: &str,
     root: PathBuf,
@@ -547,7 +562,16 @@ fn spawn_process(
     proc: &mut ProcessRuntime,
     record: Option<RecordBinding>,
 ) -> Result<TermId, String> {
-    let spec = build_spec(&proc.def, &root, settings)?;
+    let mut spec = build_spec(&proc.def, &root, settings)?;
+    // A source gets its loopback address and a fresh token for THIS launch,
+    // through the same env the yml variables take (the actor applies
+    // `spec.env` over the inherited environment). New on every respawn, so a
+    // restarted source proves itself again.
+    let is_source = proc.def.is_source();
+    if is_source {
+        let launch = sources.prepare_launch(project_id, &root, name)?;
+        spec.env.extend(launch.env());
+    }
     let channel = proc
         .channel
         .clone()
@@ -575,7 +599,7 @@ fn spawn_process(
         name.to_owned(),
     );
     let record_id = record.as_ref().map(|r| r.record_id.clone());
-    let term_id = match proc.term_id {
+    let created = match proc.term_id {
         Some(id) => registry.respawn_terminal(
             id,
             cfg,
@@ -584,7 +608,7 @@ fn spawn_process(
             name.to_owned(),
             Some(on_exit),
             record,
-        )?,
+        ),
         None => registry.create_terminal_with_exit(
             cfg,
             Arc::new(ChannelSink::new(channel, app.clone())),
@@ -592,9 +616,23 @@ fn spawn_process(
             name.to_owned(),
             Some(on_exit),
             record,
-        )?,
+        ),
+    };
+    let term_id = match created {
+        Ok(term_id) => term_id,
+        Err(e) => {
+            if is_source {
+                sources.launch_failed(&root, name, &e);
+            }
+            return Err(e);
+        }
     };
     proc.term_id = Some(term_id);
+    if is_source {
+        // From here the source has READY_TIMEOUT to bind its port and answer
+        // the identity check; the registry row is just "starting" meanwhile.
+        sources.launched(&root, name, term_id);
+    }
     // The control snapshot (and timer name resolution) know
     // which project owns this terminal.
     registry.set_project(term_id, Some(project_id));
@@ -660,11 +698,13 @@ fn make_exit_handler(
             if inner.shutting_down {
                 return;
             }
-            let proc = match inner
-                .runtimes
-                .get_mut(&project_id)
-                .and_then(|r| r.processes.get_mut(&process_name))
-            {
+            let sources = inner.sources.clone();
+            let runtime = match inner.runtimes.get_mut(&project_id) {
+                Some(runtime) => runtime,
+                None => return,
+            };
+            let root = runtime.root.clone();
+            let proc = match runtime.processes.get_mut(&process_name) {
                 Some(proc) => proc,
                 None => return,
             };
@@ -673,6 +713,16 @@ fn make_exit_handler(
                 .lifecycle
                 .on(ProcessEvent::Exited { success }, now_ms());
             emit_status(&app, project_id, &process_name, status, code, proc.term_id);
+            source_gone(
+                &sources,
+                &root,
+                &process_name,
+                &proc.def,
+                &match code {
+                    Some(code) => format!("exited with code {code}"),
+                    None => "exited".to_owned(),
+                },
+            );
             // Restartable: auto_restart is set, this exit is not a user stop
             // (term_id would already be gone — stop takes it), and the process
             // isn't in the stopped state. The generation captured here is the
@@ -759,6 +809,7 @@ fn respawn_process(
     // Every respawn is a NEW run of the same record, begun before the
     // terminal (and before `proc` is borrowed mutably).
     let record = begin_command_run(&mut inner, project_id, process_name);
+    let sources = inner.sources.clone();
     let Some(proc) = inner
         .runtimes
         .get_mut(&project_id)
@@ -770,6 +821,7 @@ fn respawn_process(
         registry,
         app,
         projects.clone(),
+        &sources,
         project_id,
         process_name,
         root,
@@ -1108,12 +1160,13 @@ pub fn remove_project(
 ) -> Result<(), String> {
     let mut inner = projects.store()?;
     if let Some(mut runtime) = inner.runtimes.remove(&id) {
-        for proc in runtime.processes.values_mut() {
+        for (name, proc) in runtime.processes.iter_mut() {
             proc.generation += 1; // cancels any scheduled respawn
             proc.watcher = None;
             proc.watcher_rx = None;
             if let Some(term_id) = proc.term_id.take() {
                 registry.close(term_id);
+                source_gone(&inner.sources, &runtime.root, name, &proc.def, "was stopped with its project");
             }
         }
         inner.notify_changed();
@@ -1187,12 +1240,13 @@ pub fn open_project(
     // terminals are closed here — the reopen owns the project view, and
     // leaving them running would orphan the process (nothing references it).
     if let Some(mut old) = inner.runtimes.remove(&id) {
-        for proc in old.processes.values_mut() {
+        for (name, proc) in old.processes.iter_mut() {
             proc.generation += 1;
             proc.watcher = None;
             proc.watcher_rx = None;
             if let Some(term_id) = proc.term_id.take() {
                 registry.close(term_id);
+                source_gone(&inner.sources, &old.root, name, &proc.def, "was stopped when the project reopened");
             }
         }
     }
@@ -1436,6 +1490,9 @@ impl ProcessDefDto {
                     .filter(|g| !g.is_empty())
                     .collect(),
                 env: self.env.into_iter().collect(),
+                // Not editable here; `edit_process` carries the existing
+                // value over, so an edit never strips a command's `source:`.
+                source: None,
                 unknown: IndexMap::new(),
             },
         )
@@ -1739,21 +1796,32 @@ fn move_runtime_on_rename(inner: &mut Inner, id: u32, old: &str, new: &str) {
 /// The stop half, callable while the caller already holds the lock. A
 /// process that is not open / not live is a no-op (measured, 0.7.1).
 fn stop_locked(inner: &mut Inner, registry: &Registry, app: &AppHandle, id: u32, name: &str) {
-    let Some(proc) = inner
-        .runtimes
-        .get_mut(&id)
-        .and_then(|r| r.processes.get_mut(name))
-    else {
+    let sources = inner.sources.clone();
+    let Some(runtime) = inner.runtimes.get_mut(&id) else {
+        return;
+    };
+    let root = runtime.root.clone();
+    let Some(proc) = runtime.processes.get_mut(name) else {
         return;
     };
     let status = proc.lifecycle.on(ProcessEvent::Stop, now_ms());
     proc.generation += 1;
     if let Some(term_id) = proc.term_id.take() {
         registry.close(term_id);
+        source_gone(&sources, &root, name, &proc.def, "was stopped");
     }
     let exit_code = proc.exit_code;
     inner.notify_changed();
     emit_status(app, id, name, status, exit_code, None);
+}
+
+/// Tell the source registry that a `source:` command's process is gone, so
+/// its source reads "down" (payloads kept) until the next start. A no-op
+/// for ordinary commands.
+fn source_gone(sources: &Sources, root: &Path, name: &str, def: &ProcessDef, reason: &str) {
+    if def.is_source() {
+        sources.process_gone(root, name, reason);
+    }
 }
 
 /// The rows of an OPEN project (empty when it is not open).
@@ -1902,6 +1970,7 @@ fn reload_locked(
                         proc.generation += 1;
                         if let Some(term_id) = proc.term_id.take() {
                             registry.close(term_id);
+                            source_gone(&inner.sources, &root, &name, &proc.def, "was stopped until its new definition is trusted");
                         }
                         emit_status(app, id, &name, status, proc.exit_code, None);
                     } else if live {
@@ -1919,10 +1988,12 @@ fn reload_locked(
                                 proc.lifecycle.on(ProcessEvent::Stop, now_ms());
                                 proc.generation += 1;
                                 let record = begin_command_run(inner, id, &name);
+                                let sources = inner.sources.clone();
                                 if let Err(e) = spawn_process(
                                     registry,
                                     app,
                                     projects.clone(),
+                                    &sources,
                                     id,
                                     &name,
                                     root.clone(),
@@ -1946,12 +2017,13 @@ fn reload_locked(
         processes.insert(name, proc);
     }
     // Whatever is left in `old` was removed from the file: stop it.
-    for (_, mut proc) in old {
+    for (name, mut proc) in old {
         proc.generation += 1;
         proc.watcher = None;
         proc.watcher_rx = None;
         if let Some(term_id) = proc.term_id.take() {
             registry.close(term_id);
+            source_gone(&inner.sources, &root, &name, &proc.def, "was removed from chappa.yml");
         }
     }
     let trust_commands = if trusted {
@@ -2001,6 +2073,15 @@ fn trust_line(def: &ProcessDef) -> String {
     }
     for (key, value) in &def.env {
         line.push_str(&format!("\n    env {key}={value}"));
+    }
+    // A source also receives two variables the yml does not spell out; the
+    // prompt names them so what it lists is everything the process gets.
+    if def.is_source() {
+        line.push_str(&format!(
+            "\n    source: receives {} and {} from the app and is polled for its views",
+            crate::sources::identity::ADDR_ENV,
+            crate::sources::identity::TOKEN_ENV
+        ));
     }
     line
 }
@@ -2381,6 +2462,7 @@ fn start_process(
     // Read the execution profile + per-actor controls fresh at every
     // start (same borrow discipline — owned clone before `&mut proc`).
     let settings = inner.settings.snapshot();
+    let sources = inner.sources.clone();
     // The run begins only for a spec that can spawn; a failed attempt leaves
     // the record's previous run as it was.
     let spec = build_spec(&def, &root, &settings);
@@ -2409,6 +2491,7 @@ fn start_process(
                 registry,
                 app,
                 projects.arc(),
+                &sources,
                 id,
                 &name,
                 root,
@@ -2465,10 +2548,12 @@ fn stop_process(
     name: &str,
 ) -> Result<(), ControlError> {
     let mut inner = projects.store()?;
+    let sources = inner.sources.clone();
     let runtime = inner
         .runtimes
         .get_mut(&id)
         .ok_or_else(|| ControlError::not_open(id))?;
+    let root = runtime.root.clone();
     let proc = runtime
         .processes
         .get_mut(name)
@@ -2478,6 +2563,7 @@ fn stop_process(
     let term_id = proc.term_id.take();
     if let Some(term_id) = term_id {
         registry.close(term_id);
+        source_gone(&sources, &root, name, &proc.def, "was stopped");
     }
     let exit_code = proc.exit_code;
     inner.notify_changed();

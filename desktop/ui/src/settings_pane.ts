@@ -26,9 +26,11 @@
 
 import { Segmented } from "./segmented";
 import { AgentsSection } from "./agents_section";
+import { SourcesSection } from "./sources_section";
 import { TimersSection } from "./timers_section";
 import { ProjectsSection, type ProjectsSettingsApi } from "./projects_section";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
+import { sourcesStore, type SourcesStore } from "./sources_store";
 import type { ClipboardWritesMode } from "./ipc";
 import {
   BUILTIN_EXEC_PROFILES,
@@ -55,7 +57,7 @@ import {
   settingsSection,
 } from "./settings_widgets";
 
-export type SettingsTab = "terminal" | "projects" | "agents" | "timers";
+export type SettingsTab = "terminal" | "projects" | "agents" | "sources" | "timers";
 
 /** Every tab in display order. Projects only renders when the app lends the
  *  pane its project adapter (a bare pane has no projects to show). */
@@ -63,6 +65,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "terminal", label: "Terminal" },
   { id: "projects", label: "Projects" },
   { id: "agents", label: "Agents" },
+  { id: "sources", label: "Sources" },
   { id: "timers", label: "Timers" },
 ];
 const DEFAULT_TAB: SettingsTab = "terminal";
@@ -140,6 +143,8 @@ export interface SettingsPaneOptions {
   /** The agent-tool registry behind the Agents tab. Defaults to the app-wide
    *  store; tests inject one over a fake api. */
   agentTools?: AgentToolsStore;
+  /** The sources listing behind the Sources tab. Same default and seam. */
+  sources?: SourcesStore;
   /** Where the pane attaches. Defaults to document.body. */
   container?: HTMLElement;
   /** Fired after a close so the caller can hand focus back to the terminal. */
@@ -194,6 +199,8 @@ export class SettingsPane {
 
   /** The Agents tab: its own store, its own list/modal. */
   private readonly agents: AgentsSection;
+  /** The Sources tab: the source list, trust, hide switches, attach. */
+  private readonly sources: SourcesSection;
   /** The Timers tab. */
   private readonly timers: TimersSection;
   /** The Projects tab, when the app lent its adapter. */
@@ -494,6 +501,13 @@ export class SettingsPane {
     });
     this.panels.get("agents")!.appendChild(this.agents.element);
 
+    // --- Sources tab -----------------------------------------------------------
+    this.sources = new SourcesSection({
+      store: opts.sources ?? sourcesStore,
+      modalContainer: opts.container,
+    });
+    this.panels.get("sources")!.appendChild(this.sources.element);
+
     // --- Timers tab ------------------------------------------------------------
     this.timers = new TimersSection({ settings: this.store });
     this.panels.get("timers")!.appendChild(this.timers.element);
@@ -560,6 +574,7 @@ export class SettingsPane {
     this.projectsSection?.refresh();
     this.unsubscribe = this.store.subscribe((s) => this.sync(s));
     this.agents.activate();
+    this.sources.activate();
     this.timers.activate();
     this.wrap.style.display = "flex";
     document.addEventListener("keydown", this.escape, true);
@@ -573,6 +588,7 @@ export class SettingsPane {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.agents.deactivate();
+    this.sources.deactivate();
     this.timers.deactivate();
     this.opts.onClose?.();
   }
@@ -580,6 +596,11 @@ export class SettingsPane {
   /** The Agents section (tests drive its list and modal through it). */
   get agentsSection(): AgentsSection {
     return this.agents;
+  }
+
+  /** The Sources section (tests drive its list and dialog through it). */
+  get sourcesSection(): SourcesSection {
+    return this.sources;
   }
 
   toggleOpen(): void {
@@ -593,6 +614,7 @@ export class SettingsPane {
     this.clipboardWritesPicker.dispose();
     this.lineHeightPicker.dispose();
     this.agents.dispose();
+    this.sources.dispose();
     this.timers.dispose();
     this.projectsSection?.dispose();
     this.wrap.remove();

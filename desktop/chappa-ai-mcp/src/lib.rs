@@ -16,7 +16,7 @@
 //! `readOnlyHint`/`destructiveHint` annotations are set so clients stop
 //! nagging for approval on harmless calls.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+pub mod http;
 pub mod identity;
 pub mod session_hook;
 pub use identity::{identity_proof, Endpoint, ENDPOINT_FILE, IDENTITY_PATH};
@@ -311,18 +312,17 @@ impl Client {
         stream
             .write_all(req.as_bytes())
             .map_err(|e| ToolError::Unreachable(e.to_string()))?;
-        let mut raw = Vec::new();
-        stream
-            .read_to_end(&mut raw)
+        // The shared reader decodes both body framings, so a chunked reply
+        // (which the app never sends today, but a proxy in front of it may)
+        // arrives as its decoded bytes rather than as raw chunk framing. No
+        // body cap here: this connection is to the app, and a whole-screen
+        // `get_process_output` with scrollback is legitimately large.
+        let reply = http::read_response(&mut stream, &mut Vec::new(), usize::MAX)
             .map_err(|e| ToolError::Unreachable(format!("reading reply: {e}")))?;
-        let (status, body) = parse_http_response(&raw)
-            .ok_or_else(|| ToolError::Unreachable("malformed HTTP reply".to_owned()))?;
-        // Parsed straight off the reply bytes — no intermediate String copies
-        // of the whole response (a whole-screen `get_process_output` is the
-        // big one). A non-JSON body is kept verbatim for the error message.
-        let value = serde_json::from_slice(body)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()));
-        Ok((status, value))
+        // A non-JSON body is kept verbatim for the error message.
+        let value = serde_json::from_slice(&reply.body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&reply.body).into_owned()));
+        Ok((reply.status, value))
     }
 }
 
@@ -407,26 +407,6 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
         None => (authority.to_owned(), 80),
     };
     Some((host, port, path.trim_end_matches('/').to_owned()))
-}
-
-/// `(status, body)` from a raw HTTP/1.1 reply, working on the BYTES: the
-/// status comes off the status line inside the header block and the body is
-/// borrowed from `raw` (so `serde_json::from_slice` parses it in place). The
-/// old version made three whole-response String copies, which for a
-/// whole-screen `get_process_output` is the largest allocation in the crate.
-fn parse_http_response(raw: &[u8]) -> Option<(u16, &[u8])> {
-    let split = find(raw, b"\r\n\r\n")?;
-    let head = &raw[..split];
-    let line_end = find(head, b"\r\n").unwrap_or(head.len());
-    let status_line = std::str::from_utf8(&head[..line_end]).ok()?;
-    let status: u16 = status_line.split_whitespace().nth(1)?.parse().ok()?;
-    Some((status, &raw[split + 4..]))
-}
-
-pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// Percent-encode a path segment (process names carry spaces and `+`).
@@ -1805,24 +1785,25 @@ mod tests {
         assert_eq!(format!("{none}/processes"), "/processes", "no prefix = unchanged");
     }
 
-    /// The reply is parsed on the byte slice: status off the header block,
-    /// body borrowed for `from_slice`.
+    /// A control-surface error body reaches `outcome` as parsed JSON; a
+    /// non-JSON 200 body comes back as its raw text; a chunked reply (a
+    /// proxy in front of the app) is decoded before parsing.
     #[test]
-    fn http_replies_are_parsed_on_the_bytes() {
-        let raw = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"error\":\"nope\"}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 404);
-        assert_eq!(body, b"{\"error\":\"nope\"}");
+    fn http_replies_are_decoded_before_the_outcome_is_judged() {
+        let read = |raw: &[u8]| {
+            let mut cursor = std::io::Cursor::new(raw.to_vec());
+            http::read_response(&mut cursor, &mut Vec::new(), usize::MAX).unwrap()
+        };
+        let reply = read(b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{\"error\":\"nope\"}");
         assert_eq!(
-            outcome(status, serde_json::from_slice(body).unwrap()).unwrap_err(),
+            outcome(reply.status, reply.json().unwrap()).unwrap_err(),
             ToolError::Http { status: 404, message: "nope".into() }
         );
-        // A body with no header terminator is malformed, not a silent empty.
-        assert!(parse_http_response(b"HTTP/1.1 200 OK").is_none());
-        // A 200 with a non-JSON body still comes back as the raw text.
-        let (status, body) = parse_http_response(b"HTTP/1.1 200 OK\r\n\r\nnot json").unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"not json");
+        let reply = read(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot json");
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body, b"not json");
+        let reply = read(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n{\"a\":1\r\n1\r\n}\r\n0\r\n\r\n");
+        assert_eq!(reply.json(), Some(json!({"a": 1})));
     }
 
     #[test]

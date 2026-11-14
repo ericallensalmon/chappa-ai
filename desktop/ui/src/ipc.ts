@@ -6,6 +6,7 @@
 // objects shown.
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { Freshness } from "./sources/types";
 
 export { Channel };
 export type { UnlistenFn };
@@ -1422,4 +1423,98 @@ export function listScratchpads(projectId: number | null, includeGlobal = false)
 
 export function readScratchpad(id: number): Promise<ScratchpadDto> {
   return call<ScratchpadDto>("read_scratchpad", { id });
+}
+
+// --- sources (local processes feeding the Work / PRs / Needs you / Environment views) ---
+//
+// Every source call is a Tauri command answered from Rust's cache: the
+// webview never fetches a source URL and never sees a token. Rust also
+// refuses these commands from any window but the main one.
+
+export type SourceStatusDto = "starting" | "needs_review" | "needs_update" | "up" | "down";
+
+/** Where a source comes from: a `source:` command of a project, or a server
+ *  started elsewhere that was attached in Settings. */
+export type SourceOriginDto =
+  | { kind: "launched"; project_id: number; project_path: string; command: string }
+  | { kind: "attached"; addr: string; token_file: string };
+
+/** What the trust dialog shows. Trust covers exactly `hash`. */
+export interface SourceTrustDto {
+  id: string;
+  label: string;
+  linkHosts: string[];
+  roots: string[];
+  views: string[];
+  hash: string;
+}
+
+/** One cached view (or the `workflows` list) of a source. */
+export interface SourceViewInfoDto {
+  name: string;
+  pollSeconds: number;
+  asOf: string | null;
+  nextUtc: string | null;
+  refreshing: boolean;
+  lastError: string | null;
+  hasPayload: boolean;
+}
+
+export interface SourceDto {
+  /** Opaque, stable per source; what every other source command takes. */
+  id: string;
+  label: string;
+  origin: SourceOriginDto;
+  status: SourceStatusDto;
+  lastError: string | null;
+  trusted: boolean;
+  trust: SourceTrustDto | null;
+  manifestId: string | null;
+  version: string | null;
+  views: SourceViewInfoDto[];
+  /** A platform caveat about an attached token file. */
+  warning: string | null;
+}
+
+export interface SourcesListingDto {
+  sources: SourceDto[];
+  /** Rail views switched off in Settings (data and trust kept). */
+  hiddenViews: string[];
+}
+
+/** A `source_view` answer: the raw payload as the source sent it (null until
+ *  the first successful poll) and the app's own freshness bookkeeping. */
+export interface SourceViewDto {
+  payload: unknown | null;
+  freshness: Freshness;
+}
+
+/** A `term://sources` payload. */
+export type SourcesEvent = { event: "sources" } | { event: "view"; source_id: string; view: string };
+
+export function listSources(): Promise<SourcesListingDto> {
+  return call("list_sources");
+}
+
+/** `trust = true` records `hash` (the hash the dialog showed) and polling
+ *  starts; Rust refuses when the manifest moved on since. `false` records
+ *  nothing. */
+export function sourceTrustAnswer(sourceId: string, trust: boolean, hash: string): Promise<SourcesListingDto> {
+  return call("source_trust_answer", { sourceId, trust, hash });
+}
+
+export function sourceView(sourceId: string, view: string): Promise<SourceViewDto> {
+  return call("source_view", { sourceId, view });
+}
+
+export function setSourceViewHidden(view: string, hidden: boolean): Promise<SourcesListingDto> {
+  return call("set_source_view_hidden", { view, hidden });
+}
+
+export function attachSource(addr: string, tokenFile: string): Promise<SourcesListingDto> {
+  return call("attach_source", { addr, tokenFile });
+}
+
+export function detachSource(sourceId: string): Promise<SourcesListingDto> {
+  return call("detach_source", { sourceId });
 }

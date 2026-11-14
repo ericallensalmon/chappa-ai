@@ -82,6 +82,14 @@ pub struct ProcessDef {
     pub restart_when_changed: Vec<String>,
     #[serde(default)]
     pub env: IndexMap<String, String>,
+    /// `source: {}` marks the command as a SOURCE: a local process that
+    /// serves work items, pull requests, attention items or an environment
+    /// over loopback HTTP. The app hands it a loopback address and a token
+    /// in its environment at spawn and polls it from Rust. `None` = an
+    /// ordinary command. Written as `source: {}` (a bare `source:` reads as
+    /// null, which is "absent").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceOptions>,
     /// Keys chappa-ai does not model, preserved verbatim through write-back.
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
@@ -96,9 +104,20 @@ impl Default for ProcessDef {
             auto_restart: false,
             restart_when_changed: Vec::new(),
             env: IndexMap::new(),
+            source: None,
             unknown: IndexMap::new(),
         }
     }
+}
+
+/// The options under a command's `source:` key. No option is modelled yet;
+/// every key is carried through write-back untouched so a file written for
+/// a newer version keeps its options. An empty map is the common spelling
+/// (`source: {}`) and means "this command is a source, defaults for all".
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SourceOptions {
+    #[serde(default, flatten)]
+    pub options: IndexMap<String, YamlValue>,
 }
 
 fn default_auto_start() -> bool {
@@ -262,6 +281,8 @@ struct ProcessDefRaw {
     restart_when_changed: Vec<String>,
     #[serde(default)]
     env: IndexMap<String, String>,
+    #[serde(default)]
+    source: Option<SourceOptions>,
     #[serde(flatten)]
     unknown: IndexMap<String, YamlValue>,
 }
@@ -336,6 +357,7 @@ impl ProjectYml {
                                 auto_restart: p.auto_restart,
                                 restart_when_changed: p.restart_when_changed,
                                 env: p.env,
+                                source: p.source,
                                 unknown: p.unknown,
                             },
                         )
@@ -403,6 +425,10 @@ impl ProjectYml {
         def.validate(root)?;
         if def.unknown.is_empty() {
             def.unknown = self.processes[idx].unknown.clone();
+        }
+        // The editor has no control for `source:`; an edit must not strip it.
+        if def.source.is_none() {
+            def.source = self.processes[idx].source.clone();
         }
         if new_name == old_name {
             self.processes[idx] = def;
@@ -501,12 +527,19 @@ impl ProcessDef {
     /// restarted: only the spawn inputs count. `auto_start`/`auto_restart`
     /// are policy read at the next start/exit, and unknown keys are opaque to
     /// chappa-ai — neither justifies killing a running process (the
-    /// watcher guard).
+    /// watcher guard). `source` IS a spawn input: a source gets its address
+    /// and token in the environment, an ordinary command does not.
     pub fn runtime_eq(&self, other: &ProcessDef) -> bool {
         self.command == other.command
             && self.working_dir == other.working_dir
             && self.env == other.env
             && self.restart_when_changed == other.restart_when_changed
+            && self.source == other.source
+    }
+
+    /// Whether this command is a source (see [`ProcessDef::source`]).
+    pub fn is_source(&self) -> bool {
+        self.source.is_some()
     }
 }
 
@@ -657,6 +690,7 @@ processes:
                         auto_restart: false,
                         restart_when_changed: vec![],
                         env: IndexMap::new(),
+                        source: None,
                         unknown: IndexMap::new(),
                     },
                 ),
@@ -669,6 +703,7 @@ processes:
                         auto_restart: false,
                         restart_when_changed: vec![],
                         env: IndexMap::new(),
+                        source: None,
                         unknown: IndexMap::new(),
                     },
                 ),
@@ -681,6 +716,7 @@ processes:
                         auto_restart: false,
                         restart_when_changed: vec![],
                         env: IndexMap::new(),
+                        source: None,
                         unknown: IndexMap::new(),
                     },
                 ),
@@ -899,6 +935,70 @@ processes:
         let edited = ProcessDef { command: "npm run dev -- --port 1".into(), ..ProcessDef::default() };
         yml.edit_process(root.path(), "dev", "dev", edited).unwrap();
         assert_eq!(yml.processes["dev"].command, "npm run dev -- --port 1");
+    }
+
+    /// `source: {}` marks a source and round-trips as written; its options
+    /// survive write-back unmodelled; a command without the key is not a
+    /// source; a bare `source:` (null) reads as absent.
+    #[test]
+    fn a_source_key_marks_a_source_and_round_trips() {
+        let text = "processes:
+  feed:
+    command: [node, feed.mjs]
+    source: {}
+  plain:
+    command: npm test
+  bare:
+    command: x
+    source:
+";
+        let yml = ProjectYml::from_str(text).unwrap();
+        assert!(yml.processes["feed"].is_source());
+        assert_eq!(yml.processes["feed"].source, Some(SourceOptions::default()));
+        assert!(!yml.processes["plain"].is_source());
+        assert!(!yml.processes["bare"].is_source(), "a null source key is absent, not a source");
+        let written = yml.to_yaml_string().unwrap();
+        assert!(written.contains("source: {}"), "{written}");
+        assert!(!written.contains("plain:
+    command: npm test
+    source"), "{written}");
+        assert_eq!(ProjectYml::from_str(&written).unwrap().processes["feed"], yml.processes["feed"]);
+
+        // Options under the key are kept verbatim through a round trip.
+        let text = "processes:
+  feed:
+    command: x
+    source:
+      later_option: 7
+      nested: {a: b}
+";
+        let yml = ProjectYml::from_str(text).unwrap();
+        let opts = yml.processes["feed"].source.as_ref().unwrap();
+        assert_eq!(opts.options["later_option"], YamlValue::from(7));
+        let again = ProjectYml::from_str(&yml.to_yaml_string().unwrap()).unwrap();
+        assert_eq!(again.processes["feed"].source, yml.processes["feed"].source);
+
+        // An edit from the command editor (which knows nothing of `source:`)
+        // keeps the key, like it keeps unknown keys.
+        let mut yml = yml;
+        let root = tempfile::tempdir().unwrap();
+        let edited = ProcessDef { command: "y".into(), ..ProcessDef::default() };
+        yml.edit_process(root.path(), "feed", "feed", edited).unwrap();
+        assert_eq!(yml.processes["feed"].command, "y");
+        assert!(yml.processes["feed"].is_source(), "the edit kept source:");
+        assert_eq!(yml.processes["feed"].source.as_ref().unwrap().options["later_option"], YamlValue::from(7));
+    }
+
+    /// Adding or removing `source:` changes what the spawn feeds the process
+    /// (the address and token in its environment), so it is a runtime change.
+    #[test]
+    fn toggling_source_is_a_runtime_change() {
+        let plain = ProcessDef { command: "x".into(), ..ProcessDef::default() };
+        let source = ProcessDef { source: Some(SourceOptions::default()), ..plain.clone() };
+        assert!(!plain.runtime_eq(&source));
+        assert!(source.runtime_eq(&source.clone()));
+        let auto = ProcessDef { auto_restart: true, ..source.clone() };
+        assert!(source.runtime_eq(&auto), "policy fields still do not count");
     }
 
     #[test]

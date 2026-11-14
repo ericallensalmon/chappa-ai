@@ -48,6 +48,12 @@ tiny_http = "0.12"
 # Already in the dependency tree via tauri; a direct dep so the OS CSPRNG
 # is reached without a hand-rolled mixer.
 getrandom = "0.3"
+# A source proves it holds its token with HMAC-SHA256 (sources.rs). Not
+# BLAKE3 like the app's own control surface: a source is written in whatever
+# language its author likes, and every mainstream standard library ships
+# HMAC-SHA256 while none ships BLAKE3.
+hmac = "0.12"
+sha2 = "0.10"
 # coordination.db (scratchpads + todos). `bundled` = no system sqlite
 # on Windows; the file lives in the app-config dir next to settings.json.
 rusqlite = { version = "0.40.2", features = ["bundled"] }

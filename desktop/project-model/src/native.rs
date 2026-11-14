@@ -220,6 +220,10 @@ pub fn edit_process(
     if def.unknown.is_empty() {
         def.unknown = defs[idx].unknown.clone();
     }
+    // The editor has no control for `source:`; an edit must not strip it.
+    if def.source.is_none() {
+        def.source = defs[idx].source.clone();
+    }
     if new_name == old_name {
         defs[idx] = def;
     } else {

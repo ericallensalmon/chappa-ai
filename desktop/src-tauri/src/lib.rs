@@ -16,6 +16,7 @@ pub mod projects;
 pub mod records;
 pub mod registry;
 pub mod settings;
+pub mod sources;
 pub mod stats;
 pub mod timers;
 pub mod timers_http;
@@ -35,6 +36,7 @@ use projects::Projects;
 use records::Records;
 use registry::{AppClosedBroadcast, Registry};
 use settings::SettingsState;
+use sources::Sources;
 use workspace::Workspace;
 
 #[tauri::command]
@@ -58,6 +60,7 @@ pub fn run() {
         .manage(Coordination::default())
         .manage(Workspace::default())
         .manage(Records::default())
+        .manage(Sources::default())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             // The config dir holds secrets (agent tool env, the control
@@ -93,10 +96,19 @@ pub fn run() {
             let coordination = app.state::<Coordination>().inner().clone();
             app.state::<Workspace>()
                 .init(app.handle(), config_dir.clone(), settings.inner().clone(), coordination.clone());
+            // The source registry (`<app-config>/sources.json`): attached
+            // sources start connecting now; launched ones register when their
+            // project command spawns, so it is initialized BEFORE projects.
+            app.state::<Sources>().init(app.handle(), config_dir.clone());
             // Point the projects store at the app-config dir and start the
             // 500ms-alive ticker. Idempotent: setup runs once.
-            app.state::<Projects>()
-                .init(app.handle(), config_dir.clone(), settings.inner().clone(), coordination.clone());
+            app.state::<Projects>().init(
+                app.handle(),
+                config_dir.clone(),
+                settings.inner().clone(),
+                coordination.clone(),
+                app.state::<Sources>().inner().clone(),
+            );
             // The durable row records over both stores + the run ledger,
             // AFTER the stores loaded (it reconciles runs a crash left open),
             // and the registry reports every run's end to it.
@@ -252,6 +264,12 @@ pub fn run() {
         records::resume_record,
         records::remove_record,
         records::update_agent_record,
+        sources::list_sources,
+        sources::source_trust_answer,
+        sources::source_view,
+        sources::set_source_view_hidden,
+        sources::attach_source,
+        sources::detach_source,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -315,6 +333,12 @@ pub fn run() {
         records::resume_record,
         records::remove_record,
         records::update_agent_record,
+        sources::list_sources,
+        sources::source_trust_answer,
+        sources::source_view,
+        sources::set_source_view_hidden,
+        sources::attach_source,
+        sources::detach_source,
         workspace::list_workspace_commands,
         workspace::save_workspace_command,
         workspace::delete_workspace_command,
@@ -339,6 +363,9 @@ pub fn run() {
             // Every open run is `stopped` NOW, before the actors go: a clean
             // quit must not read as a crash at the next launch.
             app_handle.state::<Records>().stop_open_runs(&registry);
+            // Pollers end before their processes are killed, so the exit does
+            // not read as a crash of every source.
+            app_handle.state::<Sources>().shutdown();
             projects.shutdown(&registry);
             workspace.shutdown(&registry);
             registry.shutdown_all();
