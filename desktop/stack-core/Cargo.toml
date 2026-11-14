@@ -1,0 +1,21 @@
+[package]
+name = "stack-core"
+version = "0.1.0"
+description = "Per-slot development stacks: definition, planning, provenance and driver contracts"
+edition = "2021"
+
+# Pure core. NO tauri, tokio, HTTP or engine dependency — this crate must
+# compile and test headless on Linux and Windows alike. Engines are CLIs
+# that the drivers (built on these traits elsewhere) shell out to, argv
+# only; nothing in here talks to one.
+
+[dependencies]
+blake3 = "1"
+indexmap = { version = "2", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
