@@ -18,7 +18,8 @@
 // field that is absent or of the wrong type reads as absent, and unknown
 // fields are ignored.
 
-import type { Badge, Bucket, Freshness, Pr } from "./types";
+import { readBanners, readSections } from "./sections";
+import type { Badge, Banner, Bucket, Freshness, Pr, Section } from "./types";
 
 /** The contract version these views speak. */
 export const CONTRACT = 1;
@@ -54,8 +55,11 @@ export interface PrOrigin {
   sourceLabel: string;
   /** The key the source's actions are addressed by (see {@link prActionKey}). */
   key: string;
-  /** Whether this source's row carried any actions at all. */
+  /** Whether this source's row carried any actions at all (its sections'
+   *  included). */
   hasActions: boolean;
+  /** The ids of the row's own actions (not its sections'). */
+  actionIds: string[];
 }
 
 export interface PrRow {
@@ -82,6 +86,8 @@ export interface PrRow {
   teams: string[];
   /** Whether it needs the user: {@link attentionOf}. */
   attention: "yes" | "folded" | "no";
+  /** The primary source's sections; their actions are the primary's. */
+  sections: Section[];
   /** The source whose payload supplied the fields (the fresher one). */
   primary: PrOrigin;
   /** Every source that served the row, the primary first. */
@@ -123,6 +129,8 @@ export interface PrsModel {
   counts: Record<PrsTab, number>;
   freshness: FreshnessSummary;
   needsUpdate: NeedsUpdate[];
+  /** The view-level banners, per source. */
+  banners: { sourceId: string; sourceLabel: string; banner: Banner }[];
   /** At least one source has served a payload. */
   hasData: boolean;
 }
@@ -335,6 +343,7 @@ export function readPr(raw: unknown): Pr | null {
     mergeable: (mergeable && MERGEABLE.has(mergeable) ? mergeable : null) as Pr["mergeable"],
     workKeys: list(p.workKeys).filter((k): k is string => typeof k === "string"),
     badges: readBadges(p.badges),
+    sections: readSections(p.sections),
     actions: list(p.actions) as Pr["actions"],
   };
 }
@@ -457,8 +466,10 @@ export function buildPrsModel(payloads: ViewPayload[], needsUpdate: NeedsUpdate[
   }
   const freshness = summarizeFreshness(usable);
   const rows = new Map<string, { row: PrRow; asOf: number }>();
+  const banners: PrsModel["banners"] = [];
   for (const p of usable) {
     if (p.payload === null || p.payload === undefined) continue;
+    for (const banner of readBanners(obj(p.payload)?.banners)) banners.push({ sourceId: p.sourceId, sourceLabel: p.sourceLabel, banner });
     const asOf = asOfMs(readFreshness(obj(p.payload)?.freshness).asOf ?? p.freshness?.asOf);
     let skipped = 0;
     for (const raw of itemsOf(p.payload)) {
@@ -468,11 +479,13 @@ export function buildPrsModel(payloads: ViewPayload[], needsUpdate: NeedsUpdate[
         continue;
       }
       const id = prId(pr.forge, pr.repo, pr.number);
+      const actionIds = (pr.actions ?? []).map((a) => str(obj(a)?.id)).filter((id): id is string => !!id);
       const origin: PrOrigin = {
         sourceId: p.sourceId,
         sourceLabel: p.sourceLabel,
         key: prActionKey(pr.forge, pr.repo, pr.number),
-        hasActions: (pr.actions ?? []).length > 0,
+        hasActions: actionIds.length > 0 || (pr.sections ?? []).some((s) => (s.actions ?? []).length > 0),
+        actionIds,
       };
       const seen = rows.get(id);
       if (!seen) {
@@ -500,6 +513,7 @@ export function buildPrsModel(payloads: ViewPayload[], needsUpdate: NeedsUpdate[
     counts: { mine: mineRows.length, reviewing: reviewingRows.length, all: allRows.length },
     freshness,
     needsUpdate: stale,
+    banners,
     hasData: usable.some((p) => p.payload !== null && p.payload !== undefined),
   };
 }
@@ -536,6 +550,7 @@ function toRow(id: string, pr: Pr, primary: PrOrigin, origins: PrOrigin[]): PrRo
     required,
     teams,
     attention: attentionOf({ role: pr.role, bucket, required, state: pr.state }),
+    sections: pr.sections ?? [],
     primary,
     origins,
   };

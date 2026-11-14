@@ -1,5 +1,6 @@
 // The Edit-project pane. A full-window overlay exactly like the
-// settings pane (same open/close chrome, × top-right, Escape closes),
+// settings pane (same chrome: the shared back arrow before the title at the
+// top left, Escape does the same),
 // giving every project a real settings home: one "Edit project…" pane in
 // the house style, instead of settings scattered across the rail.
 //
@@ -17,9 +18,10 @@
 // (the same no-Save convention as the settings pane) and refresh() re-syncs from the
 // canonical value, so a rejected write visibly snaps back.
 //
-// Dismiss is × or Escape only, matching the settings pane — a full-window
-// view has no outside to click.
+// Dismiss is the back arrow or Escape only, matching the settings pane — a
+// full-window view has no outside to click.
 
+import { isBackKey, mountPageHeader } from "./page_header";
 import { Segmented } from "./segmented";
 import { LEVELS, LEVEL_LABELS, resolveLevel, type Level } from "./notifications";
 import { PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
@@ -30,11 +32,7 @@ const PANE_CSS =
   "color:#d6d8dc;font:13px system-ui,sans-serif;";
 const COLUMN_CSS = "width:100%;padding:24px 32px 64px;box-sizing:border-box;";
 const HEADER_CSS =
-  "display:flex;align-items:center;gap:8px;padding:0 0 14px;border-bottom:1px solid #1c1f24;";
-const TITLE_CSS = "flex:1 1 auto;font:600 18px system-ui,sans-serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-const CLOSE_CSS =
-  "flex:none;border:1px solid #262a31;background:#16181d;color:#8b949e;font-size:18px;" +
-  "line-height:1;cursor:pointer;padding:2px 9px;border-radius:6px;";
+  "display:flex;align-items:center;gap:8px;margin-left:-6px;padding:0 0 14px;border-bottom:1px solid #1c1f24;";
 const SECTION_CSS = "padding:16px 0 8px;";
 const SECTION_LABEL_CSS =
   "font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;padding-bottom:6px;";
@@ -108,7 +106,7 @@ export interface EditPaneOptions {
 export class EditPane {
   private readonly opts: EditPaneOptions;
   private readonly wrap: HTMLDivElement;
-  private readonly title: HTMLSpanElement;
+  private readonly title: HTMLElement;
 
   // Overview rows (read-only facts, repainted on refresh()).
   private readonly pathValue: HTMLSpanElement;
@@ -135,17 +133,9 @@ export class EditPane {
     this.wrap.setAttribute("aria-label", "Edit project");
 
     const header = document.createElement("div");
+    header.className = "chappa-edit-header";
     header.style.cssText = HEADER_CSS;
-    this.title = document.createElement("span");
-    this.title.style.cssText = TITLE_CSS;
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "chappa-edit-close";
-    close.textContent = "×";
-    close.title = "Close edit-project (Esc)";
-    close.style.cssText = CLOSE_CSS;
-    close.addEventListener("click", () => this.close());
-    header.append(this.title, close);
+    this.title = mountPageHeader(header, { title: "", backTo: "the workspace", onBack: () => this.close(), arrowClass: "chappa-edit-back" }).title;
 
     // --- Overview card --------------------------------------------------------
     const overview = document.createElement("div");
@@ -361,7 +351,7 @@ export class EditPane {
   }
 
   private readonly escape = (e: KeyboardEvent): void => {
-    if (e.key !== "Escape") return;
+    if (!isBackKey(e)) return;
     e.preventDefault();
     e.stopPropagation();
     this.close();

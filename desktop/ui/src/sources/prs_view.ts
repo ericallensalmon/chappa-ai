@@ -3,10 +3,15 @@
 // grouped by how I am on each review (team groups start folded). Built like
 // the dashboard: the app hands it a plain model on every change and the
 // page repaints only the rows whose content changed (a poll that changed
-// one PR touches one row, and focus inside the page survives).
+// one PR touches one row, and focus inside the page survives). The
+// sources' view-level banners sit above the tabs; a PR's sections are
+// folded inside its row; a `panel` action opens the source's drill-in page
+// over the view.
 
 import type { ActionTarget } from "./needs_you";
-import type { PrGroup, PrRow, PrsModel, PrsTab } from "./prs_model";
+import { withPanels } from "./panel_view";
+import { prId, type PrGroup, type PrRow, type PrsModel, type PrsTab } from "./prs_model";
+import { SectionsBlock, paintBanners } from "./sections";
 import {
   ActionsCell,
   ViewFrame,
@@ -52,6 +57,7 @@ interface RowRefs {
   meta: HTMLElement;
   reasons: HTMLElement;
   chips: HTMLElement;
+  sections: SectionsBlock;
   actions: ActionsCell;
   sig: string;
   row: PrRow | null;
@@ -75,6 +81,37 @@ export function prTargets(row: PrRow): ActionTarget[] {
     .map((o) => ({ sourceId: o.sourceId, sourceLabel: o.sourceLabel, view: "prs", key: o.key }));
 }
 
+/** Whether `row` is the PR a `forge:repo:number` key names: one of its
+ *  sources' keys exactly, or the same PR as forges compare them (forge and
+ *  repo case folded). */
+export function prMatchesKey(row: PrRow, key: string): boolean {
+  if (row.origins.some((o) => o.key === key)) return true;
+  const first = key.indexOf(":");
+  const last = key.lastIndexOf(":");
+  if (first <= 0 || last <= first) return false;
+  return prId(key.slice(0, first), key.slice(first + 1, last), key.slice(last + 1)) === row.id;
+}
+
+/** Which tab shows a PR, looked for in this order. */
+const FOCUS_TABS: PrsTab[] = ["reviewing", "mine", "all"];
+
+const CSS = `
+.chappa-pr-banners:empty{display:none;}
+.chappa-pr-row.focused{box-shadow:0 0 0 1px #5ea6ff;}
+.chappa-pr-row .chappa-secs:empty{display:none;}
+.chappa-pr-row .chappa-sec{margin:2px 0 0;}
+`;
+
+let stylesInjected = false;
+
+function injectStyles(): void {
+  if (stylesInjected || typeof document === "undefined") return;
+  stylesInjected = true;
+  const el = document.createElement("style");
+  el.textContent = CSS;
+  document.head.appendChild(el);
+}
+
 export class PrsView {
   private readonly frame: ViewFrame;
   private readonly tabs: Record<PrsTab, HTMLButtonElement>;
@@ -84,10 +121,21 @@ export class PrsView {
   private readonly foldChoice = new Map<string, boolean>();
   private readonly groups = new Map<string, GroupRefs>();
   private readonly rows = new Map<string, RowRefs>();
+  private readonly bannersEl: HTMLElement;
   private input: PrsViewInput | null = null;
+  /** The deps every part of the page uses: panels stack over this view. */
+  private readonly ui: SourceViewDeps;
+  private focused: string | null = null;
+  /** A focus asked for before the data arrived. */
+  private pendingFocus: string | null = null;
 
   constructor(private readonly deps: SourceViewDeps) {
+    injectStyles();
     this.frame = new ViewFrame("PRs", "prs", () => deps.onClose());
+    this.ui = withPanels(() => this.frame, deps);
+    this.bannersEl = document.createElement("div");
+    this.bannersEl.className = "chappa-pr-banners";
+    this.frame.banners.after(this.bannersEl);
     const tabs = document.createElement("div");
     tabs.className = "chappa-sv-tabs";
     tabs.setAttribute("role", "tablist");
@@ -121,6 +169,39 @@ export class PrsView {
     this.frame.setActive(active);
   }
 
+  /** Where the view's arrow returns. */
+  setBackTo(where: string): void {
+    this.frame.setBackTo(where);
+  }
+
+  /**
+   * Bring the PR `key` (`forge:repo:number`) into view: the tab that holds
+   * it (Reviewing first, then My PRs, then All), its group unfolded,
+   * scrolled to and marked. Answers whether it was found; asked before the
+   * first answer arrived, it waits for it (and answers true).
+   */
+  focus(key: string): boolean {
+    const model = this.input?.model;
+    if (!model?.hasData) {
+      this.pendingFocus = key;
+      return true;
+    }
+    this.pendingFocus = null;
+    for (const tab of FOCUS_TABS) {
+      const group = model[tab].find((g) => g.rows.some((r) => prMatchesKey(r, key)));
+      if (!group) continue;
+      const row = group.rows.find((r) => prMatchesKey(r, key))!;
+      this.frame.clearSubpages();
+      this.foldChoice.set(`${tab}\u001f${group.id}`, false);
+      this.tab = tab;
+      this.focused = row.id;
+      this.paint();
+      this.rows.get(row.id)?.el.scrollIntoView?.({ block: "center" });
+      return true;
+    }
+    return false;
+  }
+
   selectTab(tab: PrsTab): void {
     if (tab === this.tab) return;
     this.tab = tab;
@@ -130,6 +211,10 @@ export class PrsView {
   update(input: PrsViewInput): void {
     this.input = input;
     this.paint();
+    if (this.pendingFocus !== null && input.model.hasData) {
+      const key = this.pendingFocus;
+      if (!this.focus(key)) this.deps.say(`${key} is not in the PRs list.`, "error");
+    }
   }
 
   dispose(): void {
@@ -141,6 +226,15 @@ export class PrsView {
     if (!input) return;
     const { model } = input;
     this.frame.paintStatus(model.freshness, model.needsUpdate, this.deps.now());
+    const version = (sourceId: string): string => `${sourceId}:${input.versions[sourceId] ?? 0}`;
+    paintBanners(
+      this.bannersEl,
+      this.ui,
+      model.banners.map(({ sourceId, sourceLabel, banner }) => ({
+        banner,
+        ctx: { sourceId, target: { sourceId, sourceLabel, view: "prs", key: null }, version: version(sourceId) },
+      })),
+    );
     for (const { id, label } of PRS_TABS) {
       this.tabs[id].textContent = `${label} (${model.counts[id]})`;
       this.tabs[id].classList.toggle("active", id === this.tab);
@@ -168,6 +262,8 @@ export class PrsView {
       const [tab, id] = key.split("\u001f");
       if (!model[tab as PrsTab].some((g) => g.id === id)) this.groups.delete(key);
     }
+    if (this.focused !== null && !all.has(this.focused)) this.focused = null;
+    for (const [id, r] of this.rows) r.el.classList.toggle("focused", id === this.focused);
     this.frame.empty.textContent = groups.length === 0 ? prsEmptyText(input, this.tab) : "";
   }
 
@@ -238,9 +334,10 @@ export class PrsView {
     reasons.className = "chappa-sv-reasons";
     const chips = document.createElement("div");
     chips.className = "chappa-sv-chips";
-    const actions = new ActionsCell(this.deps);
-    el.append(top, meta, reasons, chips, actions.el);
-    const r: RowRefs = { el, title, meta, reasons, chips, actions, sig: "", row: null };
+    const sections = new SectionsBlock(this.ui, { collapsedByDefault: true });
+    const actions = new ActionsCell(this.ui);
+    el.append(top, meta, reasons, chips, sections.el, actions.el);
+    const r: RowRefs = { el, title, meta, reasons, chips, sections, actions, sig: "", row: null };
     title.addEventListener("mousedown", (e) => e.preventDefault());
     title.addEventListener("click", () => {
       const row = r.row;
@@ -253,7 +350,15 @@ export class PrsView {
   private paintRow(r: RowRefs, row: PrRow, versions: Record<string, number>): void {
     r.row = row;
     const targets = prTargets(row);
-    r.actions.load(targets, targets.map((t) => `${t.sourceId}:${versions[t.sourceId] ?? 0}`).join(","));
+    // The sections draw their own actions; the row's cell draws the rest.
+    const own = row.sections.some((s) => (s.actions ?? []).length > 0) ? [...new Set(row.origins.flatMap((o) => o.actionIds))] : undefined;
+    r.actions.load(own?.length === 0 ? [] : targets, targets.map((t) => `${t.sourceId}:${versions[t.sourceId] ?? 0}`).join(","), own);
+    const p = row.primary;
+    r.sections.update(row.sections, {
+      sourceId: p.sourceId,
+      target: { sourceId: p.sourceId, sourceLabel: p.sourceLabel, view: "prs", key: p.key },
+      version: `${p.sourceId}:${versions[p.sourceId] ?? 0}`,
+    });
     const sig = JSON.stringify([row.title, row.url, row.repo, row.number, row.author, row.branch, row.reasons, row.chips, row.bucket, row.primary.sourceLabel]);
     if (sig === r.sig) return;
     r.sig = sig;

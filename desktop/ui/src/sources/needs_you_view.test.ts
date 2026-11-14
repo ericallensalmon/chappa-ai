@@ -42,7 +42,9 @@ describe("NeedsYouView", () => {
   it("one section per kind, each titled with its count; rows lead with the item name", () => {
     const v = new NeedsYouView(deps());
     v.update({ model: buildNeedsYou(fixtureInput()), versions: {} });
-    expect(v.host.querySelector(".chappa-sv-back")?.textContent).toBe("←Needs you");
+    expect(v.host.querySelector(".chappa-sv-header")?.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(v.host.querySelector(".chappa-back-arrow")?.textContent).toBe("←");
+    expect(v.host.querySelector(".chappa-sv-header .chappa-page-title")?.textContent).toBe("Needs you");
     expect(sections(v)).toEqual(["terminals", "work", "prs", "group:Builds", "group:Incidents"]);
     const heads = [...v.host.querySelectorAll(".chappa-sv-content > .chappa-sv-group")].map(
       (s) => `${s.querySelector(".chappa-sv-group-label")?.textContent} ${s.querySelector(".chappa-sv-count")?.textContent}`,
@@ -80,10 +82,11 @@ describe("NeedsYouView", () => {
     expect(d.selectTerminal).toHaveBeenCalledWith("term:4");
     click("att:fx|nightly-build-1");
     expect(d.openLink).toHaveBeenCalledWith("fx", "https://registry.example/owner/repo/actions/runs/1");
+    // A PR opens the PRs view at it, with its source.
     click("pr:github/owner/repo/#7");
-    expect(d.openLink).toHaveBeenLastCalledWith("fx", "https://registry.example/owner/repo/pull/7");
+    expect(d.openView).toHaveBeenLastCalledWith("prs", "github:owner/repo:#7", "fx");
     click("att:fx|review-note-1");
-    expect(d.openView).toHaveBeenCalledWith("work", "ABC-2");
+    expect(d.openView).toHaveBeenLastCalledWith("work", "ABC-2", "fx");
     expect(d.said).toEqual(["No work view is available to show ABC-2."]);
     // An item that opens nothing has a disabled title.
     expect(row(v, "att:fx|plain-1").querySelector<HTMLButtonElement>(".chappa-sv-title")!.disabled).toBe(true);
@@ -101,6 +104,7 @@ describe("NeedsYouView", () => {
     expect(actions.mock.calls.map((c) => c.slice(0, 3))).toEqual([
       ["fx", "work", "ABC-1"],
       ["fx", "prs", "github:owner/repo:#1"],
+      ["fx", "prs", "github:owner/repo:#2"],
       ["fx", "attention", "nightly-build-1"],
       ["fx", "attention", "review-note-1"],
     ]);

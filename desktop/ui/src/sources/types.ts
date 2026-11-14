@@ -176,6 +176,9 @@ export interface Pr {
   /** Keys of the Work items this PR belongs to. */
   workKeys?: string[];
   badges?: Badge[];
+  /** Extra facts a forge has (check runs, deployments), shown folded in
+   *  the row. Their actions belong to the PR. */
+  sections?: Section[];
   actions?: Action[];
 }
 
@@ -233,6 +236,9 @@ export interface Component {
   probe?: { url: string; rule: "health" | "web" | "any"; up: boolean; status?: number | null } | null;
   hint?: string | null;
   badges?: Badge[];
+  /** Extra facts (configuration, volumes), shown folded in the row. Their
+   *  actions belong to the component. */
+  sections?: Section[];
   actions?: Action[];
 }
 

@@ -1,19 +1,22 @@
 // The Work page: the items of every trusted source serving `work`, the
 // active one pinned on top, the rest grouped by status (Done folded), with
 // an "Assigned to me" switch and a text filter. Selecting a row opens its
-// detail beside the list on a wide window, or in place of the list (with a
-// back arrow) on a narrow one: every field, the item's actions, its local
-// workflow block and its sections. A `panel` action opens the source's
-// drill-in page over both.
+// detail beside the list on a wide window, or in place of the list on a
+// narrow one: every field, the item's actions, its local workflow block and
+// its sections. The detail's header starts with the shared back arrow; on a
+// narrow window it is the page's only header (the view's own is hidden), so
+// there is one way back. A `panel` action opens the source's drill-in page
+// over the whole view.
 //
 // Built like the other source pages: the app hands it the payloads on every
 // change, and rows are keyed and repainted only when their content changed,
 // so a poll that changed one item touches one row and focus survives.
 
+import { mountPageHeader } from "../page_header";
 import { formatAgo } from "../record_pane";
 import { LocalStatusBlock } from "./local_status";
 import type { ActionTarget } from "./needs_you";
-import { PanelPage } from "./panel_view";
+import { withPanels, type PanelPage } from "./panel_view";
 import type { NeedsUpdate, ViewPayload } from "./prs_model";
 import { SectionsBlock, paintBanners, type SectionsContext } from "./sections";
 import {
@@ -23,7 +26,6 @@ import {
   openChecked,
   placeAt,
   truncate,
-  type PanelOrigin,
   type SourceViewDeps,
 } from "./view_common";
 import { buildWorkModel, type WorkFilter, type WorkGroup, type WorkGroupId, type WorkModel, type WorkPrChip, type WorkRow } from "./work_model";
@@ -56,10 +58,12 @@ export const WORK_VIEW_CSS = `
 .chappa-work-list{flex:1 1 auto;min-width:0;}
 .chappa-work-detail{display:none;flex:0 0 46%;min-width:0;border-left:1px solid #1c1f24;padding-left:16px;}
 .chappa-work-split.has-detail .chappa-work-detail{display:block;}
-.chappa-work-split.hidden,.chappa-work-banners.hidden{display:none;}
 @media (max-width: 900px){
   .chappa-work-split.has-detail .chappa-work-list{display:none;}
   .chappa-work-split.has-detail .chappa-work-detail{flex:1 1 auto;border-left:0;padding-left:0;}
+  .chappa-source-view.detail-open > .chappa-sv-header{display:none;}
+  .chappa-source-view.detail-open .chappa-sv-banners,.chappa-source-view.detail-open .chappa-sv-errors,
+  .chappa-source-view.detail-open .chappa-sv-notices,.chappa-source-view.detail-open .chappa-work-banners{display:none;}
 }
 .chappa-work-row{cursor:default;}
 .chappa-work-row.selected{border-color:#353a43;background:#161a20;}
@@ -67,14 +71,12 @@ export const WORK_VIEW_CSS = `
 .chappa-work-key{flex:none;font:11px ui-monospace,monospace;color:#8b949e;}
 .chappa-work-pr{cursor:pointer;background:none;}
 .chappa-work-pr:hover{border-color:#5ea6ff;}
-.chappa-work-detail-head{display:flex;align-items:center;gap:8px;margin:2px 0 10px;}
-.chappa-work-detail-title{font:600 14px system-ui,sans-serif;color:#e6e8ec;overflow-wrap:anywhere;}
+.chappa-work-detail-head{display:flex;align-items:center;gap:8px;margin:2px 0 10px 0;}
+.chappa-work-detail-title{font:600 14px system-ui,sans-serif;color:#e6e8ec;white-space:normal;overflow-wrap:anywhere;}
 .chappa-work-fields{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;margin-bottom:10px;font:12px system-ui,sans-serif;}
 .chappa-work-field-name{color:#8b949e;}
 .chappa-work-field-value{color:#d6d8dc;min-width:0;overflow-wrap:anywhere;display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
 .chappa-work-detail .chappa-sv-actions{margin-bottom:10px;}
-.chappa-panel-page{display:flex;flex-direction:column;gap:6px;}
-.chappa-panel-head{display:flex;align-items:center;gap:14px;margin-bottom:6px;}
 `;
 
 let stylesInjected = false;
@@ -147,8 +149,8 @@ export class WorkView {
   private readonly split: HTMLElement;
   private readonly list: HTMLElement;
   private readonly detail: WorkDetail;
-  private readonly panelHost: HTMLElement;
-  private panel: PanelPage | null = null;
+  /** The deps every part of the page uses: panels stack over this view. */
+  private readonly ui: WorkViewDeps;
   private readonly groups = new Map<WorkGroupId, GroupRefs>();
   private readonly rows = new Map<string, RowRefs>();
   /** Fold choices per group, for as long as the page lives (the session). */
@@ -165,6 +167,13 @@ export class WorkView {
   constructor(private readonly deps: WorkViewDeps) {
     injectStyles();
     this.frame = new ViewFrame("Work", "work", () => deps.onClose());
+    this.ui = withPanels(() => this.frame, deps);
+    // Escape closes an open detail before it leaves the view.
+    this.frame.setInnerBack(() => {
+      if (this.selected === null) return false;
+      this.select(null);
+      return true;
+    });
     const filters = document.createElement("div");
     filters.className = "chappa-work-filters";
     this.assignedBtn = document.createElement("button");
@@ -201,11 +210,9 @@ export class WorkView {
     this.split.className = "chappa-work-split";
     this.list = document.createElement("div");
     this.list.className = "chappa-work-list";
-    this.detail = new WorkDetail({ ...deps, openPanel: (o, p) => this.openPanel(o, p) }, () => this.select(null));
+    this.detail = new WorkDetail(this.ui, () => this.select(null));
     this.split.append(this.list, this.detail.el);
-    this.panelHost = document.createElement("div");
-    this.panelHost.className = "chappa-work-panel";
-    this.frame.content.append(this.bannersEl, this.split, this.panelHost);
+    this.frame.content.append(this.bannersEl, this.split);
   }
 
   get host(): HTMLElement {
@@ -223,11 +230,17 @@ export class WorkView {
 
   /** The panel page on screen, or null. */
   get openPanelPage(): PanelPage | null {
-    return this.panel;
+    const pages = this.frame.subpages;
+    return (pages[pages.length - 1] as PanelPage | undefined) ?? null;
   }
 
   setActive(active: boolean): void {
     this.frame.setActive(active);
+  }
+
+  /** Where the view's arrow returns. */
+  setBackTo(where: string): void {
+    this.frame.setBackTo(where);
   }
 
   update(input: WorkViewInput): void {
@@ -254,7 +267,7 @@ export class WorkView {
     }
     const row = model.all.find((r) => r.key === key);
     if (!row) return false;
-    this.closePanel();
+    this.frame.clearSubpages();
     const shown = model.groups.some((g) => g.rows.some((r) => r.id === row.id));
     if (!shown) {
       this.filter.text = "";
@@ -271,31 +284,12 @@ export class WorkView {
   }
 
   dispose(): void {
-    this.closePanel();
     this.frame.dispose();
   }
 
   private select(id: string | null): void {
     this.selected = id;
     if (id === null) this.focused = null;
-    this.paint();
-  }
-
-  private openPanel(origin: PanelOrigin, payload: unknown): void {
-    this.closePanel();
-    this.panel = new PanelPage(this.deps, origin, payload, () => this.closePanel());
-    this.panelHost.appendChild(this.panel.el);
-    this.split.classList.add("hidden");
-    this.bannersEl.classList.add("hidden");
-    this.paint();
-  }
-
-  private closePanel(): void {
-    if (!this.panel) return;
-    this.panel.dispose();
-    this.panel = null;
-    this.split.classList.remove("hidden");
-    this.bannersEl.classList.remove("hidden");
     this.paint();
   }
 
@@ -313,10 +307,10 @@ export class WorkView {
     const version = (sourceId: string): string => `${sourceId}:${input.versions[sourceId] ?? 0}`;
     paintBanners(
       this.bannersEl,
-      this.deps,
+      this.ui,
       model.banners.map(({ sourceId, sourceLabel, banner }) => ({
         banner,
-        ctx: { sourceId, target: { sourceId, sourceLabel, view: "work", key: banner.id }, version: version(sourceId) },
+        ctx: { sourceId, target: { sourceId, sourceLabel, view: "work", key: null }, version: version(sourceId) },
       })),
     );
     model.groups.forEach((g, i) => {
@@ -341,6 +335,7 @@ export class WorkView {
       this.focused = null;
     }
     this.split.classList.toggle("has-detail", sel !== null);
+    this.frame.host.classList.toggle("detail-open", sel !== null);
     if (sel) this.detail.show(sel, version(sel.sourceId));
     else this.detail.hide();
     for (const [id, r] of this.rows) {
@@ -348,7 +343,7 @@ export class WorkView {
       r.el.classList.toggle("focused", id === this.focused);
       r.title.setAttribute("aria-current", String(id === this.selected));
     }
-    this.frame.empty.textContent = model.groups.length === 0 && !this.panel ? workEmptyText(input, model, this.filter) : "";
+    this.frame.empty.textContent = model.groups.length === 0 ? workEmptyText(input, model, this.filter) : "";
   }
 
   private folded(g: WorkGroup): boolean {
@@ -414,7 +409,7 @@ export class WorkView {
     meta.className = "chappa-sv-meta";
     const chips = document.createElement("div");
     chips.className = "chappa-sv-chips";
-    const actions = new ActionsCell({ ...this.deps, openPanel: (o, p) => this.openPanel(o, p) });
+    const actions = new ActionsCell(this.ui);
     el.append(top, meta, chips, actions.el);
     const r: RowRefs = { el, key, title, status, meta, chips, actions, sig: "", row: null };
     title.addEventListener("click", () => {
@@ -442,7 +437,7 @@ export class WorkView {
     if (row.statusChip) r.status.appendChild(chipEl(row.statusChip));
     r.meta.textContent = meta;
     r.meta.title = meta;
-    fillChips(r.chips, row, this.deps);
+    fillChips(r.chips, row, this.ui);
   }
 }
 
@@ -490,18 +485,13 @@ class WorkDetail {
     this.el.setAttribute("aria-label", "Work item");
     const head = document.createElement("div");
     head.className = "chappa-work-detail-head";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "chappa-sv-back chappa-work-detail-back";
-    back.title = "Back to the list";
-    const arrow = document.createElement("span");
-    arrow.setAttribute("aria-hidden", "true");
-    arrow.textContent = "←";
-    back.appendChild(arrow);
-    back.addEventListener("click", onBack);
-    this.title = document.createElement("span");
-    this.title.className = "chappa-work-detail-title";
-    head.append(back, this.title);
+    this.title = mountPageHeader(head, {
+      title: "",
+      backTo: "the Work list",
+      onBack,
+      arrowClass: "chappa-work-detail-back",
+      titleClass: "chappa-work-detail-title",
+    }).title;
     this.fields = document.createElement("div");
     this.fields.className = "chappa-work-fields";
     this.actions = new ActionsCell(deps);

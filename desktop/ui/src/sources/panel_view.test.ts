@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ipc from "../ipc";
-import { PANEL_ACTIONS_REASON, PanelPage, readPanel } from "./panel_view";
+import { PanelPage, openPanelIn, panelView, readPanel, withPanels } from "./panel_view";
 import { fixture } from "./test-utils";
-import type { SourceViewDeps } from "./view_common";
+import { ViewFrame, type SourceViewDeps } from "./view_common";
 
 const FLUSH = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const NOW = Date.parse("2026-01-15T10:03:00Z");
 const origin = { sourceId: "fx", sourceLabel: "Fixture", label: "Validate", endpoint: "/api/panel/validate" };
+const ok: ipc.ActionVerdictDto = { enabled: true, reason: null, hidden: false, cwd: null, tool: null };
+const ping = (label: string): ipc.SourceActionDto => ({
+  action: { kind: "endpoint", id: "ping", label, mutates: false, confirm: null, params: null, note: null },
+  verdict: ok,
+  needsPrompt: false,
+});
 
 function deps(over: Partial<SourceViewDeps> = {}): SourceViewDeps {
   return {
@@ -41,19 +47,36 @@ describe("readPanel", () => {
 });
 
 describe("PanelPage", () => {
-  it("a back arrow before the title, freshness, banners and sections through the shared renderer, actions disabled with why", () => {
+  it("a back arrow before the title, freshness, banners and sections through the shared renderer, its own actions live", async () => {
     const onBack = vi.fn();
-    const p = new PanelPage(deps(), origin, panelBody(), onBack, 0);
-    const back = p.el.querySelector<HTMLButtonElement>(".chappa-panel-back")!;
-    expect(back.textContent).toBe("←Validate");
+    // Rust lists the page's own action and (same id) its banner's once each.
+    const actions = vi.fn(async () => [ping("Re-run"), ping("Re-run")]);
+    const run = vi.fn(async () => ({ kind: "done", message: "pong" }) as ipc.ActionOutcomeDto);
+    const d = deps({ actions, run });
+    const p = new PanelPage(d, origin, panelBody(), onBack, 0);
+    const head = p.el.querySelector(".chappa-sv-header")!;
+    const back = head.firstElementChild as HTMLButtonElement;
+    expect(back.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(back.textContent).toBe("←");
+    expect(back.getAttribute("aria-label")).toBe("Back to Fixture");
+    expect(back.nextElementSibling?.textContent).toBe("Validate");
+    p.setBackTo("Work");
+    expect(back.getAttribute("aria-label")).toBe("Back to Work");
+    expect(p.title).toBe("Validate");
     expect(p.el.querySelector(".chappa-sv-fresh")?.textContent).toBe("as of 3 min ago");
     expect(p.el.querySelector(".chappa-banner-title")?.textContent).toBe("Configuration has drifted");
     expect(p.el.querySelector(".chappa-banner")?.getAttribute("data-tone")).toBe("warn");
     expect(p.el.querySelector('.chappa-sec[data-section="checks"] .chappa-sec-head')?.textContent).toBe("▾ Checks");
     expect([...p.el.querySelectorAll(".chappa-sec-body > .chappa-sec-row .chappa-sec-label")].map((l) => l.textContent)).toEqual(["Lint", "Types"]);
     expect(p.el.querySelector(".chappa-sec-more")?.textContent).toBe("▸ Show skipped");
-    const action = p.el.querySelector<HTMLButtonElement>(".chappa-panel-actions .chappa-sv-action")!;
-    expect([action.textContent, action.disabled, action.title]).toEqual(["Re-run", true, PANEL_ACTIONS_REASON]);
+    await FLUSH();
+    // Read as the page itself: the `panel:<endpoint>` view, no key.
+    expect(actions).toHaveBeenCalledWith("fx", panelView("/api/panel/validate"), null);
+    const buttons = [...p.el.querySelectorAll<HTMLButtonElement>(".chappa-panel-actions .chappa-sv-action")];
+    expect(buttons.map((b) => [b.textContent, b.disabled])).toEqual([["Re-run", false]]);
+    buttons[0].click();
+    await FLUSH();
+    expect(run).toHaveBeenCalledWith("fx", "panel:/api/panel/validate", null, "ping", false, null);
     back.click();
     expect(onBack).toHaveBeenCalledTimes(1);
     p.dispose();
@@ -80,6 +103,34 @@ describe("PanelPage", () => {
     p.dispose();
     await vi.advanceTimersByTimeAsync(5000);
     expect(panel).toHaveBeenCalledTimes(3);
+  });
+
+  it("pages stack in the frame that opened the first: each back steps one page, Escape too, and leaving the view drops them", async () => {
+    const onClose = vi.fn();
+    const frame = new ViewFrame("Work", "work", onClose);
+    document.body.appendChild(frame.host);
+    const d = withPanels(() => frame, deps({ onClose }));
+    const first = openPanelIn(frame, d, origin, panelBody(), 0);
+    expect(frame.host.classList.contains("covered")).toBe(true);
+    expect(first.el.querySelector(".chappa-back-arrow")?.getAttribute("aria-label")).toBe("Back to Work");
+    d.openPanel!({ ...origin, label: "Checks", endpoint: "/api/panel/checks" }, { title: "Checks for #2" });
+    expect(frame.subpages.length).toBe(2);
+    const second = frame.subpages[1] as PanelPage;
+    expect(second.el.querySelector(".chappa-back-arrow")?.getAttribute("aria-label")).toBe("Back to Validate");
+    expect(first.el.classList.contains("under")).toBe(true);
+    second.el.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
+    expect(frame.subpages).toEqual([first]);
+    frame.host.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(frame.subpages).toEqual([]);
+    expect(frame.host.classList.contains("covered")).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    frame.host.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    openPanelIn(frame, d, origin, panelBody(), 0);
+    frame.setActive(false);
+    expect(frame.subpages).toEqual([]);
+    expect(frame.host.querySelector(".chappa-panel-page")).toBeNull();
+    frame.dispose();
   });
 
   it("a page in another contract version says so and shows nothing of it", async () => {

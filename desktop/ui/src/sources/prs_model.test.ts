@@ -84,7 +84,13 @@ describe("the fixture's PRs", () => {
     const draft = m.mine.find((g) => g.bucket === "draft")!.rows[0];
     // The bucket chip and the state chip say the same: one chip.
     expect(draft.chips).toEqual([{ text: "draft", tone: "warn", title: "Still a draft" }]);
-    expect(draft.primary.hasActions).toBe(false);
+    // Its panel action is its own; its section folds in the row.
+    expect(draft.primary.hasActions).toBe(true);
+    expect(draft.primary.actionIds).toEqual(["checks"]);
+    expect(draft.sections.map((s) => [s.id, s.title, s.rows.length, s.more?.label])).toEqual([["checks", "Checks", 2, "Show skipped"]]);
+    expect(m.mine.find((g) => g.bucket === "ready")!.rows[0].sections).toEqual([]);
+    // The view-level banner, with its source.
+    expect(m.banners.map((b) => [b.sourceId, b.banner.id, b.banner.actions?.map((a) => a.id)])).toEqual([["fx", "review-sync", ["resync"]]]);
   });
 
   it("a closed review is in no tab; an open one carries its bucket chip beside its vote", () => {

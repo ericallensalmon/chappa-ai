@@ -7,6 +7,15 @@
       "showing 10 of 24 pull requests"
     ]
   },
+  "banners": [
+    {
+      "id": "review-sync",
+      "tone": "info",
+      "title": "Review requests sync every 5 minutes",
+      "lines": ["A review asked for just now may not be listed yet"],
+      "actions": [{ "kind": "endpoint", "id": "resync", "label": "Sync now", "mutates": false }]
+    }
+  ],
   "items": [
     {
       "forge": "github",
@@ -103,7 +112,21 @@
       "reasons": [
         "Still a draft"
       ],
-      "mergeable": "unknown"
+      "mergeable": "unknown",
+      "sections": [
+        {
+          "id": "checks",
+          "title": "Checks",
+          "rows": [
+            { "label": "Build", "value": "passing", "badges": [{ "text": "ok", "tone": "ok" }] },
+            { "label": "Tests", "value": "3 pending" }
+          ],
+          "more": { "label": "Show skipped", "rows": [{ "label": "Docs", "value": "skipped" }] }
+        }
+      ],
+      "actions": [
+        { "kind": "panel", "id": "checks", "label": "Checks", "endpoint": "/api/panel/checks" }
+      ]
     },
     {
       "forge": "github",

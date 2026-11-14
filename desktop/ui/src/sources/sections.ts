@@ -3,11 +3,12 @@
 // and the coloured notes above a list. One place reads them leniently and
 // draws them, so every view shows a source's sections the same way.
 //
-// A section's actions are judged by Rust like any other: they are read
-// with the item they belong to (`source_actions` walks every `actions`
-// array under the item's key) and the section draws only its own ids.
-// Where no such target exists (a drill-in page's sections), the buttons are
-// drawn disabled with the reason.
+// A section's or banner's actions are judged by Rust like any other: they
+// are read with what holds them (`source_actions` walks every `actions`
+// array under the item's key; a view's or a drill-in page's own banners and
+// sections are read with no key, as the view or page itself) and each block
+// draws only its own ids. Where no target exists the buttons are drawn
+// disabled with the reason.
 
 import type { ActionTarget } from "./needs_you";
 import { oneLine, readBadges, type Chip, type Tone } from "./prs_model";
@@ -179,7 +180,7 @@ export function inertActions(actions: readonly Action[], reason: string): HTMLEl
   return el;
 }
 
-const NO_TARGET = "This page's actions cannot run here yet.";
+const NO_TARGET = "These actions cannot run here.";
 
 interface SectionRefs {
   el: HTMLElement;
@@ -204,7 +205,12 @@ export class SectionsBlock {
   private sections: Section[] = [];
   private ctx: SectionsContext | null = null;
 
-  constructor(private readonly deps: SourceViewDeps) {
+  /** `collapsedByDefault`: every section starts folded whatever it says
+   *  (sections inside a list row, where open ones would bury the list). */
+  constructor(
+    private readonly deps: SourceViewDeps,
+    private readonly opts: { collapsedByDefault?: boolean } = {},
+  ) {
     injectStyles();
     this.el = document.createElement("div");
     this.el.className = "chappa-secs";
@@ -253,7 +259,7 @@ export class SectionsBlock {
   }
 
   private isCollapsed(s: Section): boolean {
-    return this.collapsed.get(s.id) ?? s.collapsed === true;
+    return this.collapsed.get(s.id) ?? (this.opts.collapsedByDefault === true || s.collapsed === true);
   }
 
   private paintSection(refs: SectionRefs, s: Section, ctx: SectionsContext): void {
@@ -344,9 +350,9 @@ const badgeChip = (b: { text: string; tone?: string; title?: string }): Chip => 
 });
 
 /**
- * One banner: tone, title, lines, and its actions (judged for `target`,
- * whose key is the banner's id, the key Rust files a top-level banner's
- * actions under; drawn disabled without one).
+ * One banner: tone, title, lines, and its actions (judged for `target`:
+ * a view's or page's own banner is the view or page itself, key null;
+ * drawn disabled without one).
  */
 export function bannerEl(deps: SourceViewDeps, b: Banner, ctx: SectionsContext): HTMLElement {
   injectStyles();

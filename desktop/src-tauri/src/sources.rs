@@ -65,6 +65,13 @@ use crate::roots::Root;
 pub const RUNS_JOBS_HEADER: (&str, &str) = ("X-Chappa-Runs-Jobs", "1");
 /// How many finished jobs a source keeps in its log.
 pub const JOB_LOG_CAP: usize = 50;
+/// The view name a panel page's own actions are addressed by:
+/// `panel:<path>`, the path being the panel action's `endpoint`.
+pub const PANEL_VIEW_PREFIX: &str = "panel:";
+/// How many panel pages a source keeps for their actions: the ones open now
+/// (a page and the page it was opened from) plus a few just left. The page
+/// fetched least recently goes first.
+pub const PANEL_CACHE_CAP: usize = 8;
 
 /// The one webview that may talk to sources. A second window (a terminal
 /// dock) is a second webview with the same origin, and it must not reach
@@ -196,11 +203,51 @@ struct SourceState {
     unconfirmable_logged: std::collections::BTreeSet<String>,
     /// The jobs started from this source (202 replies), oldest first.
     jobs: Vec<JobRecord>,
+    /// The last page of each panel fetched, so the page's own actions can be
+    /// judged and run like a view's.
+    panels: PanelCache,
 }
 
 impl SourceState {
     fn cancelled(&self, generation: u64) -> bool {
         self.generation != generation
+    }
+
+    /// Whether a cached VIEW payload names `path` as a `panel` action's
+    /// endpoint: the closed list of panel paths. Panel pages themselves do
+    /// not count, so a cached page never widens what may be fetched.
+    fn names_panel(&self, path: &str) -> bool {
+        self.views.values().filter_map(|v| v.payload.as_ref()).any(|payload| {
+            actions::actions_in(payload)
+                .0
+                .iter()
+                .any(|f| matches!(&f.action, SourceAction::Panel { endpoint, .. } if endpoint == path))
+        })
+    }
+}
+
+/// The last payload per panel path, most recently fetched last, at most
+/// [`PANEL_CACHE_CAP`] of them.
+#[derive(Debug, Default)]
+struct PanelCache {
+    pages: Vec<(String, Value)>,
+}
+
+impl PanelCache {
+    fn put(&mut self, path: &str, payload: Value) {
+        self.pages.retain(|(p, _)| p != path);
+        self.pages.push((path.to_owned(), payload));
+        while self.pages.len() > PANEL_CACHE_CAP {
+            self.pages.remove(0);
+        }
+    }
+
+    fn get(&self, path: &str) -> Option<&Value> {
+        self.pages.iter().find(|(p, _)| p == path).map(|(_, v)| v)
+    }
+
+    fn clear(&mut self) {
+        self.pages.clear();
     }
 }
 
@@ -695,13 +742,16 @@ impl Sources {
         };
         {
             let mut inner = self.lock();
-            let trusted = inner
-                .store
-                .as_ref()
-                .is_some_and(|s| s.is_trusted(key, &manifest::trust_hash(&manifest)));
+            let hash = manifest::trust_hash(&manifest);
+            let trusted = inner.store.as_ref().is_some_and(|s| s.is_trusted(key, &hash));
             let Some(state) = inner.sources.get_mut(key) else { return RunEnd::Cancelled };
             if state.cancelled(generation) {
                 return RunEnd::Cancelled;
+            }
+            // Panel pages were judged under the trust the user gave; a
+            // different (or no) trust starts over once the views refill.
+            if !trusted || state.trust.as_ref().map(|t| t.hash.as_str()) != Some(hash.as_str()) {
+                state.panels.clear();
             }
             let mut views = BTreeMap::new();
             let mut declared: Vec<(String, Endpoint, Duration)> = manifest
@@ -969,7 +1019,20 @@ impl Sources {
         Ok(())
     }
 
+    /// The cached payload a view name addresses: a view's last answer, or,
+    /// for `panel:<path>`, the last page of that panel. A panel page counts
+    /// only while a cached view payload still names its path.
     fn cached_payload(state: &SourceState, view: &str) -> Result<Value, String> {
+        if let Some(path) = view.strip_prefix(PANEL_VIEW_PREFIX) {
+            if !state.names_panel(path) {
+                return Err(format!("source {} names no panel at `{path}`", state.id));
+            }
+            return state
+                .panels
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("source {} has no page at `{path}` yet; open it first", state.id));
+        }
         state
             .views
             .get(view)
@@ -977,8 +1040,9 @@ impl Sources {
             .ok_or_else(|| format!("source {} has no `{view}` data yet", state.id))
     }
 
-    /// The actions under `key` in the cached `view` payload, judged. A
-    /// mutating endpoint without a confirm is left out (logged once).
+    /// The actions under `key` in the cached `view` payload (or panel page,
+    /// `panel:<path>`), judged. A mutating endpoint without a confirm is
+    /// left out (logged once).
     pub fn actions(&self, source_id: &str, view: &str, key: Option<&str>, tools: &[AgentTool], roots: &[Root]) -> Result<Vec<ActionDto>, String> {
         let (found, hosts, label, policy, shown) = {
             let inner = self.lock();
@@ -1097,26 +1161,30 @@ impl Sources {
     }
 
     /// Fetch a panel. `path` must be the `endpoint` of a `panel` action in
-    /// one of the source's cached payloads — the payload is the closed list
-    /// for panels, as the manifest is for views — and must pass the same
-    /// path rules.
+    /// one of the source's cached view payloads — the payload is the closed
+    /// list for panels, as the manifest is for views — and must pass the
+    /// same path rules. The page is kept (see [`PANEL_CACHE_CAP`]) so its
+    /// own actions can be judged and run as the `panel:<path>` view.
     pub fn panel(&self, source_id: &str, path: &str) -> Result<Value, String> {
-        let endpoint = {
+        let (endpoint, generation) = {
             let inner = self.lock();
             let state = Self::trusted_state(&inner, source_id)?;
-            let named = state.views.values().filter_map(|v| v.payload.as_ref()).any(|payload| {
-                actions::actions_in(payload)
-                    .0
-                    .iter()
-                    .any(|f| matches!(&f.action, SourceAction::Panel { endpoint, .. } if endpoint == path))
-            });
-            if !named {
+            if !state.names_panel(path) {
                 return Err(format!("source {} names no panel at `{path}`", state.id));
             }
-            Endpoint::named_in_payload(path)?
+            (Endpoint::named_in_payload(path)?, state.generation)
         };
         let (mut client, _) = self.client_for(source_id)?;
-        client.get(&endpoint).map_err(|e| e.to_string())
+        let page = client.get(&endpoint).map_err(|e| e.to_string())?;
+        if page.is_object() {
+            let mut inner = self.lock();
+            // A source relaunched or re-trusted meanwhile keeps nothing from
+            // before; the page is still returned for this one look.
+            if let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id && s.generation == generation && s.trusted) {
+                state.panels.put(path, page.clone());
+            }
+        }
+        Ok(page)
     }
 
     /// Record a job the source started.
@@ -1181,6 +1249,7 @@ fn fresh_state(key: &str, origin: Origin) -> SourceState {
         views: BTreeMap::new(),
         unconfirmable_logged: Default::default(),
         jobs: Vec::new(),
+        panels: PanelCache::default(),
     }
 }
 
@@ -1487,6 +1556,53 @@ mod tests {
             let err = main_window_label_only(other).unwrap_err();
             assert!(err.contains(other) || other.is_empty(), "{err}");
         }
+    }
+
+    #[test]
+    fn the_panel_cache_keeps_the_most_recent_pages_per_path() {
+        let mut cache = PanelCache::default();
+        cache.put("/a", json!({"title": "A1"}));
+        cache.put("/b", json!({"title": "B"}));
+        cache.put("/a", json!({"title": "A2"}));
+        assert_eq!(cache.get("/a").unwrap()["title"], "A2", "a refetch replaces the page");
+        assert_eq!(cache.pages.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["/b", "/a"], "and makes it the most recent");
+        for i in 0..PANEL_CACHE_CAP {
+            cache.put(&format!("/p{i}"), json!({}));
+        }
+        assert_eq!(cache.pages.len(), PANEL_CACHE_CAP);
+        assert!(cache.get("/b").is_none() && cache.get("/a").is_none(), "the least recently fetched went first");
+        assert!(cache.get(&format!("/p{}", PANEL_CACHE_CAP - 1)).is_some());
+        cache.clear();
+        assert!(cache.get("/p0").is_none());
+    }
+
+    #[test]
+    fn a_panel_page_is_addressed_only_while_a_view_names_it() {
+        let mut state = fresh_state("k", Origin::Attached { addr: "127.0.0.1:1".into(), token_file: PathBuf::from("t"), warning: None });
+        let named = json!({"items": [{"key": "ABC-1", "actions": [{"kind": "panel", "id": "v", "label": "V", "endpoint": "/api/panel/validate"}]}]});
+        state.views.insert(
+            "work".into(),
+            ViewState {
+                endpoint: Endpoint::named_in_payload("/api/work").unwrap(),
+                poll: Duration::from_secs(60),
+                payload: Some(named),
+                as_of_ms: None,
+                next_due_ms: 0,
+                refreshing: false,
+                failures: 0,
+                last_error: None,
+            },
+        );
+        let view = format!("{PANEL_VIEW_PREFIX}/api/panel/validate");
+        assert!(Sources::cached_payload(&state, &view).unwrap_err().contains("open it first"), "named but not fetched yet");
+        state.panels.put("/api/panel/validate", json!({"title": "Validate", "actions": []}));
+        assert_eq!(Sources::cached_payload(&state, &view).unwrap()["title"], "Validate");
+        // A cached page of a path no view names answers nothing.
+        state.panels.put("/api/panel/deeper", json!({"title": "Deeper"}));
+        assert!(Sources::cached_payload(&state, "panel:/api/panel/deeper").unwrap_err().contains("names no panel"));
+        // The view stops naming the panel: its page no longer answers.
+        state.views.get_mut("work").unwrap().payload = Some(json!({"items": []}));
+        assert!(Sources::cached_payload(&state, &view).unwrap_err().contains("names no panel"));
     }
 
     #[test]

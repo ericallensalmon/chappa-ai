@@ -1,0 +1,27 @@
+{
+  "title": "Checks for #2",
+  "freshness": { "asOf": "2026-01-15T10:00:00Z", "refreshing": false },
+  "banners": [
+    {
+      "id": "pending",
+      "tone": "info",
+      "title": "3 checks are still running",
+      "actions": [{ "kind": "endpoint", "id": "rerun-checks", "label": "Re-run", "mutates": false }]
+    }
+  ],
+  "sections": [
+    {
+      "id": "runs",
+      "title": "Runs",
+      "rows": [
+        { "label": "Build", "value": "passing", "badges": [{ "text": "ok", "tone": "ok" }] },
+        { "label": "Tests", "value": "pending", "badges": [{ "text": "pending", "tone": "warn" }] }
+      ],
+      "more": { "label": "Show skipped", "rows": [{ "label": "Docs", "value": "skipped" }] }
+    }
+  ],
+  "actions": [
+    { "kind": "endpoint", "id": "rerun-checks", "label": "Re-run checks", "mutates": false },
+    { "kind": "panel", "id": "validate", "label": "Validate", "endpoint": "/api/panel/validate" }
+  ]
+}

@@ -135,8 +135,30 @@ describe("environment model: blocks, groups, cells", () => {
     expect(byId.get("migrate")!.oneshot).toBe(true);
     expect(byId.get("api")!.oneshot).toBe(false);
     expect(m.blocks[0].alerts.length).toBe(3);
-    expect(m.blocks[0].facts).toEqual([{ id: "runtimes", title: "Runtimes", rows: [{ label: "Node", value: "22", badges: [] }, { label: "Memory", value: "6.1 GiB free", badges: [] }] }]);
-    expect(m.blocks[0].banners).toEqual([{ id: "stale-images", tone: "warn", title: "Images are out of date", lines: ["Pull to update"] }]);
+    // Facts and banners are read by the shared section reader: `more` stays
+    // folded behind its label, a banner keeps its actions (the view's own).
+    expect(m.blocks[0].facts).toEqual([
+      {
+        id: "runtimes",
+        title: "Runtimes",
+        collapsed: false,
+        rows: [{ label: "Node", value: "22" }, { label: "Memory", value: "6.1 GiB free" }],
+        more: { label: "Show disks", rows: [{ label: "Disk", value: "40 GiB free" }] },
+      },
+    ]);
+    expect(m.blocks[0].banners).toEqual([
+      {
+        id: "stale-images",
+        tone: "warn",
+        title: "Images are out of date",
+        lines: ["Pull to update"],
+        actions: [{ kind: "endpoint", id: "check-images", label: "Check again", mutates: false }],
+      },
+    ]);
+    // A component's sections: its own actions apart from theirs.
+    expect(api.sections.map((s) => s.id)).toEqual(["config"]);
+    expect(api.actionIds).toEqual(["ping"]);
+    expect(byId.get("web")!.sections).toEqual([]);
   });
 
   it("source cells: the commit is shortened and the mode explained", () => {

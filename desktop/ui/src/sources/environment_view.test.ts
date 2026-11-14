@@ -38,11 +38,15 @@ describe("EnvironmentView", () => {
   it("draws the block head with its counts, banners, alerts, groups in order and facts", () => {
     const v = new EnvironmentView(deps());
     v.update(input());
-    expect(v.host.querySelector(".chappa-sv-back")?.textContent).toBe("←Environment");
+    expect(v.host.querySelector(".chappa-sv-header")?.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(v.host.querySelector(".chappa-back-arrow")?.textContent).toBe("←");
+    expect(v.host.querySelector(".chappa-sv-header .chappa-page-title")?.textContent).toBe("Environment");
     expect(v.host.querySelector(".chappa-sv-fresh")?.textContent).toBe("as of 3 min ago");
     expect(v.host.querySelector(".chappa-env-source")?.textContent).toBe("Fixture");
     expect(v.host.querySelector(".chappa-env-counts")?.textContent).toContain("1 deployed but not running · 1 stopped");
-    expect(v.host.querySelector(".chappa-env-banner-title")?.textContent).toBe("Images are out of date");
+    // The banner through the shared renderer.
+    expect(v.host.querySelector(".chappa-env-banners .chappa-banner")?.getAttribute("data-tone")).toBe("warn");
+    expect(v.host.querySelector(".chappa-env-banners .chappa-banner-title")?.textContent).toBe("Images are out of date");
     expect([...v.host.querySelectorAll<HTMLElement>(".chappa-env-alert")].map((a) => `${a.dataset.severity}:${a.textContent}`)).toEqual([
       "bad:db is unhealthy",
       "warn:web is slow to start",
@@ -51,8 +55,20 @@ describe("EnvironmentView", () => {
     expect([...v.host.querySelectorAll(".chappa-sv-group-label")].map((g) => g.textContent)).toEqual(["Application", "Data", "Jobs"]);
     // Not deployed is hidden by default.
     expect(rowIds(v)).toEqual(["api", "web", "worker", "mailer", "db", "queue", "migrate", "seed"]);
-    expect([...v.host.querySelectorAll(".chappa-env-fact")].map((f) => f.textContent)).toEqual(["Node22", "Memory6.1 GiB free"]);
-    expect(v.host.querySelector(".chappa-env-fact-title")?.textContent).toBe("Runtimes");
+    // Facts through the shared section renderer, `more` folded.
+    const facts = v.host.querySelector('.chappa-env-facts .chappa-sec[data-section="runtimes"]')!;
+    expect(facts.querySelector(".chappa-sec-head")?.textContent).toBe("▾ Runtimes");
+    expect([...facts.querySelectorAll(".chappa-sec-body > .chappa-sec-row")].map((f) => f.textContent)).toEqual(["Node22", "Memory6.1 GiB free"]);
+    const more = facts.querySelector<HTMLButtonElement>(".chappa-sec-more")!;
+    expect(more.textContent).toBe("▸ Show disks");
+    expect(facts.querySelector(".chappa-sec-more-rows")?.classList.contains("folded")).toBe(true);
+    more.click();
+    expect(v.host.querySelector('.chappa-env-facts .chappa-sec-more-rows')?.classList.contains("folded")).toBe(false);
+    // A component's sections are folded inside its row.
+    const config = row(v, "fx|api")!.querySelector('.chappa-sec[data-section="config"]')!;
+    expect(config.classList.contains("collapsed")).toBe(true);
+    config.querySelector<HTMLButtonElement>(".chappa-sec-head")!.click();
+    expect(row(v, "fx|api")!.querySelector('.chappa-sec[data-section="config"]')?.classList.contains("collapsed")).toBe(false);
     v.dispose();
   });
 
@@ -151,8 +167,9 @@ describe("EnvironmentView", () => {
     const v = new EnvironmentView(d);
     v.update(input());
     await FLUSH();
-    // api and seed carry actions; the rest never ask.
+    // The view's own (its banner's), then api and seed; the rest never ask.
     expect(actions.mock.calls.map((c) => (c as unknown[]).slice(0, 3))).toEqual([
+      ["fx", "environment", null],
       ["fx", "environment", "api"],
       ["fx", "environment", "seed"],
     ]);

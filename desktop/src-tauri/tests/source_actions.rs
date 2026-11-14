@@ -287,6 +287,39 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     assert!(deps.sources.panel(sid, "/api/work").unwrap_err().contains("names no panel"));
     assert!(deps.sources.panel(sid, "/api/panel/../work").is_err());
 
+    // A panel page's own actions: listed, judged and run as the
+    // `panel:<path>` view once the page was fetched, and only then.
+    let checks = "panel:/api/panel/checks";
+    assert!(deps.sources.actions(sid, checks, None, &deps.tools.list(), &roots).unwrap_err().contains("open it first"));
+    assert!(run(checks, None, "rerun-checks", false, None).unwrap_err().contains("open it first"));
+    match run("prs", Some("github:owner/repo:#2"), "checks", false, None).unwrap() {
+        ActionOutcome::Panel { payload } => assert_eq!(payload["title"], "Checks for #2"),
+        other => panic!("{other:?}"),
+    }
+    let page = deps.sources.actions(sid, checks, None, &deps.tools.list(), &roots).unwrap();
+    // The page's own two, then its banner's (a banner belongs to the page).
+    assert_eq!(page.iter().map(|a| a.action.id()).collect::<Vec<_>>(), ["rerun-checks", "validate", "rerun-checks"]);
+    assert!(page.iter().all(|a| a.verdict.enabled), "{page:?}");
+    assert_eq!(run(checks, None, "rerun-checks", false, None).unwrap(), ActionOutcome::Done { message: Some("Checks restarted".into()) });
+    let journal = deps.registry.input_journal(st.source_row).unwrap();
+    assert!(journal.iter().any(|r| r.text.contains("action `rerun-checks` on panel:/api/panel/checks → 200")), "{journal:?}");
+    // A panel opened from a panel: its path is one a view names (the work
+    // item's), so it opens; one no view names is refused even when a page
+    // links it, and a path never named cannot be addressed at all.
+    match run(checks, None, "validate", false, None).unwrap() {
+        ActionOutcome::Panel { payload } => assert_eq!(payload["title"], "Validate"),
+        other => panic!("{other:?}"),
+    }
+    assert!(deps.sources.actions(sid, "panel:/api/panel/nowhere", None, &deps.tools.list(), &roots).unwrap_err().contains("names no panel"));
+    assert!(deps.sources.panel(sid, "/api/panel/nowhere").unwrap_err().contains("names no panel"));
+    // View-level banners: their actions are the view's own (no key).
+    let prs_own = deps.sources.actions(sid, "prs", None, &deps.tools.list(), &roots).unwrap();
+    assert_eq!(prs_own.iter().map(|a| a.action.id()).collect::<Vec<_>>(), ["resync"]);
+    assert_eq!(run("prs", None, "resync", false, None).unwrap(), ActionOutcome::Done { message: Some("Synced".into()) });
+    let env_own = deps.sources.actions(sid, "environment", None, &deps.tools.list(), &roots).unwrap();
+    assert_eq!(env_own.iter().map(|a| a.action.id()).collect::<Vec<_>>(), ["check-images"]);
+    assert!(deps.sources.actions(sid, "environment", Some("stale-images"), &deps.tools.list(), &roots).unwrap().is_empty(), "a banner id is not a key");
+
     // A terminal action: the argv in the checked folder, journaled.
     let ActionOutcome::Launched { term_id, what } = run("work", Some("ABC-1"), "terminal-here", false, None).unwrap() else { panic!() };
     assert_eq!(what, "terminal");

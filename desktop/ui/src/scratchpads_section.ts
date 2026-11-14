@@ -1,7 +1,8 @@
 // The read-only SCRATCHPADS subsection under the open project:
 // one row per unarchived pad of the expanded project (name, updated_at,
-// updated_by, revision), clicking a row opens the content in a modal with a
-// Copy button. That is the whole v1 surface — agents write through the
+// updated_by, revision), clicking a row opens the content on a full-window
+// page whose header starts with the shared back arrow (Escape does the
+// same) and carries a Copy button. That is the whole v1 surface — agents write through the
 // chappa-ai-mcp tools, you read here without leaving chappa-ai. No
 // editing, no todos (MCP only in v1; both are future work).
 //
@@ -13,6 +14,7 @@
 
 import type { ScratchpadDto, ScratchpadSummaryDto } from "./ipc";
 import * as ipc from "./ipc";
+import { isBackKey, mountPageHeader } from "./page_header";
 import { makeCollapsibleSection } from "./sidebar_sections";
 
 /** The two reads the section needs (stubbed in tests). `includeGlobal`
@@ -31,7 +33,7 @@ export const tauriScratchpadsApi: ScratchpadsApi = {
 
 export interface ScratchpadsSectionOptions {
   api?: ScratchpadsApi;
-  /** Where the modal mounts. Defaults to document.body. */
+  /** Where the content page mounts. Defaults to document.body. */
   modalContainer?: HTMLElement;
   /** Clipboard write; defaults to navigator.clipboard (the documented
    *  fallback — there is no Rust clipboard-write command). */
@@ -41,20 +43,15 @@ export interface ScratchpadsSectionOptions {
   now?: () => number;
 }
 
-const BACKDROP_CSS =
-  "position:fixed;top:0;right:0;bottom:0;left:0;z-index:70;display:flex;align-items:center;" +
-  "justify-content:center;background:rgba(0,0,0,.55);";
-const BOX_CSS =
-  "width:720px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);display:flex;flex-direction:column;" +
-  "background:#1b1d21;border:1px solid #2a2c31;border-radius:8px;padding:14px 16px;" +
-  "color:#d6d8dc;font:13px system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,.6);";
-const META_CSS = "font:11px ui-monospace,monospace;color:#8b949e;padding:2px 0 8px;";
+/** A full-window page, like Settings and Edit project. */
+const PAGE_CSS =
+  "position:fixed;top:0;right:0;bottom:0;left:0;z-index:70;display:flex;flex-direction:column;" +
+  "background:#0d0e10;color:#d6d8dc;font:13px system-ui,sans-serif;padding:16px 32px 24px;box-sizing:border-box;outline:none;";
+const HEADER_CSS = "flex:none;display:flex;align-items:center;gap:8px;margin-left:-6px;padding:0 0 4px;";
+const META_CSS = "font:11px ui-monospace,monospace;color:#8b949e;padding:2px 0 10px;";
 const PRE_CSS =
-  "flex:1 1 auto;min-height:120px;overflow:auto;margin:0;padding:10px;background:#0d0e10;border:1px solid #2a2c31;" +
+  "flex:1 1 auto;min-height:120px;overflow:auto;margin:0;padding:10px;background:#0f1114;border:1px solid #1c1f24;" +
   "border-radius:4px;color:#d6d8dc;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;";
-const BUTTON_ROW_CSS = "display:flex;justify-content:flex-end;gap:8px;padding-top:12px;";
-const BTN_CSS =
-  "border:1px solid #262a31;border-radius:4px;background:#16181d;color:#8b949e;font:12px system-ui,sans-serif;cursor:pointer;padding:4px 12px;";
 const OK_BTN_CSS =
   "border:1px solid #3b6fb0;border-radius:4px;background:#244a7a;color:#e6edf3;font:12px system-ui,sans-serif;cursor:pointer;padding:4px 12px;";
 
@@ -108,7 +105,7 @@ export class ScratchpadsSection {
   private projectId: number | null | undefined = undefined;
   private rows: ScratchpadSummaryDto[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
-  private modal: HTMLDivElement | null = null;
+  private page: HTMLDivElement | null = null;
   /** Guards a stale list answer landing after a project switch. */
   private fetchSeq = 0;
 
@@ -225,31 +222,32 @@ export class ScratchpadsSection {
     }
   }
 
-  /** The content modal: name, meta line, the content, Copy + Close. */
+  /** The content page: back arrow and name, Copy, the meta line, the
+   *  content. */
   async open(id: number): Promise<void> {
     let pad: ScratchpadDto;
     try {
       pad = await this.api.readScratchpad(id);
     } catch (err) {
-      this.showModal(null, `Could not read scratchpad ${id}: ${String(err)}`);
+      this.showPage(null, `Could not read scratchpad ${id}: ${String(err)}`);
       return;
     }
-    this.showModal(pad, pad.content);
+    this.showPage(pad, pad.content);
   }
 
-  private showModal(pad: ScratchpadDto | null, content: string): void {
-    this.closeModal();
-    const backdrop = document.createElement("div");
-    backdrop.className = "chappa-scratchpad-modal";
-    backdrop.style.cssText = BACKDROP_CSS;
-    const box = document.createElement("div");
-    box.style.cssText = BOX_CSS;
-    const title = document.createElement("div");
-    title.className = "chappa-scratchpad-modal-title";
-    title.style.cssText = "font:14px system-ui,sans-serif;font-weight:600;";
-    title.textContent = pad ? pad.name : "Scratchpad";
+  private showPage(pad: ScratchpadDto | null, content: string): void {
+    this.closePage();
+    const page = document.createElement("div");
+    page.className = "chappa-scratchpad-page";
+    page.style.cssText = PAGE_CSS;
+    page.setAttribute("role", "dialog");
+    page.setAttribute("aria-label", pad ? pad.name : "Scratchpad");
+    page.tabIndex = -1;
+    const header = document.createElement("div");
+    header.className = "chappa-scratchpad-page-header";
+    header.style.cssText = HEADER_CSS;
     const meta = document.createElement("div");
-    meta.className = "chappa-scratchpad-modal-meta";
+    meta.className = "chappa-scratchpad-page-meta";
     meta.style.cssText = META_CSS;
     meta.textContent = pad
       ? `revision ${pad.revision} · updated ${relativeTime(pad.updated_at, this.now())} by ${actorLabel(pad.updated_by)}` +
@@ -257,14 +255,13 @@ export class ScratchpadsSection {
         (pad.project_id === null ? " · global" : "")
       : "";
     const pre = document.createElement("pre");
-    pre.className = "chappa-scratchpad-modal-content";
+    pre.className = "chappa-scratchpad-page-content";
     pre.style.cssText = PRE_CSS;
     pre.textContent = content;
-    const buttons = document.createElement("div");
-    buttons.style.cssText = BUTTON_ROW_CSS;
     const copy = document.createElement("button");
+    copy.type = "button";
     copy.className = "chappa-scratchpad-copy";
-    copy.style.cssText = OK_BTN_CSS;
+    copy.style.cssText = `${OK_BTN_CSS}margin-left:auto;`;
     copy.textContent = "Copy";
     copy.disabled = pad === null;
     copy.addEventListener("click", () => {
@@ -277,33 +274,32 @@ export class ScratchpadsSection {
         },
       );
     });
-    const close = document.createElement("button");
-    close.className = "chappa-scratchpad-close";
-    close.style.cssText = BTN_CSS;
-    close.textContent = "Close";
-    close.addEventListener("click", () => this.closeModal());
-    buttons.append(copy, close);
-    box.append(title, meta, pre, buttons);
-    backdrop.append(box);
-    backdrop.addEventListener("click", (e) => {
-      if (e.target === backdrop) this.closeModal();
+    header.append(copy);
+    const { arrow } = mountPageHeader(header, {
+      title: pad ? pad.name : "Scratchpad",
+      backTo: "the workspace",
+      onBack: () => this.closePage(),
+      titleClass: "chappa-scratchpad-page-title",
     });
-    backdrop.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") this.closeModal();
+    page.append(header, meta, pre);
+    page.addEventListener("keydown", (e) => {
+      if (!isBackKey(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closePage();
     });
-    box.tabIndex = -1;
-    this.modalContainer.appendChild(backdrop);
-    this.modal = backdrop;
-    close.focus();
+    this.modalContainer.appendChild(page);
+    this.page = page;
+    arrow.focus();
   }
 
-  closeModal(): void {
-    this.modal?.remove();
-    this.modal = null;
+  closePage(): void {
+    this.page?.remove();
+    this.page = null;
   }
 
-  get modalOpen(): boolean {
-    return this.modal !== null;
+  get pageOpen(): boolean {
+    return this.page !== null;
   }
 
   private stopPolling(): void {
@@ -315,7 +311,7 @@ export class ScratchpadsSection {
 
   dispose(): void {
     this.stopPolling();
-    this.closeModal();
+    this.closePage();
     this.projectId = undefined;
     this.rows = [];
     this.element.style.display = "none";

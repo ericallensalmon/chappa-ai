@@ -118,7 +118,17 @@ Items, pull requests, components and banners carry `actions`. Five kinds:
 - `endpoint`: the app calls the source.
 - `link`: open an `https` URL on a trusted host.
 - `panel`: open a drill-in page served by `endpoint`; it returns
-  `{title, freshness, sections, banners?, actions?}`.
+  `{title, freshness, sections, banners?, actions?}`. The page's path
+  must be named by a `panel` action in one of the source's view
+  answers (a page naming another page does not make it fetchable on
+  its own). The page's actions, its banners' and its sections' run like
+  any other, with `target: {view: "panel:<endpoint>", key: null}`.
+
+Who an action belongs to decides its `target.key`: an item's own
+actions and its sections' carry the item's key (`key`, else `id`; a
+pull request's is `forge:repo:number`). A view's own actions, its
+banners' and its `facts`' carry `key: null`: a banner or a section is
+part of what holds it, and its `id` only names it.
 
 The app checks every `cwd` against the open projects, their git
 worktrees and the approved roots, shows an agent's prompt before it

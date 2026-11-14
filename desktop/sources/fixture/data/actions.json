@@ -1,5 +1,8 @@
 {
   "ping": { "mutates": false, "status": 200, "body": { "message": "pong" } },
+  "resync": { "mutates": false, "status": 200, "body": { "message": "Synced" } },
+  "check-images": { "mutates": false, "status": 200, "body": { "message": "2 images are out of date" } },
+  "rerun-checks": { "mutates": false, "status": 200, "body": { "message": "Checks restarted" } },
   "approve": { "mutates": true, "status": 200, "body": { "message": "Approved" } },
   "start-build": { "mutates": true, "status": 202, "job": {} },
   "run-seed": {

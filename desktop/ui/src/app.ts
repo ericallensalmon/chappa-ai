@@ -584,6 +584,11 @@ export type PaneTarget =
   | { kind: "workspace-command"; name: string }
   | { kind: "record"; recordId: string };
 
+/** What a page drilled into (the dashboard, a source view) covered, so its
+ *  back arrow returns there: a terminal, a run card, or the view it was
+ *  opened from (which returns to what IT covered). */
+type PagePrev = { termId: number } | { pane: PaneTarget } | { view: RailView; prev: PagePrev } | null;
+
 /**
  * Attention flag for an ACTIVE-section row — a small enum so task
  * 31's upgrade is additive:
@@ -1449,7 +1454,7 @@ export class App {
    *  like the record pane. */
   private dashboard: Dashboard | null = null;
   /** What the stack showed before the dashboard, restored on Back. */
-  private dashboardPrev: { termId: number } | { pane: PaneTarget } | null = null;
+  private dashboardPrev: PagePrev = null;
   // --- the source views -------------------------------------------
   /** The sources listing (Settings ▸ Sources and the rail views share it). */
   private readonly sources: SourcesStore;
@@ -1466,7 +1471,7 @@ export class App {
   private environmentView: EnvironmentView | null = null;
   /** Which view is on screen, and what it covered (restored on Back). */
   private openViewName: RailView | null = null;
-  private viewPrev: { termId: number } | { pane: PaneTarget } | null = null;
+  private viewPrev: PagePrev = null;
   /** The merged PRs model, rebuilt when a PRs payload moves. */
   private prsModel: PrsModel | null = null;
   /** The Environment model, rebuilt when an environment payload moves. */
@@ -5340,6 +5345,7 @@ export class App {
             : null;
     this.stepBackForPage();
     this.dashTails.clear();
+    dash.setBackTo(this.backToText(this.dashboardPrev));
     dash.setActive(true);
     this.dashboardBtn.classList.add("open");
     // Clears the rows' active markers and the strip; its ACTIVE tail paints
@@ -5351,8 +5357,40 @@ export class App {
   closeDashboard(): void {
     const prev = this.dashboardPrev;
     if (!this.hideDashboard()) return;
-    if (prev && "termId" in prev && this.entries.has(prev.termId)) this.activate(prev.termId);
-    else if (prev && "pane" in prev) this.showRecordPane(prev.pane);
+    this.returnTo(prev);
+  }
+
+  /** Show what a page covered (its back arrow's target). A view that left
+   *  the rail meanwhile is skipped for what it covered. */
+  private returnTo(prev: PagePrev): void {
+    if (!prev) return;
+    if ("termId" in prev) {
+      if (this.entries.has(prev.termId)) this.activate(prev.termId);
+      return;
+    }
+    if ("pane" in prev) {
+      this.showRecordPane(prev.pane);
+      return;
+    }
+    if (!BUILT_VIEWS.includes(prev.view) || !this.railViews().includes(prev.view)) {
+      this.returnTo(prev.prev);
+      return;
+    }
+    this.openSourceView(prev.view);
+    this.viewPrev = prev.prev;
+    this.sourcePage(prev.view)?.setBackTo(this.backToText(prev.prev));
+  }
+
+  /** How a back arrow names what it returns to ("Back to …"). */
+  private backToText(prev: PagePrev): string {
+    if (!prev) return "the workspace";
+    if ("view" in prev) return VIEW_LABELS[prev.view];
+    if ("termId" in prev) {
+      const entry = this.entries.get(prev.termId);
+      return entry ? `“${this.entryLabel(entry)}”` : "the workspace";
+    }
+    const pane = prev.pane;
+    return pane.kind === "record" ? "the run" : `“${pane.name}”`;
   }
 
   /** Take the dashboard off screen (something else is being shown). Answers
@@ -6438,13 +6476,14 @@ export class App {
   }
 
   /** Front a source view. What was on screen steps back and returns on
-   *  Back; coming from the dashboard (or another view), what THAT covered
-   *  is what Back returns to. */
-  openSourceView(view: RailView): void {
+   *  Back; coming from the dashboard (or, through the rail, another view),
+   *  what THAT covered is what Back returns to. `drill`: opened from a row
+   *  of the view on screen, so Back returns to that view. */
+  openSourceView(view: RailView, drill = false): void {
     if (!BUILT_VIEWS.includes(view) || this.openViewName === view) return;
-    let prev: { termId: number } | { pane: PaneTarget } | null;
+    let prev: PagePrev;
     if (this.openViewName !== null) {
-      prev = this.viewPrev;
+      prev = drill ? { view: this.openViewName, prev: this.viewPrev } : this.viewPrev;
       this.hideSourceView();
     } else if (this.dashboard?.active) {
       prev = this.dashboardPrev;
@@ -6456,6 +6495,7 @@ export class App {
     this.stepBackForPage();
     this.viewPrev = prev;
     this.openViewName = view;
+    page.setBackTo(this.backToText(prev));
     page.setActive(true);
     this.renderSourceViews();
     // Clears the rows' active markers and the strip.
@@ -6467,8 +6507,7 @@ export class App {
   closeSourceView(): void {
     const prev = this.viewPrev;
     if (!this.hideSourceView()) return;
-    if (prev && "termId" in prev && this.entries.has(prev.termId)) this.activate(prev.termId);
-    else if (prev && "pane" in prev) this.showRecordPane(prev.pane);
+    this.returnTo(prev);
   }
 
   /** Take the open view off screen. Answers whether one was showing. */
@@ -6538,7 +6577,7 @@ export class App {
       this.needsYouView = new NeedsYouView({
         ...deps,
         selectTerminal: (key) => this.selectAttentionRow(key),
-        openView: (target, key) => this.openViewAt(target, key),
+        openView: (target, key, sourceId) => this.openViewAt(target, key, sourceId),
       });
       this.stack.appendChild(this.needsYouView.host);
     }
@@ -6546,14 +6585,18 @@ export class App {
   }
 
   /** A link from one view into another (a Needs you row, a Work item's PR
-   *  chip): open the view, and on Work bring the item into view. False when
-   *  the view is not in the rail. */
-  private openViewAt(target: string, key: string): boolean {
+   *  chip): drill into the view (its arrow comes back) and bring the item
+   *  into view; on Environment the row's source picks between stacks
+   *  sharing a component id. False when the view is not in the rail. */
+  private openViewAt(target: string, key: string, sourceId?: string | null): boolean {
     const v = target as RailView;
     if (!BUILT_VIEWS.includes(v) || !this.railViews().includes(v)) return false;
-    this.openSourceView(v);
+    this.openSourceView(v, true);
     if (v === "work" && this.workView && !this.workView.focus(key)) this.showToast(`${key} is not in the Work list.`, "error");
-    if (v === "environment") this.environmentView?.focus(key);
+    if (v === "prs" && this.prsView) {
+      if (!this.prsView.focus(key)) this.showToast(`${key} is not in the PRs list.`, "error");
+    }
+    if (v === "environment") this.environmentView?.focus(key, sourceId ?? undefined);
     return true;
   }
 

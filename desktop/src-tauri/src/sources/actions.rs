@@ -215,8 +215,11 @@ pub fn parse_action(value: &Value) -> Result<SourceAction, String> {
 
 /// One action found in a payload, with the key of the OUTERMOST keyed
 /// object it sits under: the work item's `key`, a component's or
-/// attention item's or banner's `id`, a pull request's `number`. `None`
-/// for the payload's own top-level actions (a panel's, a response's).
+/// attention item's `id`, a pull request's `forge:repo:number`. `None`
+/// for the payload's own actions (a panel's, a response's), and for the
+/// actions of the payload's own banners and sections: a banner or section
+/// is part of whatever holds it, never an item of its own (see
+/// [`PART_LISTS`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FoundAction {
     pub key: Option<String>,
@@ -257,11 +260,22 @@ pub fn pr_key(forge: &str, repo: &str, number: &str) -> String {
     format!("{forge}:{repo}:{number}")
 }
 
+/// Lists whose entries are parts of their holder, not items: their `id`
+/// names the part (for fold state), so it must not become an action key.
+/// A view's banner is addressed as the view itself, a work item's section
+/// as that item, a panel's section as the panel.
+pub const PART_LISTS: [&str; 3] = ["banners", "sections", "facts"];
+
 fn walk(value: &Value, key: Option<&str>, path: &str, found: &mut Vec<FoundAction>, broken: &mut Vec<(String, String)>) {
+    walk_in(value, key, path, false, found, broken);
+}
+
+/// `part`: `value` sits in one of the [`PART_LISTS`], so it cannot own a key.
+fn walk_in(value: &Value, key: Option<&str>, path: &str, part: bool, found: &mut Vec<FoundAction>, broken: &mut Vec<(String, String)>) {
     match value {
         Value::Object(obj) => {
             // The outermost keyed object on the path owns what is below it.
-            let own_key = key.map(str::to_owned).or_else(|| if path.is_empty() { None } else { item_key(obj) });
+            let own_key = key.map(str::to_owned).or_else(|| if path.is_empty() || part { None } else { item_key(obj) });
             for (k, v) in obj {
                 let child_path = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
                 if k == "actions" {
@@ -278,12 +292,12 @@ fn walk(value: &Value, key: Option<&str>, path: &str, found: &mut Vec<FoundActio
                     }
                     continue;
                 }
-                walk(v, own_key.as_deref(), &child_path, found, broken);
+                walk_in(v, own_key.as_deref(), &child_path, PART_LISTS.contains(&k.as_str()), found, broken);
             }
         }
         Value::Array(list) => {
             for (i, v) in list.iter().enumerate() {
-                walk(v, key, &format!("{path}[{i}]"), found, broken);
+                walk_in(v, key, &format!("{path}[{i}]"), part, found, broken);
             }
         }
         _ => {}
@@ -487,7 +501,7 @@ mod tests {
             summary,
             vec![
                 (None, "ping", "actions[0]"),
-                (Some("drift"), "validate", "banners[0].actions[0]"),
+                (None, "validate", "banners[0].actions[0]"),
                 (Some("api"), "logs", "components[0].actions[0]"),
                 (Some("ABC-1"), "open", "items[0].actions[0]"),
                 (Some("ABC-1"), "approve", "items[0].sections[0].actions[0]"),
@@ -497,12 +511,26 @@ mod tests {
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0].0, "actions[1]");
         assert_eq!(actions_for(&payload, Some("ABC-1")).len(), 2);
-        assert_eq!(actions_for(&payload, None).len(), 1);
+        assert_eq!(actions_for(&payload, None).len(), 2, "the payload's own and its banner's");
+        assert!(find_action(&payload, Some("drift"), "validate").is_none(), "a banner's id is not a key");
         assert_eq!(find_action(&payload, Some("ABC-2"), "approve").unwrap().path, "items[1].actions[0]");
         assert!(find_action(&payload, Some("ABC-1"), "approve").unwrap().action.is_unconfirmable_mutation() == false);
         assert!(find_action(&payload, Some("ABC-2"), "approve").unwrap().action.is_unconfirmable_mutation());
         assert!(find_action(&payload, Some("ABC-9"), "open").is_none());
         assert!(find_action(&payload, None, "open").is_none(), "an item's action is not a top-level one");
+    }
+
+    #[test]
+    fn sections_and_banners_belong_to_what_holds_them() {
+        let payload = json!({
+            "facts": [{"id": "runtimes", "title": "R", "rows": [], "actions": [{"kind": "endpoint", "id": "refresh", "label": "R", "mutates": false}]}],
+            "sections": [{"id": "checks", "title": "C", "rows": [], "actions": [{"kind": "endpoint", "id": "rerun", "label": "R", "mutates": false}]}],
+            "components": [{"id": "api", "sections": [{"id": "conf", "title": "C", "rows": [], "actions": [{"kind": "endpoint", "id": "reload", "label": "R", "mutates": false}]}]}]
+        });
+        let found = actions_in(&payload).0;
+        let mut keys: Vec<(Option<&str>, &str)> = found.iter().map(|f| (f.key.as_deref(), f.action.id())).collect();
+        keys.sort();
+        assert_eq!(keys, vec![(None, "refresh"), (None, "rerun"), (Some("api"), "reload")]);
     }
 
     #[test]
@@ -594,6 +622,7 @@ mod tests {
             ("attention", include_str!("../../../sources/fixture/data/attention.json")),
             ("environment", include_str!("../../../sources/fixture/data/environment.json")),
             ("panel", include_str!("../../../sources/fixture/data/panel.json")),
+            ("panel-checks", include_str!("../../../sources/fixture/data/panel-checks.json")),
         ] {
             let value: Value = serde_json::from_str(text).unwrap();
             let (found, broken) = actions_in(&value);

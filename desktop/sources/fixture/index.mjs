@@ -7,6 +7,7 @@
 //
 // chappa sets both variables when it launches a source. Bodies come from
 // `<dir>/{manifest,work,prs,attention,environment,workflows,panel,actions}.json`
+// and `panel-<name>.json` for every other panel at `/api/panel/<name>`
 // (default: ./data next to this file), re-read on every request so a test
 // or a person can swap them while it runs. No packages; one line per
 // request on stderr.
@@ -128,6 +129,14 @@ async function route(req, res, url) {
   if (get && p === "/api/env") return send(res, 200, data("environment"));
   if (get && p === "/api/workflows") return send(res, 200, data("workflows"));
   if (get && p === "/api/panel/validate") return send(res, 200, data("panel"));
+  if (get && /^\/api\/panel\/[a-z0-9-]+$/.test(p)) {
+    const name = p.slice("/api/panel/".length);
+    try {
+      return send(res, 200, data(`panel-${name}`));
+    } catch {
+      return fail(res, 404, "not-found", `No panel ${name}`);
+    }
+  }
   if (req.method === "POST" && p === "/api/actions") return handleAction(req, res);
   if (p.startsWith("/api/jobs/")) {
     const id = decodeURIComponent(p.slice("/api/jobs/".length));

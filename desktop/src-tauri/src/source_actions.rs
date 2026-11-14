@@ -8,7 +8,9 @@
 //! action the payload does not carry. Then, per kind:
 //!
 //! - `link`: the https-and-trusted-host check, then the OS opener;
-//! - `panel`: fetched from the payload-named path and returned;
+//! - `panel`: fetched from the payload-named path and returned; the page
+//!   is kept, so its own actions are looked up and run the same way under
+//!   the view name `panel:<path>`;
 //! - `endpoint`: `POST {actions}` with `confirmed: true` only when the
 //!   dialog was accepted; `200` is done, `202 {jobId}` is polled from a
 //!   thread, `202 {jobId, run}` spawns the run's argv in a pane of the
@@ -473,7 +475,8 @@ fn deps_of(
 
 // ---- Tauri commands (main window only) ---------------------------------------------
 
-/// The judged actions under `key` in a source's cached `view`.
+/// The judged actions under `key` in a source's cached `view`, or on a
+/// fetched panel page (`panel:<path>`).
 #[tauri::command]
 pub fn source_actions(
     window: tauri::Window,

@@ -2,7 +2,8 @@
 // deliberately NOT a second window: a window brings its own chrome, its own
 // webview and a whole focus-restoration problem for one screen of controls.
 //
-// Layout: a pinned header ("← Settings" back control, then the tab row) and,
+// Layout: a pinned header (the shared back arrow and "Settings", then the
+// tab row) and,
 // beneath it, ONE tab's sections in a column that scrolls on its own. The
 // header never scrolls away, so the way out is always on screen — with a
 // scrolling page the close control disappeared as soon as a long tab was
@@ -24,6 +25,7 @@
 // invariant every consumer (PTY resize, mouse mapping, GL quads) depends on —
 // and font-weight pickers.
 
+import { isBackKey, mountPageHeader } from "./page_header";
 import { Segmented } from "./segmented";
 import { AgentsSection } from "./agents_section";
 import { SourcesSection } from "./sources_section";
@@ -83,10 +85,8 @@ const PANE_CSS =
   "flex-direction:column;overflow:hidden;background:#0d0e10;" +
   "color:#d6d8dc;font:13px system-ui,sans-serif;";
 const HEADER_CSS = "flex:none;padding:12px 32px 0;border-bottom:1px solid #1c1f24;";
-const BACK_CSS =
-  "display:inline-flex;align-items:center;gap:10px;border:0;background:none;color:#8b949e;" +
-  "font:600 18px system-ui,sans-serif;cursor:pointer;padding:4px 0 10px;";
-const BACK_TITLE_CSS = "color:#d6d8dc;";
+/** The header's first row: back arrow, then the title. */
+const TITLE_ROW_CSS = "display:flex;align-items:center;gap:8px;margin-left:-6px;padding:0 0 8px;";
 const TABS_CSS = "display:flex;gap:4px;padding:0 0 10px;overflow-x:auto;";
 const TAB_CSS =
   "flex:none;border:0;background:none;color:#8b949e;font:13px system-ui,sans-serif;" +
@@ -234,20 +234,10 @@ export class SettingsPane {
     const header = document.createElement("div");
     header.className = "chappa-settings-header";
     header.style.cssText = HEADER_CSS;
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "chappa-settings-close";
-    back.title = "Back to the workspace (Esc)";
-    back.setAttribute("aria-label", "Back to the workspace");
-    back.style.cssText = BACK_CSS;
-    const arrow = document.createElement("span");
-    arrow.setAttribute("aria-hidden", "true");
-    arrow.textContent = "←";
-    const title = document.createElement("span");
-    title.style.cssText = BACK_TITLE_CSS;
-    title.textContent = "Settings";
-    back.append(arrow, title);
-    back.addEventListener("click", () => this.close());
+    const titleRow = document.createElement("div");
+    titleRow.className = "chappa-settings-title-row";
+    titleRow.style.cssText = TITLE_ROW_CSS;
+    mountPageHeader(titleRow, { title: "Settings", backTo: "the workspace", onBack: () => this.close(), arrowClass: "chappa-settings-close" });
 
     const tabs = document.createElement("div");
     tabs.className = "chappa-settings-tabs";
@@ -291,7 +281,7 @@ export class SettingsPane {
       this.selectTab(order[next].id);
       this.tabButtons.get(order[next].id)?.focus();
     });
-    header.append(back, tabs);
+    header.append(titleRow, tabs);
 
     // --- Terminal tab --------------------------------------------------------
     const terminal = this.panels.get("terminal")!;
@@ -661,7 +651,7 @@ export class SettingsPane {
   // --- dismissal -----------------------------------------------------------
 
   private readonly escape = (e: KeyboardEvent): void => {
-    if (e.key !== "Escape") return;
+    if (!isBackKey(e)) return;
     // The agent edit modal owns Escape while it is up (its own capture
     // listener closes it and stops propagation before this one runs).
     if (this.agents.modalElement) return;

@@ -120,7 +120,10 @@ describe("buildNeedsYou", () => {
     ]);
     expect(prRows[0].detail).toBe("owner/repo#1 · Checks are failing: lint");
     expect(prRows[0].actions).toEqual([{ sourceId: "fx", sourceLabel: "fx", view: "prs", key: "github:owner/repo:#1" }]);
-    expect(prRows[1].actions).toEqual([]);
+    expect(prRows[1].actions).toEqual([{ sourceId: "fx", sourceLabel: "fx", view: "prs", key: "github:owner/repo:#2" }]);
+    expect(prRows[2].actions).toEqual([]);
+    // A PR row opens the PRs view at it.
+    expect(prRows[0].opens).toEqual({ view: "prs", key: "github:owner/repo:#1" });
     const builds = m.sections[2].rows;
     expect(builds.map((r) => [r.title, r.tone, r.opens])).toEqual([
       ["Nightly build failed", "bad", { url: "https://registry.example/owner/repo/actions/runs/1" }],

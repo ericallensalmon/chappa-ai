@@ -4983,14 +4983,19 @@ describe("App edit-project pane + project context menu", () => {
     root.remove();
   });
 
-  it("Escape and × both close the pane", async () => {
+  it("Escape and the back arrow both close the pane", async () => {
     const { root, app } = await openedProject();
     app.openEditPane(1);
     expect(app.editPaneElement!.style.display).toBe("flex");
+    // The header leads with the shared back arrow; there is no × any more.
+    const head = app.editPaneElement!.querySelector(".chappa-edit-header")!;
+    expect(head.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(head.firstElementChild?.getAttribute("aria-label")).toBe("Back to the workspace");
+    expect([...head.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["←"]);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(app.editPaneElement!.style.display).toBe("none");
     app.openEditPane(1);
-    app.editPaneElement!.querySelector<HTMLButtonElement>(".chappa-edit-close")!.click();
+    app.editPaneElement!.querySelector<HTMLButtonElement>(".chappa-edit-back")!.click();
     expect(app.editPaneElement!.style.display).toBe("none");
     panelDispose(app);
     root.remove();
@@ -6608,7 +6613,10 @@ describe("App record rows and the record pane", () => {
       expect(dash(root).parentElement?.classList.contains("chappa-stack")).toBe(true);
       expect(drive(app).activeId).toBeNull();
       expect(btn.classList.contains("open")).toBe(true);
-      expect(dash(root).querySelector(".chappa-dash-back")?.textContent).toBe("←Dashboard");
+      expect(dash(root).querySelector(".chappa-dash-header")?.firstElementChild?.classList.contains("chappa-dash-back")).toBe(true);
+      expect(dash(root).querySelector(".chappa-dash-back")?.textContent).toBe("←");
+      expect(dash(root).querySelector(".chappa-dash-header .chappa-page-title")?.textContent).toBe("Dashboard");
+      expect(dash(root).querySelector(".chappa-dash-back")?.getAttribute("aria-label")).toMatch(/^Back to “.+”$/);
       dash(root).querySelector<HTMLButtonElement>(".chappa-dash-back")!.click();
       expect(dash(root).classList.contains("active")).toBe(false);
       expect(btn.classList.contains("open")).toBe(false);
@@ -6968,6 +6976,9 @@ describe("App source views", () => {
   const page = (root: HTMLElement, view: string): HTMLElement | null =>
     root.querySelector<HTMLElement>(`.chappa-stack > .chappa-source-view[data-view="${view}"]`);
   const ALL = ["work", "prs", "attention", "environment"];
+  const key = (el: HTMLElement, init: KeyboardEventInit): void => {
+    el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  };
 
   it("with no source, the rail lists Needs you alone, under the project bar, with no badge", async () => {
     const { root, app } = await mountedWithSources({ sources: [], hiddenViews: [] });
@@ -7027,7 +7038,7 @@ describe("App source views", () => {
     expect(root.querySelector(".chappa-dashboard")?.classList.contains("active")).toBe(false);
     const needs = page(root, "attention")!;
     expect(needs.classList.contains("active")).toBe(true);
-    needs.querySelector<HTMLButtonElement>(".chappa-sv-back")!.click();
+    needs.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
     expect(needs.classList.contains("active")).toBe(false);
     expect(vd(app).activeId).toBe(shellId);
     // The entry toggles; a row activation hides the view.
@@ -7069,7 +7080,7 @@ describe("App source views", () => {
     expect(work.classList.contains("active")).toBe(true);
     // Assigned to me is on by default: the active ABC-1 is what shows.
     expect([...work.querySelectorAll<HTMLElement>(".chappa-work-row")].map((r) => r.dataset.key)).toContain("ABC-1");
-    work.querySelector<HTMLButtonElement>(".chappa-sv-back")!.click();
+    work.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
     expect(work.classList.contains("active")).toBe(false);
     panelDispose(app);
     root.remove();
@@ -7087,10 +7098,80 @@ describe("App source views", () => {
     const focused = work.querySelector<HTMLElement>(".chappa-work-row.focused");
     expect(focused?.dataset.key).toBe("ABC-2");
     expect(work.querySelector(".chappa-work-detail-title")?.textContent).toBe("ABC-2 Rename the web build step");
-    // The PRs view lists owner/repo#1, so ABC-1's chip opens it there.
+    // Drilled in from Needs you: Work's arrow goes back there.
+    const arrow = (p: HTMLElement) => p.querySelector<HTMLButtonElement>(":scope > .chappa-sv-header > .chappa-back-arrow")!;
+    expect(arrow(work).getAttribute("aria-label")).toBe("Back to Needs you");
+    // The PRs view lists owner/repo#1, so ABC-1's chip opens it there, at the PR.
     work.querySelector<HTMLButtonElement>('.chappa-work-row[data-key="ABC-1"] .chappa-work-pr')!.click();
     expect(work.classList.contains("active")).toBe(false);
-    expect(page(root, "prs")?.classList.contains("active")).toBe(true);
+    const prs = page(root, "prs")!;
+    expect(prs.classList.contains("active")).toBe(true);
+    expect(prs.querySelector<HTMLElement>(".chappa-pr-row.focused")?.dataset.id).toBe("github/owner/repo/#1");
+    expect(prs.querySelector(".chappa-sv-tab.active")?.getAttribute("data-tab")).toBe("mine");
+    // One level back per arrow: PRs → Work → Needs you → the workspace.
+    expect(arrow(prs).getAttribute("aria-label")).toBe("Back to Work");
+    arrow(prs).click();
+    expect(work.classList.contains("active")).toBe(true);
+    expect(arrow(work).getAttribute("aria-label")).toBe("Back to Needs you");
+    key(work, { key: "Escape" });
+    // Escape first closed the open detail; the next one steps back.
+    expect(work.classList.contains("active")).toBe(true);
+    key(work, { key: "Escape" });
+    expect(needs.classList.contains("active")).toBe(true);
+    expect(arrow(needs).getAttribute("aria-label")).toBe("Back to the workspace");
+    arrow(needs).click();
+    expect(needs.classList.contains("active")).toBe(false);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a Needs you PR row opens the PRs view at the PR; an Environment row focuses its own source's component", async () => {
+    const { root, app } = await mountedWithSources(
+      { sources: [sourceRow("fx", ALL), sourceRow("two", ["environment"])], hiddenViews: [] },
+      { ...fixtureAnswers(), "fx/environment": sourceFixture("environment"), "two/environment": sourceFixture("environment") },
+    );
+    entry(root, "attention").click();
+    const needs = page(root, "attention")!;
+    needs.querySelector<HTMLButtonElement>('.chappa-needs-row[data-id="pr:github/owner/repo/#7"] .chappa-sv-title')!.click();
+    const prs = page(root, "prs")!;
+    expect(prs.classList.contains("active")).toBe(true);
+    expect(prs.querySelector(".chappa-sv-tab.active")?.getAttribute("data-tab")).toBe("reviewing");
+    expect(prs.querySelector<HTMLElement>(".chappa-pr-row.focused")?.dataset.id).toBe("github/owner/repo/#7");
+    prs.querySelector<HTMLButtonElement>(":scope > .chappa-sv-header > .chappa-back-arrow")!.click();
+    expect(needs.classList.contains("active")).toBe(true);
+    // Both stacks have a `db`: the row of the second one focuses the second's.
+    needs.querySelector<HTMLButtonElement>('.chappa-needs-row[data-id="env:two|db"] .chappa-sv-title')!.click();
+    const env = page(root, "environment")!;
+    expect(env.classList.contains("active")).toBe(true);
+    expect(env.querySelector<HTMLElement>(".chappa-env-row.focused")?.dataset.key).toBe("two|db");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("every page reached by drilling in starts its header with the back arrow, which names where it returns", async () => {
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    await app.newShell();
+    await FLUSH();
+    const leadsWithArrow = (header: Element | null | undefined): string => {
+      const first = header?.firstElementChild;
+      expect(first?.classList.contains("chappa-back-arrow")).toBe(true);
+      expect(first?.textContent).toBe("←");
+      // The way back is the arrow alone: no other back, close or × control.
+      const others = [...(header?.querySelectorAll("button") ?? [])].filter((b) => b !== first).map((b) => b.textContent ?? "");
+      expect(others.filter((t) => /^(×|✕|Close|Back)/.test(t.trim()))).toEqual([]);
+      return first!.getAttribute("aria-label") ?? "";
+    };
+    for (const view of ALL) {
+      entry(root, view).click();
+      const p = page(root, view)!;
+      expect(leadsWithArrow(p.querySelector(":scope > .chappa-sv-header"))).toMatch(/^Back to “.+”$/);
+      entry(root, view).click();
+    }
+    root.querySelector<HTMLButtonElement>(".chappa-dashboard-open")!.click();
+    expect(leadsWithArrow(root.querySelector(".chappa-dashboard .chappa-dash-header"))).toMatch(/^Back to “.+”$/);
+    root.querySelector<HTMLButtonElement>(".chappa-dashboard-open")!.click();
+    app.openSettings();
+    expect(leadsWithArrow(document.querySelector(".chappa-settings-title-row"))).toBe("Back to the workspace");
     panelDispose(app);
     root.remove();
   });

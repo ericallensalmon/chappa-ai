@@ -101,6 +101,13 @@ test("every manifest path is served and every list has freshness", async () => {
   assert.equal((await src.call("/api/work/nope")).status, 404);
   const panel = await src.call("/api/panel/validate");
   assert.ok(panel.body.title && panel.body.freshness && Array.isArray(panel.body.sections));
+  // Every other panel a payload names is served from its own file.
+  const named = (await src.call("/api/prs")).body.items.flatMap((p) => p.actions ?? []).filter((a) => a.kind === "panel");
+  assert.deepEqual(named.map((a) => a.endpoint), ["/api/panel/checks"]);
+  const checks = await src.call("/api/panel/checks");
+  assert.equal(checks.body.title, "Checks for #2");
+  assert.ok(checks.body.actions.some((a) => a.kind === "endpoint"), "a panel with its own endpoint action");
+  assert.equal((await src.call("/api/panel/nowhere")).status, 404);
 });
 
 test("data covers every PR bucket, all nine states and a pending approval", async () => {

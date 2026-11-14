@@ -119,10 +119,10 @@ describe("ScratchpadsSection", () => {
     expect(section.element.style.display).toBe("block");
     section.dispose();
     expect(section.element.style.display).toBe("none");
-    expect(section.modalOpen).toBe(false);
+    expect(section.pageOpen).toBe(false);
   });
 
-  it("opens the content in a modal with a working Copy button and closes", async () => {
+  it("opens the content on a drill-in page with a working Copy button; the back arrow and Escape leave", async () => {
     const { api, reads } = stubApi({ 6: [summary()] });
     const copied: string[] = [];
     const container = document.createElement("div");
@@ -141,21 +141,31 @@ describe("ScratchpadsSection", () => {
     (section.element.querySelector(".chappa-scratchpad-row") as HTMLButtonElement).click();
     await FLUSH();
     expect(reads).toEqual([5]);
-    expect(section.modalOpen).toBe(true);
-    const modal = container.querySelector(".chappa-scratchpad-modal")!;
-    expect(modal.querySelector(".chappa-scratchpad-modal-title")?.textContent).toBe("eval · worker models");
-    expect(modal.querySelector(".chappa-scratchpad-modal-meta")?.textContent).toBe(
+    expect(section.pageOpen).toBe(true);
+    const page = container.querySelector(".chappa-scratchpad-page")!;
+    // A drill-in page: the header leads with the back arrow, then the name.
+    const head = page.querySelector(".chappa-scratchpad-page-header")!;
+    expect(head.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(head.firstElementChild?.getAttribute("aria-label")).toBe("Back to the workspace");
+    expect(page.querySelector(".chappa-scratchpad-page-title")?.textContent).toBe("eval · worker models");
+    expect(page.querySelector(".chappa-scratchpad-page-meta")?.textContent).toBe(
       "revision 3 · updated 2m ago by process 12 · eval",
     );
-    expect(modal.querySelector(".chappa-scratchpad-modal-content")?.textContent).toBe("# eval\n\n## Log\n\nrun 1: ok\n");
-    const copy = modal.querySelector(".chappa-scratchpad-copy") as HTMLButtonElement;
+    expect(page.querySelector(".chappa-scratchpad-page-content")?.textContent).toBe("# eval\n\n## Log\n\nrun 1: ok\n");
+    const copy = page.querySelector(".chappa-scratchpad-copy") as HTMLButtonElement;
     copy.click();
     await FLUSH();
     expect(copied).toEqual(["# eval\n\n## Log\n\nrun 1: ok\n"]);
     expect(copy.textContent).toBe("Copied");
-    (modal.querySelector(".chappa-scratchpad-close") as HTMLButtonElement).click();
-    expect(section.modalOpen).toBe(false);
-    expect(container.querySelector(".chappa-scratchpad-modal")).toBeNull();
+    // No Close button: the arrow leaves, and Escape does the same.
+    expect([...page.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["←", "Copied"]);
+    (head.firstElementChild as HTMLButtonElement).click();
+    expect(section.pageOpen).toBe(false);
+    expect(container.querySelector(".chappa-scratchpad-page")).toBeNull();
+    (section.element.querySelector(".chappa-scratchpad-row") as HTMLButtonElement).click();
+    await FLUSH();
+    container.querySelector(".chappa-scratchpad-page")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(section.pageOpen).toBe(false);
     section.dispose();
     container.remove();
   });
@@ -199,7 +209,7 @@ describe("ScratchpadsSection", () => {
     }
   });
 
-  it("a failed read shows the error in the modal with Copy disabled; a failed list keeps the last rows", async () => {
+  it("a failed read shows the error on the page with Copy disabled; a failed list keeps the last rows", async () => {
     const { api } = stubApi({ 6: [summary()] });
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -207,10 +217,10 @@ describe("ScratchpadsSection", () => {
     section.setProject(6);
     await FLUSH();
     await section.open(404);
-    const modal = container.querySelector(".chappa-scratchpad-modal")!;
-    expect(modal.querySelector(".chappa-scratchpad-modal-content")?.textContent).toContain("Could not read scratchpad 404");
-    expect((modal.querySelector(".chappa-scratchpad-copy") as HTMLButtonElement).disabled).toBe(true);
-    section.closeModal();
+    const page = container.querySelector(".chappa-scratchpad-page")!;
+    expect(page.querySelector(".chappa-scratchpad-page-content")?.textContent).toContain("Could not read scratchpad 404");
+    expect((page.querySelector(".chappa-scratchpad-copy") as HTMLButtonElement).disabled).toBe(true);
+    section.closePage();
     (api.listScratchpads as unknown as { mockImplementationOnce: (f: () => Promise<never>) => void }).mockImplementationOnce(
       async () => {
         throw new Error("app gone");

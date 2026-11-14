@@ -16,6 +16,7 @@
 
 import type * as ipc from "./ipc";
 import { firstLine, MARKDOWN_CSS, renderMarkdown } from "./markdown";
+import { isBackKey, mountPageHeader, type PageHeader } from "./page_header";
 import {
   formatAgo,
   formatDuration,
@@ -306,10 +307,8 @@ export interface DashboardOptions {
 export const DASHBOARD_CSS = `${MARKDOWN_CSS}
 .chappa-panel-host.chappa-dashboard{display:none;}
 .chappa-panel-host.chappa-dashboard.active{display:flex;flex-direction:column;outline:none;background:#0d0e10;}
-.chappa-dash-header{flex:none;display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid #1c1f24;}
-.chappa-dash-back{display:inline-flex;align-items:center;gap:8px;border:0;background:none;color:#8b949e;font:600 15px system-ui,sans-serif;cursor:pointer;padding:2px 0;}
-.chappa-dash-back > span:last-child{color:#d6d8dc;}
-.chappa-dash-back:hover{color:#d6d8dc;}
+.chappa-dash-header{flex:none;display:flex;align-items:center;gap:10px;padding:8px 20px 8px 14px;border-bottom:1px solid #1c1f24;}
+.chappa-dash-header > .chappa-page-title{margin-right:4px;}
 .chappa-dash-filter{flex:0 1 240px;min-width:80px;padding:4px 8px;border:1px solid #262a31;border-radius:6px;background:#16181d;color:#d6d8dc;font:12px system-ui,sans-serif;}
 .chappa-dash-stopped{display:flex;align-items:center;gap:6px;font:12px system-ui,sans-serif;color:#8b949e;cursor:pointer;}
 .chappa-dash-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 20px 48px;}
@@ -414,6 +413,7 @@ function truncate(parent: HTMLElement, n: number): void {
 export class Dashboard {
   readonly host: HTMLDivElement;
   private readonly opts: DashboardOptions;
+  private readonly header: PageHeader;
   private readonly filterInput: HTMLInputElement;
   private readonly stoppedToggle: HTMLInputElement;
   private readonly list: HTMLElement;
@@ -434,17 +434,6 @@ export class Dashboard {
 
     const header = document.createElement("div");
     header.className = "chappa-dash-header";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "chappa-dash-back";
-    back.title = "Back (Esc)";
-    const arrow = document.createElement("span");
-    arrow.setAttribute("aria-hidden", "true");
-    arrow.textContent = "←";
-    const title = document.createElement("span");
-    title.textContent = "Dashboard";
-    back.append(arrow, title);
-    back.addEventListener("click", () => this.opts.onClose());
     this.filterInput = document.createElement("input");
     this.filterInput.type = "search";
     this.filterInput.className = "chappa-dash-filter";
@@ -459,7 +448,8 @@ export class Dashboard {
     this.stoppedToggle.checked = true;
     this.stoppedToggle.addEventListener("change", () => this.paint());
     stopped.append(this.stoppedToggle, "Stopped rows");
-    header.append(back, this.filterInput, stopped);
+    header.append(this.filterInput, stopped);
+    this.header = mountPageHeader(header, { title: "Dashboard", backTo: "the workspace", onBack: () => this.opts.onClose(), arrowClass: "chappa-dash-back" });
 
     const body = document.createElement("div");
     body.className = "chappa-dash-body";
@@ -486,6 +476,11 @@ export class Dashboard {
 
   get active(): boolean {
     return this.host.classList.contains("active");
+  }
+
+  /** Where the arrow returns (what the dashboard covered). */
+  setBackTo(where: string): void {
+    this.header.setBackTo(where);
   }
 
   dispose(): void {
@@ -771,7 +766,7 @@ export class Dashboard {
   }
 
   private onKeydown = (e: KeyboardEvent): void => {
-    if (e.key !== "Escape" || e.isComposing) return;
+    if (!isBackKey(e)) return;
     // Escape in a non-empty filter clears it first; otherwise it leaves.
     if (e.target === this.filterInput && this.filterInput.value !== "") {
       this.filterInput.value = "";

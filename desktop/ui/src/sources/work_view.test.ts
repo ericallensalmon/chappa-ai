@@ -55,6 +55,7 @@ const detail = (v: WorkView) => v.host.querySelector<HTMLElement>(".chappa-work-
 const field = (v: WorkView, name: string) => detail(v).querySelector<HTMLElement>(`.chappa-work-field-value[data-field="${name}"]`)?.textContent;
 const assigned = (v: WorkView) => v.host.querySelector<HTMLButtonElement>(".chappa-work-assigned")!;
 const search = (v: WorkView) => v.host.querySelector<HTMLInputElement>(".chappa-work-search")!;
+const key = (el: HTMLElement, k: string) => el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
 afterEach(() => {
   document.body.textContent = "";
@@ -64,7 +65,9 @@ describe("WorkView", () => {
   it("the list: freshness, the source's banner, Assigned to me on by default, the active item pinned", () => {
     const v = new WorkView(deps());
     v.update(input());
-    expect(v.host.querySelector(".chappa-sv-back")?.textContent).toBe("←Work");
+    expect(v.host.querySelector(".chappa-sv-header")?.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(v.host.querySelector(".chappa-back-arrow")?.textContent).toBe("←");
+    expect(v.host.querySelector(".chappa-sv-header .chappa-page-title")?.textContent).toBe("Work");
     expect(v.host.querySelector(".chappa-sv-fresh")?.textContent).toBe("as of 3 min ago · refreshing");
     expect([...v.host.querySelectorAll(".chappa-sv-error")].map((e) => e.textContent)).toEqual(["rate limited, showing cached items"]);
     expect(v.host.querySelector(".chappa-work-banners .chappa-banner-title")?.textContent).toBe("Syncing");
@@ -180,10 +183,26 @@ describe("WorkView", () => {
     expect([...ls.querySelectorAll<HTMLElement>(".chappa-ls-move")].map((m) => m.dataset.move)).toEqual(["approve", "in-progress"]);
     expect(detail(v).querySelector('.chappa-sec[data-section="details"]')).not.toBeNull();
     expect([...detail(v).querySelectorAll<HTMLButtonElement>(".chappa-sec .chappa-sv-action")].map((b) => b.dataset.action)).toEqual(["open-docs"]);
+    // The detail's header starts with the shared arrow, then the item.
+    const head = detail(v).querySelector(".chappa-work-detail-head")!;
+    expect(head.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(head.firstElementChild?.getAttribute("aria-label")).toBe("Back to the Work list");
+    expect(head.querySelector(".chappa-work-detail-title")?.textContent).toBe("ABC-1 Add a health route to api");
+    // While it is open the view says so (on a narrow window its header then
+    // gives way to the detail's, so there is one arrow).
+    expect(v.host.classList.contains("detail-open")).toBe(true);
     // Back closes the detail; clicking the selected title again does too.
     detail(v).querySelector<HTMLButtonElement>(".chappa-work-detail-back")!.click();
     expect(v.selectedId).toBeNull();
     expect(v.host.querySelector(".chappa-work-split")?.classList.contains("has-detail")).toBe(false);
+    expect(v.host.classList.contains("detail-open")).toBe(false);
+    // Escape steps back one level: the detail first, then the view.
+    row(v, "ABC-1").querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
+    key(v.host, "Escape");
+    expect(v.selectedId).toBeNull();
+    expect(d.onClose).not.toHaveBeenCalled();
+    key(v.host, "Escape");
+    expect(d.onClose).toHaveBeenCalledTimes(1);
     row(v, "ABC-1").querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
     row(v, "ABC-1").querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
     expect(v.selectedId).toBeNull();
@@ -254,23 +273,61 @@ describe("WorkView", () => {
     w.dispose();
   });
 
-  it("a panel action opens the drill-in page over the list; its back arrow returns", async () => {
-    const d = deps({ run: vi.fn(async () => ({ kind: "panel", payload: fixture("panel") }) as ipc.ActionOutcomeDto) });
+  it("a panel action opens the drill-in page over the whole view; a page opened from it stacks; each arrow and Escape step back one", async () => {
+    const validate = fixture("panel") as unknown as Record<string, unknown> & { actions: unknown[] };
+    const first = { ...validate, actions: [...validate.actions, { kind: "panel", id: "deeper", label: "Deeper", endpoint: "/api/panel/deeper" }] };
+    const run = vi.fn(async (_s: string, view: string, _k: string | null, id: string) =>
+      (id === "ping"
+        ? { kind: "done", message: "pong" }
+        : { kind: "panel", payload: view === "work" ? first : { ...validate, title: "Deeper" } }) as ipc.ActionOutcomeDto);
+    const actions = vi.fn(async (_s: string, view: string, key: string | null): Promise<ipc.SourceActionDto[]> =>
+      view.startsWith("panel:")
+        ? [
+            { action: { kind: "endpoint", id: "ping", label: "Re-run", mutates: false, confirm: null, params: null, note: null }, verdict: ok, needsPrompt: false },
+            { action: { kind: "panel", id: "deeper", label: "Deeper", endpoint: "/api/panel/deeper" }, verdict: ok, needsPrompt: false },
+          ]
+        : key === "ABC-1"
+          ? [{ action: { kind: "panel", id: "validate", label: "Validate", endpoint: "/api/panel/validate" }, verdict: ok, needsPrompt: false }]
+          : []);
+    const d = deps({ run, actions });
     const v = new WorkView(d);
+    v.setActive(true);
     v.update(input());
     await FLUSH();
     row(v, "ABC-1").querySelector<HTMLButtonElement>('[data-action="validate"]')!.click();
     await FLUSH();
-    expect(d.run).toHaveBeenCalledWith("fx", "work", "ABC-1", "validate", false, null);
+    expect(run).toHaveBeenCalledWith("fx", "work", "ABC-1", "validate", false, null);
     const page = v.openPanelPage!;
     expect(page.origin).toEqual({ sourceId: "fx", sourceLabel: "Fixture", label: "Validate", endpoint: "/api/panel/validate" });
-    expect(v.host.querySelector(".chappa-work-panel .chappa-panel-back")?.textContent).toBe("←Validate");
-    expect(v.host.querySelector(".chappa-work-split")?.classList.contains("hidden")).toBe(true);
-    expect(v.host.querySelector(".chappa-work-panel .chappa-banner-title")?.textContent).toBe("Configuration has drifted");
-    v.host.querySelector<HTMLButtonElement>(".chappa-panel-back")!.click();
+    // The page covers the view: one header, the page's, starting with the arrow.
+    expect(v.host.classList.contains("covered")).toBe(true);
+    const head = page.el.querySelector(".chappa-sv-header")!;
+    expect(head.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(head.querySelector(".chappa-page-title")?.textContent).toBe("Validate");
+    expect(head.querySelector(".chappa-back-arrow")?.getAttribute("aria-label")).toBe("Back to Work");
+    expect(page.el.querySelector(".chappa-banner-title")?.textContent).toBe("Configuration has drifted");
+    // Its own actions are read as the page (no key) and run there.
+    await FLUSH();
+    expect(actions).toHaveBeenCalledWith("fx", "panel:/api/panel/validate", null);
+    page.el.querySelector<HTMLButtonElement>('.chappa-panel-actions [data-action="ping"]')!.click();
+    await FLUSH();
+    expect(run).toHaveBeenLastCalledWith("fx", "panel:/api/panel/validate", null, "ping", false, null);
+    // A panel from the page stacks over it and returns to it.
+    page.el.querySelector<HTMLButtonElement>('.chappa-panel-actions [data-action="deeper"]')!.click();
+    await FLUSH();
+    const deeper = v.openPanelPage!;
+    expect(deeper).not.toBe(page);
+    expect(deeper.el.querySelector(".chappa-page-title")?.textContent).toBe("Deeper");
+    expect(deeper.el.querySelector(".chappa-back-arrow")?.getAttribute("aria-label")).toBe("Back to Validate");
+    expect(page.el.classList.contains("under")).toBe(true);
+    key(v.host, "Escape");
+    expect(v.openPanelPage).toBe(page);
+    expect(page.el.classList.contains("under")).toBe(false);
+    page.el.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
     expect(v.openPanelPage).toBeNull();
-    expect(v.host.querySelector(".chappa-work-split")?.classList.contains("hidden")).toBe(false);
+    expect(v.host.classList.contains("covered")).toBe(false);
     expect(v.host.querySelector(".chappa-panel-page")).toBeNull();
+    expect(d.onClose).not.toHaveBeenCalled();
     v.dispose();
   });
 

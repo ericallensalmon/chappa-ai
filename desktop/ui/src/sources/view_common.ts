@@ -1,6 +1,7 @@
-// What the source views share: the page frame (a main-area page with a
-// back control, like the dashboard), the freshness line, chips, keyed-row
-// placement and the action buttons.
+// What the source views share: the page frame (a main-area page whose
+// header starts with the shared back arrow, like the dashboard), the pages
+// drilled into from it, the freshness line, chips, keyed-row placement and
+// the action buttons.
 //
 // Action buttons never decide anything themselves: Rust judges every action
 // (`source_actions`) and judges it again when it runs; a button shows that
@@ -8,6 +9,7 @@
 // asks whatever must be asked first.
 
 import type * as ipc from "../ipc";
+import { isBackKey, mountPageHeader, type PageHeader } from "../page_header";
 import { formatAgo } from "../record_pane";
 import { actionButtonState, outcomeText, runAction } from "../source_actions";
 import type { ActionTarget } from "./needs_you";
@@ -15,8 +17,9 @@ import type { Chip, FreshnessSummary, NeedsUpdate } from "./prs_model";
 
 /** What a source view needs from the app. */
 export interface SourceViewDeps {
-  /** Rust's judged actions of one item (`source_actions`). */
-  actions(sourceId: string, view: string, key: string): Promise<ipc.SourceActionDto[]>;
+  /** Rust's judged actions of one item (`source_actions`); `key` null =
+   *  the view's (or page's) own, which is where its banners' actions are. */
+  actions(sourceId: string, view: string, key: string | null): Promise<ipc.SourceActionDto[]>;
   /** `source_run_action`; only ever called through `runAction`. */
   run: typeof ipc.sourceRunAction;
   /** Open a source's link after Rust's https + trusted-host check. */
@@ -27,7 +30,7 @@ export interface SourceViewDeps {
   /** A `panel` action ran and answered its first page: show it. Absent
    *  where the view has nowhere to show one. */
   openPanel?(origin: PanelOrigin, payload: unknown): void;
-  /** The back control or Escape. */
+  /** The view's back arrow or Escape, with no page drilled into it left. */
   onClose(): void;
   /** One line for the user: an action's outcome or a failure. */
   say(text: string, kind?: "info" | "error"): void;
@@ -37,10 +40,11 @@ export interface SourceViewDeps {
 export const SOURCE_VIEW_CSS = `
 .chappa-panel-host.chappa-source-view{display:none;}
 .chappa-panel-host.chappa-source-view.active{display:flex;flex-direction:column;outline:none;background:#0d0e10;}
-.chappa-sv-header{flex:none;display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid #1c1f24;}
-.chappa-sv-back{display:inline-flex;align-items:center;gap:8px;border:0;background:none;color:#8b949e;font:600 15px system-ui,sans-serif;cursor:pointer;padding:2px 0;}
-.chappa-sv-back > span:last-child{color:#d6d8dc;}
-.chappa-sv-back:hover{color:#d6d8dc;}
+.chappa-sv-header{flex:none;display:flex;align-items:center;gap:10px;padding:8px 20px 8px 14px;border-bottom:1px solid #1c1f24;min-width:0;}
+.chappa-sv-header > .chappa-sv-header-slot{margin-left:4px;}
+.chappa-source-view.covered > .chappa-sv-header,.chappa-source-view.covered > .chappa-sv-body{display:none;}
+.chappa-sv-subpage{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;}
+.chappa-sv-subpage.under{display:none;}
 .chappa-sv-tabs{display:flex;gap:4px;}
 .chappa-sv-tab{border:1px solid #262a31;border-radius:6px;background:#16181d;color:#8b949e;font:12px system-ui,sans-serif;cursor:pointer;padding:3px 10px;}
 .chappa-sv-tab.active{background:#1d232b;color:#e6e8ec;border-color:#353a43;}
@@ -151,11 +155,23 @@ export interface PanelOrigin {
   endpoint: string;
 }
 
-/** The page frame both views use: back control with the view's name, a
+/** A page drilled into from a view (a source's panel page): it covers the
+ *  view, header and all, and its own header's arrow steps back one page. */
+export interface Subpage {
+  readonly el: HTMLElement;
+  /** What its header says (the page above it returns "to" this). */
+  readonly title: string;
+  setBackTo(where: string): void;
+  dispose(): void;
+}
+
+/** The page frame every view uses: the back arrow and the view's name, a
  *  header slot, the freshness line, then banners / errors / notices above
- *  the content and its empty state. */
+ *  the content and its empty state; and the stack of pages drilled into
+ *  from it, the top one covering the view. */
 export class ViewFrame {
   readonly host: HTMLDivElement;
+  readonly header: PageHeader;
   readonly headerSlot: HTMLElement;
   readonly fresh: HTMLElement;
   readonly banners: HTMLElement;
@@ -164,8 +180,12 @@ export class ViewFrame {
   readonly content: HTMLElement;
   readonly empty: HTMLElement;
   private sig = "";
+  private readonly pages: Subpage[] = [];
+  /** A level inside the view itself (a work item's detail) that Escape
+   *  closes before the view; answers whether it closed one. */
+  private innerBack: (() => boolean) | null = null;
 
-  constructor(name: string, view: string, private readonly onClose: () => void) {
+  constructor(readonly name: string, view: string, private readonly onClose: () => void) {
     injectSourceViewStyles();
     this.host = document.createElement("div");
     this.host.className = "chappa-panel-host chappa-source-view";
@@ -175,22 +195,12 @@ export class ViewFrame {
     this.host.addEventListener("keydown", this.onKeydown);
     const header = document.createElement("div");
     header.className = "chappa-sv-header";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "chappa-sv-back";
-    back.title = "Back (Esc)";
-    const arrow = document.createElement("span");
-    arrow.setAttribute("aria-hidden", "true");
-    arrow.textContent = "←";
-    const title = document.createElement("span");
-    title.textContent = name;
-    back.append(arrow, title);
-    back.addEventListener("click", () => this.onClose());
     this.headerSlot = document.createElement("div");
     this.headerSlot.className = "chappa-sv-header-slot";
     this.fresh = document.createElement("span");
     this.fresh.className = "chappa-sv-fresh";
-    header.append(back, this.headerSlot, this.fresh);
+    header.append(this.headerSlot, this.fresh);
+    this.header = mountPageHeader(header, { title: name, backTo: "the workspace", onBack: () => this.onClose() });
     const body = document.createElement("div");
     body.className = "chappa-sv-body";
     this.banners = document.createElement("div");
@@ -221,7 +231,10 @@ export class ViewFrame {
     fillLines(this.notices, "chappa-sv-notice", f.notices);
   }
 
+  /** A view leaving the screen drops the pages drilled into from it: it
+   *  comes back as itself. */
   setActive(active: boolean): void {
+    if (!active) this.clearSubpages();
     this.host.classList.toggle("active", active);
     if (active) this.host.focus({ preventScroll: true });
   }
@@ -230,15 +243,67 @@ export class ViewFrame {
     return this.host.classList.contains("active");
   }
 
+  /** Where the view's arrow returns (what it covered). */
+  setBackTo(where: string): void {
+    this.header.setBackTo(where);
+  }
+
+  setInnerBack(fn: (() => boolean) | null): void {
+    this.innerBack = fn;
+  }
+
+  /** The pages drilled into, the top one last. */
+  get subpages(): readonly Subpage[] {
+    return this.pages;
+  }
+
+  /** Cover the view (or the page on top) with `page`; its arrow returns to
+   *  what it covers. */
+  pushSubpage(page: Subpage): void {
+    const below = this.pages[this.pages.length - 1];
+    below?.el.classList.add("under");
+    page.setBackTo(below ? below.title : this.name);
+    page.el.classList.add("chappa-sv-subpage");
+    this.pages.push(page);
+    this.host.classList.add("covered");
+    this.host.appendChild(page.el);
+    this.host.focus({ preventScroll: true });
+  }
+
+  /** Step back one page. Answers whether there was one. */
+  popSubpage(): boolean {
+    const page = this.pages.pop();
+    if (!page) return false;
+    page.dispose();
+    const top = this.pages[this.pages.length - 1];
+    top?.el.classList.remove("under");
+    this.host.classList.toggle("covered", top !== undefined);
+    this.host.focus({ preventScroll: true });
+    return true;
+  }
+
+  clearSubpages(): void {
+    while (this.pages.length) this.popSubpage();
+  }
+
+  /** One step back: the top drilled-in page, else the view's own inner
+   *  level, else the view itself. Escape lands here. */
+  back(): void {
+    if (this.popSubpage()) return;
+    if (this.innerBack?.()) return;
+    this.onClose();
+  }
+
   dispose(): void {
+    this.clearSubpages();
     this.host.removeEventListener("keydown", this.onKeydown);
     this.host.remove();
   }
 
   private onKeydown = (e: KeyboardEvent): void => {
-    if (e.key !== "Escape" || e.isComposing) return;
+    if (!isBackKey(e)) return;
     e.preventDefault();
-    this.onClose();
+    this.back();
   };
 }
 
@@ -278,9 +343,15 @@ export class ActionsCell {
       if (seq !== this.seq) return;
       this.el.textContent = "";
       const links = new Set<string>();
+      const ids = new Set<string>();
       const many = targets.length > 1;
       for (const { t, entry } of lists.flat()) {
         if (only && !only.includes(entry.action.id)) continue;
+        // One target can carry an id twice (a page's own "Re-run" and its
+        // banner's); Rust runs the first, so one button.
+        const id = `${t.sourceId}\u001f${t.key ?? ""}\u001f${entry.action.id}`;
+        if (ids.has(id)) continue;
+        ids.add(id);
         // Two sources serving the same PR both offer "open it": one button.
         if (entry.action.kind === "link") {
           if (links.has(entry.action.url)) continue;

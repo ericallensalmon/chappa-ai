@@ -430,9 +430,14 @@ describe("SettingsPane — tabs", () => {
     expect(pane.isOpen()).toBe(true);
     expect(pane.activeTab).toBe("agents");
     expect(visiblePanels(pane)).toEqual(["agents"]);
-    // The back control (the only close affordance besides Escape) closes it.
+    // The back arrow (the only way out besides Escape) leads the header,
+    // then the title; where it returns is its tooltip, not text.
     const back = pane.element.querySelector<HTMLButtonElement>(".chappa-settings-close")!;
-    expect(back.textContent).toContain("Settings");
+    expect(back.parentElement?.firstElementChild).toBe(back);
+    expect(back.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(back.textContent).toBe("←");
+    expect(back.getAttribute("aria-label")).toBe("Back to the workspace");
+    expect(back.nextElementSibling?.textContent).toBe("Settings");
     back.click();
     expect(pane.isOpen()).toBe(false);
     pane.dispose();

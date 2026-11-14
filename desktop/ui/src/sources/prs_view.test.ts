@@ -40,7 +40,9 @@ describe("PrsView", () => {
   it("draws the freshness line, notices, tabs with counts and the My groups in order", () => {
     const v = new PrsView(deps());
     v.update(input());
-    expect(v.host.querySelector(".chappa-sv-back")?.textContent).toBe("←PRs");
+    expect(v.host.querySelector(".chappa-sv-header")?.firstElementChild?.classList.contains("chappa-back-arrow")).toBe(true);
+    expect(v.host.querySelector(".chappa-back-arrow")?.textContent).toBe("←");
+    expect(v.host.querySelector(".chappa-sv-header .chappa-page-title")?.textContent).toBe("PRs");
     expect(v.host.querySelector(".chappa-sv-fresh")?.textContent).toBe("as of 3 min ago");
     expect([...v.host.querySelectorAll(".chappa-sv-notice")].map((n) => n.textContent)).toEqual(["showing 10 of 24 pull requests"]);
     expect(v.host.querySelectorAll(".chappa-sv-error").length).toBe(0);
@@ -263,9 +265,101 @@ describe("PrsView", () => {
     const d = deps();
     const v = new PrsView(d);
     v.update(input());
-    v.host.querySelector<HTMLButtonElement>(".chappa-sv-back")!.click();
+    v.host.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
     v.host.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(d.onClose).toHaveBeenCalledTimes(2);
+    v.setBackTo("Needs you");
+    expect(v.host.querySelector(".chappa-back-arrow")?.getAttribute("aria-label")).toBe("Back to Needs you");
+    v.dispose();
+  });
+
+  it("the view's banners are drawn with their actions, read as the view itself (no key)", async () => {
+    const actions = vi.fn(async (_s: string, _v: string, key: string | null): Promise<ipc.SourceActionDto[]> =>
+      key === null
+        ? [{ action: { kind: "endpoint", id: "resync", label: "Sync now", mutates: false, confirm: null, params: null, note: null }, verdict: ok, needsPrompt: false }]
+        : [],
+    );
+    const run = vi.fn(async () => ({ kind: "done", message: "Synced" }) as ipc.ActionOutcomeDto);
+    const d = deps({ actions, run });
+    const v = new PrsView(d);
+    v.update(input());
+    await FLUSH();
+    const banner = v.host.querySelector<HTMLElement>('.chappa-pr-banners .chappa-banner[data-banner="review-sync"]')!;
+    expect(banner.querySelector(".chappa-banner-title")?.textContent).toBe("Review requests sync every 5 minutes");
+    expect(actions).toHaveBeenCalledWith("fx", "prs", null);
+    banner.querySelector<HTMLButtonElement>('[data-action="resync"]')!.click();
+    await FLUSH();
+    expect(run).toHaveBeenCalledWith("fx", "prs", null, "resync", false, null);
+    expect(d.said).toEqual(["Synced"]);
+    v.dispose();
+  });
+
+  it("a PR's sections fold inside its row, more rows folded too; a panel action opens the page over the view", async () => {
+    const actions = vi.fn(async (_s: string, _v: string, key: string | null): Promise<ipc.SourceActionDto[]> =>
+      key === "github:owner/repo:#2"
+        ? [{ action: { kind: "panel", id: "checks", label: "Checks", endpoint: "/api/panel/checks" }, verdict: ok, needsPrompt: false }]
+        : [],
+    );
+    const run = vi.fn(async () => ({ kind: "panel", payload: { title: "Checks for #2", sections: [] } }) as ipc.ActionOutcomeDto);
+    const d = deps({ actions, run });
+    const v = new PrsView(d);
+    v.update(input());
+    await FLUSH();
+    const r = row(v, "github/owner/repo/#2");
+    const sec = r.querySelector<HTMLElement>('.chappa-sec[data-section="checks"]')!;
+    expect(sec.classList.contains("collapsed")).toBe(true);
+    expect(sec.querySelector(".chappa-sec-head")?.textContent).toBe("▸ Checks");
+    sec.querySelector<HTMLButtonElement>(".chappa-sec-head")!.click();
+    expect(sec.classList.contains("collapsed")).toBe(false);
+    expect(sec.querySelector(".chappa-sec-more-rows")?.classList.contains("folded")).toBe(true);
+    expect(row(v, "github/owner/repo/#3").querySelector(".chappa-sec")).toBeNull();
+    // The fold survives a poll.
+    v.update(input(undefined, { versions: { fx: 2 } }));
+    expect(row(v, "github/owner/repo/#2").querySelector('.chappa-sec[data-section="checks"]')?.classList.contains("collapsed")).toBe(false);
+    await FLUSH();
+    row(v, "github/owner/repo/#2").querySelector<HTMLButtonElement>(':scope > .chappa-sv-actions [data-action="checks"]')!.click();
+    await FLUSH();
+    expect(run).toHaveBeenCalledWith("fx", "prs", "github:owner/repo:#2", "checks", false, null);
+    const page = v.host.querySelector<HTMLElement>(".chappa-panel-page")!;
+    expect(v.host.classList.contains("covered")).toBe(true);
+    expect(page.querySelector(".chappa-page-title")?.textContent).toBe("Checks for #2");
+    expect(page.querySelector(".chappa-back-arrow")?.getAttribute("aria-label")).toBe("Back to PRs");
+    page.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
+    expect(v.host.querySelector(".chappa-panel-page")).toBeNull();
+    expect(d.onClose).not.toHaveBeenCalled();
+    v.dispose();
+  });
+
+  it("focus(key) picks the tab holding the PR (Reviewing first, then My PRs, then All), unfolds its group and marks it", () => {
+    const d = deps();
+    const v = new PrsView(d);
+    // Asked before the first answer: it waits for it.
+    expect(v.focus("github:owner/repo:#7")).toBe(true);
+    v.update(input());
+    expect(v.currentTab).toBe("reviewing");
+    expect(row(v, "github/owner/repo/#7").classList.contains("focused")).toBe(true);
+    // Mine.
+    expect(v.focus("github:owner/repo:#4")).toBe(true);
+    expect(v.currentTab).toBe("mine");
+    expect(group(v, "waiting").querySelector(".chappa-sv-rows")?.classList.contains("folded")).toBe(false);
+    expect(row(v, "github/owner/repo/#4").classList.contains("focused")).toBe(true);
+    expect(row(v, "github/owner/repo/#7")?.classList.contains("focused") ?? false).toBe(false);
+    // Only in All, under a team group that starts folded; forge and repo
+    // compare case folded.
+    expect(v.focus("GitHub:Owner/Repo:#10")).toBe(true);
+    expect(v.currentTab).toBe("all");
+    expect(group(v, "team:platform-team").querySelector(".chappa-sv-rows")?.classList.contains("folded")).toBe(false);
+    expect(row(v, "github/owner/repo/#10").classList.contains("focused")).toBe(true);
+    expect(v.focus("github:owner/repo:#99")).toBe(false);
+    v.dispose();
+  });
+
+  it("focus(key) asked before the data says so when the PR never arrives", () => {
+    const d = deps();
+    const v = new PrsView(d);
+    v.focus("github:owner/repo:#99");
+    v.update(input());
+    expect(d.said).toEqual(["github:owner/repo:#99 is not in the PRs list."]);
     v.dispose();
   });
 });

@@ -7,10 +7,17 @@
 //
 // Components that are not deployed are hidden by default behind a toggle
 // per source; the choice lasts as long as the page does (the session).
+//
+// Banners and facts are drawn by the shared section renderer, their actions
+// judged as the view's own; a component's sections fold inside its row with
+// their actions judged as the component's. A `panel` action opens the
+// source's drill-in page over the view.
 
 import type { ActionTarget } from "./needs_you";
-import type { EnvAlert, EnvBanner, EnvBlock, EnvGroup, EnvRow, EnvironmentModel, FactSection } from "./environment_model";
-import { ActionsCell, ViewFrame, chipEl, fillLines, openChecked, placeAt, truncate, type SourceViewDeps } from "./view_common";
+import type { EnvAlert, EnvBlock, EnvGroup, EnvRow, EnvironmentModel } from "./environment_model";
+import { withPanels } from "./panel_view";
+import { SectionsBlock, paintBanners } from "./sections";
+import { ActionsCell, ViewFrame, chipEl, openChecked, placeAt, truncate, type SourceViewDeps } from "./view_common";
 
 export interface EnvironmentViewInput {
   model: EnvironmentModel;
@@ -25,13 +32,12 @@ export const ENVIRONMENT_CSS = `
 .chappa-env-block-head{display:flex;align-items:baseline;gap:10px;margin:4px 0 8px;flex-wrap:wrap;}
 .chappa-env-source{font:600 13px system-ui,sans-serif;color:#e6e8ec;}
 .chappa-env-counts{font:12px system-ui,sans-serif;color:#8b949e;}
-.chappa-env-alerts,.chappa-env-banners,.chappa-env-facts{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;}
-.chappa-env-alerts:empty,.chappa-env-banners:empty,.chappa-env-facts:empty,.chappa-env-wait:empty{display:none;}
+.chappa-env-alerts,.chappa-env-banners{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;}
+.chappa-env-facts{margin-bottom:10px;}
+.chappa-env-alerts:empty,.chappa-env-banners:empty,.chappa-env-facts:empty,.chappa-env-wait:empty,.chappa-env-row .chappa-secs:empty{display:none;}
+.chappa-env-row .chappa-sec{margin:2px 0 0;}
 .chappa-env-alert{font:12px system-ui,sans-serif;padding:3px 8px;border-radius:5px;border:1px solid #5c4813;color:#f0d68a;background:#1d1708;}
 .chappa-env-alert[data-severity="bad"]{border-color:#5c1f1c;color:#ffb3ad;background:#1f0d0c;}
-.chappa-env-banner[data-tone="bad"]{border-color:#5c1f1c;color:#ffb3ad;background:#1f0d0c;}
-.chappa-env-banner[data-tone="info"]{border-color:#1f3a5c;color:#b6d4ff;background:#0c1520;}
-.chappa-env-banner-line{font-size:11px;opacity:.85;}
 .chappa-env-wait{font:12px system-ui,sans-serif;color:#6b7280;margin-bottom:8px;}
 .chappa-env-dot{flex:none;width:8px;height:8px;border-radius:50%;background:#6b7280;}
 .chappa-env-dot[data-tone="ok"]{background:#3fb950;}
@@ -53,9 +59,6 @@ export const ENVIRONMENT_CSS = `
 .chappa-env-toggle{border:0;background:none;padding:2px 0;color:#8b949e;font:12px system-ui,sans-serif;cursor:pointer;margin-bottom:10px;}
 .chappa-env-toggle:hover{color:#d6d8dc;}
 .chappa-env-row.focused{outline:1px solid #5ea6ff;outline-offset:1px;}
-.chappa-env-fact-title{font:600 12px system-ui,sans-serif;color:#adb3bd;margin:2px 0;}
-.chappa-env-fact{display:flex;gap:10px;font:12px system-ui,sans-serif;color:#c9d1d9;}
-.chappa-env-fact > span:first-child{min-width:140px;color:#8b949e;}
 `;
 
 let stylesInjected = false;
@@ -91,7 +94,7 @@ interface BlockRefs {
   alerts: HTMLElement;
   groups: HTMLElement;
   toggle: HTMLButtonElement;
-  facts: HTMLElement;
+  facts: SectionsBlock;
   sig: string;
 }
 
@@ -114,6 +117,7 @@ interface RowRefs {
   links: HTMLElement;
   hint: HTMLElement;
   chips: HTMLElement;
+  sections: SectionsBlock;
   actions: ActionsCell;
   sig: string;
   row: EnvRow | null;
@@ -136,10 +140,13 @@ export class EnvironmentView {
   /** A focus asked for before the row exists (the first answer pending). */
   private pendingFocus: { id: string; sourceId?: string } | null = null;
   private focusedKey: string | null = null;
+  /** The deps every part of the page uses: panels stack over this view. */
+  private readonly ui: SourceViewDeps;
 
   constructor(private readonly deps: SourceViewDeps) {
     injectStyles();
     this.frame = new ViewFrame("Environment", "environment", () => deps.onClose());
+    this.ui = withPanels(() => this.frame, deps);
   }
 
   get host(): HTMLElement {
@@ -152,6 +159,11 @@ export class EnvironmentView {
 
   setActive(active: boolean): void {
     this.frame.setActive(active);
+  }
+
+  /** Where the view's arrow returns. */
+  setBackTo(where: string): void {
+    this.frame.setBackTo(where);
   }
 
   update(input: EnvironmentViewInput): void {
@@ -179,6 +191,7 @@ export class EnvironmentView {
       return false;
     }
     this.pendingFocus = null;
+    this.frame.clearSubpages();
     if (row.notDeployed && !this.showNotDeployed.get(row.sourceId)) {
       this.showNotDeployed.set(row.sourceId, true);
       this.paint();
@@ -203,7 +216,7 @@ export class EnvironmentView {
     model.blocks.forEach((b, i) => {
       liveBlocks.add(b.sourceId);
       const refs = this.blockRefs(b.sourceId);
-      this.paintBlock(refs, b, model.blocks.length > 1);
+      this.paintBlock(refs, b, model.blocks.length > 1, `${b.sourceId}:${input.versions[b.sourceId] ?? 0}`);
       placeAt(this.frame.content, refs.el, i);
       const shown = this.showNotDeployed.get(b.sourceId) ?? false;
       let gi = 0;
@@ -253,27 +266,31 @@ export class EnvironmentView {
       this.showNotDeployed.set(sourceId, !(this.showNotDeployed.get(sourceId) ?? false));
       this.paint();
     });
-    const facts = el("div", "chappa-env-facts");
-    root.append(head, wait, banners, alerts, groups, toggle, facts);
+    const facts = new SectionsBlock(this.ui);
+    facts.el.classList.add("chappa-env-facts");
+    root.append(head, wait, banners, alerts, groups, toggle, facts.el);
     refs = { el: root, source, counts, wait, banners, alerts, groups, toggle, facts, sig: "" };
     this.blocks.set(sourceId, refs);
     return refs;
   }
 
-  private paintBlock(refs: BlockRefs, b: EnvBlock, many: boolean): void {
+  private paintBlock(refs: BlockRefs, b: EnvBlock, many: boolean, version: string): void {
+    // The view's own target: its banners' and facts' actions (no key).
+    const own: ActionTarget = { sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "environment", key: null };
+    const ctx = { sourceId: b.sourceId, target: own, version };
+    paintBanners(refs.banners, this.ui, b.banners.map((banner) => ({ banner, ctx })));
+    refs.facts.update(b.facts, ctx);
     const shown = this.showNotDeployed.get(b.sourceId) ?? false;
-    const sig = JSON.stringify([b.sourceLabel, b.hasData, b.header, b.banners, b.alerts, b.facts, b.notDeployed, shown, many]);
+    const sig = JSON.stringify([b.sourceLabel, b.hasData, b.header, b.alerts, b.notDeployed, shown, many]);
     if (sig === refs.sig) return;
     refs.sig = sig;
     refs.source.textContent = b.sourceLabel;
     refs.counts.textContent = b.header.join(" · ");
     refs.wait.textContent = b.hasData ? "" : `Waiting for the first answer from ${b.sourceLabel}.`;
-    paintBanners(refs.banners, b.banners);
     paintAlerts(refs.alerts, b.alerts);
     refs.toggle.hidden = b.notDeployed === 0;
     refs.toggle.textContent = notDeployedToggleText(b.notDeployed, shown);
     refs.toggle.setAttribute("aria-expanded", String(shown));
-    paintFacts(refs.facts, b.facts);
   }
 
   private groupRefs(key: string, id: string): GroupRefs {
@@ -319,19 +336,22 @@ export class EnvironmentView {
     const links = el("div", "chappa-env-links");
     const hint = el("div", "chappa-env-hint");
     const chips = el("div", "chappa-sv-chips");
-    const actions = new ActionsCell(this.deps);
-    root.append(top, details, cells, links, hint, chips, actions.el);
-    refs = { el: root, dot, label, kind, state, details, cells, links, hint, chips, actions, sig: "", row: null };
+    const sections = new SectionsBlock(this.ui, { collapsedByDefault: true });
+    const actions = new ActionsCell(this.ui);
+    root.append(top, details, cells, links, hint, chips, sections.el, actions.el);
+    refs = { el: root, dot, label, kind, state, details, cells, links, hint, chips, sections, actions, sig: "", row: null };
     this.rows.set(key, refs);
     return refs;
   }
 
   private paintRow(r: RowRefs, row: EnvRow, versions: Record<string, number>): void {
     r.row = row;
-    const targets: ActionTarget[] = row.hasActions
-      ? [{ sourceId: row.sourceId, sourceLabel: row.sourceLabel, view: "environment", key: row.id }]
-      : [];
-    r.actions.load(targets, targets.map((t) => `${t.sourceId}:${versions[t.sourceId] ?? 0}`).join(","));
+    const target: ActionTarget = { sourceId: row.sourceId, sourceLabel: row.sourceLabel, view: "environment", key: row.id };
+    const version = `${row.sourceId}:${versions[row.sourceId] ?? 0}`;
+    // The sections draw their own actions; the row's cell draws the rest.
+    const own = row.sections.some((s) => (s.actions ?? []).length > 0) ? row.actionIds : undefined;
+    r.actions.load(row.hasActions && own?.length !== 0 ? [target] : [], version, own);
+    r.sections.update(row.sections, { sourceId: row.sourceId, target, version });
     const sig = JSON.stringify([
       row.label, row.oneshot, row.state, row.tone, row.details, row.source, row.probe, row.links, row.hint, row.badges, row.alerts,
     ]);
@@ -390,21 +410,6 @@ export class EnvironmentView {
   }
 }
 
-function paintBanners(parent: HTMLElement, banners: EnvBanner[]): void {
-  parent.textContent = "";
-  for (const b of banners) {
-    const e = el("div", "chappa-sv-banner chappa-env-banner");
-    e.dataset.tone = b.tone;
-    e.dataset.id = b.id;
-    const title = el("div", "chappa-env-banner-title");
-    title.textContent = b.title;
-    const lines = el("div", "chappa-env-banner-lines");
-    fillLines(lines, "chappa-env-banner-line", b.lines);
-    e.append(title, lines);
-    parent.appendChild(e);
-  }
-}
-
 function paintAlerts(parent: HTMLElement, alerts: EnvAlert[]): void {
   parent.textContent = "";
   for (const a of alerts) {
@@ -413,31 +418,5 @@ function paintAlerts(parent: HTMLElement, alerts: EnvAlert[]): void {
     if (a.componentId) e.dataset.component = a.componentId;
     e.textContent = a.text;
     parent.appendChild(e);
-  }
-}
-
-// A small local renderer for `facts`; it should switch to the shared section
-// renderer once that exists.
-function paintFacts(parent: HTMLElement, facts: FactSection[]): void {
-  parent.textContent = "";
-  for (const s of facts) {
-    const sec = el("div", "chappa-env-fact-section");
-    sec.dataset.id = s.id;
-    if (s.title) {
-      const t = el("div", "chappa-env-fact-title");
-      t.textContent = s.title;
-      sec.appendChild(t);
-    }
-    for (const row of s.rows) {
-      const line = el("div", "chappa-env-fact");
-      const label = document.createElement("span");
-      label.textContent = row.label;
-      const value = document.createElement("span");
-      value.textContent = row.value;
-      line.append(label, value);
-      for (const chip of row.badges) line.appendChild(chipEl(chip));
-      sec.appendChild(line);
-    }
-    parent.appendChild(sec);
   }
 }

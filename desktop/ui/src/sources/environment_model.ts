@@ -14,7 +14,8 @@
 // of the wrong type reads as absent, an unknown state reads as a muted
 // "unknown", and unknown fields are ignored.
 
-import type { ComponentState } from "./types";
+import { readBanners, readSections } from "./sections";
+import type { Banner, ComponentState, Section } from "./types";
 import {
   oneLine,
   readBadges,
@@ -161,6 +162,11 @@ export interface EnvRow {
   badges: Chip[];
   /** Alerts that name this component. */
   alerts: EnvAlert[];
+  /** Folded in the row; their actions are the component's. */
+  sections: Section[];
+  /** The ids of the component's own actions (not its sections'). */
+  actionIds: string[];
+  /** Any action at all, its sections' included. */
   hasActions: boolean;
 }
 
@@ -168,19 +174,6 @@ export interface EnvGroup {
   id: string;
   label: string;
   rows: EnvRow[];
-}
-
-export interface FactSection {
-  id: string;
-  title: string;
-  rows: { label: string; value: string; badges: Chip[] }[];
-}
-
-export interface EnvBanner {
-  id: string;
-  tone: "info" | "warn" | "bad";
-  title: string;
-  lines: string[];
 }
 
 /** One source's stack. */
@@ -195,8 +188,10 @@ export interface EnvBlock {
   /** How many components are `not-deployed` (hidden behind the toggle). */
   notDeployed: number;
   alerts: EnvAlert[];
-  facts: FactSection[];
-  banners: EnvBanner[];
+  /** Drawn by the shared section renderer; their actions are the view's. */
+  facts: Section[];
+  /** The view-level banners; their actions are the view's own (no key). */
+  banners: Banner[];
 }
 
 export type AlertLevel = "bad" | "warn" | null;
@@ -273,34 +268,6 @@ function readAlerts(v: unknown): EnvAlert[] {
     }));
 }
 
-/** `facts` sections, read leniently: label/value rows with their badges. */
-export function readFacts(v: unknown): FactSection[] {
-  const out: FactSection[] = [];
-  list(v).forEach((raw, i) => {
-    const s = obj(raw);
-    if (!s) return;
-    const rows = [...list(s.rows), ...list(obj(s.more)?.rows)]
-      .map(obj)
-      .filter((r): r is Record<string, unknown> => r !== null && !!text(r.label))
-      .map((r) => ({ label: text(r.label), value: text(r.value), badges: chips(r.badges) }));
-    if (rows.length === 0) return;
-    out.push({ id: text(s.id) || `facts-${i}`, title: text(s.title), rows });
-  });
-  return out;
-}
-
-function readBanners(v: unknown): EnvBanner[] {
-  const out: EnvBanner[] = [];
-  list(v).forEach((raw, i) => {
-    const b = obj(raw);
-    const title = text(b?.title);
-    if (!b || !title) return;
-    const tone = b.tone === "bad" || b.tone === "info" ? b.tone : "warn";
-    out.push({ id: text(b.id) || `banner-${i}`, tone, title, lines: list(b.lines).map(text).filter(Boolean) });
-  });
-  return out;
-}
-
 const chips = (v: unknown): Chip[] => readBadges(v).map((b) => ({ text: b.text, tone: (b.tone ?? "info") as Tone, ...(b.title ? { title: b.title } : {}) }));
 
 const plural = (k: number, one: string, many = `${one}s`): string => `${k} ${k === 1 ? one : many}`;
@@ -324,6 +291,8 @@ export function readComponent(raw: unknown, sourceId: string, sourceLabel: strin
   const state = text(c.state) || "unknown";
   const info = stateInfo(state);
   const kindOneshot = c.kind === "oneshot" || state === "oneshot-ok" || state === "oneshot-failed";
+  const sections = readSections(c.sections);
+  const actionIds = list(c.actions).map((a) => str(obj(a)?.id)).filter((a): a is string => !!a);
   return {
     id,
     key: `${sourceId}|${id}`,
@@ -345,7 +314,9 @@ export function readComponent(raw: unknown, sourceId: string, sourceLabel: strin
     hint: text(c.hint),
     badges: chips(c.badges),
     alerts: alerts.filter((a) => a.componentId === id),
-    hasActions: list(c.actions).length > 0,
+    sections,
+    actionIds,
+    hasActions: actionIds.length > 0 || sections.some((s) => (s.actions ?? []).length > 0),
   };
 }
 
@@ -410,7 +381,7 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
       groups: groups.filter((g) => g.rows.length > 0),
       notDeployed: rows.filter((r) => r.notDeployed).length,
       alerts,
-      facts: readFacts(body.facts),
+      facts: readSections(body.facts),
       banners: readBanners(body.banners),
     },
     skipped,

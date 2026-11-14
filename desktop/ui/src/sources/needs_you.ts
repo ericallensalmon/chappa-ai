@@ -57,7 +57,8 @@ export interface ActionTarget {
   sourceId: string;
   sourceLabel: string;
   view: string;
-  key: string;
+  /** The item's key; null for the view's (or page's) own actions. */
+  key: string | null;
 }
 
 /** Where an attention item's title leads. */
@@ -243,7 +244,9 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
       actions: r.origins
         .filter((o) => o.hasActions)
         .map((o) => ({ sourceId: o.sourceId, sourceLabel: o.sourceLabel, view: "prs", key: o.key })),
-      opens: r.url ? { url: r.url } : null,
+      // The PRs view shows it with its reasons and chips; that view is in
+      // the rail whenever a PR row is here (a hidden view feeds no rows).
+      opens: { view: "prs", key: r.primary.key },
     });
     const rows = [...yes.map((r) => prRow(r, false)), ...folded.map((r) => prRow(r, true))];
     if (rows.length) sections.push({ id: "prs", title: "Pull requests", rows });

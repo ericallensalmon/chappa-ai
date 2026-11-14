@@ -22,6 +22,14 @@
       "probe": { "url": "https://dev.example.test/api/health", "rule": "health", "up": true, "status": 200 },
       "hint": "Serving from your working copy",
       "badges": [{ "text": "dev", "tone": "info" }],
+      "sections": [
+        {
+          "id": "config",
+          "title": "Configuration",
+          "rows": [{ "label": "Port", "value": "8080" }, { "label": "Profile", "value": "dev" }],
+          "more": { "label": "Show all", "rows": [{ "label": "Log level", "value": "debug" }] }
+        }
+      ],
       "actions": [{ "kind": "endpoint", "id": "ping", "label": "Ping", "mutates": false }]
     },
     {
@@ -69,7 +77,8 @@
       "rows": [
         { "label": "Node", "value": "22" },
         { "label": "Memory", "value": "6.1 GiB free" }
-      ]
+      ],
+      "more": { "label": "Show disks", "rows": [{ "label": "Disk", "value": "40 GiB free" }] }
     }
   ],
   "alerts": [
@@ -78,6 +87,9 @@
     { "text": "Disk is 85 percent full", "severity": "warn" }
   ],
   "banners": [
-    { "id": "stale-images", "tone": "warn", "title": "Images are out of date", "lines": ["Pull to update"] }
+    {
+      "id": "stale-images", "tone": "warn", "title": "Images are out of date", "lines": ["Pull to update"],
+      "actions": [{ "kind": "endpoint", "id": "check-images", "label": "Check again", "mutates": false }]
+    }
   ]
 }

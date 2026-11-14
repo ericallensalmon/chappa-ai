@@ -1,16 +1,20 @@
 // The Needs you page: everything that waits on the user, across terminals,
 // agents and sources, one section per kind (source attention under each
 // item's own heading). Built like the dashboard: repainted from a plain
-// model, rows keyed by id, only changed rows touched.
+// model, rows keyed by id, only changed rows touched. A `panel` action
+// opens the source's drill-in page over the view; a row that opens another
+// view drills into it (its arrow comes back here).
 
 import type { NeedsYouModel, NeedsYouRow, NeedsYouSection, Opens } from "./needs_you";
+import { withPanels } from "./panel_view";
 import { ActionsCell, ViewFrame, openChecked, placeAt, truncate, type SourceViewDeps } from "./view_common";
 
 export interface NeedsYouViewDeps extends SourceViewDeps {
   /** Front the terminal / agent / command row behind a terminal key. */
   selectTerminal(key: string): void;
-  /** Open another view at an item; false when that view is not available. */
-  openView(view: string, key: string): boolean;
+  /** Open another view at an item of `sourceId` (when the row has one);
+   *  false when that view is not available. */
+  openView(view: string, key: string, sourceId?: string): boolean;
 }
 
 export interface NeedsYouViewInput {
@@ -59,9 +63,12 @@ export class NeedsYouView {
   private readonly rows = new Map<string, RowRefs>();
   private readonly unfolded = new Set<string>();
   private input: NeedsYouViewInput | null = null;
+  /** The deps every part of the page uses: panels stack over this view. */
+  private readonly ui: NeedsYouViewDeps;
 
   constructor(private readonly deps: NeedsYouViewDeps) {
     this.frame = new ViewFrame("Needs you", "attention", () => deps.onClose());
+    this.ui = withPanels(() => this.frame, deps);
   }
 
   get host(): HTMLElement {
@@ -74,6 +81,11 @@ export class NeedsYouView {
 
   setActive(active: boolean): void {
     this.frame.setActive(active);
+  }
+
+  /** Where the view's arrow returns. */
+  setBackTo(where: string): void {
+    this.frame.setBackTo(where);
   }
 
   update(input: NeedsYouViewInput): void {
@@ -170,7 +182,7 @@ export class NeedsYouView {
     top.appendChild(title);
     const detail = document.createElement("div");
     detail.className = "chappa-sv-detail";
-    const actions = new ActionsCell(this.deps);
+    const actions = new ActionsCell(this.ui);
     el.append(top, detail, actions.el);
     const r: RowRefs = { el, title, detail, actions, sig: "", row: null };
     title.addEventListener("mousedown", (e) => e.preventDefault());
@@ -192,7 +204,7 @@ export class NeedsYouView {
       openChecked(this.deps, row.sourceId, o.url);
       return;
     }
-    if (!this.deps.openView(o.view, o.key)) this.deps.say(`No ${o.view} view is available to show ${o.key}.`, "error");
+    if (!this.deps.openView(o.view, o.key, row.sourceId)) this.deps.say(`No ${o.view} view is available to show ${o.key}.`, "error");
   }
 
   private paintRow(r: RowRefs, row: NeedsYouRow, versions: Record<string, number>): void {
