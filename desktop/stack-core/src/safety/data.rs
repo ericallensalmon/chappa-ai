@@ -931,14 +931,25 @@ pub struct DataVerdict {
 }
 
 impl DataVerdict {
-    /// What an acknowledgement of this verdict must cover: every finding's
-    /// [`Finding::key`], a `marker:` / `sample:` entry for a marker or
-    /// sample problem, and the rules hash. Empty when clean.
+    /// What an acknowledgement of this verdict is tied to: every finding's
+    /// [`Finding::key`] with its count (`rule@table.column#count`), a
+    /// `marker:` / `sample:` entry for a marker or sample problem, and the
+    /// rules hash. Sorted, no repeats. Empty when clean.
+    ///
+    /// Counts are part of the key because a different count is different
+    /// data: a restore of real data can add matches to a column that held a
+    /// few known fixtures, and it can just as well replace them with fewer
+    /// matches that are all real. Neither direction is safe to wave through
+    /// on an earlier decision.
     pub fn ack_keys(&self) -> Vec<String> {
         if self.clean {
             return Vec::new();
         }
-        let mut keys: Vec<String> = self.findings.iter().map(Finding::key).collect();
+        let mut keys: Vec<String> = self
+            .findings
+            .iter()
+            .map(|f| format!("{}#{}", f.key(), f.count))
+            .collect();
         if let MarkerVerdict::Unscrubbed { reason, .. } = &self.marker {
             let r = match reason {
                 UnscrubbedReason::Missing => "missing",
@@ -954,6 +965,8 @@ impl DataVerdict {
             "rules:{}",
             self.rules_hash.as_deref().unwrap_or("none")
         ));
+        keys.sort();
+        keys.dedup();
         keys
     }
 }
@@ -1105,8 +1118,8 @@ pub fn enforcement(
 }
 
 /// Record an acknowledgement of `verdict` (the UI confirms first). It covers
-/// the verdict's [`DataVerdict::ack_keys`], so it is tied to these findings,
-/// this marker state and these rules.
+/// the verdict's [`DataVerdict::ack_keys`], so it is tied to these findings
+/// at these exact counts, this marker state and these rules.
 pub fn acknowledge(verdict: &DataVerdict, who: &str, why: &str, at_utc: &str) -> Acknowledgement {
     Acknowledgement {
         who: who.into(),
@@ -1116,17 +1129,29 @@ pub fn acknowledge(verdict: &DataVerdict, who: &str, why: &str, at_utc: &str) ->
     }
 }
 
-/// Whether `ack` covers everything `verdict` would block on.
+/// Whether `ack` was given for exactly this verdict, so it lifts the block.
+/// The covered keys must equal the verdict's [`DataVerdict::ack_keys`]: a
+/// key the ack lacks (a new finding, a changed count, a marker or rules
+/// change) and a key the verdict lacks (a vanished finding) both mean the
+/// data is not what was looked at. A clean verdict has nothing to clear.
 pub fn ack_clears(ack: &Acknowledgement, verdict: &DataVerdict) -> bool {
-    verdict.ack_keys().iter().all(|k| ack.covers.contains(k))
+    if verdict.clean {
+        return true;
+    }
+    let mut covers = ack.covers.clone();
+    covers.sort();
+    covers.dedup();
+    covers == verdict.ack_keys()
 }
 
 /// Whether an acknowledgement stays on record after a rescan produced
-/// `next`. It lasts until the next scan that differs from what was
-/// acknowledged: a clean rescan ends it (a later problem needs a fresh
-/// look), and so does any new finding, a marker change or a rules change.
-/// A rescan that reports only what was acknowledged keeps it, so a
-/// periodic check does not re-raise a decision already made.
+/// `next`. It holds only while the rescan reports exactly what was
+/// acknowledged: the same findings at the same counts, the same marker and
+/// sample state, the same rules. Any count change, up or down, ends it, as
+/// does a finding added or gone, a marker change or a rules change; a
+/// clean rescan ends it too (a later problem needs a fresh look). A
+/// periodic check that finds the data unchanged keeps it, so a decision
+/// already made is not re-raised.
 pub fn ack_survives(ack: &Acknowledgement, next: &DataVerdict) -> bool {
     !next.clean && ack_clears(ack, next)
 }

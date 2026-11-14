@@ -179,8 +179,10 @@ impl Finding {
     }
 }
 
-/// A recorded "I know, carry on" for a set of findings. Lasts until the
-/// next scan produces a finding outside `covers`.
+/// A recorded "I know, carry on" for a set of findings. By [`Self::clears`]
+/// it lasts until a scan produces a finding outside `covers`; data safety
+/// ties it tighter, to the exact findings and counts acknowledged (see
+/// `data::ack_clears`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Acknowledgement {

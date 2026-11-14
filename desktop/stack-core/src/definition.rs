@@ -1200,6 +1200,8 @@ pub enum Rule {
     SourceModeNeedsRegistry,
     AnonymousPersistenceVolume,
     UnscannedPersistentComponent,
+    /// A component samples its data but the stack names no rules file.
+    SampleWithoutRules,
     WorkDirNotIgnored,
     StateDirNotIgnored,
     PortLayout,
@@ -1672,6 +1674,21 @@ fn validate_stack(
                         .into(),
                 );
             }
+        }
+        // Sampled rows are only checked against the stack's rules file, so a
+        // hook that prints rows with no rules to read them checks nothing.
+        let has_rules = stack
+            .data_safety
+            .as_ref()
+            .is_some_and(|d| d.rules.is_some());
+        if !has_rules && c.data_safety.as_ref().is_some_and(|d| d.sample.is_some()) {
+            warn(
+                Rule::SampleWithoutRules,
+                format!("{cpath}.dataSafety.sample"),
+                format!(
+                    "{name} has a sample check but no data-safety rules; its sample is not checked unless the hook reports findings itself"
+                ),
+            );
         }
         if let Some(d) = &c.data {
             if d.strategy == DataStrategy::Snapshot && c.persistence.is_none() {
@@ -2203,6 +2220,47 @@ stacks:
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].severity, Severity::Warning);
         assert_eq!(w[0].path, "stacks.app.components.db.dataSafety");
+    }
+
+    #[test]
+    fn sample_hook_without_rules_warns() {
+        // the example has a sample hook and a rules file: no warning
+        let doc = example();
+        let diags = validate(&doc, &ValidationContext::default());
+        assert!(by_rule(&diags, Rule::SampleWithoutRules).is_empty());
+
+        let mut no_rules_file = example();
+        no_rules_file.stacks["app"]
+            .data_safety
+            .as_mut()
+            .unwrap()
+            .rules = None;
+        let mut no_data_safety = example();
+        no_data_safety.stacks["app"].data_safety = None;
+        for doc in [no_rules_file, no_data_safety] {
+            let diags = validate(&doc, &ValidationContext::default());
+            let w = by_rule(&diags, Rule::SampleWithoutRules);
+            assert_eq!(w.len(), 1, "{diags:#?}");
+            assert_eq!(w[0].severity, Severity::Warning);
+            assert_eq!(w[0].path, "stacks.app.components.db.dataSafety.sample");
+            assert_eq!(
+                w[0].message,
+                "db has a sample check but no data-safety rules; its sample is not checked \
+                 unless the hook reports findings itself"
+            );
+        }
+
+        // a marker-only component has nothing for rules to read
+        let mut marker_only = example();
+        marker_only.stacks["app"].data_safety = None;
+        marker_only.stacks["app"].components["db"]
+            .data_safety
+            .as_mut()
+            .unwrap()
+            .sample = None;
+        let diags = validate(&marker_only, &ValidationContext::default());
+        assert!(by_rule(&diags, Rule::SampleWithoutRules).is_empty());
+        assert!(by_rule(&diags, Rule::UnscannedPersistentComponent).is_empty());
     }
 
     #[test]

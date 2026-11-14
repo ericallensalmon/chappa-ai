@@ -1163,30 +1163,59 @@ fn enforcement_follows_the_policy_table() {
 }
 
 #[test]
-fn acknowledgements_are_tied_to_findings_marker_and_rules() {
+fn acknowledgements_are_tied_to_exact_findings_counts_marker_and_rules() {
     let f1 = hook_finding("email", "customers", "email", 2, Severity::Bad);
     let f2 = hook_finding("phone", "customers", "phone", 9, Severity::Warn);
-    let base = verdict_with(vec![f1.clone()], MarkerVerdict::NotDefined, "h1");
+    let base = verdict_with(
+        vec![f1.clone(), f2.clone()],
+        MarkerVerdict::NotDefined,
+        "h1",
+    );
     let ack = acknowledge(&base, "Alex", "seeded fixtures", "2026-01-01T00:00:00Z");
     assert_eq!(ack.who, "Alex");
     assert_eq!(
         ack.covers,
-        vec!["email@customers.email".to_string(), "rules:h1".to_string()]
+        vec![
+            "email@customers.email#2".to_string(),
+            "phone@customers.phone#9".to_string(),
+            "rules:h1".to_string()
+        ]
     );
     assert!(ack_clears(&ack, &base));
 
-    let more_of_the_same = verdict_with(
-        vec![Finding {
-            count: 40,
-            ..f1.clone()
-        }],
+    let with_count = |n: u32| Finding {
+        count: n,
+        ..f1.clone()
+    };
+    let same_counts_reordered = verdict_with(
+        vec![f2.clone(), f1.clone()],
         MarkerVerdict::NotDefined,
         "h1",
     );
-    let new_finding = verdict_with(vec![f1.clone(), f2], MarkerVerdict::NotDefined, "h1");
-    let new_rules = verdict_with(vec![f1.clone()], MarkerVerdict::NotDefined, "h2");
+    let count_up = verdict_with(
+        vec![with_count(40), f2.clone()],
+        MarkerVerdict::NotDefined,
+        "h1",
+    );
+    let count_down = verdict_with(
+        vec![with_count(1), f2.clone()],
+        MarkerVerdict::NotDefined,
+        "h1",
+    );
+    let f3 = hook_finding("iban", "payments", "account", 1, Severity::Bad);
+    let finding_added = verdict_with(
+        vec![f1.clone(), f2.clone(), f3],
+        MarkerVerdict::NotDefined,
+        "h1",
+    );
+    let finding_removed = verdict_with(vec![f1.clone()], MarkerVerdict::NotDefined, "h1");
+    let new_rules = verdict_with(
+        vec![f1.clone(), f2.clone()],
+        MarkerVerdict::NotDefined,
+        "h2",
+    );
     let marker_now_missing = verdict_with(
-        vec![f1.clone()],
+        vec![f1.clone(), f2.clone()],
         MarkerVerdict::Unscrubbed {
             reason: UnscrubbedReason::Missing,
             version: None,
@@ -1197,15 +1226,56 @@ fn acknowledgements_are_tied_to_findings_marker_and_rules() {
     let clean = verdict_with(vec![], MarkerVerdict::NotDefined, "h1");
     let cases: &[(&DataVerdict, bool, &str)] = &[
         (&base, true, "the same verdict again"),
-        (&more_of_the_same, true, "a count change at the same place"),
-        (&new_finding, false, "a new finding"),
+        (
+            &same_counts_reordered,
+            true,
+            "the same counts in another order",
+        ),
+        (&count_up, false, "a count going up"),
+        (&count_down, false, "a count going down"),
+        (&finding_added, false, "a finding added"),
+        (&finding_removed, false, "a finding gone"),
         (&new_rules, false, "a rules change"),
         (&marker_now_missing, false, "a marker change"),
         (&clean, false, "a clean rescan ends it"),
     ];
     for (next, survives, why) in cases {
         assert_eq!(ack_survives(&ack, next), *survives, "{why}");
+        // the block lifts on exactly the same verdicts the ack survives
+        if !next.clean {
+            assert_eq!(ack_clears(&ack, next), *survives, "{why}");
+            let e = enforcement(None, Some(next), Some(&ack));
+            let lifted = e.cause == EnforcementCause::Acknowledged;
+            assert_eq!(lifted, *survives, "{why}");
+        }
     }
+
+    // a marker that was acknowledged as unscrubbed, then changes reason
+    let unscrubbed = |reason| {
+        verdict_with(
+            vec![],
+            MarkerVerdict::Unscrubbed {
+                reason,
+                version: None,
+                at: None,
+            },
+            "h1",
+        )
+    };
+    let marker_ack = acknowledge(
+        &unscrubbed(UnscrubbedReason::Missing),
+        "Alex",
+        "known",
+        "2026-01-01T00:00:00Z",
+    );
+    assert!(ack_survives(
+        &marker_ack,
+        &unscrubbed(UnscrubbedReason::Missing)
+    ));
+    assert!(!ack_survives(
+        &marker_ack,
+        &unscrubbed(UnscrubbedReason::NotScrubbed)
+    ));
     // a clean verdict needs nothing cleared
     assert!(clean.ack_keys().is_empty());
     assert!(ack_clears(&ack, &clean));
@@ -1221,7 +1291,7 @@ fn acknowledgements_are_tied_to_findings_marker_and_rules() {
         scanned_values: 0,
         truncated_values: 0,
     };
-    assert_eq!(refused.ack_keys(), vec!["sample:refused", "rules:none"]);
+    assert_eq!(refused.ack_keys(), vec!["rules:none", "sample:refused"]);
 }
 
 // --------------------------------------------------------------- starter
