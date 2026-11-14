@@ -44,7 +44,9 @@ use crate::compose::{
     self, actual_from, parse_inspect, parse_ps, parse_utc, uptime_text, ComposeProject, Gateway,
     GatewayResolver, InspectEntry, OverrideError, OverrideInputs, PsEntry,
 };
-use crate::definition::{ComponentKind, DriverKind, EngineRef, Mode, ModeDef, StackDef};
+use crate::definition::{
+    ComponentKind, ContainerOs, DriverKind, EngineRef, Mode, ModeDef, StackDef,
+};
 use crate::driver::{
     checks_for, checks_for_plan, component_state, run_checks, Actual, CheckResult, Checker,
     ComponentStatus, EngineKind, ResolveError, ResolvedInstance,
@@ -893,12 +895,29 @@ impl<'a> StackRunner<'a> {
 
     // ------------------------------------------------------------- status
 
-    /// The report per component, probes included.
+    /// The report per component, probes included. The `newer prebuilt`
+    /// check asks the registry in place; see [`StackRunner::status_with`]
+    /// for a report that never waits on one.
     pub fn status(
         &self,
         inst: &ResolvedInstance,
         obs: &Observation,
         http: &dyn ProbeHttp,
+    ) -> Vec<ComponentReport> {
+        self.status_with(inst, obs, http, &LiveDigests(self.cli))
+    }
+
+    /// [`StackRunner::status`] with the channel digests coming from
+    /// `digests`. A registry round trip can take many seconds per image, so
+    /// a host that answers status often hands in a cache it refreshes off
+    /// the hot path; a digest it does not know yet means no staleness badge
+    /// yet, never a wait.
+    pub fn status_with(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        http: &dyn ProbeHttp,
+        digests: &dyn PrebuiltDigests,
     ) -> Vec<ComponentReport> {
         let projects = self.projects(inst);
         let now = self.now_secs();
@@ -933,7 +952,7 @@ impl<'a> StackRunner<'a> {
                         }
                     }
                     Mode::Prebuilt => {
-                        if let Some(s) = self.newer_prebuilt(inst, obs, name, p) {
+                        if let Some(s) = self.newer_prebuilt(inst, obs, name, p, digests) {
                             stale.push(s);
                         }
                     }
@@ -995,15 +1014,51 @@ impl<'a> StackRunner<'a> {
         obs: &Observation,
         component: &str,
         prov: &Provenance,
+        digests: &dyn PrebuiltDigests,
     ) -> Option<Staleness> {
+        let lookup = self.channel_lookup(inst, obs, component)?;
+        let now = digests.current_digest(&lookup.engine, &lookup.reference, lookup.os)?;
+        prebuilt_staleness(prov, &now)
+    }
+
+    /// The channel reference a prebuilt component tracks (`repo:<tag>` with
+    /// the intent's channel), when it has one.
+    fn channel_lookup(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        component: &str,
+    ) -> Option<ChannelLookup> {
         let mode = self.mode_def(component, Mode::Prebuilt).ok()?;
         let channel = obs.intent.components.get(component)?.channel.as_deref();
         let tag = resolve_tag(mode, channel).ok()?;
         let reference = tagged_reference(mode.image.as_deref()?, &tag);
-        let c = &inst.components[component];
-        let os = self.stack.os_for_engine(&c.engine.name);
-        let now = resolve_digest(self.cli, &c.engine, &reference, os).ok()??;
-        prebuilt_staleness(prov, &now)
+        let c = inst.components.get(component)?;
+        Some(ChannelLookup {
+            component: component.to_string(),
+            engine: c.engine.clone(),
+            reference,
+            os: self.stack.os_for_engine(&c.engine.name),
+        })
+    }
+
+    /// Every channel reference the `newer prebuilt` check would ask about
+    /// for this observation: what a cache refreshes in the background.
+    pub fn channel_lookups(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+    ) -> Vec<ChannelLookup> {
+        inst.components
+            .keys()
+            .filter(|name| {
+                obs.cache
+                    .components
+                    .get(*name)
+                    .is_some_and(|p| p.mode == Mode::Prebuilt)
+            })
+            .filter_map(|name| self.channel_lookup(inst, obs, name))
+            .collect()
     }
 
     // ------------------------------------------------------------- checks
@@ -1254,6 +1309,41 @@ impl<'a> StackRunner<'a> {
         ))?;
         Ok(parse_container_images(&out.stdout))
     }
+}
+
+/// Where the `newer prebuilt` check gets the digest a channel resolves to
+/// right now.
+pub trait PrebuiltDigests {
+    /// `None` when unknown: the check is skipped, never failed.
+    fn current_digest(
+        &self,
+        engine: &EngineRef,
+        reference: &str,
+        os: Option<ContainerOs>,
+    ) -> Option<String>;
+}
+
+/// Ask the registry in place, through the engine CLI.
+pub struct LiveDigests<'a>(pub &'a dyn EngineCli);
+
+impl PrebuiltDigests for LiveDigests<'_> {
+    fn current_digest(
+        &self,
+        engine: &EngineRef,
+        reference: &str,
+        os: Option<ContainerOs>,
+    ) -> Option<String> {
+        resolve_digest(self.0, engine, reference, os).ok()?
+    }
+}
+
+/// One channel reference to resolve: which component, on which engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelLookup {
+    pub component: String,
+    pub engine: EngineRef,
+    pub reference: String,
+    pub os: Option<ContainerOs>,
 }
 
 /// `repo:tag` → (tag, None); `repo@sha256:…` → (None, digest).

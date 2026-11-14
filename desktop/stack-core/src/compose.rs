@@ -211,8 +211,19 @@ impl ComposeProject {
     }
 
     /// `ps -a --format json`: every container of the project, running or not.
+    /// `ps` names the override file only once it exists: before the first
+    /// `up` there is none, and compose refuses a missing `-f` file instead
+    /// of reporting an empty project.
     pub fn ps(&self) -> Invocation {
-        Invocation::from_argv(&self.argv(&["ps", "-a", "--format", "json"]))
+        let mut files = self.files.clone();
+        if self.override_path.exists() {
+            files.push(self.override_path.clone());
+        }
+        let args: Vec<String> = ["ps", "-a", "--format", "json"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        Invocation::from_argv(&compose_argv(&self.engine, &self.project, &files, &args))
     }
 
     /// `inspect` of named containers, through the engine itself.
@@ -1125,7 +1136,14 @@ volumes:
         );
         assert_eq!(core.down(false), join(&["down"]));
         assert_eq!(core.down(true), join(&["down", "--volumes"]));
-        assert_eq!(core.ps().argv(), join(&["ps", "-a", "--format", "json"]));
+        // No override file on disk yet: `ps` leaves it out.
+        let before_up: Vec<String> = prefix[..prefix.len() - 2]
+            .iter()
+            .chain(["ps", "-a", "--format", "json"].iter())
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!core.override_path.exists());
+        assert_eq!(core.ps().argv(), before_up);
         assert_eq!(
             core.inspect(&["app-1-core-postgres-1".into()]).argv(),
             [

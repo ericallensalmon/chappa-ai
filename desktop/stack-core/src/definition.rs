@@ -146,8 +146,44 @@ pub struct StackDef {
     pub ttl_hours: Option<u32>,
     #[serde(default)]
     pub auto_destroy: bool,
+    /// How long job records under `.work/jobs/` are kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<JobsDef>,
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// Job-record retention. A record is kept while it is younger than
+/// `keepDays` OR among the newest `keepCount`, whichever keeps more; one a
+/// saved state refers to is never pruned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobsDef {
+    #[serde(default = "default_jobs_keep_days")]
+    pub keep_days: u32,
+    #[serde(default = "default_jobs_keep_count")]
+    pub keep_count: u32,
+}
+
+/// Default job-record age kept, in days.
+pub const DEFAULT_JOBS_KEEP_DAYS: u32 = 90;
+/// Default number of newest job records kept regardless of age.
+pub const DEFAULT_JOBS_KEEP_COUNT: u32 = 500;
+
+fn default_jobs_keep_days() -> u32 {
+    DEFAULT_JOBS_KEEP_DAYS
+}
+fn default_jobs_keep_count() -> u32 {
+    DEFAULT_JOBS_KEEP_COUNT
+}
+
+impl Default for JobsDef {
+    fn default() -> Self {
+        Self {
+            keep_days: DEFAULT_JOBS_KEEP_DAYS,
+            keep_count: DEFAULT_JOBS_KEEP_COUNT,
+        }
+    }
 }
 
 impl Default for StackDef {
@@ -172,6 +208,7 @@ impl Default for StackDef {
             stop: None,
             ttl_hours: None,
             auto_destroy: false,
+            jobs: None,
             unknown: IndexMap::new(),
         }
     }

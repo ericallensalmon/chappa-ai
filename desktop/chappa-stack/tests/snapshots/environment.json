@@ -1,0 +1,737 @@
+{
+  "alerts": [
+    {
+      "componentId": "search",
+      "severity": "bad",
+      "text": "search is unhealthy: http://dev.example.test:15002/health: HTTP 503 fails the health rule"
+    },
+    {
+      "componentId": "worker",
+      "severity": "bad",
+      "text": "worker is in a crash loop: restarted 4 times; its logs say why"
+    },
+    {
+      "componentId": "mailer",
+      "severity": "bad",
+      "text": "mailer is deployed but not running: wanted running, but it exited with code 137; start it, or stop it through the stack"
+    },
+    {
+      "componentId": "seed",
+      "severity": "bad",
+      "text": "seed failed: exited with code 2"
+    }
+  ],
+  "banners": [
+    {
+      "id": "definition-warnings",
+      "lines": [
+        "warning at stacks.env.components.db.dataSafety: persistent component has no data-safety check; its data counts as sensitive"
+      ],
+      "title": "The stack definition has 1 warning(s)",
+      "tone": "warn"
+    }
+  ],
+  "components": [
+    {
+      "actions": [
+        {
+          "confirm": "Stop api.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Restart api (stop with a 10 s grace, then start).",
+          "id": "restart",
+          "kind": "endpoint",
+          "label": "Restart",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull api (registry.example/api:main); recreate api (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-app-api-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        },
+        {
+          "id": "open-url",
+          "kind": "link",
+          "label": "Open api",
+          "url": "http://dev.example.test:15000"
+        },
+        {
+          "id": "open-docs",
+          "kind": "link",
+          "label": "api: docs",
+          "url": "http://dev.example.test:15000/docs"
+        }
+      ],
+      "badges": [
+        {
+          "text": "newer prebuilt",
+          "title": "newer prebuilt (sha256:1 → sha256:2). Rebuild pulls the newer image.",
+          "tone": "warn"
+        }
+      ],
+      "exitCode": null,
+      "group": "app",
+      "id": "api",
+      "kind": "service",
+      "label": "api",
+      "links": [
+        {
+          "browser": true,
+          "label": "Open",
+          "url": "http://dev.example.test:15000"
+        },
+        {
+          "label": "docs",
+          "url": "http://dev.example.test:15000/docs"
+        }
+      ],
+      "probe": {
+        "rule": "health",
+        "status": 200,
+        "up": true,
+        "url": "http://dev.example.test:15000/health"
+      },
+      "restarts": 0,
+      "source": {
+        "buildId": "main",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "mode": "prebuilt",
+        "ref": "registry.example/api:main",
+        "stale": [
+          "newer prebuilt (sha256:1 → sha256:2)"
+        ]
+      },
+      "state": "up",
+      "uptime": "<uptime>"
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Stop web.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "/opt/chappa/chappa-stack",
+            "follow",
+            "<project>/.work/instances/env-0/logs/web.log"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        },
+        {
+          "id": "open-url",
+          "kind": "link",
+          "label": "Open web",
+          "url": "http://dev.example.test:15001"
+        }
+      ],
+      "exitCode": null,
+      "group": "app",
+      "id": "web",
+      "kind": "service",
+      "label": "web",
+      "links": [
+        {
+          "browser": true,
+          "label": "Open",
+          "url": "http://dev.example.test:15001"
+        }
+      ],
+      "probe": {
+        "rule": "web",
+        "status": 302,
+        "up": true,
+        "url": "http://dev.example.test:15001/"
+      },
+      "restarts": 0,
+      "source": {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "mode": "dev",
+        "ref": "main"
+      },
+      "state": "up",
+      "uptime": "<uptime>"
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull search (registry.example/search:1).",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Stop search.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Restart search (stop with a 10 s grace, then start).",
+          "id": "restart",
+          "kind": "endpoint",
+          "label": "Restart",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull search (registry.example/search:1); recreate search (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-app-search-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "exitCode": null,
+      "group": "app",
+      "hint": "http://dev.example.test:15002/health: HTTP 503 fails the health rule",
+      "id": "search",
+      "kind": "service",
+      "label": "search",
+      "probe": {
+        "rule": "health",
+        "status": 503,
+        "up": false,
+        "url": "http://dev.example.test:15002/health"
+      },
+      "restarts": 0,
+      "source": null,
+      "state": "unhealthy",
+      "uptime": "<uptime>"
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull worker (registry.example/worker:1); start worker.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Worker was already stopped; recorded as stopped.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull worker (registry.example/worker:1); recreate worker (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-app-worker-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "exitCode": 0,
+      "group": "app",
+      "hint": "restarted 4 times; its logs say why",
+      "id": "worker",
+      "kind": "service",
+      "label": "worker",
+      "restarts": 4,
+      "source": null,
+      "state": "crashloop",
+      "uptime": null
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull cache (registry.example/cache:7); start cache.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull cache (registry.example/cache:7); recreate cache (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-data-cache-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "exitCode": 0,
+      "group": "data",
+      "id": "cache",
+      "kind": "service",
+      "label": "cache",
+      "restarts": 0,
+      "source": null,
+      "state": "stopped-idle",
+      "uptime": null
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Stop db.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Restart db (stop with a 10 s grace, then start).",
+          "id": "restart",
+          "kind": "endpoint",
+          "label": "Restart",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull db (postgres:16); recreate db (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-data-db-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "badges": [
+        {
+          "text": "no data-safety check",
+          "title": "This component keeps data and nothing checks that data is scrubbed; it counts as sensitive.",
+          "tone": "warn"
+        }
+      ],
+      "exitCode": null,
+      "group": "data",
+      "hint": "waiting for its healthcheck",
+      "id": "db",
+      "kind": "service",
+      "label": "db",
+      "restarts": 0,
+      "source": {
+        "buildId": "16",
+        "commit": null,
+        "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "mode": "prebuilt",
+        "ref": "postgres:16"
+      },
+      "state": "starting",
+      "uptime": "<uptime>"
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull mailer (registry.example/mailer:1); start mailer.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Mailer was already stopped; recorded as stopped.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull mailer (registry.example/mailer:1); recreate mailer (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-app-mailer-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "exitCode": 137,
+      "group": "app",
+      "hint": "wanted running, but it exited with code 137; start it, or stop it through the stack",
+      "id": "mailer",
+      "kind": "service",
+      "label": "mailer",
+      "restarts": 0,
+      "source": null,
+      "state": "stopped-problem",
+      "uptime": null
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull migrate (postgres:16). Migrate already ran to completion.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull migrate (postgres:16); recreate migrate (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-jobs-migrate-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "exitCode": 0,
+      "group": "jobs",
+      "id": "migrate",
+      "kind": "oneshot",
+      "label": "migrate",
+      "restarts": 0,
+      "source": null,
+      "state": "oneshot-ok",
+      "uptime": null
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull seed (postgres:16); start seed.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Seed was already stopped; recorded as stopped.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull seed (postgres:16); recreate seed (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "command": [
+            "docker",
+            "logs",
+            "-f",
+            "env-0-jobs-seed-1"
+          ],
+          "cwd": "<project>",
+          "id": "logs",
+          "kind": "terminal",
+          "label": "Logs"
+        }
+      ],
+      "exitCode": 2,
+      "group": "jobs",
+      "hint": "exited with code 2",
+      "id": "seed",
+      "kind": "oneshot",
+      "label": "seed",
+      "restarts": 0,
+      "source": null,
+      "state": "oneshot-failed",
+      "uptime": null
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Pull docs (registry.example/docs:1); start docs.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        }
+      ],
+      "exitCode": null,
+      "group": "app",
+      "id": "docs",
+      "kind": "service",
+      "label": "docs",
+      "restarts": null,
+      "source": null,
+      "state": "not-deployed",
+      "uptime": null
+    }
+  ],
+  "facts": [
+    {
+      "actions": [
+        {
+          "confirm": "Pull search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); start worker, cache, mailer, seed. Migrate already ran to completion.",
+          "id": "up",
+          "kind": "endpoint",
+          "label": "Bring up",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Start worker, mailer, seed. Migrate already ran to completion.",
+          "id": "start",
+          "kind": "endpoint",
+          "label": "Start (after a reboot)",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Stop db, search, web, api. Seed was already stopped; recorded as stopped. Mailer was already stopped; recorded as stopped. Worker was already stopped; recorded as stopped.",
+          "id": "stop",
+          "kind": "endpoint",
+          "label": "Stop",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Stop db, search, web, api; remove seed, migrate, mailer, db, cache, worker, search, web, api. Containers are removed; volumes are kept.",
+          "id": "down",
+          "kind": "endpoint",
+          "label": "Down",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Pull api (registry.example/api:main), search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), db (postgres:16), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); recreate api (rebuilt), search (rebuilt), worker (rebuilt), cache (rebuilt), db (rebuilt), mailer (rebuilt), migrate (rebuilt), seed (rebuilt).",
+          "id": "rebuild",
+          "kind": "endpoint",
+          "label": "Rebuild all",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
+          "confirm": "Remove images that no running instance, kept state or pinned channel uses, and prune the build cache on docker. The job lists every image before it removes anything.",
+          "id": "gc",
+          "kind": "endpoint",
+          "label": "Clean up images",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        }
+      ],
+      "id": "stack",
+      "rows": [
+        {
+          "label": "Instance",
+          "value": "env-0"
+        },
+        {
+          "label": "Slot",
+          "value": "0 of 2 · ports 15000–15005 (block 15000–15049)"
+        },
+        {
+          "label": "Hostname",
+          "value": "dev.example.test"
+        },
+        {
+          "label": "Bound item",
+          "value": "ABC-1"
+        },
+        {
+          "label": "Channel",
+          "value": "main"
+        },
+        {
+          "label": "Definition",
+          "value": "chappa.yml"
+        }
+      ],
+      "title": "Stack env · slot 0"
+    },
+    {
+      "id": "engines",
+      "rows": [
+        {
+          "label": "docker",
+          "value": "v29.0.0 · linux containers · 16.0 GB total"
+        }
+      ],
+      "title": "Engines"
+    }
+  ],
+  "freshness": {
+    "asOf": "<now>",
+    "errors": []
+  },
+  "groups": [
+    {
+      "id": "app",
+      "label": "Application"
+    },
+    {
+      "id": "data",
+      "label": "Data"
+    },
+    {
+      "id": "jobs",
+      "label": "Jobs"
+    }
+  ]
+}

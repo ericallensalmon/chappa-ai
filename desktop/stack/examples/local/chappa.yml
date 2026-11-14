@@ -1,8 +1,18 @@
 # An example project with one local stack: a database and a migration on
 # docker, an API on podman, and a web app run as a host process. See the
-# README beside this file for running it by hand.
+# README beside this file for running it in the app or by hand.
 name: example-local
 processes:
+  # The stack runner as a source: the app starts it, checks its identity,
+  # and shows its Environment view; the stack's verbs are its actions.
+  # Built from this repository (build it once first, see the README).
+  stack:
+    command: [cargo, run, -q, --manifest-path, ../../../Cargo.toml, -p, chappa-stack, --, serve]
+    source: {}
+    auto_start: true
+    auto_restart: false
+    restart_when_changed: []
+    env: {}
   web-dev:
     command: [npm, run, dev]
     auto_start: false

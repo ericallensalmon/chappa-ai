@@ -610,6 +610,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chappa-stack"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "hmac",
+ "indexmap 2.14.0",
+ "project-model",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stack-core",
+ "tempfile",
+ "tiny_http",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

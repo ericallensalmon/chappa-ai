@@ -139,10 +139,19 @@ pub enum Change {
         #[serde(default)]
         keep_groups: Vec<String>,
     },
+    /// Stop only these components (each with its grace period, in the
+    /// stack's stop order), leaving the rest as they are.
+    StopComponents {
+        components: Vec<String>,
+    },
     Down {
         #[serde(default)]
         keep_groups: Vec<String>,
     },
+    /// Re-acquire the image of every existing component that runs from one
+    /// (prebuilt pulled again, source built again) and recreate it. Dev
+    /// and process components have no image and are left alone.
+    RebuildAll,
     /// After a reboot: start what exists, recreating only what baked in a
     /// gateway address that has since changed.
     Start {
@@ -180,8 +189,9 @@ impl Change {
             Change::SwitchMode { .. } => Verb::SwitchMode,
             Change::ChangeRef { .. } => Verb::ChangeRef,
             Change::Rebuild { .. } => Verb::Rebuild,
-            Change::Stop { .. } => Verb::Stop,
+            Change::Stop { .. } | Change::StopComponents { .. } => Verb::Stop,
             Change::Down { .. } => Verb::Down,
+            Change::RebuildAll => Verb::Rebuild,
             Change::Start { .. } => Verb::Start,
             Change::Watch { .. } => Verb::Watch,
         }
@@ -278,7 +288,8 @@ impl Step {
         }
     }
 
-    fn verb_label(&self) -> &'static str {
+    /// The step kind as a word: `Build`, `Recreate` …
+    pub fn verb_label(&self) -> &'static str {
         match self {
             Step::Checkout { .. } => "Checkout",
             Step::Build { .. } => "Build",
@@ -290,7 +301,8 @@ impl Step {
         }
     }
 
-    fn detail(&self) -> Option<String> {
+    /// What the summary shows in parentheses after the component.
+    pub fn detail(&self) -> Option<String> {
         match self {
             Step::Checkout { git_ref, kind, .. } => Some(match kind {
                 CheckoutKind::Worktree => git_ref.clone(),
@@ -596,6 +608,56 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                     plan.desired.insert(name, Desired::Stopped);
                 }
             }
+        }
+        Change::StopComponents { components } => {
+            for name in components {
+                require(stack, name)?;
+            }
+            for name in stop_order(stack, &order, |n| {
+                components.iter().any(|c| c == n) && state.component(n).exists
+            }) {
+                let cur = state.component(&name);
+                if cur.running {
+                    plan.push(Step::Stop {
+                        grace_seconds: stack.grace_seconds(&name),
+                        component: name,
+                    });
+                } else if cur.desired == Desired::Running
+                    && !(stack.components[&name].kind == ComponentKind::Oneshot
+                        && cur.exit_code == Some(0))
+                {
+                    plan.notes
+                        .push(format!("{name} was already stopped; recorded as stopped"));
+                    plan.desired.insert(name, Desired::Stopped);
+                }
+            }
+        }
+        Change::RebuildAll => {
+            let mut rebuilt: Vec<String> = Vec::new();
+            for name in &order {
+                let cur = state.component(name);
+                if !cur.exists {
+                    continue;
+                }
+                let Some(mode) = cur.mode.or_else(|| stack.components[name].default_mode()) else {
+                    continue;
+                };
+                if mode == Mode::Dev {
+                    continue;
+                }
+                let forget = ComponentCurrent {
+                    image: None,
+                    mode: None,
+                    ..cur.clone()
+                };
+                acquire(stack, name, mode, cur.git_ref.clone(), &forget, &mut plan);
+                plan.push(Step::Recreate {
+                    component: name.clone(),
+                    reason: RecreateReason::Rebuilt,
+                });
+                rebuilt.push(name.clone());
+            }
+            recreate_image_dependents(stack, state, &order, &rebuilt, &mut plan);
         }
         Change::Down { keep_groups } => {
             let targets = stop_order(stack, &order, |n| {
@@ -1825,5 +1887,63 @@ stacks:
         let p = plan(&st, &InstanceState::new("mini", 0), &up_default()).unwrap();
         assert_eq!(labels(&p), ["build api", "start api"]);
         assert_eq!(p.instance, "mini-0");
+    }
+
+    #[test]
+    fn stop_components_stops_only_those_in_stop_order() {
+        let st = stack();
+        let state = running_state();
+        let p = plan(
+            &st,
+            &state,
+            &Change::StopComponents {
+                components: vec!["api".into(), "db".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(p.verb, Verb::Stop);
+        assert_eq!(labels(&p), ["stop db", "stop api"]);
+        assert_eq!(p.desired["api"], Desired::Stopped);
+        assert!(!p.desired.contains_key("web"));
+        // Already down while wanted running: only the intent follows.
+        let mut down = running_state();
+        down.components["api"].running = false;
+        let p = plan(
+            &st,
+            &down,
+            &Change::StopComponents {
+                components: vec!["api".into()],
+            },
+        )
+        .unwrap();
+        assert!(p.steps.is_empty());
+        assert_eq!(p.desired["api"], Desired::Stopped);
+        assert!(plan(
+            &st,
+            &state,
+            &Change::StopComponents {
+                components: vec!["nope".into()]
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rebuild_all_reacquires_every_image_and_leaves_dev_and_imageless_alone() {
+        let st = stack();
+        let p = plan(&st, &running_state(), &Change::RebuildAll).unwrap();
+        assert_eq!(p.verb, Verb::Rebuild);
+        assert_eq!(
+            labels(&p),
+            [
+                "pull db",
+                "recreate db",
+                "pull api",
+                "recreate api",
+                "pull migrate",
+                "recreate migrate",
+                "recreate infra"
+            ]
+        );
     }
 }

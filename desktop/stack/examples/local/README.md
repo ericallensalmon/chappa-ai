@@ -59,6 +59,48 @@ purpose: `db` is persistent and has no data-safety check, so its data
 counts as sensitive. For a throwaway local database that is the honest
 floor; a real project adds a `dataSafety` marker or sample hook.
 
+## Running it in the app
+
+`chappa.yml` has one more command, `stack`, marked `source: {}`: it runs
+`chappa-stack serve` from this repository with `cargo run`. Build it once
+before opening the project, so the first start is quick enough for the
+app's readiness check:
+
+```sh
+cargo build -p chappa-stack --manifest-path ../../../Cargo.toml
+```
+
+Then open this folder as a project in the app:
+
+1. The project's trust prompt lists the `stack` command (and says it
+   receives a source address and token). Trust it; the command starts.
+2. Settings ▸ Sources shows **Stack local** asking for review: its link
+   hosts are the stack's own `dev.example.test:<port>` addresses and its
+   one view is Environment. Trust it.
+3. The rail gains **Environment**. Every component is listed (`not
+   deployed` ones behind the toggle) with its mode, probe and links; the
+   **Stack local · slot 0** section at the bottom holds the stack-wide
+   actions (Bring up, Start, Stop, Down, Rebuild all, Clean up images),
+   each row its own (Start, Stop, Restart, Rebuild, Switch to …, Watch,
+   Logs).
+4. An action asks first, with the plan as the question ("Pull db
+   (postgres:16); start db."). Accepting opens one pane that runs
+   `chappa-stack run-job <id>`: the checks before up, then every step with
+   its output, then the outcome. The job's files are under
+   `.work/jobs/<id>.{json,log,result.json}`.
+
+Without podman, `api` cannot start; bring `db` up on its own from its row.
+`web` starts only once `../web` exists with an `npm run dev`. The source
+serves slot 0; another slot is a second command with `serve --slot 1`.
+
+To run the source outside the app (attached mode), start it with a token
+file and attach it in Settings ▸ Sources with the printed address:
+
+```sh
+cargo run -p chappa-stack --manifest-path ../../../Cargo.toml -- \
+  serve --addr 127.0.0.1:0 --token-file .work/source-token
+```
+
 ## Running it by hand
 
 The stack runner writes the override files and runs these commands for

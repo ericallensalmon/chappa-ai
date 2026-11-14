@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["term-core", "project-model", "stack-core", "src-tauri", "chappa-ai-mcp"]
+members = ["term-core", "project-model", "stack-core", "chappa-stack", "src-tauri", "chappa-ai-mcp"]
 
 # Local copy of the Windows runtime with one fix: cloning the runtime handle
 # off the main thread must not touch the event loop's non-atomic refcounts
