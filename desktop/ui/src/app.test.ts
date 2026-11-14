@@ -6984,7 +6984,7 @@ describe("App source views", () => {
       sources: [sourceRow("fx", ALL), sourceRow("raw", ["prs"], { trusted: false, status: "needs_review" })],
       hiddenViews: [],
     });
-    expect(entries(root)).toEqual(["work", "prs", "attention"]);
+    expect(entries(root)).toEqual(["work", "prs", "attention", "environment"]);
     // 1 work approval + 5 PRs in yes buckets (waiting folded, not counted) + 4 attention items.
     expect(badge(root)).toBe("10");
     panelDispose(app);
@@ -6995,14 +6995,14 @@ describe("App source views", () => {
     const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
     await sources.store.setViewHidden("prs", true);
     await FLUSH();
-    expect(entries(root)).toEqual(["work", "attention"]);
+    expect(entries(root)).toEqual(["work", "attention", "environment"]);
     expect(badge(root)).toBe("5");
     await sources.store.setViewHidden("attention", true);
     await FLUSH();
-    expect(entries(root)).toEqual(["work"]);
+    expect(entries(root)).toEqual(["work", "environment"]);
     await sources.store.setViewHidden("prs", false);
     await FLUSH();
-    expect(entries(root)).toEqual(["work", "prs"]);
+    expect(entries(root)).toEqual(["work", "prs", "environment"]);
     panelDispose(app);
     root.remove();
   });
@@ -7172,7 +7172,7 @@ describe("App source views", () => {
     sources.emit({ event: "sources" });
     await FLUSH();
     expect(hint()).toBeNull();
-    expect(entries(root)).toEqual(["work", "prs", "attention"]);
+    expect(entries(root)).toEqual(["work", "prs", "attention", "environment"]);
     panelDispose(app);
     root.remove();
   });
@@ -7213,6 +7213,76 @@ describe("App source views", () => {
     await FLUSH();
     await FLUSH();
     expect(vd(app).center.entries.length).toBe(0);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("the Environment entry shows a dot, red for a broken component, amber for a warning, never a count", async () => {
+    const answers: Record<string, unknown> = { ...fixtureAnswers(), "fx/environment": sourceFixture("environment") };
+    const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
+    const dot = (): string | undefined => entry(root, "environment").querySelector<HTMLElement>(".chappa-view-dot")?.dataset.level;
+    expect(entries(root)).toEqual(["work", "prs", "attention", "environment"]);
+    expect(dot()).toBe("bad");
+    expect(entry(root, "environment").querySelector(".chappa-view-badge")?.textContent).toBe("");
+    expect(entry(root, "environment").title).toBe("Environment from fx: something is broken");
+    // The four red components join Needs you: 10 + 4.
+    expect(badge(root)).toBe("14");
+    const env = sourceFixture("environment");
+    answers["fx/environment"] = { ...env, components: [{ id: "api", group: "app", state: "starting" }], alerts: [{ text: "Disk is 85 percent full", severity: "warn" }] };
+    sources.emit({ event: "view", source_id: "fx", view: "environment" });
+    await FLUSH();
+    await FLUSH();
+    expect(dot()).toBe("warn");
+    expect(badge(root)).toBe("10");
+    answers["fx/environment"] = { ...env, components: [{ id: "api", group: "app", state: "up" }], alerts: [] };
+    sources.emit({ event: "view", source_id: "fx", view: "environment" });
+    await FLUSH();
+    await FLUSH();
+    expect(dot()).toBeUndefined();
+    expect(entry(root, "environment").title).toBe("Environment from fx");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a red component's Needs you row opens the Environment view on its row", async () => {
+    const answers: Record<string, unknown> = { ...fixtureAnswers(), "fx/environment": sourceFixture("environment") };
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
+    entry(root, "attention").click();
+    const needs = page(root, "attention")!;
+    const envRow = needs.querySelector<HTMLElement>('.chappa-needs-row[data-id="env:fx|db"]')!;
+    expect(envRow.querySelector(".chappa-sv-title")?.textContent).toBe("Database");
+    envRow.querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
+    const envPage = page(root, "environment")!;
+    expect(envPage.classList.contains("active")).toBe(true);
+    expect(needs.classList.contains("active")).toBe(false);
+    expect(envPage.querySelector('.chappa-env-row[data-key="fx|db"]')?.classList.contains("focused")).toBe(true);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("environment news: a component turning red notifies once, titled with its name; the entry opens the Environment view", async () => {
+    const answers: Record<string, unknown> = { ...fixtureAnswers(), "fx/environment": sourceFixture("environment") };
+    const { root, app, api, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
+    const center = vd(app).center;
+    expect(center.entries.length).toBe(0);
+    const env = sourceFixture("environment") as unknown as Record<string, unknown> & { components: Record<string, unknown>[] };
+    const mailer = env.components.findIndex((c) => c.id === "mailer");
+    env.components[mailer] = { ...env.components[mailer], state: "crashloop", hint: "Restarting" };
+    answers["fx/environment"] = env;
+    vd(app).windowFocused = false;
+    sources.emit({ event: "view", source_id: "fx", view: "environment" });
+    await FLUSH();
+    await FLUSH();
+    expect(center.entries.map((e) => [e.title, e.body, e.processName, e.view])).toEqual([["Mailer", "crash loop: Restarting", "fx", "environment"]]);
+    expect((api.osNotify as ReturnType<typeof vi.fn>).mock.calls).toEqual([["Mailer", "crash loop: Restarting"]]);
+    // A recovery says nothing.
+    answers["fx/environment"] = sourceFixture("environment");
+    sources.emit({ event: "view", source_id: "fx", view: "environment" });
+    await FLUSH();
+    await FLUSH();
+    expect(center.entries.length).toBe(1);
+    vd(app).focusCenterEntry(center.entries[0]);
+    expect(page(root, "environment")?.classList.contains("active")).toBe(true);
     panelDispose(app);
     root.remove();
   });

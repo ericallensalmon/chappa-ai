@@ -15,7 +15,10 @@
       "id": "api", "group": "app", "label": "API", "kind": "service", "state": "up",
       "uptime": "3h 12m", "restarts": 0, "exitCode": null,
       "source": { "mode": "dev", "ref": "abc-1-health", "commit": "1a2b3c4" },
-      "links": [{ "label": "Open", "url": "https://dev.example.test/api", "browser": true }],
+      "links": [
+        { "label": "Docs", "url": "https://dev.example.test/api/docs" },
+        { "label": "Open", "url": "https://dev.example.test/api", "browser": true }
+      ],
       "probe": { "url": "https://dev.example.test/api/health", "rule": "health", "up": true, "status": 200 },
       "hint": "Serving from your working copy",
       "badges": [{ "text": "dev", "tone": "info" }],
@@ -31,7 +34,7 @@
       "id": "db", "group": "data", "label": "Database", "state": "unhealthy",
       "uptime": "3h 12m", "restarts": 1,
       "source": { "mode": "prebuilt", "ref": "registry.example/db:16" },
-      "probe": { "url": "https://dev.example.test:5432/", "rule": "any", "up": false, "status": 503 },
+      "probe": { "url": "https://dev.example.test:8081/health/ready", "rule": "health", "up": false, "status": 503 },
       "hint": "Healthcheck failing for 4 minutes"
     },
     {

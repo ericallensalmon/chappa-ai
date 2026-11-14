@@ -51,15 +51,19 @@ describe("SourceViewsData", () => {
     expect((h.api.sourceView as ReturnType<typeof vi.fn>).mock.calls).toEqual([
       ["a", "prs"],
       ["a", "attention"],
+      ["a", "environment"],
     ]);
     expect(h.data.payloadsFor("prs").map((p) => [p.sourceId, (p.payload as { read: string }).read])).toEqual([["a", "a/prs#1"]]);
-    expect(h.data.versions()).toEqual({ a: 2 });
+    expect(h.data.versions()).toEqual({ a: 3 });
     h.fire({ event: "view", source_id: "a", view: "prs" });
     h.fire({ event: "view", source_id: "a", view: "environment" });
+    // A view the source does not serve is not read.
+    h.fire({ event: "view", source_id: "a", view: "work" });
     h.fire({ event: "view", source_id: "b", view: "prs" });
     await FLUSH();
-    expect((h.data.payload("a", "prs")?.payload as { read: string }).read).toBe("a/prs#3");
-    expect(h.changes.filter((c) => c !== null)).toEqual(["a/prs", "a/attention", "a/prs"]);
+    expect((h.data.payload("a", "prs")?.payload as { read: string }).read).toBe("a/prs#4");
+    expect((h.data.payload("a", "environment")?.payload as { read: string }).read).toBe("a/environment#5");
+    expect(h.changes.filter((c) => c !== null)).toEqual(["a/prs", "a/attention", "a/environment", "a/prs", "a/environment"]);
   });
 
   it("a source that leaves (or loses trust) drops out; a newly trusted one is read", async () => {

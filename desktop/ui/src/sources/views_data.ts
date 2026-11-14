@@ -10,7 +10,7 @@ import type { SourcesListing, SourcesStore } from "../sources_store";
 import type { NeedsUpdate, ViewPayload } from "./prs_model";
 
 /** The views whose payloads the app reads today. */
-export const DATA_VIEWS = ["work", "prs", "attention"] as const;
+export const DATA_VIEWS = ["work", "prs", "attention", "environment"] as const;
 export type DataView = (typeof DATA_VIEWS)[number];
 
 const pairKey = (sourceId: string, view: string): string => `${sourceId}\u001f${view}`;

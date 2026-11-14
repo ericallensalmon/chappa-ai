@@ -76,6 +76,8 @@ import { SourceViewsData, type DataView } from "./sources/views_data";
 import { PrsView } from "./sources/prs_view";
 import { NeedsYouView } from "./sources/needs_you_view";
 import { WorkView } from "./sources/work_view";
+import { buildEnvironmentModel, type EnvironmentModel } from "./sources/environment_model";
+import { EnvironmentView } from "./sources/environment_view";
 import type { SourceViewDeps } from "./sources/view_common";
 
 /** The process-status vocabulary. */
@@ -838,7 +840,7 @@ export interface AppOptions {
 
 /** The source views this build renders, in rail order. A later view joins
  *  by adding its name here and its page to `ensureSourceView`. */
-const BUILT_VIEWS: readonly RailView[] = ["work", "prs", "attention"];
+const BUILT_VIEWS: readonly RailView[] = ["work", "prs", "attention", "environment"];
 
 const tauriSourceActions: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel"> = {
   actions: (sourceId, view, key) => ipc.sourceActions(sourceId, view, key),
@@ -1080,6 +1082,9 @@ const APP_CSS = `
 .chappa-view-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .chappa-view-badge{flex:none;min-width:16px;height:16px;border-radius:8px;background:#f0b429;color:#0d0e10;font:600 10px ui-monospace,monospace;line-height:16px;text-align:center;padding:0 4px;box-sizing:border-box;}
 .chappa-view-badge:empty{display:none;}
+.chappa-view-dot{flex:none;width:8px;height:8px;border-radius:50%;margin-right:4px;}
+.chappa-view-dot[data-level="bad"]{background:#f85149;}
+.chappa-view-dot[data-level="warn"]{background:#f0b429;}
 .chappa-views-hint{align-self:flex-start;margin:2px 8px 0;padding:2px 0;border:0;background:none;color:#f0b429;font:12px system-ui,sans-serif;text-align:left;cursor:pointer;}
 .chappa-views-hint:hover{text-decoration:underline;}
 /* The rail footer's notification bell + unread count, NEXT TO the
@@ -1458,11 +1463,14 @@ export class App {
   private prsView: PrsView | null = null;
   private needsYouView: NeedsYouView | null = null;
   private workView: WorkView | null = null;
+  private environmentView: EnvironmentView | null = null;
   /** Which view is on screen, and what it covered (restored on Back). */
   private openViewName: RailView | null = null;
   private viewPrev: { termId: number } | { pane: PaneTarget } | null = null;
   /** The merged PRs model, rebuilt when a PRs payload moves. */
   private prsModel: PrsModel | null = null;
+  /** The Environment model, rebuilt when an environment payload moves. */
+  private environmentModel: EnvironmentModel | null = null;
   /** The Needs you model as last built (the rail badge reads its count). */
   private needsYouModel: NeedsYouModel | null = null;
   /** Seen-id baselines behind the sources' Needs you notifications. */
@@ -6369,7 +6377,8 @@ export class App {
     const count = this.needsYouModel?.count ?? 0;
     const prsCount = views.includes("prs") ? prsNeedingYou(this.currentPrsModel()).yes.length : 0;
     const review = this.viewsData.current.sources.filter((s) => s.status === "needs_review").length;
-    const sig = `${views.join(",")}\u001f${count}\u001f${prsCount}\u001f${review}\u001f${this.openViewName ?? ""}`;
+    const envLevel = views.includes("environment") ? this.currentEnvironmentModel().alertLevel : null;
+    const sig = `${views.join(",")}\u001f${count}\u001f${prsCount}\u001f${review}\u001f${envLevel ?? ""}\u001f${this.openViewName ?? ""}`;
     if (sig === this.viewsSig) return;
     this.viewsSig = sig;
     this.viewsSection.textContent = "";
@@ -6387,6 +6396,14 @@ export class App {
       const shown = view === "attention" ? count : view === "prs" ? prsCount : 0;
       if (shown > 0) badge.textContent = shown > 99 ? "99+" : String(shown);
       el.append(name, badge);
+      // Environment shows a dot, not a count: red for a broken component or a
+      // bad alert, amber for a warning.
+      if (view === "environment" && envLevel) {
+        const dot = document.createElement("span");
+        dot.className = "chappa-view-dot";
+        dot.dataset.level = envLevel;
+        el.appendChild(dot);
+      }
       const from = `${VIEW_LABELS[view]} from ${servedBy(this.viewsData.current, view).map((s) => s.label).join(", ")}`;
       el.title =
         view === "attention"
@@ -6395,7 +6412,9 @@ export class App {
             : "Nothing needs you"
           : view === "prs" && prsCount > 0
             ? `${from}: ${prsCount} need you`
-            : from;
+            : view === "environment" && envLevel
+              ? `${from}: ${envLevel === "bad" ? "something is broken" : "a warning"}`
+              : from;
       el.addEventListener("mousedown", (e) => e.preventDefault());
       el.addEventListener("click", () => this.toggleSourceView(view));
       this.viewsSection.appendChild(el);
@@ -6478,15 +6497,16 @@ export class App {
     for (const r of this.wsCmds.values()) r.el?.classList.remove("active");
   }
 
-  private sourcePage(view: RailView): PrsView | NeedsYouView | WorkView | null {
+  private sourcePage(view: RailView): PrsView | NeedsYouView | WorkView | EnvironmentView | null {
     if (view === "work") return this.workView;
     if (view === "prs") return this.prsView;
     if (view === "attention") return this.needsYouView;
+    if (view === "environment") return this.environmentView;
     return null;
   }
 
   /** Build a view's page on first open and mount it in the stack. */
-  private ensureSourceView(view: RailView): PrsView | NeedsYouView | WorkView {
+  private ensureSourceView(view: RailView): PrsView | NeedsYouView | WorkView | EnvironmentView {
     const deps: SourceViewDeps = {
       ...this.sourceActionsApi,
       onClose: () => this.closeSourceView(),
@@ -6507,6 +6527,13 @@ export class App {
       }
       return this.prsView;
     }
+    if (view === "environment") {
+      if (!this.environmentView) {
+        this.environmentView = new EnvironmentView(deps);
+        this.stack.appendChild(this.environmentView.host);
+      }
+      return this.environmentView;
+    }
     if (!this.needsYouView) {
       this.needsYouView = new NeedsYouView({
         ...deps,
@@ -6526,6 +6553,7 @@ export class App {
     if (!BUILT_VIEWS.includes(v) || !this.railViews().includes(v)) return false;
     this.openSourceView(v);
     if (v === "work" && this.workView && !this.workView.focus(key)) this.showToast(`${key} is not in the Work list.`, "error");
+    if (v === "environment") this.environmentView?.focus(key);
     return true;
   }
 
@@ -6533,6 +6561,7 @@ export class App {
    *  notifications first, then every surface that shows source data. */
   private onSourceData(change: { sourceId: string; view: DataView } | null): void {
     if (change === null || change.view === "prs") this.prsModel = null;
+    if (change === null || change.view === "environment") this.environmentModel = null;
     if (change) {
       this.noteSourceNews(change.sourceId, change.view);
     } else {
@@ -6552,6 +6581,12 @@ export class App {
     return this.prsModel;
   }
 
+  /** The Environment model, rebuilt only after an environment payload moved. */
+  private currentEnvironmentModel(): EnvironmentModel {
+    this.environmentModel ??= buildEnvironmentModel(this.viewsData.payloadsFor("environment"), this.viewsData.needsUpdate());
+    return this.environmentModel;
+  }
+
   /** Repaint the open view and the Needs you badge. */
   private renderSourceViews(): void {
     this.renderNeedsYou();
@@ -6566,6 +6601,13 @@ export class App {
         loadedPrs,
         servedBy: servedBy(data.current, "work").map((s) => s.label),
         versions: data.versions(),
+      });
+    }
+    if (this.environmentView?.active) {
+      this.environmentView.update({
+        model: this.currentEnvironmentModel(),
+        servedBy: servedBy(this.viewsData.current, "environment").map((s) => s.label),
+        versions: this.viewsData.versions(),
       });
     }
     if (this.prsView?.active) {
@@ -6587,6 +6629,7 @@ export class App {
       work: data.hidden("work") ? [] : data.payloadsFor("work"),
       prs: data.hidden("prs") ? null : this.currentPrsModel(),
       attention: data.payloadsFor("attention"),
+      environment: data.hidden("environment") ? [] : data.payloadsFor("environment"),
       needsUpdate: data.needsUpdate(),
     });
     this.needsYouModel = model;
@@ -6636,8 +6679,10 @@ export class App {
       (id) => view === "prs" && this.baselines.seenElsewhere("prs", id, sourceId),
     );
     if (news.length === 0 || this.viewsData.hidden("attention") || this.viewsData.hidden(view)) return;
+    // Environment news opens (and is "being looked at" in) its own view.
+    const opens: RailView = view === "environment" ? "environment" : "attention";
     for (const n of news) {
-      const d = decide("notify", "all", this.openViewName === "attention", this.windowFocused, n.body);
+      const d = decide("notify", "all", this.openViewName === opens, this.windowFocused, n.body);
       if (!d.badge && !d.osNotify) continue;
       const recorded = this.center.record({
         termId: 0,
@@ -6646,7 +6691,7 @@ export class App {
         kind: "notify",
         title: n.title,
         body: n.body,
-        view: "attention",
+        view: opens,
       });
       if (d.osNotify) {
         if (this.windowFocused) this.banners.show(recorded);

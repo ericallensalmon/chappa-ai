@@ -12,15 +12,20 @@
 //    action / draft / ready, reviews the author answered, and required
 //    reviews not yet voted; my PRs waiting on reviewers are shown folded,
 //    not counted; optional and team-only reviews never appear);
+//  - Environment components in a red state (unhealthy, crash loop, deployed
+//    but not running, a failed one-shot): something the user brought up is
+//    broken;
 //  - the attention items sources serve, grouped under their own headings.
 // The rail badge counts the rows that wait on a decision: agents waiting
-// and programs blocked, Work approvals, PRs and source attention. A
+// and programs blocked, Work approvals, PRs, red components and source
+// attention. A
 // terminal at bell rank (a bell, or a program that reported done / failed)
 // is listed but not counted: a stray `\a` should not keep a number on the
 // rail.
 
 import { attentionText, type CardAttention } from "../dashboard";
 import type * as ipc from "../ipc";
+import { buildEnvironmentModel, environmentNews } from "./environment_model";
 import {
   itemsOf,
   oneLine,
@@ -59,9 +64,10 @@ export interface ActionTarget {
 export type Opens = { view: "work" | "prs" | "environment"; key: string } | { url: string } | null;
 
 export interface NeedsYouRow {
-  /** Stable across polls: `term:…`, `work:<source>|<key>`, `pr:<id>`, `att:<source>|<id>`. */
+  /** Stable across polls: `term:…`, `work:<source>|<key>`, `pr:<id>`,
+   *  `env:<source>|<component id>`, `att:<source>|<id>`. */
   id: string;
-  kind: "terminal" | "work" | "pr" | "attention";
+  kind: "terminal" | "work" | "pr" | "environment" | "attention";
   /** Leads with the item or process name; markdown links stripped. */
   title: string;
   detail: string;
@@ -104,6 +110,9 @@ export interface NeedsYouInput {
   prs: PrsModel | null;
   /** The `attention` payloads of the trusted sources serving it. */
   attention: ViewPayload[];
+  /** The `environment` payloads of the trusted sources serving it (absent
+   *  or empty when the view is not in play). */
+  environment?: ViewPayload[];
   needsUpdate?: NeedsUpdate[];
 }
 
@@ -240,6 +249,23 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
     if (rows.length) sections.push({ id: "prs", title: "Pull requests", rows });
   }
 
+  // Red Environment components: each opens the Environment view on its row.
+  const envUsable = (input.environment ?? []).filter((p) => !addStale(p));
+  const envRows: NeedsYouRow[] = buildEnvironmentModel(envUsable).red.map((r) => ({
+    id: `env:${r.key}`,
+    kind: "environment",
+    title: r.label,
+    detail: [r.stateText, r.hint || r.details.join(", "), envUsable.length > 1 ? r.sourceLabel : ""].filter(Boolean).join(" · "),
+    tone: "bad",
+    folded: false,
+    counted: true,
+    sourceId: r.sourceId,
+    sourceLabel: r.sourceLabel,
+    actions: r.hasActions ? [{ sourceId: r.sourceId, sourceLabel: r.sourceLabel, view: "environment", key: r.id }] : [],
+    opens: { view: "environment", key: r.id },
+  }));
+  if (envRows.length) sections.push({ id: "environment", title: "Environment", rows: envRows });
+
   // Source attention, under each item's own group, groups in first-seen order.
   const attentionUsable = input.attention.filter((p) => !addStale(p));
   const groups = new Map<string, NeedsYouRow[]>();
@@ -273,7 +299,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
   }
   for (const [group, rows] of groups) sections.push({ id: `group:${group}`, title: group, rows });
 
-  const fed = [...workUsable, ...attentionUsable];
+  const fed = [...workUsable, ...envUsable, ...attentionUsable];
   const freshness = summarizeFreshness(fed);
   if (input.prs) {
     freshness.errors.push(...input.prs.freshness.errors);
@@ -384,7 +410,7 @@ export function newsFor(items: NewsItem[]): NewsNotification[] {
  *  {@link SeenBaselines.update}. `prs` must be the model of THIS source's
  *  payload alone (ids are per source). A poll the app saw fail (its own
  *  freshness carries an error) or with no payload yet is a failure. */
-export function pollResult(view: "work" | "prs" | "attention", p: ViewPayload, prs?: PrsModel): PollResult {
+export function pollResult(view: "work" | "prs" | "attention" | "environment", p: ViewPayload, prs?: PrsModel): PollResult {
   if (p.payload === null || p.payload === undefined || (p.freshness?.errors?.length ?? 0) > 0 || wrongContract(p.payload)) {
     return { ok: false };
   }
@@ -397,6 +423,9 @@ export function pollResult(view: "work" | "prs" | "attention", p: ViewPayload, p
     }
   } else if (view === "prs") {
     for (const r of prs ? prsNeedingYou(prs).yes : []) items.push({ id: r.id, name: r.title, body: prDetail(r) });
+  } else if (view === "environment") {
+    // Red components and bad alerts; a recovery or a warning is never news.
+    items.push(...environmentNews(p));
   } else {
     for (const raw of itemsOf(p.payload)) {
       const a = obj(raw);
