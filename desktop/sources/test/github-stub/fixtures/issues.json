@@ -1,0 +1,51 @@
+{
+  "data": {
+    "search": {
+      "issueCount": 3,
+      "nodes": [
+        {
+          "number": 12,
+          "title": "Login fails after a timeout",
+          "url": "https://github.com/owner/repo/issues/12",
+          "createdAt": "__DAYS_AGO_9__",
+          "updatedAt": "__DAYS_AGO_1__",
+          "repository": { "nameWithOwner": "owner/repo" },
+          "author": { "login": "sam", "name": "Sam" },
+          "labels": { "nodes": [{ "name": "bug" }, { "name": "auth" }] },
+          "closedByPullRequestsReferences": {
+            "nodes": [
+              { "number": 1, "url": "https://github.com/owner/repo/pull/1", "state": "OPEN", "isDraft": false, "repository": { "nameWithOwner": "owner/repo" } }
+            ]
+          }
+        },
+        {
+          "number": 13,
+          "title": "Document the retry setting",
+          "url": "https://github.com/owner/repo/issues/13",
+          "createdAt": "__DAYS_AGO_5__",
+          "updatedAt": "__DAYS_AGO_3__",
+          "repository": { "nameWithOwner": "owner/repo" },
+          "author": { "login": "alex", "name": "Alex" },
+          "labels": { "nodes": [] },
+          "closedByPullRequestsReferences": {
+            "nodes": [
+              { "number": 5, "url": "https://github.com/owner/repo/pull/5", "state": "CLOSED", "isDraft": false, "repository": { "nameWithOwner": "owner/repo" } }
+            ]
+          }
+        },
+        {},
+        {
+          "number": 20,
+          "title": "Flaky cache test",
+          "url": "https://github.com/other/lib/issues/20",
+          "createdAt": "__DAYS_AGO_30__",
+          "updatedAt": "__DAYS_AGO_2__",
+          "repository": { "nameWithOwner": "other/lib" },
+          "author": { "login": "ghost-bot" },
+          "labels": { "nodes": [{ "name": "tests" }] },
+          "closedByPullRequestsReferences": { "nodes": [] }
+        }
+      ]
+    }
+  }
+}

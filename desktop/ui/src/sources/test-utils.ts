@@ -11,7 +11,7 @@ import type { ViewPayload } from "./prs_model";
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../sources/fixture/data");
 
 /** A fixture payload, parsed fresh each call (tests may mutate it). */
-export function fixture(name: "prs" | "attention" | "work" | "manifest"): Record<string, unknown> & { items: Record<string, unknown>[] } {
+export function fixture(name: "prs" | "attention" | "work" | "manifest" | "panel"): Record<string, unknown> & { items: Record<string, unknown>[] } {
   return JSON.parse(readFileSync(`${DATA_DIR}/${name}.json`, "utf8"));
 }
 

@@ -174,8 +174,8 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:5055/chappa/v1/manifest
 
 ## GitHub source
 
-`github/` is a real source: it serves the PRs view for the GitHub
-account the `gh` CLI is logged in to. It asks `gh api graphql` for the
+`github/` is a real source: it serves the Work and PRs views for the
+GitHub account the `gh` CLI is logged in to. It asks `gh api graphql` for the
 data, so neither the app nor the source ever holds a GitHub token.
 
 Requirements: `gh` on `PATH` (or named by `GH_BIN`) and logged in
@@ -200,6 +200,13 @@ What it serves:
   and statuses, mergeability and review threads. `workKeys` lists the
   same-repository issues the body or branch name points at
   (`owner/repo#12`).
+- `GET /api/work`: open issues assigned to you in every repository
+  (not archived), up to 100, keyed `owner/repo#12`, type `issue`.
+  Status is "Open" (`todo`), or "In progress" (`doing`) while a pull
+  request GitHub links as closing the issue is open or a draft; those
+  PRs are the item's `prs`, which the Work view joins to the PRs view.
+  No `folder` (the source cannot know where a checkout lives) and no
+  local workflow. Each item has one link action, "Open on GitHub".
 - Link actions (the PR, its files, its checks) and one endpoint action,
   `refresh`, which changes nothing on GitHub.
 
@@ -208,7 +215,9 @@ however often the app polls; the last list is served with
 `refreshing: true` while a fetch runs. A search that fails is named in
 `freshness.errors` and the others still render; a search that matched
 more than one page holds ("showing 100 of 212") says so in
-`freshness.notices`.
+`freshness.notices`. Both views come from one fetch, so polling Work
+asks GitHub nothing extra; a failing issue search is an error on Work
+only.
 
 Tests (Node 22, no packages):
 

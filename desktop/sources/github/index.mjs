@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// A chappa source for GitHub pull requests. It asks the `gh` CLI for the
+// A chappa source for GitHub: pull requests (the PRs view) and the open
+// issues assigned to me (the Work view). It asks the `gh` CLI for the
 // data (`gh api graphql`), so neither the app nor this process ever holds
 // a GitHub token: `gh` keeps its own login.
 //
@@ -16,8 +17,9 @@ import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import { isValidChallenge, proof } from "../lib/identity.mjs";
-import { SEARCH_PRS, VIEWER, searches } from "./queries.mjs";
+import { ISSUES_SEARCH, SEARCH_ISSUES, SEARCH_PRS, VIEWER, searches } from "./queries.mjs";
 import { RECENT_DAYS, toPr } from "./buckets.mjs";
+import { toWorkItem } from "./issues.mjs";
 
 const VERSION = "0.1.0";
 const CAP_PER_ROLE = 100;
@@ -49,7 +51,10 @@ function authorized(req) {
 const MANIFEST = {
   contract: 1,
   source: { id: "github", label: "GitHub", version: VERSION },
-  views: { prs: { list: "/api/prs", pollSeconds: 300 } },
+  views: {
+    work: { list: "/api/work", pollSeconds: 300 },
+    prs: { list: "/api/prs", pollSeconds: 300 },
+  },
   actions: "/api/actions",
   linkHosts: ["github.com"],
   roots: [],
@@ -104,7 +109,7 @@ async function gh(query, vars = {}) {
 // ---- fetch + cache -------------------------------------------------------
 
 const cache = {
-  last: null,          // last response body served
+  last: null,          // last bodies served: { prs, work }
   perSearch: new Map(),// search name -> nodes from its last good call
   viewer: null,
   inflight: null,      // promise of the running fetch
@@ -113,10 +118,56 @@ const cache = {
 
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
-async function fetchAll() {
-  const started = Date.now();
+/** Both views' bodies after a failure that leaves nothing fresh: the
+ *  previous items (or none, when `empty`) with one error line. */
+function failedBodies(message, empty) {
+  const keep = (body) => ({
+    freshness: { asOf: body?.freshness?.asOf ?? null, errors: [{ source: "github", message }] },
+    items: empty ? [] : body?.items ?? [],
+  });
+  return { prs: keep(cache.last?.prs), work: keep(cache.last?.work) };
+}
+
+/** The Work view's body: open issues assigned to the viewer. Its own call,
+ *  so a failing issue search leaves the PRs alone and the reverse. */
+async function fetchWork(viewer, started) {
   const errors = [];
   const notices = [];
+  let found;
+  try {
+    const data = await gh(SEARCH_ISSUES, { q: ISSUES_SEARCH.q });
+    found = (data.search?.nodes ?? []).filter((n) => n && typeof n.number === "number");
+    cache.perSearch.set("issues", found);
+    if ((data.search?.issueCount ?? 0) > found.length) {
+      notices.push(`${ISSUES_SEARCH.label}: showing ${found.length} of ${data.search.issueCount} issues`);
+    }
+  } catch (e) {
+    const kept = cache.perSearch.get("issues");
+    errors.push({ source: "github:issues", message: `${e.message}${kept ? " (showing the previous results)" : ""}` });
+    found = kept ?? [];
+  }
+  const items = [];
+  const keys = new Set();
+  for (const node of found) {
+    try {
+      const item = toWorkItem(node, { viewer });
+      if (item && !keys.has(item.key)) { keys.add(item.key); items.push(item); }
+    } catch (e) {
+      errors.push({ source: "github", message: `could not read ${node.repository?.nameWithOwner ?? "?"}#${node.number}: ${e.message}` });
+    }
+  }
+  return {
+    freshness: {
+      asOf: new Date(started).toISOString(),
+      ...(errors.length ? { errors } : {}),
+      ...(notices.length ? { notices } : {}),
+    },
+    items,
+  };
+}
+
+async function fetchAll() {
+  const started = Date.now();
   let viewer;
   try {
     viewer = (await gh(VIEWER)).viewer?.login;
@@ -125,12 +176,18 @@ async function fetchAll() {
   } catch (e) {
     const message = e instanceof GhError ? e.message : String(e?.message ?? e);
     // gh missing or logged out: nothing it showed before can be trusted
-    // to still be visible, so the list empties. Any other failure keeps
+    // to still be visible, so the lists empty. Any other failure keeps
     // what was shown before and says why it is not fresh.
-    const items = e instanceof GhError && e.fatal ? [] : cache.last?.items ?? [];
-    return { freshness: { asOf: cache.last?.freshness?.asOf ?? null, errors: [{ source: "github", message }] }, items };
+    return failedBodies(message, e instanceof GhError && e.fatal);
   }
+  const [prs, work] = await Promise.all([fetchPrs(viewer, started), fetchWork(viewer, started)]);
+  return { prs, work };
+}
 
+/** The PRs view's body from the five pull request searches. */
+async function fetchPrs(viewer, started) {
+  const errors = [];
+  const notices = [];
   const plan = searches(isoDay(started - RECENT_DAYS * 24 * 60 * 60 * 1000));
   const results = await Promise.all(Object.entries(plan).map(async ([name, s]) => {
     try {
@@ -191,24 +248,25 @@ function maybeRefresh(force = false) {
   if (!force && cache.last && Date.now() - cache.lastStart < minRefreshMs) return null;
   cache.lastStart = Date.now();
   cache.inflight = fetchAll()
-    .catch((e) => ({ freshness: { asOf: cache.last?.freshness?.asOf ?? null, errors: [{ source: "github", message: String(e?.message ?? e) }] }, items: cache.last?.items ?? [] }))
-    .then((body) => { cache.last = body; return body; })
+    .catch((e) => failedBodies(String(e?.message ?? e), false))
+    .then((bodies) => { cache.last = bodies; return bodies; })
     .finally(() => { cache.inflight = null; });
   return cache.inflight;
 }
 
-function current() {
-  const body = cache.last;
+function current(view) {
+  const body = cache.last[view];
   const next = new Date(Math.max(cache.lastStart + minRefreshMs, Date.now())).toISOString();
   return { ...body, freshness: { ...body.freshness, refreshing: Boolean(cache.inflight), nextUtc: next } };
 }
 
-async function prs() {
+/** A view's body (`prs` or `work`). */
+async function served(view) {
   const running = maybeRefresh();
   // The very first request waits for the first fetch; after that the
   // cached body is served at once while a refresh runs behind it.
   if (!cache.last && running) await running;
-  return current();
+  return current(view);
 }
 
 // ---- http ----------------------------------------------------------------
@@ -259,7 +317,8 @@ async function route(req, res, url) {
   }
   if (!authorized(req)) return fail(res, 401, "unauthorized", "A bearer token is required");
   if (get && p === "/chappa/v1/manifest") return send(res, 200, MANIFEST);
-  if (get && p === "/api/prs") return send(res, 200, await prs());
+  if (get && p === "/api/prs") return send(res, 200, await served("prs"));
+  if (get && p === "/api/work") return send(res, 200, await served("work"));
   if (req.method === "POST" && p === "/api/actions") return handleAction(req, res);
   return fail(res, 404, "not-found", `No route for ${req.method} ${p}`);
 }

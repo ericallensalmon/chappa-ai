@@ -97,6 +97,51 @@ query ($q: String!) {
 }`;
 
 /**
+ * One page of issues matching a search string (`$q`): the Work view's
+ * items. Capped at 100 like the pull request searches, for the same
+ * reason. The closing pull requests ride along in the same call, so the
+ * "in progress" status and the PR chips cost no extra request.
+ */
+export const SEARCH_ISSUES = `
+query ($q: String!) {
+  search(query: $q, type: ISSUE, first: 100) {
+    issueCount            # how many matched, to say when the cap cut the list
+    nodes {
+      ... on Issue {
+        number            # the key "owner/repo#12"
+        title
+        url               # the row's link and the "Open on GitHub" action
+        createdAt         # created
+        updatedAt         # lastTouchedUtc
+        repository {
+          nameWithOwner   # the key's "owner/repo"
+        }
+        author {
+          login           # reporter id; isMe when it is the viewer
+          ... on User { name }  # reporter name when the user set one
+        }
+        labels(first: 20) {
+          nodes { name }  # labels, shown as chips and searched by the text filter
+        }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
+          nodes {
+            number        # the PR chip "#7", joined to the PRs view
+            url
+            state         # OPEN / MERGED / CLOSED: an open one makes the issue "in progress"
+            isDraft
+            repository { nameWithOwner }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** The Work view's search: open issues assigned to the viewer, in every
+ *  repository, skipping archived ones (nothing can be done there). */
+export const ISSUES_SEARCH = { label: "issues assigned to me", q: "is:issue is:open assignee:@me archived:false" };
+
+/**
  * The search strings, one call each so that one failing search leaves
  * the others rendering, with the label a notice about the search uses. `since` is a YYYY-MM-DD date for the window of
  * recently merged or closed PRs.

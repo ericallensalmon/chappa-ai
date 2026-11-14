@@ -61,17 +61,18 @@ test("identity first, then the token; everything else is closed without it", () 
   assert.equal(id.status, 200);
   assert.equal(id.body.proof, proof(TOKEN, CHALLENGE, src.addr));
   assert.equal((await src.call("/chappa/v1/identity?challenge=nope", { auth: false })).status, 400);
-  for (const path of ["/chappa/v1/manifest", "/api/prs"]) assert.equal((await src.call(path, { auth: false })).status, 401, path);
-  assert.equal((await src.call("/api/work")).status, 404);
+  for (const path of ["/chappa/v1/manifest", "/api/prs", "/api/work"]) assert.equal((await src.call(path, { auth: false })).status, 401, path);
+  assert.equal((await src.call("/api/env")).status, 404);
   assert.match(src.log(), /GET \/api\/prs 401/);
 }));
 
-test("the manifest offers the PRs view, github.com links and an actions endpoint", () => withSource({}, async (src) => {
+test("the manifest offers the Work and PRs views, github.com links and an actions endpoint", () => withSource({}, async (src) => {
   const { status, body } = await src.call("/chappa/v1/manifest");
   assert.equal(status, 200);
   assert.equal(body.contract, 1);
   assert.equal(body.source.id, "github");
-  assert.deepEqual(Object.keys(body.views), ["prs"]);
+  assert.deepEqual(Object.keys(body.views), ["work", "prs"]);
+  assert.deepEqual(body.views.work, { list: "/api/work", pollSeconds: 300 });
   assert.deepEqual(body.views.prs, { list: "/api/prs", pollSeconds: 300 });
   assert.deepEqual(body.linkHosts, ["github.com"]);
   assert.equal(body.actions, "/api/actions");
@@ -147,7 +148,9 @@ test("GitHub is asked at most once per refresh interval, however often the app p
       for (let i = 0; i < 4; i++) assert.equal((await src.call("/api/prs")).status, 200);
       const calls = readFileSync(logFile, "utf8").trim().split("\n");
       assert.equal(calls.filter((c) => c === "viewer").length, 1);
-      assert.equal(calls.length, 6); // viewer + five searches
+      assert.equal(calls.length, 7); // viewer + five PR searches + the issue search
+      for (let i = 0; i < 2; i++) assert.equal((await src.call("/api/work")).status, 200);
+      assert.equal(readFileSync(logFile, "utf8").trim().split("\n").length, 7, "the Work view shares the fetch");
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -177,4 +180,57 @@ test("the refresh action is not mutating and unknown actions are refused", () =>
   const u = await src.call("/api/actions", { method: "POST", body: { id: "merge", confirmed: true } });
   assert.equal(u.status, 404);
   assert.equal(u.body.kind, "unknown-action");
+}));
+
+test("Work: open issues assigned to me, keyed owner/repo#N, in progress while a closing PR is open", () => withSource({}, async (src) => {
+  const before = Date.now();
+  const { status, body } = await src.call("/api/work");
+  assert.equal(status, 200);
+  assert.equal(body.freshness.errors, undefined);
+  assert.equal(body.freshness.notices, undefined);
+  assert.ok(Date.parse(body.freshness.asOf) >= before - 5000);
+  assert.deepEqual(body.items.map((i) => i.key), ["owner/repo#12", "owner/repo#13", "other/lib#20"]);
+  const [doing, todo, other] = body.items;
+  assert.deepEqual(doing.status, { label: "In progress", category: "doing" });
+  assert.deepEqual(doing.prs, [{ forge: "github", repo: "owner/repo", number: "#1", url: "https://github.com/owner/repo/pull/1", status: "open" }]);
+  assert.deepEqual(doing.labels, ["bug", "auth"]);
+  assert.deepEqual(doing.reporter, { id: "sam", name: "Sam" });
+  assert.equal(doing.type, "issue");
+  assert.equal(doing.assignedToMe, true);
+  assert.equal(doing.url, "https://github.com/owner/repo/issues/12");
+  assert.deepEqual(doing.actions, [{ kind: "link", id: "open", label: "Open on GitHub", url: "https://github.com/owner/repo/issues/12" }]);
+  assert.equal("folder" in doing, false);
+  assert.equal("localStatus" in doing, false);
+  // A closed closing PR does not make the issue in progress.
+  assert.deepEqual(todo.status, { label: "Open", category: "todo" });
+  assert.equal(todo.prs[0].status, "closed");
+  assert.deepEqual(todo.reporter, { id: "alex", name: "Alex", isMe: true });
+  assert.deepEqual(other.reporter, { id: "ghost-bot", name: "ghost-bot" });
+  // The PRs the issues link to are the PRs view's own rows.
+  const prs = (await src.call("/api/prs")).body.items;
+  assert.ok(row(prs, "#1", "owner/repo"));
+}));
+
+test("Work: a capped issue search is a quiet notice", () => withSource({ GH_STUB_TOTAL: "issues:340" }, async (src) => {
+  const { body } = await src.call("/api/work");
+  assert.equal(body.freshness.errors, undefined);
+  assert.deepEqual(body.freshness.notices, ["issues assigned to me: showing 3 of 340 issues"]);
+  assert.equal((await src.call("/api/prs")).body.freshness.notices, undefined);
+}));
+
+test("Work: a failing issue search is an error on Work only; the PRs still render", () => withSource({ GH_STUB_FAIL: "issues" }, async (src) => {
+  const work = (await src.call("/api/work")).body;
+  assert.deepEqual(work.items, []);
+  assert.equal(work.freshness.errors.length, 1);
+  assert.equal(work.freshness.errors[0].source, "github:issues");
+  const prs = (await src.call("/api/prs")).body;
+  assert.equal(prs.freshness.errors, undefined);
+  assert.equal(prs.items.length, 10);
+}));
+
+test("Work: gh not logged in empties Work too, with one clear error", () => withSource({ GH_STUB_MODE: "logged-out" }, async (src) => {
+  const { body } = await src.call("/api/work");
+  assert.deepEqual(body.items, []);
+  assert.equal(body.freshness.errors.length, 1);
+  assert.match(body.freshness.errors[0].message, /not logged in/);
 }));

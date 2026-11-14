@@ -75,6 +75,7 @@ import { SeenBaselines, buildNeedsYou, pollResult, type NeedsYouModel, type Term
 import { SourceViewsData, type DataView } from "./sources/views_data";
 import { PrsView } from "./sources/prs_view";
 import { NeedsYouView } from "./sources/needs_you_view";
+import { WorkView } from "./sources/work_view";
 import type { SourceViewDeps } from "./sources/view_common";
 
 /** The process-status vocabulary. */
@@ -832,17 +833,18 @@ export interface AppOptions {
   sources?: SourcesStore;
   /** What the source views call: judged actions, running one, opening a
    *  checked link. Defaults to the Tauri commands. */
-  sourceActions?: Pick<SourceViewDeps, "actions" | "run" | "openLink">;
+  sourceActions?: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel">;
 }
 
 /** The source views this build renders, in rail order. A later view joins
  *  by adding its name here and its page to `ensureSourceView`. */
-const BUILT_VIEWS: readonly RailView[] = ["prs", "attention"];
+const BUILT_VIEWS: readonly RailView[] = ["work", "prs", "attention"];
 
-const tauriSourceActions: Pick<SourceViewDeps, "actions" | "run" | "openLink"> = {
+const tauriSourceActions: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel"> = {
   actions: (sourceId, view, key) => ipc.sourceActions(sourceId, view, key),
   run: ipc.sourceRunAction,
   openLink: ipc.openSourceLink,
+  panel: ipc.sourcePanel,
 };
 
 const APP_CSS = `
@@ -1448,13 +1450,14 @@ export class App {
   private readonly sources: SourcesStore;
   /** The cached payloads the views read, kept current from the store. */
   private readonly viewsData: SourceViewsData;
-  private readonly sourceActionsApi: Pick<SourceViewDeps, "actions" | "run" | "openLink">;
+  private readonly sourceActionsApi: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel">;
   /** The rail's views section: one row per visible view. */
   private readonly viewsSection: HTMLElement;
   private viewsSig = " never-rendered";
   /** The pages, built on first open and mounted in the stack. */
   private prsView: PrsView | null = null;
   private needsYouView: NeedsYouView | null = null;
+  private workView: WorkView | null = null;
   /** Which view is on screen, and what it covered (restored on Back). */
   private openViewName: RailView | null = null;
   private viewPrev: { termId: number } | { pane: PaneTarget } | null = null;
@@ -6475,20 +6478,28 @@ export class App {
     for (const r of this.wsCmds.values()) r.el?.classList.remove("active");
   }
 
-  private sourcePage(view: RailView): PrsView | NeedsYouView | null {
+  private sourcePage(view: RailView): PrsView | NeedsYouView | WorkView | null {
+    if (view === "work") return this.workView;
     if (view === "prs") return this.prsView;
     if (view === "attention") return this.needsYouView;
     return null;
   }
 
   /** Build a view's page on first open and mount it in the stack. */
-  private ensureSourceView(view: RailView): PrsView | NeedsYouView {
+  private ensureSourceView(view: RailView): PrsView | NeedsYouView | WorkView {
     const deps: SourceViewDeps = {
       ...this.sourceActionsApi,
       onClose: () => this.closeSourceView(),
       say: (text, kind) => this.showToast(text, kind === "error" ? "error" : "info"),
       now: this.now,
     };
+    if (view === "work") {
+      if (!this.workView) {
+        this.workView = new WorkView({ ...deps, openView: (target, key) => this.openViewAt(target, key) });
+        this.stack.appendChild(this.workView.host);
+      }
+      return this.workView;
+    }
     if (view === "prs") {
       if (!this.prsView) {
         this.prsView = new PrsView(deps);
@@ -6500,16 +6511,22 @@ export class App {
       this.needsYouView = new NeedsYouView({
         ...deps,
         selectTerminal: (key) => this.selectAttentionRow(key),
-        openView: (target) => {
-          const v = target as RailView;
-          if (!BUILT_VIEWS.includes(v) || !this.railViews().includes(v)) return false;
-          this.openSourceView(v);
-          return true;
-        },
+        openView: (target, key) => this.openViewAt(target, key),
       });
       this.stack.appendChild(this.needsYouView.host);
     }
     return this.needsYouView;
+  }
+
+  /** A link from one view into another (a Needs you row, a Work item's PR
+   *  chip): open the view, and on Work bring the item into view. False when
+   *  the view is not in the rail. */
+  private openViewAt(target: string, key: string): boolean {
+    const v = target as RailView;
+    if (!BUILT_VIEWS.includes(v) || !this.railViews().includes(v)) return false;
+    this.openSourceView(v);
+    if (v === "work" && this.workView && !this.workView.focus(key)) this.showToast(`${key} is not in the Work list.`, "error");
+    return true;
   }
 
   /** A source payload was re-read (or, with null, the listing moved):
@@ -6538,6 +6555,19 @@ export class App {
   /** Repaint the open view and the Needs you badge. */
   private renderSourceViews(): void {
     this.renderNeedsYou();
+    if (this.workView?.active) {
+      const data = this.viewsData;
+      // PR chips open in the PRs view only while it is in the rail and lists them.
+      const prs = this.railViews().includes("prs") ? this.currentPrsModel() : null;
+      const loadedPrs = new Set(prs ? [...prs.mine, ...prs.reviewing, ...prs.all].flatMap((g) => g.rows.map((r) => r.id)) : []);
+      this.workView.update({
+        payloads: data.payloadsFor("work"),
+        needsUpdate: data.needsUpdate(),
+        loadedPrs,
+        servedBy: servedBy(data.current, "work").map((s) => s.label),
+        versions: data.versions(),
+      });
+    }
     if (this.prsView?.active) {
       this.prsView.update({
         model: this.currentPrsModel(),

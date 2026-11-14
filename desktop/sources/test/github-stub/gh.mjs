@@ -38,6 +38,7 @@ if (argv[0] !== "api" || argv[1] !== "graphql" || !vars.query) {
 const q = vars.q ?? "";
 const name =
   !q ? "viewer" :
+  q.includes("is:issue") ? "issues" :
   q.includes("review-requested:@me") ? "requested" :
   q.includes("reviewed-by:@me") ? "reviewed" :
   q.includes("commenter:@me") ? "commented" :

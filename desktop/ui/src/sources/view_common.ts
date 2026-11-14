@@ -21,6 +21,12 @@ export interface SourceViewDeps {
   run: typeof ipc.sourceRunAction;
   /** Open a source's link after Rust's https + trusted-host check. */
   openLink(sourceId: string, url: string): Promise<void>;
+  /** Fetch a panel's page again (`source_panel`), to re-poll it while it
+   *  is open. Absent where no page can be shown. */
+  panel?(sourceId: string, path: string): Promise<unknown>;
+  /** A `panel` action ran and answered its first page: show it. Absent
+   *  where the view has nowhere to show one. */
+  openPanel?(origin: PanelOrigin, payload: unknown): void;
   /** The back control or Escape. */
   onClose(): void;
   /** One line for the user: an action's outcome or a failure. */
@@ -135,6 +141,16 @@ export function fillLines(parent: HTMLElement, cls: string, lines: string[]): vo
   }
 }
 
+/** Where a panel page came from: the source, and the `panel` action. */
+export interface PanelOrigin {
+  sourceId: string;
+  sourceLabel: string;
+  /** The action's label (the page's title until the page names its own). */
+  label: string;
+  /** The payload-named path the page is re-fetched from. */
+  endpoint: string;
+}
+
 /** The page frame both views use: back control with the view's name, a
  *  header slot, the freshness line, then banners / errors / notices above
  *  the content and its empty state. */
@@ -240,8 +256,10 @@ export class ActionsCell {
     this.el.className = "chappa-sv-actions";
   }
 
-  load(targets: ActionTarget[], version: string): void {
-    const sig = `${version}\u001e${JSON.stringify(targets)}`;
+  /** `only`: draw just these action ids (a section's own actions out of
+   *  its item's list), in the order Rust lists them. */
+  load(targets: ActionTarget[], version: string, only?: readonly string[]): void {
+    const sig = `${version}\u001e${JSON.stringify(targets)}\u001e${only ? JSON.stringify(only) : ""}`;
     if (sig === this.sig) return;
     this.sig = sig;
     const seq = ++this.seq;
@@ -262,6 +280,7 @@ export class ActionsCell {
       const links = new Set<string>();
       const many = targets.length > 1;
       for (const { t, entry } of lists.flat()) {
+        if (only && !only.includes(entry.action.id)) continue;
         // Two sources serving the same PR both offer "open it": one button.
         if (entry.action.kind === "link") {
           if (links.has(entry.action.url)) continue;
@@ -288,6 +307,10 @@ export class ActionsCell {
     try {
       const outcome = await runAction(t.sourceId, t.sourceLabel, t.view, t.key, entry, { run: this.deps.run });
       if (!outcome) return;
+      if (outcome.kind === "panel" && entry.action.kind === "panel") {
+        this.deps.openPanel?.({ sourceId: t.sourceId, sourceLabel: t.sourceLabel, label: entry.action.label, endpoint: entry.action.endpoint }, outcome.payload);
+        return;
+      }
       const text = outcomeText(outcome);
       if (text) this.deps.say(text, outcome.kind === "uncertain" ? "error" : "info");
     } catch (e) {

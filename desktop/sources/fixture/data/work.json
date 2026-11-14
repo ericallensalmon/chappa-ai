@@ -36,7 +36,7 @@
         "gate": "human-exit",
         "pendingApproval": { "to": "done", "by": "Alex", "note": "Looks complete" },
         "allowed": [
-          { "id": "done", "label": "Approve", "humanOnly": true },
+          { "id": "approve", "label": "Approve", "humanOnly": true },
           { "id": "in-progress", "label": "Send back", "requireNote": true }
         ],
         "history": [

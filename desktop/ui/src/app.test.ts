@@ -6984,7 +6984,7 @@ describe("App source views", () => {
       sources: [sourceRow("fx", ALL), sourceRow("raw", ["prs"], { trusted: false, status: "needs_review" })],
       hiddenViews: [],
     });
-    expect(entries(root)).toEqual(["prs", "attention"]);
+    expect(entries(root)).toEqual(["work", "prs", "attention"]);
     // 1 work approval + 5 PRs in yes buckets (waiting folded, not counted) + 4 attention items.
     expect(badge(root)).toBe("10");
     panelDispose(app);
@@ -6995,14 +6995,14 @@ describe("App source views", () => {
     const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
     await sources.store.setViewHidden("prs", true);
     await FLUSH();
-    expect(entries(root)).toEqual(["attention"]);
+    expect(entries(root)).toEqual(["work", "attention"]);
     expect(badge(root)).toBe("5");
     await sources.store.setViewHidden("attention", true);
     await FLUSH();
-    expect(entries(root)).toEqual([]);
+    expect(entries(root)).toEqual(["work"]);
     await sources.store.setViewHidden("prs", false);
     await FLUSH();
-    expect(entries(root)).toEqual(["prs"]);
+    expect(entries(root)).toEqual(["work", "prs"]);
     panelDispose(app);
     root.remove();
   });
@@ -7054,6 +7054,43 @@ describe("App source views", () => {
     expect(entries(root)).toEqual(["attention"]);
     expect(page(root, "prs")?.classList.contains("active")).toBe(false);
     expect(vd(app).activeId).toBe(shellId);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a trusted source serving work adds the Work entry first, with no count; its page lists the items", async () => {
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ["work"])], hiddenViews: [] });
+    expect(entries(root)).toEqual(["work", "attention"]);
+    expect(entry(root, "work").querySelector(".chappa-view-name")?.textContent).toBe("Work");
+    expect(entry(root, "work").querySelector(".chappa-view-badge")?.textContent).toBe("");
+    expect(entry(root, "work").title).toBe("Work from fx");
+    entry(root, "work").click();
+    const work = page(root, "work")!;
+    expect(work.classList.contains("active")).toBe(true);
+    // Assigned to me is on by default: the active ABC-1 is what shows.
+    expect([...work.querySelectorAll<HTMLElement>(".chappa-work-row")].map((r) => r.dataset.key)).toContain("ABC-1");
+    work.querySelector<HTMLButtonElement>(".chappa-sv-back")!.click();
+    expect(work.classList.contains("active")).toBe(false);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a Needs you item that opens a Work item opens the Work view at it; a Work item's PR chip opens the PRs view", async () => {
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    entry(root, "attention").click();
+    const needs = page(root, "attention")!;
+    needs.querySelector<HTMLButtonElement>('.chappa-needs-row[data-id="att:fx|review-note-1"] .chappa-sv-title')!.click();
+    const work = page(root, "work")!;
+    expect(needs.classList.contains("active")).toBe(false);
+    expect(work.classList.contains("active")).toBe(true);
+    // ABC-2 is not assigned to me: the filter stepped aside to show it.
+    const focused = work.querySelector<HTMLElement>(".chappa-work-row.focused");
+    expect(focused?.dataset.key).toBe("ABC-2");
+    expect(work.querySelector(".chappa-work-detail-title")?.textContent).toBe("ABC-2 Rename the web build step");
+    // The PRs view lists owner/repo#1, so ABC-1's chip opens it there.
+    work.querySelector<HTMLButtonElement>('.chappa-work-row[data-key="ABC-1"] .chappa-work-pr')!.click();
+    expect(work.classList.contains("active")).toBe(false);
+    expect(page(root, "prs")?.classList.contains("active")).toBe(true);
     panelDispose(app);
     root.remove();
   });
@@ -7135,7 +7172,7 @@ describe("App source views", () => {
     sources.emit({ event: "sources" });
     await FLUSH();
     expect(hint()).toBeNull();
-    expect(entries(root)).toEqual(["prs", "attention"]);
+    expect(entries(root)).toEqual(["work", "prs", "attention"]);
     panelDispose(app);
     root.remove();
   });
