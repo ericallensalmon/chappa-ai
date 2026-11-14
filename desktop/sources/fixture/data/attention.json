@@ -1,0 +1,41 @@
+{
+  "freshness": { "asOf": "2026-01-15T10:00:00Z", "refreshing": false, "nextUtc": "2026-01-15T10:05:00Z" },
+  "items": [
+    {
+      "id": "nightly-build-1",
+      "title": "Nightly build failed",
+      "detail": "3 of 120 tests failed on main",
+      "group": "Builds",
+      "severity": "bad",
+      "opens": { "url": "https://registry.example/owner/repo/actions/runs/1" },
+      "actions": [
+        { "kind": "link", "id": "open-run", "label": "Open run", "url": "https://registry.example/owner/repo/actions/runs/1" }
+      ]
+    },
+    {
+      "id": "incident-1",
+      "title": "Elevated error rate on api",
+      "detail": "Started 20 minutes ago",
+      "group": "Incidents",
+      "severity": "warn",
+      "opens": { "view": "environment", "key": "api" }
+    },
+    {
+      "id": "review-note-1",
+      "title": "ABC-2 needs a decision",
+      "detail": "Waiting on a human",
+      "group": "Builds",
+      "severity": "info",
+      "opens": { "view": "work", "key": "ABC-2" },
+      "actions": [
+        { "kind": "endpoint", "id": "ping", "label": "Ping", "mutates": false }
+      ]
+    },
+    {
+      "id": "plain-1",
+      "title": "Certificate expires soon",
+      "detail": "dev.example.test expires in 6 days",
+      "group": "Incidents"
+    }
+  ]
+}

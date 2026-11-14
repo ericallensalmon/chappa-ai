@@ -1,0 +1,32 @@
+[
+  {
+    "token": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "challenge": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "addr": "127.0.0.1:5000",
+    "proof": "5ef51b2d8210edd67b211ebdad647af1fbbc49a51ed8c42baa2e08043025e02d"
+  },
+  {
+    "token": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0",
+    "challenge": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "addr": "127.0.0.1:48213",
+    "proof": "1ace2e0105be8539cb49f055021e1bf5cb757bb92ccb5ed33a1628ffded8dd72"
+  },
+  {
+    "token": "0000000000000000000000000000000000000000000000000000000000000000",
+    "challenge": "0000000000000000000000000000000000000000000000000000000000000000",
+    "addr": "127.0.0.1:80",
+    "proof": "4e40ff3f95afd9bc74cbcd345fa279a2f50636c9e68f0f536f68fb161cb08358"
+  },
+  {
+    "token": "c0ffee00d00dfeedc0ffee00d00dfeedc0ffee00d00dfeedc0ffee00d00dfeed",
+    "challenge": "05121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98",
+    "addr": "[::1]:9",
+    "proof": "bb73a9e018fd050a8b6cdf801a80b85ce781a1bb8040d3becfb14863140da159"
+  },
+  {
+    "token": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "challenge": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "addr": "127.0.0.1:65535",
+    "proof": "2cfa224486550e8453afe194eb64112f560ced4e2e6b36af8fd84dfa9b9d954f"
+  }
+]

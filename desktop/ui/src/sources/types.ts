@@ -1,0 +1,349 @@
+// Wire types of the source contract (version 1). A source is a local
+// process that serves these shapes over loopback HTTP; the app fetches
+// them from Rust and hands them to the views. Unknown fields are ignored,
+// and changes within version 1 are additive only.
+
+/** ISO 8601 timestamp in UTC, ending in Z. */
+export type Utc = string;
+
+/** A link the user can open. Its host must be one the user trusted for the source. */
+export interface Link {
+  label: string;
+  url: string;
+}
+
+/** A small coloured chip next to a row. */
+export interface Badge {
+  text: string;
+  tone?: "info" | "ok" | "warn" | "bad" | "muted";
+  /** Tooltip. */
+  title?: string;
+}
+
+export interface Person {
+  /** The source's own id for the person. */
+  id?: string;
+  name: string;
+  /** True when this person is the signed-in user. */
+  isMe?: boolean;
+}
+
+/** How current a list is, and what went wrong while building it. */
+export interface Freshness {
+  /** When the data was gathered; null when it never was. */
+  asOf: Utc | null;
+  /** The source is refreshing right now; what is served may be stale. */
+  refreshing?: boolean;
+  /** When the source expects to refresh next. */
+  nextUtc?: Utc | null;
+  /** Partial failure: render what came back and list what did not. */
+  errors?: { source: string; message: string }[];
+}
+
+/** Body of every non-2xx reply. */
+export interface SourceError {
+  kind: string;
+  message: string;
+  detail?: string;
+}
+
+// ---- Work ----
+
+export interface WorkItem {
+  /** Stable and unique within the source (ABC-123, owner/repo#12). */
+  key: string;
+  title: string | null;
+  type?: string | null;
+  status: { label: string; category?: "todo" | "doing" | "done" | null } | null;
+  url?: string | null;
+  assignedToMe?: boolean;
+  priority?: string | null;
+  labels?: string[];
+  parent?: { key: string; title?: string | null } | null;
+  created?: Utc | null;
+  reporter?: Person | null;
+  lastTouchedUtc?: Utc | null;
+  /** Working directory for "agent here" / "terminal here". Must resolve inside an allowed root. */
+  folder?: string | null;
+  prs?: { forge: string; repo: string; number: string; url?: string; status?: string }[];
+  /** The item the environment is currently set up for. */
+  active?: boolean;
+  localStatus?: LocalStatus | null;
+  badges?: Badge[];
+  sections?: Section[];
+  actions?: Action[];
+}
+
+export interface WorkListResponse {
+  freshness: Freshness;
+  items: WorkItem[];
+  banners?: Banner[];
+}
+
+/** An optional local workflow on an item. Omit it and the status block hides. */
+export interface LocalStatus {
+  id: string;
+  label: string;
+  since?: Utc | null;
+  actor?: string | null;
+  round?: number | null;
+  /** Who may leave this status: anyone, a human, or a human at exit only. */
+  gate?: "any" | "human" | "human-exit" | null;
+  /** A move waiting for a human to approve it. Counts as needing the user. */
+  pendingApproval?: { to: string; by?: string; note?: string } | null;
+  /** The moves available from here. */
+  allowed: { id: string; label: string; humanOnly?: boolean; requireNote?: boolean }[];
+  history?: { at: Utc; from?: string; to?: string; actor?: string; note?: string; override?: string }[];
+}
+
+// ---- PRs ----
+
+/**
+ * Which group a PR sits in. For role "mine": action, draft, ready, waiting,
+ * recent. For role "reviewing": replied, vote, mythreads, voted, group.
+ */
+export type Bucket =
+  | "action" | "draft" | "ready" | "waiting" | "recent"
+  | "replied" | "vote" | "mythreads" | "voted" | "group";
+
+export interface Pr {
+  /** "github", "gitlab", "azure-devops", ... */
+  forge: string;
+  repo: string;
+  project?: string | null;
+  /** As shown to the user (#12, !345). */
+  number: string;
+  url: string;
+  title: string;
+  author: Person;
+  sourceBranch?: string;
+  targetBranch?: string;
+  state: "open" | "draft" | "merged" | "closed";
+  closedUtc?: Utc | null;
+  role: "mine" | "reviewing";
+  /** Computed by the source. */
+  bucket: Bucket;
+  /** Why the PR is in its bucket; shown verbatim, one line each. */
+  reasons: string[];
+  me?: {
+    required?: boolean;
+    vote?: "approved" | "approved-with-suggestions" | "waiting" | "rejected" | "none";
+  } | null;
+  reviewers?: (Person & { required?: boolean; isGroup?: boolean; vote?: string })[];
+  checks?: {
+    state: "passing" | "failing" | "pending" | "none";
+    failing?: string[];
+    pending?: string[];
+  } | null;
+  threads?: { active: number; resolved: number; needsMe: number } | null;
+  mergeable?: "yes" | "conflicts" | "unknown" | null;
+  /** Keys of the Work items this PR belongs to. */
+  workKeys?: string[];
+  badges?: Badge[];
+  actions?: Action[];
+}
+
+export interface PrListResponse {
+  freshness: Freshness;
+  items: Pr[];
+  banners?: Banner[];
+}
+
+// ---- Needs you ----
+
+/** Attention the source raises beyond what the app derives itself. */
+export interface AttentionItem {
+  /** Stable; notifications fire on ids not seen before. */
+  id: string;
+  title: string;
+  detail: string;
+  /** Section heading the item is listed under. */
+  group: string;
+  severity?: "info" | "warn" | "bad";
+  opens?: { view: "work" | "prs" | "environment"; key: string } | { url: string };
+  actions?: Action[];
+}
+
+export interface AttentionListResponse {
+  freshness: Freshness;
+  items: AttentionItem[];
+}
+
+// ---- Environment ----
+
+export type ComponentState =
+  | "up" | "starting" | "unhealthy"
+  | "crashloop" | "stopped-problem" | "stopped-idle"
+  | "oneshot-ok" | "oneshot-failed"
+  | "not-deployed";
+
+export interface Component {
+  id: string;
+  /** Id of an entry in EnvironmentResponse.groups. */
+  group: string;
+  label?: string;
+  /** A oneshot runs to completion (migrations, seed jobs). Default "service". */
+  kind?: "service" | "oneshot";
+  state: ComponentState;
+  uptime?: string | null;
+  restarts?: number | null;
+  exitCode?: number | null;
+  source?: { mode: "prebuilt" | "source" | "dev"; ref?: string | null; commit?: string | null } | null;
+  links?: (Link & { browser?: boolean })[];
+  /**
+   * An HTTP check. "health" passes on 2xx only, "web" on 2xx or 3xx, "any"
+   * on any status; no response at all is always down.
+   */
+  probe?: { url: string; rule: "health" | "web" | "any"; up: boolean; status?: number | null } | null;
+  hint?: string | null;
+  badges?: Badge[];
+  actions?: Action[];
+}
+
+export interface EnvironmentResponse {
+  freshness: Freshness;
+  /** Count per state; the header shows the non-zero ones. */
+  summary?: Partial<Record<ComponentState, number>>;
+  groups: { id: string; label: string }[];
+  components: Component[];
+  /** Runtimes, memory, dirty clones and the like. */
+  facts?: Section[];
+  /** Drives the view's alert dot. */
+  alerts?: { text: string; severity: "warn" | "bad"; componentId?: string }[];
+  banners?: Banner[];
+}
+
+// ---- Actions, sections, banners, panels ----
+
+/** Extra environment for a launched agent or terminal; names match [A-Z_][A-Z0-9_]*. */
+export type ActionEnv = Record<string, string>;
+
+export type Action =
+  | {
+      kind: "agent"; id: string; label: string;
+      cwd: string;
+      /** First prompt; shown to the user before it runs. */
+      prompt: string;
+      /** Agent tool name; absent means the project's default agent tool. */
+      tool?: string;
+      title?: string;
+      env?: ActionEnv;
+    }
+  | {
+      kind: "terminal"; id: string; label: string;
+      cwd: string;
+      /** argv, never a shell string. */
+      command?: string[];
+      env?: ActionEnv;
+    }
+  | {
+      kind: "endpoint"; id: string; label: string;
+      /** True when the call changes something. */
+      mutates: boolean;
+      /** Question shown before the call. Required when mutates: without it the action is not rendered. */
+      confirm?: string;
+      params?: Record<string, unknown>;
+      /** Whether the user may or must add a note. */
+      note?: "optional" | "required";
+    }
+  | { kind: "link"; id: string; label: string; url: string }
+  /** Opens a drill-in page served by the source's endpoint. */
+  | { kind: "panel"; id: string; label: string; endpoint: string };
+
+/** A titled block of label/value rows. */
+export interface Section {
+  id: string;
+  title: string;
+  collapsed?: boolean;
+  rows: { label: string; value?: string; links?: Link[]; badges?: Badge[] }[];
+  /** Rows folded behind a toggle labelled `label`. */
+  more?: { label: string; rows: Section["rows"] };
+  actions?: Action[];
+}
+
+export interface Banner {
+  id: string;
+  tone: "info" | "warn" | "bad";
+  title: string;
+  lines?: string[];
+  actions?: Action[];
+}
+
+/** Body of an endpoint action call. */
+export interface ActionRequest {
+  id: string;
+  target: { view: string; key: string };
+  params?: Record<string, unknown>;
+  note?: string;
+  /** Set only after the user accepted the action's confirm text. A mutating call without it is refused. */
+  confirmed?: boolean;
+}
+
+/** The job the app runs for a 202 reply that carries one. */
+export interface RunBlock {
+  argv: string[];
+  cwd: string;
+  env?: ActionEnv;
+  title?: string;
+}
+
+/** Reply to an endpoint action: 200 done, 202 started (optionally with a run), 503 outcome unknown. */
+export interface ActionResult {
+  message?: string;
+  jobId?: string;
+  run?: RunBlock;
+}
+
+export interface JobStatus {
+  state: "running" | "done" | "failed";
+  log?: string;
+}
+
+/** What the app posts to the jobs endpoint when a `run` job's pane exits. */
+export interface JobExitReport {
+  exitCode: number;
+  endedUtc: Utc;
+  /** The pane's text, capped with a truncation marker. */
+  output: string;
+}
+
+/** A drill-in page. The app re-polls it while it is open. */
+export interface PanelResponse {
+  title: string;
+  freshness: Freshness;
+  banners?: Banner[];
+  sections: Section[];
+  actions?: Action[];
+}
+
+// ---- Manifest ----
+
+export interface ViewEndpoint {
+  list: string;
+  /** Item detail path with a {key} placeholder (work only). */
+  item?: string;
+  /** Clamped by the app to 15..3600. */
+  pollSeconds?: number;
+}
+
+/** `GET /chappa/v1/manifest`. Every view is optional; the app calls only the paths named here. */
+export interface Manifest {
+  contract: 1;
+  source: { id: string; label: string; version: string };
+  views: {
+    work?: ViewEndpoint;
+    prs?: ViewEndpoint;
+    attention?: ViewEndpoint;
+    environment?: ViewEndpoint;
+  };
+  /** Optional list of the source's local workflows. */
+  workflows?: string;
+  /** POST target for endpoint actions. */
+  actions?: string;
+  /** Job status path with an {id} placeholder. */
+  jobs?: string;
+  /** Hosts links may open on; the user approves this list. */
+  linkHosts: string[];
+  /** Extra directories the source wants to launch in; the user approves them. */
+  roots?: string[];
+}

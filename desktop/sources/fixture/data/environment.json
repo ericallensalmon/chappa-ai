@@ -1,0 +1,80 @@
+{
+  "freshness": { "asOf": "2026-01-15T10:00:00Z", "refreshing": false, "nextUtc": "2026-01-15T10:02:00Z" },
+  "summary": {
+    "up": 1, "starting": 1, "unhealthy": 1,
+    "crashloop": 1, "stopped-problem": 1, "stopped-idle": 1,
+    "oneshot-ok": 1, "oneshot-failed": 1, "not-deployed": 1
+  },
+  "groups": [
+    { "id": "app", "label": "Application" },
+    { "id": "data", "label": "Data" },
+    { "id": "jobs", "label": "Jobs" }
+  ],
+  "components": [
+    {
+      "id": "api", "group": "app", "label": "API", "kind": "service", "state": "up",
+      "uptime": "3h 12m", "restarts": 0, "exitCode": null,
+      "source": { "mode": "dev", "ref": "abc-1-health", "commit": "1a2b3c4" },
+      "links": [{ "label": "Open", "url": "https://dev.example.test/api", "browser": true }],
+      "probe": { "url": "https://dev.example.test/api/health", "rule": "health", "up": true, "status": 200 },
+      "hint": "Serving from your working copy",
+      "badges": [{ "text": "dev", "tone": "info" }],
+      "actions": [{ "kind": "endpoint", "id": "ping", "label": "Ping", "mutates": false }]
+    },
+    {
+      "id": "web", "group": "app", "label": "Web", "state": "starting",
+      "uptime": "20s", "restarts": 0,
+      "source": { "mode": "source", "ref": "main", "commit": null },
+      "probe": { "url": "https://dev.example.test/", "rule": "web", "up": false, "status": null }
+    },
+    {
+      "id": "db", "group": "data", "label": "Database", "state": "unhealthy",
+      "uptime": "3h 12m", "restarts": 1,
+      "source": { "mode": "prebuilt", "ref": "registry.example/db:16" },
+      "probe": { "url": "https://dev.example.test:5432/", "rule": "any", "up": false, "status": 503 },
+      "hint": "Healthcheck failing for 4 minutes"
+    },
+    {
+      "id": "queue", "group": "data", "label": "Queue", "state": "crashloop",
+      "restarts": 7, "exitCode": 1, "hint": "Restarting every few seconds"
+    },
+    {
+      "id": "worker", "group": "app", "label": "Worker", "state": "stopped-problem",
+      "restarts": 0, "exitCode": 137, "hint": "Was running; no stop was requested"
+    },
+    {
+      "id": "mailer", "group": "app", "label": "Mailer", "state": "stopped-idle",
+      "exitCode": 0, "hint": "Started on demand"
+    },
+    {
+      "id": "migrate", "group": "jobs", "label": "Migrate", "kind": "oneshot", "state": "oneshot-ok",
+      "exitCode": 0
+    },
+    {
+      "id": "seed", "group": "jobs", "label": "Seed", "kind": "oneshot", "state": "oneshot-failed",
+      "exitCode": 2,
+      "actions": [{ "kind": "endpoint", "id": "run-seed", "label": "Run again", "mutates": true, "confirm": "Run the seed job?" }]
+    },
+    {
+      "id": "search", "group": "data", "label": "Search", "state": "not-deployed"
+    }
+  ],
+  "facts": [
+    {
+      "id": "runtimes",
+      "title": "Runtimes",
+      "rows": [
+        { "label": "Node", "value": "22" },
+        { "label": "Memory", "value": "6.1 GiB free" }
+      ]
+    }
+  ],
+  "alerts": [
+    { "text": "db is unhealthy", "severity": "bad", "componentId": "db" },
+    { "text": "web is slow to start", "severity": "warn", "componentId": "web" },
+    { "text": "Disk is 85 percent full", "severity": "warn" }
+  ],
+  "banners": [
+    { "id": "stale-images", "tone": "warn", "title": "Images are out of date", "lines": ["Pull to update"] }
+  ]
+}

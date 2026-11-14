@@ -1,0 +1,15 @@
+{
+  "contract": 1,
+  "source": { "id": "fixture", "label": "Fixture", "version": "0.1.0" },
+  "views": {
+    "work": { "list": "/api/work", "item": "/api/work/{key}", "pollSeconds": 60 },
+    "prs": { "list": "/api/prs", "pollSeconds": 300 },
+    "attention": { "list": "/api/attention" },
+    "environment": { "list": "/api/env", "pollSeconds": 120 }
+  },
+  "workflows": "/api/workflows",
+  "actions": "/api/actions",
+  "jobs": "/api/jobs/{id}",
+  "linkHosts": ["registry.example", "dev.example.test"],
+  "roots": ["/srv/example"]
+}

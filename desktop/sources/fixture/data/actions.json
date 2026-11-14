@@ -1,0 +1,23 @@
+{
+  "ping": { "mutates": false, "status": 200, "body": { "message": "pong" } },
+  "approve": { "mutates": true, "status": 200, "body": { "message": "Approved" } },
+  "start-build": { "mutates": true, "status": 202, "job": {} },
+  "run-seed": {
+    "mutates": true,
+    "status": 202,
+    "job": {
+      "run": {
+        "argv": ["node", "-e", "console.log('seeded')"],
+        "cwd": "/srv/example/abc-1",
+        "env": { "CHAPPA_STACK_SLOT": "1" },
+        "title": "Seed data"
+      }
+    }
+  },
+  "flaky-deploy": {
+    "mutates": true,
+    "status": 503,
+    "body": { "kind": "uncertain", "message": "The deploy service did not answer in time", "detail": "The request may or may not have been applied" }
+  },
+  "unsafe": { "mutates": true, "status": 200, "body": { "message": "Done" } }
+}

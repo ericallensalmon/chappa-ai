@@ -1,0 +1,103 @@
+{
+  "freshness": {
+    "asOf": "2026-01-15T10:00:00Z",
+    "refreshing": true,
+    "nextUtc": "2026-01-15T10:01:00Z",
+    "errors": [{ "source": "tracker", "message": "rate limited, showing cached items" }]
+  },
+  "banners": [
+    { "id": "sync", "tone": "info", "title": "Syncing", "lines": ["Items may be a minute old"] }
+  ],
+  "items": [
+    {
+      "key": "ABC-1",
+      "title": "Add a health route to api",
+      "type": "task",
+      "status": { "label": "In progress", "category": "doing" },
+      "url": "https://registry.example/tracker/ABC-1",
+      "assignedToMe": true,
+      "priority": "high",
+      "labels": ["backend", "ops"],
+      "parent": { "key": "ABC-100", "title": "Observability" },
+      "created": "2026-01-02T09:00:00Z",
+      "reporter": { "id": "u-sam", "name": "Sam" },
+      "lastTouchedUtc": "2026-01-15T09:30:00Z",
+      "folder": "/srv/example/abc-1",
+      "prs": [
+        { "forge": "github", "repo": "owner/repo", "number": "#1", "url": "https://registry.example/owner/repo/pull/1", "status": "open" }
+      ],
+      "active": true,
+      "localStatus": {
+        "id": "in-review",
+        "label": "In review",
+        "since": "2026-01-14T16:00:00Z",
+        "actor": "Alex",
+        "round": 2,
+        "gate": "human-exit",
+        "pendingApproval": { "to": "done", "by": "Alex", "note": "Looks complete" },
+        "allowed": [
+          { "id": "done", "label": "Approve", "humanOnly": true },
+          { "id": "in-progress", "label": "Send back", "requireNote": true }
+        ],
+        "history": [
+          { "at": "2026-01-13T10:00:00Z", "from": "todo", "to": "in-progress", "actor": "Alex" },
+          { "at": "2026-01-14T16:00:00Z", "from": "in-progress", "to": "in-review", "actor": "Alex", "note": "Ready", "override": "skipped checks" }
+        ]
+      },
+      "badges": [{ "text": "blocked", "tone": "bad", "title": "Waiting on approval" }],
+      "sections": [
+        {
+          "id": "details",
+          "title": "Details",
+          "collapsed": false,
+          "rows": [
+            { "label": "Branch", "value": "abc-1-health" },
+            { "label": "Docs", "links": [{ "label": "Spec", "url": "https://registry.example/docs/abc-1" }], "badges": [{ "text": "draft", "tone": "muted" }] }
+          ],
+          "more": { "label": "Show history", "rows": [{ "label": "Created", "value": "2026-01-02" }] },
+          "actions": [{ "kind": "link", "id": "open-docs", "label": "Open docs", "url": "https://registry.example/docs/abc-1" }]
+        }
+      ],
+      "actions": [
+        { "kind": "agent", "id": "agent-here", "label": "Agent here", "cwd": "/srv/example/abc-1", "prompt": "Review ABC-1 and summarise what is left.", "tool": "claude", "title": "ABC-1 review", "env": { "CHAPPA_STACK_SLOT": "1" } },
+        { "kind": "terminal", "id": "terminal-here", "label": "Terminal here", "cwd": "/srv/example/abc-1", "command": ["git", "status"], "env": { "CHAPPA_STACK_SLOT": "1" } },
+        { "kind": "endpoint", "id": "approve", "label": "Approve", "mutates": true, "confirm": "Approve ABC-1?", "params": { "to": "done" }, "note": "optional" },
+        { "kind": "endpoint", "id": "start-build", "label": "Build", "mutates": true, "confirm": "Start a build?" },
+        { "kind": "endpoint", "id": "run-seed", "label": "Seed data", "mutates": true, "confirm": "Run the seed job?" },
+        { "kind": "endpoint", "id": "flaky-deploy", "label": "Deploy", "mutates": true, "confirm": "Deploy now?", "note": "required" },
+        { "kind": "endpoint", "id": "ping", "label": "Ping", "mutates": false },
+        { "kind": "link", "id": "open-item", "label": "Open", "url": "https://registry.example/tracker/ABC-1" },
+        { "kind": "panel", "id": "validate", "label": "Validate", "endpoint": "/api/panel/validate" }
+      ]
+    },
+    {
+      "key": "ABC-2",
+      "title": "Rename the web build step",
+      "status": { "label": "To do", "category": "todo" },
+      "assignedToMe": false,
+      "localStatus": {
+        "id": "in-review",
+        "label": "In review",
+        "gate": "human",
+        "allowed": [{ "id": "done", "label": "Approve", "humanOnly": true }]
+      }
+    },
+    {
+      "key": "owner/repo#2",
+      "title": null,
+      "status": null
+    },
+    {
+      "key": "ABC-3",
+      "title": "Retire the old queue",
+      "type": "bug",
+      "status": { "label": "Done", "category": "done" },
+      "url": null,
+      "priority": null,
+      "parent": null,
+      "reporter": { "name": "Alex", "isMe": true },
+      "folder": null,
+      "localStatus": null
+    }
+  ]
+}

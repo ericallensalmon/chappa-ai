@@ -1,0 +1,202 @@
+import test, { before, after } from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { proof } from "../lib/identity.mjs";
+
+const script = fileURLToPath(new URL("../fixture/index.mjs", import.meta.url));
+const dataDir = fileURLToPath(new URL("../fixture/data/", import.meta.url));
+// Any 64-hex value will do; built here so no line looks like a real key.
+const TOKEN = "ab".repeat(32);
+const CHALLENGE = "ab".repeat(32);
+
+function freePort() {
+  return new Promise((ok, no) => {
+    const s = createServer();
+    s.once("error", no);
+    s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => ok(port)); });
+  });
+}
+
+async function start(extraArgs = [], env = {}) {
+  const port = await freePort();
+  const addr = `127.0.0.1:${port}`;
+  const child = spawn(process.execPath, [script, ...extraArgs], {
+    env: { ...process.env, CHAPPA_SOURCE_ADDR: addr, CHAPPA_SOURCE_TOKEN: TOKEN, ...env },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let log = "";
+  await new Promise((ok, no) => {
+    child.stderr.on("data", (c) => { log += c; if (log.includes("listening")) ok(); });
+    child.once("exit", (code) => no(new Error(`fixture exited ${code}: ${log}`)));
+  });
+  const call = async (path, { method = "GET", body, auth = true, headers = {} } = {}) => {
+    const res = await fetch(`http://${addr}${path}`, {
+      method,
+      headers: { ...(auth ? { authorization: `Bearer ${TOKEN}` } : {}), ...(body ? { "content-type": "application/json" } : {}), ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  return { addr, call, stop: () => child.kill(), log: () => log };
+}
+
+let src;
+before(async () => { src = await start([], { CHAPPA_FIXTURE_JOB_MS: "200" }); });
+after(() => src.stop());
+
+const confirmed = (id) => ({ id, target: { view: "work", key: "ABC-1" }, params: {}, confirmed: true });
+const RUNS = { "x-chappa-runs-jobs": "1" };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("identity answers without a token with the proof for this address", async () => {
+  const r = await src.call(`/chappa/v1/identity?challenge=${CHALLENGE}`, { auth: false });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.proof, proof(TOKEN, CHALLENGE, src.addr));
+});
+
+test("identity refuses a bad or missing challenge", async () => {
+  for (const q of ["", "?challenge=abc", `?challenge=${"A".repeat(64)}`, `?challenge=${"a".repeat(65)}`]) {
+    const r = await src.call(`/chappa/v1/identity${q}`, { auth: false });
+    assert.equal(r.status, 400, q);
+    assert.equal(r.body.kind, "bad-challenge");
+  }
+});
+
+test("everything else needs the token", async () => {
+  for (const [path, opts] of [["/chappa/v1/manifest", {}], ["/api/work", {}], ["/api/actions", { method: "POST", body: {} }], ["/api/jobs/job-1", {}]]) {
+    const r = await src.call(path, { ...opts, auth: false });
+    assert.equal(r.status, 401, path);
+    assert.equal(r.body.kind, "unauthorized");
+  }
+  const wrong = await src.call("/api/work", { auth: false, headers: { authorization: `Bearer ${"0".repeat(64)}` } });
+  assert.equal(wrong.status, 401);
+});
+
+test("identity, then token, then manifest", async () => {
+  const id = await src.call(`/chappa/v1/identity?challenge=${CHALLENGE}`, { auth: false });
+  assert.equal(id.body.proof, proof(TOKEN, CHALLENGE, src.addr));
+  const m = await src.call("/chappa/v1/manifest");
+  assert.equal(m.status, 200);
+  assert.equal(m.body.contract, 1);
+  assert.deepEqual(Object.keys(m.body.views).sort(), ["attention", "environment", "prs", "work"]);
+  assert.match(m.body.actions, /^\/api\//);
+});
+
+test("every manifest path is served and every list has freshness", async () => {
+  const m = (await src.call("/chappa/v1/manifest")).body;
+  for (const [name, v] of Object.entries(m.views)) {
+    const r = await src.call(v.list);
+    assert.equal(r.status, 200, name);
+    assert.ok("asOf" in r.body.freshness, name);
+    assert.ok(Array.isArray(r.body.items ?? r.body.components), name);
+  }
+  assert.equal((await src.call(m.workflows)).status, 200);
+  const item = await src.call(m.views.work.item.replace("{key}", encodeURIComponent("ABC-1")));
+  assert.equal(item.body.key, "ABC-1");
+  assert.equal((await src.call("/api/work/nope")).status, 404);
+  const panel = await src.call("/api/panel/validate");
+  assert.ok(panel.body.title && panel.body.freshness && Array.isArray(panel.body.sections));
+});
+
+test("data covers every PR bucket, all nine states and a pending approval", async () => {
+  const buckets = (await src.call("/api/prs")).body.items.map((p) => `${p.role}/${p.bucket}`).sort();
+  assert.deepEqual(buckets, [
+    "mine/action", "mine/draft", "mine/ready", "mine/recent", "mine/waiting",
+    "reviewing/group", "reviewing/mythreads", "reviewing/replied", "reviewing/vote", "reviewing/voted",
+  ]);
+  const env = (await src.call("/api/env")).body;
+  assert.equal(new Set(env.components.map((c) => c.state)).size, 9);
+  assert.ok(env.summary && env.alerts.length && env.facts.length);
+  assert.ok(env.components.some((c) => c.state === "not-deployed"));
+  assert.ok((await src.call("/api/work")).body.items.some((i) => i.localStatus?.pendingApproval));
+});
+
+test("a mutating action without confirmed is refused with 409", async () => {
+  for (const body of [{ id: "approve", target: { view: "work", key: "ABC-1" } }, { ...confirmed("approve"), confirmed: false }, { ...confirmed("approve"), confirmed: "true" }]) {
+    const r = await src.call("/api/actions", { method: "POST", body });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.kind, "confirmation-required");
+    assert.equal(typeof r.body.message, "string");
+  }
+});
+
+test("200, unknown action and 503", async () => {
+  const ok = await src.call("/api/actions", { method: "POST", body: { id: "ping", target: { view: "work", key: "ABC-1" } } });
+  assert.deepEqual([ok.status, ok.body.message], [200, "pong"]);
+  assert.equal((await src.call("/api/actions", { method: "POST", body: confirmed("approve") })).status, 200);
+  assert.equal((await src.call("/api/actions", { method: "POST", body: confirmed("nope") })).status, 404);
+  const flaky = await src.call("/api/actions", { method: "POST", body: confirmed("flaky-deploy") });
+  assert.equal(flaky.status, 503);
+  assert.equal(flaky.body.kind, "uncertain");
+});
+
+test("202 {jobId} polls from running to done", async () => {
+  const r = await src.call("/api/actions", { method: "POST", body: confirmed("start-build"), headers: RUNS });
+  assert.equal(r.status, 202);
+  assert.match(r.body.jobId, /^job-/);
+  assert.equal(r.body.run, undefined);
+  assert.equal((await src.call(`/api/jobs/${r.body.jobId}`)).body.state, "running");
+  await sleep(500);
+  assert.equal((await src.call(`/api/jobs/${r.body.jobId}`)).body.state, "done");
+  assert.equal((await src.call("/api/jobs/missing")).status, 404);
+});
+
+test("202 with a run block stays running until the exit report arrives", async () => {
+  const r = await src.call("/api/actions", { method: "POST", body: confirmed("run-seed"), headers: RUNS });
+  assert.equal(r.status, 202);
+  assert.deepEqual(Object.keys(r.body.run).sort(), ["argv", "cwd", "env", "title"]);
+  await sleep(500);
+  assert.equal((await src.call(`/api/jobs/${r.body.jobId}`)).body.state, "running");
+  const post = await src.call(`/api/jobs/${r.body.jobId}`, { method: "POST", body: { exitCode: 0, endedUtc: "2026-01-15T10:00:00Z", output: "seeded\n" } });
+  assert.equal(post.status, 200);
+  const done = await src.call(`/api/jobs/${r.body.jobId}`);
+  assert.deepEqual(done.body, { state: "done", log: "seeded\n" });
+});
+
+test("a non-zero exit report marks the job failed", async () => {
+  const r = await src.call("/api/actions", { method: "POST", body: confirmed("run-seed"), headers: RUNS });
+  await src.call(`/api/jobs/${r.body.jobId}`, { method: "POST", body: { exitCode: 2, endedUtc: "2026-01-15T10:00:00Z", output: "boom" } });
+  assert.equal((await src.call(`/api/jobs/${r.body.jobId}`)).body.state, "failed");
+});
+
+test("without the runs-jobs header the run block is dropped and the source finishes the job", async () => {
+  const r = await src.call("/api/actions", { method: "POST", body: confirmed("run-seed") });
+  assert.equal(r.status, 202);
+  assert.equal(r.body.run, undefined);
+  await sleep(500);
+  assert.equal((await src.call(`/api/jobs/${r.body.jobId}`)).body.state, "done");
+});
+
+test("requests are logged one line each on stderr", () => {
+  assert.match(src.log(), /^GET \/chappa\/v1\/identity 200$/m);
+  assert.match(src.log(), /^POST \/api\/actions 409$/m);
+});
+
+test("--data swaps the response bodies", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "chappa-fixture-"));
+  try {
+    cpSync(dataDir, dir, { recursive: true });
+    const work = JSON.parse(readFileSync(join(dir, "work.json"), "utf8"));
+    work.items = [{ key: "ABC-9", title: "Swapped", status: null }];
+    writeFileSync(join(dir, "work.json"), JSON.stringify(work));
+    const other = await start(["--data", dir]);
+    try {
+      assert.deepEqual((await other.call("/api/work")).body.items.map((i) => i.key), ["ABC-9"]);
+    } finally { other.stop(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("refuses a non-loopback address and a bad token", async () => {
+  for (const env of [{ CHAPPA_SOURCE_ADDR: "0.0.0.0:5999" }, { CHAPPA_SOURCE_ADDR: "192.168.1.5:5999" }, { CHAPPA_SOURCE_TOKEN: "short" }]) {
+    const code = await new Promise((ok) => {
+      const c = spawn(process.execPath, [script], { env: { ...process.env, CHAPPA_SOURCE_ADDR: "127.0.0.1:5999", CHAPPA_SOURCE_TOKEN: TOKEN, ...env }, stdio: "ignore" });
+      c.once("exit", ok);
+    });
+    assert.equal(code, 2, JSON.stringify(env));
+  }
+});

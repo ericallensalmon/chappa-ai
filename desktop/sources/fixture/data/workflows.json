@@ -1,0 +1,15 @@
+{
+  "freshness": { "asOf": "2026-01-15T10:00:00Z" },
+  "workflows": [
+    {
+      "id": "review",
+      "label": "Review",
+      "statuses": [
+        { "id": "todo", "label": "To do" },
+        { "id": "in-progress", "label": "In progress" },
+        { "id": "in-review", "label": "In review", "gate": "human-exit" },
+        { "id": "done", "label": "Done" }
+      ]
+    }
+  ]
+}

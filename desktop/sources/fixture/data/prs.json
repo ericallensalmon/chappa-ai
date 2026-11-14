@@ -1,0 +1,292 @@
+{
+  "freshness": {
+    "asOf": "2026-01-15T10:00:00Z",
+    "refreshing": false,
+    "nextUtc": "2026-01-15T10:05:00Z"
+  },
+  "items": [
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#1",
+      "url": "https://registry.example/owner/repo/pull/1",
+      "title": "Change 1",
+      "author": {
+        "id": "u-alex",
+        "name": "Alex",
+        "isMe": true
+      },
+      "state": "open",
+      "role": "mine",
+      "bucket": "action",
+      "reasons": [
+        "Checks are failing: lint",
+        "1 thread needs your reply"
+      ],
+      "project": "platform",
+      "sourceBranch": "abc-1-health",
+      "targetBranch": "main",
+      "me": {
+        "required": false,
+        "vote": "none"
+      },
+      "reviewers": [
+        {
+          "id": "u-sam",
+          "name": "Sam",
+          "required": true,
+          "vote": "waiting"
+        },
+        {
+          "name": "platform-team",
+          "isGroup": true,
+          "vote": "none"
+        }
+      ],
+      "checks": {
+        "state": "failing",
+        "failing": [
+          "lint"
+        ],
+        "pending": [
+          "e2e"
+        ]
+      },
+      "threads": {
+        "active": 2,
+        "resolved": 1,
+        "needsMe": 1
+      },
+      "mergeable": "conflicts",
+      "workKeys": [
+        "ABC-1"
+      ],
+      "badges": [
+        {
+          "text": "conflicts",
+          "tone": "bad",
+          "title": "Rebase needed"
+        }
+      ],
+      "actions": [
+        {
+          "kind": "link",
+          "id": "open",
+          "label": "Open",
+          "url": "https://registry.example/owner/repo/pull/1"
+        },
+        {
+          "kind": "endpoint",
+          "id": "unsafe",
+          "label": "Force merge",
+          "mutates": true
+        }
+      ]
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#2",
+      "url": "https://registry.example/owner/repo/pull/2",
+      "title": "Change 2",
+      "author": {
+        "id": "u-alex",
+        "name": "Alex",
+        "isMe": true
+      },
+      "state": "draft",
+      "role": "mine",
+      "bucket": "draft",
+      "reasons": [
+        "Still a draft"
+      ],
+      "mergeable": "unknown"
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#3",
+      "url": "https://registry.example/owner/repo/pull/3",
+      "title": "Change 3",
+      "author": {
+        "id": "u-alex",
+        "name": "Alex",
+        "isMe": true
+      },
+      "state": "open",
+      "role": "mine",
+      "bucket": "ready",
+      "reasons": [
+        "Approved and green"
+      ],
+      "me": {
+        "vote": "approved"
+      },
+      "checks": {
+        "state": "passing"
+      },
+      "mergeable": "yes",
+      "closedUtc": null
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#4",
+      "url": "https://registry.example/owner/repo/pull/4",
+      "title": "Change 4",
+      "author": {
+        "id": "u-alex",
+        "name": "Alex",
+        "isMe": true
+      },
+      "state": "open",
+      "role": "mine",
+      "bucket": "waiting",
+      "reasons": [
+        "Waiting on Sam"
+      ],
+      "checks": {
+        "state": "pending",
+        "pending": [
+          "e2e"
+        ]
+      },
+      "mergeable": "yes"
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#5",
+      "url": "https://registry.example/owner/repo/pull/5",
+      "title": "Change 5",
+      "author": {
+        "id": "u-alex",
+        "name": "Alex",
+        "isMe": true
+      },
+      "state": "merged",
+      "role": "mine",
+      "bucket": "recent",
+      "reasons": [
+        "Merged yesterday"
+      ],
+      "closedUtc": "2026-01-14T12:00:00Z",
+      "checks": {
+        "state": "none"
+      }
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#6",
+      "url": "https://registry.example/owner/repo/pull/6",
+      "title": "Change 6",
+      "author": {
+        "id": "u-sam",
+        "name": "Sam"
+      },
+      "state": "open",
+      "role": "reviewing",
+      "bucket": "replied",
+      "reasons": [
+        "Sam answered your thread"
+      ],
+      "me": {
+        "required": false,
+        "vote": "waiting"
+      },
+      "threads": {
+        "active": 1,
+        "resolved": 0,
+        "needsMe": 1
+      }
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#7",
+      "url": "https://registry.example/owner/repo/pull/7",
+      "title": "Change 7",
+      "author": {
+        "id": "u-sam",
+        "name": "Sam"
+      },
+      "state": "open",
+      "role": "reviewing",
+      "bucket": "vote",
+      "reasons": [
+        "You are a required reviewer and have not voted"
+      ],
+      "me": {
+        "required": true,
+        "vote": "none"
+      }
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#8",
+      "url": "https://registry.example/owner/repo/pull/8",
+      "title": "Change 8",
+      "author": {
+        "id": "u-sam",
+        "name": "Sam"
+      },
+      "state": "open",
+      "role": "reviewing",
+      "bucket": "mythreads",
+      "reasons": [
+        "You commented; nothing new"
+      ],
+      "me": {
+        "vote": "approved-with-suggestions"
+      }
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#9",
+      "url": "https://registry.example/owner/repo/pull/9",
+      "title": "Change 9",
+      "author": {
+        "id": "u-sam",
+        "name": "Sam"
+      },
+      "state": "closed",
+      "role": "reviewing",
+      "bucket": "voted",
+      "reasons": [
+        "You voted; nothing new"
+      ],
+      "me": {
+        "vote": "rejected"
+      },
+      "closedUtc": "2026-01-13T08:00:00Z"
+    },
+    {
+      "forge": "github",
+      "repo": "owner/repo",
+      "number": "#10",
+      "url": "https://registry.example/owner/repo/pull/10",
+      "title": "Change 10",
+      "author": {
+        "id": "u-sam",
+        "name": "Sam"
+      },
+      "state": "open",
+      "role": "reviewing",
+      "bucket": "group",
+      "reasons": [
+        "Requested through platform-team"
+      ],
+      "me": null,
+      "reviewers": [
+        {
+          "name": "platform-team",
+          "isGroup": true,
+          "required": true
+        }
+      ]
+    }
+  ]
+}

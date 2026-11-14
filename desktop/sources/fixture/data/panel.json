@@ -1,0 +1,24 @@
+{
+  "title": "Validate",
+  "freshness": { "asOf": "2026-01-15T10:00:00Z", "refreshing": false },
+  "banners": [
+    { "id": "drift", "tone": "warn", "title": "Configuration has drifted", "lines": ["2 files differ from the template"] }
+  ],
+  "sections": [
+    {
+      "id": "checks",
+      "title": "Checks",
+      "rows": [
+        { "label": "Lint", "value": "passing", "badges": [{ "text": "ok", "tone": "ok" }] },
+        { "label": "Types", "value": "2 errors", "badges": [{ "text": "bad", "tone": "bad", "title": "Fix before merging" }] }
+      ],
+      "more": {
+        "label": "Show skipped",
+        "rows": [{ "label": "Docs", "value": "skipped" }]
+      }
+    }
+  ],
+  "actions": [
+    { "kind": "endpoint", "id": "ping", "label": "Re-run", "mutates": false }
+  ]
+}
