@@ -225,9 +225,9 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     assert!(!agent.verdict.enabled);
     assert!(agent.verdict.reason.as_deref().unwrap().contains("no project is open"), "{:?}", agent.verdict);
     // A mutating endpoint without a confirm is not in the list and cannot run.
-    let pr = deps.sources.actions(sid, "prs", Some("#1"), &deps.tools.list(), &roots).unwrap();
+    let pr = deps.sources.actions(sid, "prs", Some("github:owner/repo:#1"), &deps.tools.list(), &roots).unwrap();
     assert_eq!(pr.iter().map(|a| a.action.id()).collect::<Vec<_>>(), ["open"]);
-    assert!(run("prs", Some("#1"), "unsafe", true, None).unwrap_err().contains("not offered"));
+    assert!(run("prs", Some("github:owner/repo:#1"), "unsafe", true, None).unwrap_err().contains("not offered"));
     assert!(run("work", Some("ABC-1"), "nope", true, None).unwrap_err().contains("offers no action"));
 
     // 200: done, with the message.

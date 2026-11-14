@@ -116,6 +116,7 @@ const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 async function fetchAll() {
   const started = Date.now();
   const errors = [];
+  const notices = [];
   let viewer;
   try {
     viewer = (await gh(VIEWER)).viewer?.login;
@@ -137,7 +138,9 @@ async function fetchAll() {
       const found = (data.search?.nodes ?? []).filter((n) => n && n.id);
       cache.perSearch.set(name, found);
       if ((data.search?.issueCount ?? 0) > found.length) {
-        errors.push({ source: `github:${name}`, message: `showing ${found.length} of ${data.search.issueCount} pull requests` });
+        // A capped search is not a failure: what came back is complete as far
+        // as it goes, so it is a notice, not an error.
+        notices.push(`${s.label}: showing ${found.length} of ${data.search.issueCount} pull requests`);
       }
       return [name, s, found];
     } catch (e) {
@@ -173,7 +176,11 @@ async function fetchAll() {
     }
   }
   return {
-    freshness: { asOf: new Date(started).toISOString(), ...(errors.length ? { errors } : {}) },
+    freshness: {
+      asOf: new Date(started).toISOString(),
+      ...(errors.length ? { errors } : {}),
+      ...(notices.length ? { notices } : {}),
+    },
     items,
   };
 }

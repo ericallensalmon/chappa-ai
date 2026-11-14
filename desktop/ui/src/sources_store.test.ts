@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type * as ipc from "./ipc";
 import {
   RAIL_VIEWS,
   SourcesStore,
@@ -191,6 +192,28 @@ describe("SourcesStore", () => {
     await store.setViewHidden("prs", true);
     expect(store.get().hiddenViews).toEqual(["prs"]);
     expect(visibleViews(store.get())).toEqual(["work"]);
+  });
+
+  it("tells view subscribers which (source, view) moved, and still re-fetches the listing", async () => {
+    const api = fakeApi({ sources: [source("a")], hiddenViews: [] });
+    let fire: ((e: ipc.SourcesEvent) => void) | null = null;
+    api.listen = vi.fn(async (h: (e: ipc.SourcesEvent) => void) => {
+      fire = h;
+      return () => {};
+    });
+    const store = new SourcesStore(api);
+    const moved: string[] = [];
+    const off = store.subscribeViews((id, view) => moved.push(`${id}/${view}`));
+    await store.listen();
+    fire!({ event: "view", source_id: "a", view: "prs" });
+    fire!({ event: "sources" });
+    fire!({ event: "job", source_id: "a", job_id: "j1" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(moved).toEqual(["a/prs"]);
+    expect(api.listSources).toHaveBeenCalledTimes(3);
+    off();
+    fire!({ event: "view", source_id: "a", view: "work" });
+    expect(moved).toEqual(["a/prs"]);
   });
 
   it("answers an empty listing when the backend is unreachable", async () => {

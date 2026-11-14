@@ -98,15 +98,15 @@ query ($q: String!) {
 
 /**
  * The search strings, one call each so that one failing search leaves
- * the others rendering. `since` is a YYYY-MM-DD date for the window of
+ * the others rendering, with the label a notice about the search uses. `since` is a YYYY-MM-DD date for the window of
  * recently merged or closed PRs.
  */
 export function searches(since) {
   return {
-    mineOpen: { role: "mine", q: "is:pr is:open author:@me archived:false" },
-    mineClosed: { role: "mine", q: `is:pr is:closed author:@me closed:>=${since}` },
-    requested: { role: "reviewing", q: "is:pr is:open review-requested:@me -author:@me archived:false" },
-    reviewed: { role: "reviewing", q: "is:pr is:open reviewed-by:@me -author:@me archived:false" },
-    commented: { role: "reviewing", q: "is:pr is:open commenter:@me -author:@me archived:false" },
+    mineOpen: { role: "mine", label: "my open PRs", q: "is:pr is:open author:@me archived:false" },
+    mineClosed: { role: "mine", label: "my recently closed PRs", q: `is:pr is:closed author:@me closed:>=${since}` },
+    requested: { role: "reviewing", label: "review requested", q: "is:pr is:open review-requested:@me -author:@me archived:false" },
+    reviewed: { role: "reviewing", label: "reviewed by me", q: "is:pr is:open reviewed-by:@me -author:@me archived:false" },
+    commented: { role: "reviewing", label: "commented on", q: "is:pr is:open commenter:@me -author:@me archived:false" },
   };
 }

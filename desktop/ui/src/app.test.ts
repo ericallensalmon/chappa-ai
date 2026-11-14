@@ -7,6 +7,8 @@ import { emptyAgentTool, frame, stubSettings } from "./term/test-utils";
 import { AgentToolsStore, type AgentToolsApi } from "./agent_tools";
 import type * as ipc from "./ipc";
 import type { CommandForm } from "./dialog";
+import { SourcesStore, type SourcesApi, type SourcesListing } from "./sources_store";
+import { fixture as sourceFixture, source as sourceRow } from "./sources/test-utils";
 
 function makeEntry(id: number, over: Partial<RailEntry> = {}): RailEntry {
   return {
@@ -6881,5 +6883,242 @@ describe("program status", () => {
     const dead = railReducer(blocked, { type: "status", status: "exited", exitCode: 0 });
     expect(dead.programStatus).toBeNull();
     expect(railReducer(dead, { type: "programStatus", status: "blocked" }).programStatus).toBeNull();
+  });
+});
+
+describe("App source views", () => {
+  type ViewsDriver = {
+    entries: Map<number, RailEntry>;
+    renderRail: () => void;
+    activeId: number | null;
+    windowFocused: boolean;
+    center: NotifyCenter;
+    focusCenterEntry: (e: NotifyCenter["entries"][number]) => void;
+  };
+  const vd = (app: App): ViewsDriver => app as unknown as ViewsDriver;
+
+  /** A fake sources store: the listing, each (source, view)'s answer, and
+   *  a way to fire `term://sources` events. */
+  function fakeSources(listing: SourcesListing, answers: Record<string, unknown>) {
+    let handler: ((e: ipc.SourcesEvent) => void) | null = null;
+    let current = listing;
+    const api: SourcesApi = {
+      listSources: vi.fn(async () => current),
+      sourceTrustAnswer: vi.fn(async () => current),
+      sourceView: vi.fn(async (sourceId: string, view: string) => ({
+        payload: answers[`${sourceId}/${view}`] ?? null,
+        freshness: { asOf: "2026-01-15T10:00:00Z", refreshing: false, errors: [] },
+      })),
+      setSourceViewHidden: vi.fn(async (view: string, hidden: boolean) => {
+        const set = new Set(current.hiddenViews);
+        if (hidden) set.add(view);
+        else set.delete(view);
+        current = { ...current, hiddenViews: [...set] };
+        return current;
+      }),
+      attachSource: vi.fn(async () => current),
+      detachSource: vi.fn(async () => current),
+      setSourcePromptPolicy: vi.fn(async () => current),
+      listen: vi.fn(async (h: (e: ipc.SourcesEvent) => void) => {
+        handler = h;
+        return () => {};
+      }),
+    };
+    return {
+      store: new SourcesStore(api),
+      api,
+      emit: (e: ipc.SourcesEvent) => handler?.(e),
+      setListing: (l: SourcesListing) => {
+        current = l;
+      },
+    };
+  }
+
+  const fixtureAnswers = (): Record<string, unknown> => ({
+    "fx/prs": sourceFixture("prs"),
+    "fx/attention": sourceFixture("attention"),
+    "fx/work": sourceFixture("work"),
+  });
+
+  async function mountedWithSources(listing: SourcesListing, answers: Record<string, unknown> = fixtureAnswers()) {
+    const { api } = stubApi();
+    const sources = fakeSources(listing, answers);
+    const actions = vi.fn(async () => [] as ipc.SourceActionDto[]);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const app = new App({
+      root,
+      api,
+      settings: stubSettings().store,
+      confirm: async () => true,
+      sources: sources.store,
+      sourceActions: { actions, run: vi.fn(), openLink: vi.fn(async () => {}) },
+    });
+    await app.mount();
+    await FLUSH();
+    await FLUSH();
+    return { api, root, app, sources, actions };
+  }
+
+  const entries = (root: HTMLElement): string[] =>
+    [...root.querySelectorAll<HTMLElement>(".chappa-views-section .chappa-view-entry")].map((e) => e.dataset.view!);
+  const entry = (root: HTMLElement, view: string): HTMLButtonElement =>
+    root.querySelector<HTMLButtonElement>(`.chappa-view-entry[data-view="${view}"]`)!;
+  const badge = (root: HTMLElement): string => entry(root, "attention").querySelector(".chappa-view-badge")?.textContent ?? "";
+  const page = (root: HTMLElement, view: string): HTMLElement | null =>
+    root.querySelector<HTMLElement>(`.chappa-stack > .chappa-source-view[data-view="${view}"]`);
+  const ALL = ["work", "prs", "attention", "environment"];
+
+  it("with no source, the rail lists Needs you alone, under the project bar, with no badge", async () => {
+    const { root, app } = await mountedWithSources({ sources: [], hiddenViews: [] });
+    expect(entries(root)).toEqual(["attention"]);
+    expect(entry(root, "attention").querySelector(".chappa-view-name")?.textContent).toBe("Needs you");
+    expect(badge(root)).toBe("");
+    expect(root.querySelector(".chappa-views-section")?.previousElementSibling?.classList.contains("chappa-project-bar")).toBe(true);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a trusted source serving PRs adds its entry in rail order; the badge counts the yes rows; untrusted sources add nothing", async () => {
+    const { root, app } = await mountedWithSources({
+      sources: [sourceRow("fx", ALL), sourceRow("raw", ["prs"], { trusted: false, status: "needs_review" })],
+      hiddenViews: [],
+    });
+    expect(entries(root)).toEqual(["prs", "attention"]);
+    // 1 work approval + 5 PRs in yes buckets (waiting folded, not counted) + 4 attention items.
+    expect(badge(root)).toBe("10");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("the Show switches: hiding PRs drops its entry and its rows from the badge; hiding Needs you drops that entry", async () => {
+    const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    await sources.store.setViewHidden("prs", true);
+    await FLUSH();
+    expect(entries(root)).toEqual(["attention"]);
+    expect(badge(root)).toBe("5");
+    await sources.store.setViewHidden("attention", true);
+    await FLUSH();
+    expect(entries(root)).toEqual([]);
+    await sources.store.setViewHidden("prs", false);
+    await FLUSH();
+    expect(entries(root)).toEqual(["prs"]);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a view opens in the stack like the dashboard; Back returns to the panel; the dashboard and a view hand over", async () => {
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    await app.newShell();
+    await FLUSH();
+    const shellId = vd(app).activeId;
+    expect(shellId).not.toBeNull();
+    entry(root, "prs").click();
+    const prs = page(root, "prs")!;
+    expect(prs.classList.contains("active")).toBe(true);
+    expect(vd(app).activeId).toBeNull();
+    expect(entry(root, "prs").classList.contains("open")).toBe(true);
+    expect(prs.querySelectorAll(".chappa-pr-row").length).toBeGreaterThan(0);
+    // The dashboard takes over; a view opened from it inherits what it covered.
+    root.querySelector<HTMLButtonElement>(".chappa-dashboard-open")!.click();
+    expect(prs.classList.contains("active")).toBe(false);
+    expect(root.querySelector(".chappa-dashboard")?.classList.contains("active")).toBe(true);
+    entry(root, "attention").click();
+    expect(root.querySelector(".chappa-dashboard")?.classList.contains("active")).toBe(false);
+    const needs = page(root, "attention")!;
+    expect(needs.classList.contains("active")).toBe(true);
+    needs.querySelector<HTMLButtonElement>(".chappa-sv-back")!.click();
+    expect(needs.classList.contains("active")).toBe(false);
+    expect(vd(app).activeId).toBe(shellId);
+    // The entry toggles; a row activation hides the view.
+    entry(root, "prs").click();
+    entry(root, "prs").click();
+    expect(prs.classList.contains("active")).toBe(false);
+    entry(root, "prs").click();
+    expect(prs.classList.contains("active")).toBe(true);
+    app.activate(shellId!);
+    expect(prs.classList.contains("active")).toBe(false);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a view whose last source goes away closes back to what it covered", async () => {
+    const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    await app.newShell();
+    await FLUSH();
+    const shellId = vd(app).activeId;
+    entry(root, "prs").click();
+    sources.setListing({ sources: [], hiddenViews: [] });
+    sources.emit({ event: "sources" });
+    await FLUSH();
+    expect(entries(root)).toEqual(["attention"]);
+    expect(page(root, "prs")?.classList.contains("active")).toBe(false);
+    expect(vd(app).activeId).toBe(shellId);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("terminal attention is a Needs you row and counts; its click selects the terminal", async () => {
+    const { root, app } = await mountedWithSources({ sources: [], hiddenViews: [] });
+    await app.newShell();
+    await app.newShell();
+    await FLUSH();
+    const [first] = [...vd(app).entries.keys()];
+    const map = vd(app).entries;
+    map.set(first, railReducer(map.get(first)!, { type: "status", status: "running", exitCode: null }));
+    map.set(first, railReducer(map.get(first)!, { type: "bell" }));
+    vd(app).renderRail();
+    expect(badge(root)).toBe("1");
+    entry(root, "attention").click();
+    const rows = [...page(root, "attention")!.querySelectorAll<HTMLElement>(".chappa-needs-row")];
+    expect(rows.map((r) => r.dataset.id)).toEqual([`term:term:${first}`]);
+    expect(rows[0].querySelector(".chappa-sv-detail")?.textContent).toBe("needs attention");
+    rows[0].querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
+    expect(vd(app).activeId).toBe(first);
+    expect(page(root, "attention")?.classList.contains("active")).toBe(false);
+    // Activation cleared the bell: nothing needs you any more.
+    expect(badge(root)).toBe("");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("source news: the first poll is silent; a new item notifies once, leading with its name; the center entry opens Needs you", async () => {
+    const answers = fixtureAnswers();
+    const { root, app, api, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
+    const center = vd(app).center;
+    expect(center.entries.length).toBe(0);
+    const att = sourceFixture("attention");
+    att.items.push({ id: "deploy-9", title: "[Deploy 9](https://registry.example/d/9) failed", detail: "on web", group: "Deploys" });
+    answers["fx/attention"] = att;
+    vd(app).windowFocused = false;
+    sources.emit({ event: "view", source_id: "fx", view: "attention" });
+    await FLUSH();
+    await FLUSH();
+    expect(center.entries.map((e) => [e.title, e.body, e.processName, e.view])).toEqual([["Deploy 9 failed", "on web", "fx", "attention"]]);
+    expect((api.osNotify as ReturnType<typeof vi.fn>).mock.calls).toEqual([["Deploy 9 failed", "on web"]]);
+    // The same poll again is not news.
+    sources.emit({ event: "view", source_id: "fx", view: "attention" });
+    await FLUSH();
+    await FLUSH();
+    expect(center.entries.length).toBe(1);
+    expect(badge(root)).toBe("11");
+    vd(app).focusCenterEntry(center.entries[0]);
+    expect(page(root, "attention")?.classList.contains("active")).toBe(true);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("news from a view switched off moves the baseline but says nothing", async () => {
+    const answers = fixtureAnswers();
+    const { app, root, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: ["prs"] }, answers);
+    const prs = sourceFixture("prs");
+    prs.items[3] = { ...prs.items[3], bucket: "ready" };
+    answers["fx/prs"] = prs;
+    sources.emit({ event: "view", source_id: "fx", view: "prs" });
+    await FLUSH();
+    await FLUSH();
+    expect(vd(app).center.entries.length).toBe(0);
+    panelDispose(app);
+    root.remove();
   });
 });

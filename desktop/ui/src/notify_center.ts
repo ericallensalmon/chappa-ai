@@ -30,6 +30,9 @@ export interface CenterEntryInput {
   kind: CenterKind;
   title: string;
   body: string;
+  /** A rail view the entry belongs to (a source's news has no terminal):
+   *  clicking the entry opens that view. */
+  view?: string;
 }
 
 /** One recorded event. */

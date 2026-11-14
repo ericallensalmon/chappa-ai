@@ -206,7 +206,9 @@ What it serves:
 GitHub is asked at most once a minute (`CHAPPA_GITHUB_REFRESH_SECONDS`)
 however often the app polls; the last list is served with
 `refreshing: true` while a fetch runs. A search that fails is named in
-`freshness.errors` and the others still render.
+`freshness.errors` and the others still render; a search that matched
+more than one page holds ("showing 100 of 212") says so in
+`freshness.notices`.
 
 Tests (Node 22, no packages):
 

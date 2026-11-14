@@ -235,11 +235,26 @@ pub fn actions_in(value: &Value) -> (Vec<FoundAction>, Vec<(String, String)>) {
     (found, broken)
 }
 
+/// The key an item's actions are addressed by: its `key` or `id`. A pull
+/// request has neither, and its number repeats across repositories (two
+/// repos of one source both have a `#12`), so it is keyed by its whole
+/// identity, `forge:repo:number`, which is also what a view dedupes it by.
+/// A bare `number` is the last resort.
 fn item_key(obj: &serde_json::Map<String, Value>) -> Option<String> {
-    ["key", "id", "number"]
-        .iter()
-        .find_map(|k| obj.get(*k).and_then(Value::as_str))
-        .map(str::to_owned)
+    let text = |k: &str| obj.get(k).and_then(Value::as_str);
+    if let Some(k) = text("key").or_else(|| text("id")) {
+        return Some(k.to_owned());
+    }
+    if let (Some(forge), Some(repo), Some(number)) = (text("forge"), text("repo"), text("number")) {
+        return Some(pr_key(forge, repo, number));
+    }
+    text("number").map(str::to_owned)
+}
+
+/// The action key of a pull request: `forge:repo:number`, the fields as
+/// the source sent them.
+pub fn pr_key(forge: &str, repo: &str, number: &str) -> String {
+    format!("{forge}:{repo}:{number}")
 }
 
 fn walk(value: &Value, key: Option<&str>, path: &str, found: &mut Vec<FoundAction>, broken: &mut Vec<(String, String)>) {
@@ -488,6 +503,28 @@ mod tests {
         assert!(find_action(&payload, Some("ABC-2"), "approve").unwrap().action.is_unconfirmable_mutation());
         assert!(find_action(&payload, Some("ABC-9"), "open").is_none());
         assert!(find_action(&payload, None, "open").is_none(), "an item's action is not a top-level one");
+    }
+
+    #[test]
+    fn pull_requests_are_keyed_by_forge_repo_and_number_so_equal_numbers_do_not_collide() {
+        let payload = json!({
+            "freshness": {"asOf": null},
+            "items": [
+                {"forge": "github", "repo": "owner/repo", "number": "#12", "actions": [{"kind": "link", "id": "open", "label": "Open", "url": "https://x/a/12"}]},
+                {"forge": "github", "repo": "owner/other", "number": "#12", "actions": [{"kind": "link", "id": "open", "label": "Open", "url": "https://x/b/12"}]},
+                {"number": "#3", "actions": [{"kind": "link", "id": "open", "label": "Open", "url": "https://x/c/3"}]}
+            ]
+        });
+        let url = |key: &str| match find_action(&payload, Some(key), "open").map(|f| f.action) {
+            Some(SourceAction::Link { url, .. }) => Some(url),
+            _ => None,
+        };
+        assert_eq!(pr_key("github", "owner/repo", "#12"), "github:owner/repo:#12");
+        assert_eq!(url("github:owner/repo:#12").as_deref(), Some("https://x/a/12"));
+        assert_eq!(url("github:owner/other:#12").as_deref(), Some("https://x/b/12"));
+        assert_eq!(url("#12"), None, "the bare number no longer names either");
+        assert_eq!(url("#3").as_deref(), Some("https://x/c/3"), "without forge and repo the number still keys");
+        assert_eq!(actions_for(&payload, Some("github:owner/repo:#12")).len(), 1);
     }
 
     #[test]

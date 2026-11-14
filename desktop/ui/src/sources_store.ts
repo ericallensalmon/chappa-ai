@@ -129,6 +129,7 @@ export function trustMessage(source: Source, trust: SourceTrust): string {
 export class SourcesStore {
   private listing: SourcesListing = EMPTY;
   private readonly subs = new Set<(listing: SourcesListing) => void>();
+  private readonly viewSubs = new Set<(sourceId: string, view: string) => void>();
   private unlisten: (() => void) | null = null;
   private listening = false;
 
@@ -152,12 +153,17 @@ export class SourcesStore {
     return this.get();
   }
 
-  /** Follow `term://sources`: every change re-fetches the listing. Idempotent. */
+  /** Follow `term://sources`: every change re-fetches the listing, and a
+   *  `view` event also tells the view subscribers which payload moved.
+   *  Idempotent. */
   async listen(): Promise<void> {
     if (this.listening || !this.api.listen) return;
     this.listening = true;
     try {
-      this.unlisten = await this.api.listen(() => void this.load());
+      this.unlisten = await this.api.listen((event) => {
+        if (event.event === "view") for (const fn of this.viewSubs) fn(event.source_id, event.view);
+        void this.load();
+      });
     } catch {
       this.listening = false;
     }
@@ -200,6 +206,13 @@ export class SourcesStore {
   subscribe(fn: (listing: SourcesListing) => void): () => void {
     this.subs.add(fn);
     return () => this.subs.delete(fn);
+  }
+
+  /** Called with `(sourceId, view)` whenever a source's cached payload or
+   *  freshness of that view changed (`term://sources` `view` events). */
+  subscribeViews(fn: (sourceId: string, view: string) => void): () => void {
+    this.viewSubs.add(fn);
+    return () => this.viewSubs.delete(fn);
   }
 
   private adopt(listing: SourcesListing): void {

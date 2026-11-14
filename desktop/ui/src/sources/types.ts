@@ -38,6 +38,11 @@ export interface Freshness {
   nextUtc?: Utc | null;
   /** Partial failure: render what came back and list what did not. */
   errors?: { source: string; message: string }[];
+  /**
+   * Informational lines about what was served, not failures: "showing 50 of
+   * 212" when a search hit its cap. Shown quietly, never as a warning.
+   */
+  notices?: string[];
 }
 
 /** Body of every non-2xx reply. */
@@ -106,10 +111,17 @@ export type Bucket =
   | "action" | "draft" | "ready" | "waiting" | "recent"
   | "replied" | "vote" | "mythreads" | "voted" | "group";
 
+/**
+ * One pull (or merge) request. The same PR served by two sources is one row:
+ * rows are keyed by `(forge, repo, number)`, the payload with the fresher
+ * `freshness.asOf` supplies the fields, and the actions of every source that
+ * served it are offered, each run against its own source.
+ */
 export interface Pr {
   /** "github", "gitlab", "azure-devops", ... */
   forge: string;
   repo: string;
+  /** A grouping above the repo on forges that have one; absent or null elsewhere. */
   project?: string | null;
   /** As shown to the user (#12, !345). */
   number: string;
@@ -125,10 +137,22 @@ export interface Pr {
   bucket: Bucket;
   /** Why the PR is in its bucket; shown verbatim, one line each. */
   reasons: string[];
+  /** The signed-in user as a reviewer (role "reviewing"). */
   me?: {
+    /**
+     * The review is required of me. On a forge without a per-reviewer
+     * required flag (GitHub) this means "asked for by name, not only
+     * through a group".
+     */
     required?: boolean;
+    /**
+     * My vote. "waiting" means I voted "waiting for the author", never "has
+     * not voted" (that is "none"). "approved-with-suggestions" and "waiting"
+     * exist for forges with a vote scale and may never appear from others.
+     */
     vote?: "approved" | "approved-with-suggestions" | "waiting" | "rejected" | "none";
   } | null;
+  /** Other reviewers; `required` and `vote` read as on `me`. */
   reviewers?: (Person & { required?: boolean; isGroup?: boolean; vote?: string })[];
   checks?: {
     state: "passing" | "failing" | "pending" | "none";

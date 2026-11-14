@@ -69,6 +69,13 @@ import {
 } from "./record_pane";
 import { firstLine } from "./markdown";
 import { Dashboard, tailLine, type CardActionId, type CardInput, type CardLive, type DashGroupInput } from "./dashboard";
+import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, visibleViews, type RailView, type SourcesStore } from "./sources_store";
+import { buildPrsModel, type PrsModel } from "./sources/prs_model";
+import { SeenBaselines, buildNeedsYou, pollResult, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
+import { SourceViewsData, type DataView } from "./sources/views_data";
+import { PrsView } from "./sources/prs_view";
+import { NeedsYouView } from "./sources/needs_you_view";
+import type { SourceViewDeps } from "./sources/view_common";
 
 /** The process-status vocabulary. */
 export type RailStatus = "starting" | "running" | "stopped" | "exited" | "failed";
@@ -641,6 +648,13 @@ export function isWaiting(entry: Pick<RailEntry, "attention" | "programStatus" |
   return isLive(entry.status) && (entry.attention === "agent-waiting" || entry.programStatus === "blocked");
 }
 
+/** An ACTIVE row's stable key, the dashboard's card-key shape: a process
+ *  by project and name (its terminal changes across restarts), a terminal
+ *  by its id. */
+export function activeRowKey(row: Pick<ActiveRow, "kind" | "projectId" | "processName" | "termId">): string {
+  return row.kind === "process" ? `cmd:${row.projectId}:${row.processName}` : `term:${row.termId}`;
+}
+
 export function railReducer(entry: RailEntry, action: RailAction): RailEntry {
   switch (action.type) {
     case "status":
@@ -813,7 +827,23 @@ export interface AppOptions {
   /** Ctrl+click file opening (home dir, existence check, editor launch).
    *  Defaults to the Tauri commands. */
   files?: FileOpenerApi;
+  /** The sources listing behind the rail's views and Settings ▸ Sources.
+   *  Defaults to the app-wide store. */
+  sources?: SourcesStore;
+  /** What the source views call: judged actions, running one, opening a
+   *  checked link. Defaults to the Tauri commands. */
+  sourceActions?: Pick<SourceViewDeps, "actions" | "run" | "openLink">;
 }
+
+/** The source views this build renders, in rail order. A later view joins
+ *  by adding its name here and its page to `ensureSourceView`. */
+const BUILT_VIEWS: readonly RailView[] = ["prs", "attention"];
+
+const tauriSourceActions: Pick<SourceViewDeps, "actions" | "run" | "openLink"> = {
+  actions: (sourceId, view, key) => ipc.sourceActions(sourceId, view, key),
+  run: ipc.sourceRunAction,
+  openLink: ipc.openSourceLink,
+};
 
 const APP_CSS = `
 .chappa-app{position:fixed;inset:0;display:flex;background:#0d0e10;color:#d6d8dc;font-family:system-ui,sans-serif;}
@@ -1038,6 +1068,16 @@ const APP_CSS = `
 .chappa-active-row.attention{box-shadow:inset 0 0 0 1px #5ea6ff;}
 .chappa-active-attention{flex:none;color:#f0b429;font-size:11px;line-height:1;}
 .chappa-active-activity{width:8px;height:8px;border-radius:50%;flex:none;background:#5ea6ff;}
+/* The source views (Needs you, PRs, ...): one compact row each, under the
+   project bar. The open view's row is marked; Needs you carries its count. */
+.chappa-views-section{display:flex;flex-direction:column;padding:2px 8px 4px;}
+.chappa-views-section:empty{display:none;}
+.chappa-view-entry{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:0;border-radius:6px;background:none;color:#d6d8dc;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
+.chappa-view-entry:hover{background:#171a1f;}
+.chappa-view-entry.open{background:#1d232b;}
+.chappa-view-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chappa-view-badge{flex:none;min-width:16px;height:16px;border-radius:8px;background:#f0b429;color:#0d0e10;font:600 10px ui-monospace,monospace;line-height:16px;text-align:center;padding:0 4px;box-sizing:border-box;}
+.chappa-view-badge:empty{display:none;}
 /* The rail footer's notification bell + unread count, NEXT TO the
    settings gear. The banner stack and center drawer style themselves
    (notify_banners.ts / notify_drawer.ts). */
@@ -1401,6 +1441,29 @@ export class App {
   private dashboard: Dashboard | null = null;
   /** What the stack showed before the dashboard, restored on Back. */
   private dashboardPrev: { termId: number } | { pane: PaneTarget } | null = null;
+  // --- the source views -------------------------------------------
+  /** The sources listing (Settings ▸ Sources and the rail views share it). */
+  private readonly sources: SourcesStore;
+  /** The cached payloads the views read, kept current from the store. */
+  private readonly viewsData: SourceViewsData;
+  private readonly sourceActionsApi: Pick<SourceViewDeps, "actions" | "run" | "openLink">;
+  /** The rail's views section: one row per visible view. */
+  private readonly viewsSection: HTMLElement;
+  private viewsSig = " never-rendered";
+  /** The pages, built on first open and mounted in the stack. */
+  private prsView: PrsView | null = null;
+  private needsYouView: NeedsYouView | null = null;
+  /** Which view is on screen, and what it covered (restored on Back). */
+  private openViewName: RailView | null = null;
+  private viewPrev: { termId: number } | { pane: PaneTarget } | null = null;
+  /** The merged PRs model, rebuilt when a PRs payload moves. */
+  private prsModel: PrsModel | null = null;
+  /** The Needs you model as last built (the rail badge reads its count). */
+  private needsYouModel: NeedsYouModel | null = null;
+  /** Seen-id baselines behind the sources' Needs you notifications. */
+  private readonly baselines = new SeenBaselines();
+  /** The sources the baselines know, so a source that left is forgotten. */
+  private baselineSources = new Set<string>();
   /** A stopped record's newest stored line (its tail's last line, or a json
    *  agent's last text), read from the ledger once per dashboard opening. */
   private readonly dashTails = new Map<string, string | null>();
@@ -1512,6 +1575,9 @@ export class App {
     this.agentTools = opts.agentTools ?? agentToolsStore;
     this.now = opts.now ?? Date.now;
     this.center = new NotifyCenter({ now: this.now });
+    this.sources = opts.sources ?? sourcesStore;
+    this.sourceActionsApi = opts.sourceActions ?? tauriSourceActions;
+    this.viewsData = new SourceViewsData(this.sources, (change) => this.onSourceData(change));
     this.root = opts.root;
     this.root.textContent = "";
     // The flex-row layout (rail | stack) lives on this class; without it the
@@ -1588,6 +1654,13 @@ export class App {
       storageKey: "workspace.active",
       icon: "active",
     });
+
+    // The source views, right under the project bar (they span every
+    // project): Needs you always (terminals can need you with no source at
+    // all), the others while a trusted source serves them.
+    this.viewsSection = document.createElement("section");
+    this.viewsSection.className = "chappa-views-section";
+    this.viewsSection.setAttribute("aria-label", "Views");
 
     // Collapsed open projects: one-line summary rows, kept above
     // the expanded project's full section.
@@ -1917,6 +1990,7 @@ export class App {
     // (`header`) and its rail list, then AGENTS.
     rail.append(
       projectBar,
+      this.viewsSection,
       this.projectSummariesEl,
       this.projectSection,
       wsGroupHeader,
@@ -2249,6 +2323,11 @@ export class App {
     await this.reconcileAdoption();
     await this.loadWorkspaceCommands();
     await this.startAutoStartWorkspace();
+    // The source views follow the listing from here on; Needs you is in the
+    // rail from the first paint, the other views as sources appear.
+    this.viewsData.start();
+    void this.sources.load();
+    void this.sources.listen();
   }
 
   /** Boot the settings store and subscribe: a font change re-measures every
@@ -2686,6 +2765,7 @@ export class App {
     }
     this.hideRecordPane();
     this.hideDashboard();
+    this.hideSourceView();
     this.activeId = id;
     for (const [entryId, entry] of this.entries) {
       const active = entryId === id;
@@ -2863,6 +2943,12 @@ export class App {
     this.editPane = null;
     this.dashboard?.dispose();
     this.dashboard = null;
+    this.viewsData.dispose();
+    this.prsView?.dispose();
+    this.prsView = null;
+    this.needsYouView?.dispose();
+    this.needsYouView = null;
+    this.openViewName = null;
     this.banners.dispose();
     this.drawer?.dispose();
     this.drawer = null;
@@ -3315,6 +3401,12 @@ export class App {
    *  project (the entry stays readable in the center). */
   private focusCenterEntry(entry: CenterEntry): void {
     this.center.markRead(entry);
+    if (entry.view !== undefined) {
+      if (BUILT_VIEWS.includes(entry.view as RailView) && this.railViews().includes(entry.view as RailView)) {
+        this.openSourceView(entry.view as RailView);
+      }
+      return;
+    }
     if (entry.projectId !== null && this.openProjects.has(entry.projectId)) {
       this.expandProject(entry.projectId);
     }
@@ -3827,6 +3919,7 @@ export class App {
         store: this.settings,
         agentTools: this.agentTools,
         projects: this.projectsSettingsApi(),
+        sources: this.sources,
         onClose: () => {
           this.gear.classList.remove("open");
           if (this.activeId !== null) this.entries.get(this.activeId)?.panel.focusInput();
@@ -4881,6 +4974,7 @@ export class App {
     const built = this.paneView(target);
     if (!built) return;
     this.hideDashboard();
+    this.hideSourceView();
     this.activeId = null;
     for (const entry of this.entries.values()) {
       entry.panel.setActive(false);
@@ -5220,18 +5314,18 @@ export class App {
   openDashboard(): void {
     const dash = this.ensureDashboard();
     if (dash.active) return;
+    // One page at a time: a source view on screen hands over what IT covered.
+    const fromView = this.openViewName !== null ? this.viewPrev : undefined;
+    this.hideSourceView();
     this.dashboardPrev =
-      this.paneFor !== null ? { pane: this.paneFor } : this.activeId !== null ? { termId: this.activeId } : null;
-    this.hideRecordPane();
-    this.activeId = null;
-    for (const entry of this.entries.values()) {
-      entry.panel.setActive(false);
-      entry.host.classList.remove("active");
-    }
-    for (const s of this.openProjects.values()) {
-      for (const r of s.processRows.values()) r.el?.classList.remove("active");
-    }
-    for (const r of this.wsCmds.values()) r.el?.classList.remove("active");
+      fromView !== undefined
+        ? fromView
+        : this.paneFor !== null
+          ? { pane: this.paneFor }
+          : this.activeId !== null
+            ? { termId: this.activeId }
+            : null;
+    this.stepBackForPage();
     this.dashTails.clear();
     dash.setActive(true);
     this.dashboardBtn.classList.add("open");
@@ -6242,6 +6336,273 @@ export class App {
     this.refreshProjectSummary(projectId);
   }
 
+  // --- the source views -------------------------------------------
+  //
+  // Pages in the stack beside the dashboard, one page at a time: opening a
+  // view steps back whatever was on screen (Back restores it), and opening
+  // the dashboard or a row hides the view. Their data is the sources'
+  // cached payloads (`viewsData`) and, for Needs you, the attention the
+  // ACTIVE section derives, read from the same render hooks.
+
+  /** The views the rail lists, in rail order: Needs you unless switched
+   *  off, the others while a trusted source serves them. */
+  private railViews(): RailView[] {
+    const listing = this.viewsData.current;
+    const served = new Set(visibleViews(listing));
+    return RAIL_VIEWS.filter(
+      (v) => BUILT_VIEWS.includes(v) && (v === "attention" ? !listing.hiddenViews.includes(v) : served.has(v)),
+    );
+  }
+
+  /** Rebuild the rail's views section behind its signature. */
+  private renderRailViews(): void {
+    const views = this.railViews();
+    const count = this.needsYouModel?.count ?? 0;
+    const sig = `${views.join(",")}\u001f${count}\u001f${this.openViewName ?? ""}`;
+    if (sig === this.viewsSig) return;
+    this.viewsSig = sig;
+    this.viewsSection.textContent = "";
+    for (const view of views) {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "chappa-view-entry";
+      el.dataset.view = view;
+      el.classList.toggle("open", this.openViewName === view);
+      const name = document.createElement("span");
+      name.className = "chappa-view-name";
+      name.textContent = VIEW_LABELS[view];
+      const badge = document.createElement("span");
+      badge.className = "chappa-view-badge";
+      if (view === "attention" && count > 0) badge.textContent = count > 99 ? "99+" : String(count);
+      el.append(name, badge);
+      el.title =
+        view === "attention"
+          ? count > 0
+            ? `${count} waiting on you`
+            : "Nothing needs you"
+          : `${VIEW_LABELS[view]} from ${servedBy(this.viewsData.current, view).map((s) => s.label).join(", ")}`;
+      el.addEventListener("mousedown", (e) => e.preventDefault());
+      el.addEventListener("click", () => this.toggleSourceView(view));
+      this.viewsSection.appendChild(el);
+    }
+  }
+
+  /** A rail view row: open the view, or leave it when it is showing. */
+  toggleSourceView(view: RailView): void {
+    if (this.openViewName === view) this.closeSourceView();
+    else this.openSourceView(view);
+  }
+
+  /** Front a source view. What was on screen steps back and returns on
+   *  Back; coming from the dashboard (or another view), what THAT covered
+   *  is what Back returns to. */
+  openSourceView(view: RailView): void {
+    if (!BUILT_VIEWS.includes(view) || this.openViewName === view) return;
+    let prev: { termId: number } | { pane: PaneTarget } | null;
+    if (this.openViewName !== null) {
+      prev = this.viewPrev;
+      this.hideSourceView();
+    } else if (this.dashboard?.active) {
+      prev = this.dashboardPrev;
+      this.hideDashboard();
+    } else {
+      prev = this.paneFor !== null ? { pane: this.paneFor } : this.activeId !== null ? { termId: this.activeId } : null;
+    }
+    const page = this.ensureSourceView(view);
+    this.stepBackForPage();
+    this.viewPrev = prev;
+    this.openViewName = view;
+    page.setActive(true);
+    this.renderSourceViews();
+    // Clears the rows' active markers and the strip.
+    this.renderRail();
+    this.renderRailViews();
+  }
+
+  /** Back (or Escape): leave the view for what it covered. */
+  closeSourceView(): void {
+    const prev = this.viewPrev;
+    if (!this.hideSourceView()) return;
+    if (prev && "termId" in prev && this.entries.has(prev.termId)) this.activate(prev.termId);
+    else if (prev && "pane" in prev) this.showRecordPane(prev.pane);
+  }
+
+  /** Take the open view off screen. Answers whether one was showing. */
+  private hideSourceView(): boolean {
+    const view = this.openViewName;
+    if (view === null) return false;
+    this.sourcePage(view)?.setActive(false);
+    this.openViewName = null;
+    this.viewPrev = null;
+    this.renderRailViews();
+    return true;
+  }
+
+  /** Every panel and the record card step back for a page (the dashboard
+   *  or a view). */
+  private stepBackForPage(): void {
+    this.hideRecordPane();
+    this.activeId = null;
+    for (const entry of this.entries.values()) {
+      entry.panel.setActive(false);
+      entry.host.classList.remove("active");
+    }
+    for (const s of this.openProjects.values()) {
+      for (const r of s.processRows.values()) r.el?.classList.remove("active");
+    }
+    for (const r of this.wsCmds.values()) r.el?.classList.remove("active");
+  }
+
+  private sourcePage(view: RailView): PrsView | NeedsYouView | null {
+    if (view === "prs") return this.prsView;
+    if (view === "attention") return this.needsYouView;
+    return null;
+  }
+
+  /** Build a view's page on first open and mount it in the stack. */
+  private ensureSourceView(view: RailView): PrsView | NeedsYouView {
+    const deps: SourceViewDeps = {
+      ...this.sourceActionsApi,
+      onClose: () => this.closeSourceView(),
+      say: (text, kind) => this.showToast(text, kind === "error" ? "error" : "info"),
+      now: this.now,
+    };
+    if (view === "prs") {
+      if (!this.prsView) {
+        this.prsView = new PrsView(deps);
+        this.stack.appendChild(this.prsView.host);
+      }
+      return this.prsView;
+    }
+    if (!this.needsYouView) {
+      this.needsYouView = new NeedsYouView({
+        ...deps,
+        selectTerminal: (key) => this.selectAttentionRow(key),
+        openView: (target) => {
+          const v = target as RailView;
+          if (!BUILT_VIEWS.includes(v) || !this.railViews().includes(v)) return false;
+          this.openSourceView(v);
+          return true;
+        },
+      });
+      this.stack.appendChild(this.needsYouView.host);
+    }
+    return this.needsYouView;
+  }
+
+  /** A source payload was re-read (or, with null, the listing moved):
+   *  notifications first, then every surface that shows source data. */
+  private onSourceData(change: { sourceId: string; view: DataView } | null): void {
+    if (change === null || change.view === "prs") this.prsModel = null;
+    if (change) {
+      this.noteSourceNews(change.sourceId, change.view);
+    } else {
+      const ids = new Set(this.viewsData.current.sources.map((s) => s.id));
+      for (const id of this.baselineSources) if (!ids.has(id)) this.baselines.forget(id);
+      this.baselineSources = ids;
+    }
+    // A view that left the rail (its last source went, or it was switched
+    // off) closes back to what it covered.
+    if (this.openViewName !== null && !this.railViews().includes(this.openViewName)) this.closeSourceView();
+    this.renderSourceViews();
+  }
+
+  /** The merged PRs model, rebuilt only after a PRs payload moved. */
+  private currentPrsModel(): PrsModel {
+    this.prsModel ??= buildPrsModel(this.viewsData.payloadsFor("prs"), this.viewsData.needsUpdate());
+    return this.prsModel;
+  }
+
+  /** Repaint the open view and the Needs you badge. */
+  private renderSourceViews(): void {
+    this.renderNeedsYou();
+    if (this.prsView?.active) {
+      this.prsView.update({
+        model: this.currentPrsModel(),
+        servedBy: servedBy(this.viewsData.current, "prs").map((s) => s.label),
+        versions: this.viewsData.versions(),
+      });
+    }
+  }
+
+  /** Rebuild Needs you (cheap: the PRs model is cached) and repaint its
+   *  badge, and the page while it shows. A view switched off in Settings
+   *  feeds nothing into it. */
+  private renderNeedsYou(): void {
+    const data = this.viewsData;
+    const model = buildNeedsYou({
+      terminals: this.terminalAttention(),
+      work: data.hidden("work") ? [] : data.payloadsFor("work"),
+      prs: data.hidden("prs") ? null : this.currentPrsModel(),
+      attention: data.payloadsFor("attention"),
+      needsUpdate: data.needsUpdate(),
+    });
+    this.needsYouModel = model;
+    this.renderRailViews();
+    if (this.needsYouView?.active) this.needsYouView.update({ model, versions: data.versions() });
+  }
+
+  /** The ACTIVE rows that want the user, as Needs you lists them: the rail's
+   *  own attention (waiting / blocked above a bell), never re-derived. */
+  private terminalAttention(): TerminalAttention[] {
+    const out: TerminalAttention[] = [];
+    for (const row of this.collectActiveRows()) {
+      if (row.attention === null) continue;
+      const entry = row.termId !== null ? this.entries.get(row.termId) : undefined;
+      out.push({
+        key: activeRowKey(row),
+        name: row.name,
+        project: row.projectId !== null ? this.projectLabel(row.projectId) : null,
+        attention: row.attention,
+        programStatus: entry?.programStatus ?? null,
+      });
+    }
+    return out;
+  }
+
+  /** A Needs you terminal row's click: the ACTIVE row's own activation. */
+  private selectAttentionRow(key: string): void {
+    const row = this.collectActiveRows().find((r) => activeRowKey(r) === key);
+    if (row) this.activateActiveRow(row);
+  }
+
+  /**
+   * One (source, view) payload was re-read: turn what is new in it into
+   * notifications, through the same center, banner and OS-toast routing as
+   * a terminal's. The baseline moves whether or not anything is shown, so a
+   * view switched back on does not replay what came in while it was off.
+   * Terminal attention is not handled here: it notifies on its own path.
+   */
+  private noteSourceNews(sourceId: string, view: DataView): void {
+    const p = this.viewsData.payload(sourceId, view);
+    if (!p) return;
+    const result = pollResult(view, p, view === "prs" ? buildPrsModel([p]) : undefined);
+    const news = this.baselines.update(
+      sourceId,
+      view,
+      result,
+      (id) => view === "prs" && this.baselines.seenElsewhere("prs", id, sourceId),
+    );
+    if (news.length === 0 || this.viewsData.hidden("attention") || this.viewsData.hidden(view)) return;
+    for (const n of news) {
+      const d = decide("notify", "all", this.openViewName === "attention", this.windowFocused, n.body);
+      if (!d.badge && !d.osNotify) continue;
+      const recorded = this.center.record({
+        termId: 0,
+        projectId: null,
+        processName: p.sourceLabel,
+        kind: "notify",
+        title: n.title,
+        body: n.body,
+        view: "attention",
+      });
+      if (d.osNotify) {
+        if (this.windowFocused) this.banners.show(recorded);
+        else void this.api.osNotify(n.title, n.body);
+      }
+    }
+  }
+
   // --- ACTIVE section ---------------------------------------------
   //
   // READS existing state only: process rows, rail entries and
@@ -6321,6 +6682,8 @@ export class App {
     // The dashboard repaints on exactly the events ACTIVE does (it diffs per
     // card, so a no-change pass is cheap; closed, it costs nothing).
     this.renderDashboard();
+    // So does Needs you: its terminal rows are this section's attention.
+    this.renderNeedsYou();
     const rows = this.collectActiveRows();
     const multi = this.openProjects.size > 1;
     // "\u001f" (fields) / "\u001e" (rows) — the ESCAPE SEQUENCES, never literal control bytes

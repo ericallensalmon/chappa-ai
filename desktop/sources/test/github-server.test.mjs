@@ -82,6 +82,7 @@ test("PRs are bucketed per role from the searches, deduped, and old ones dropped
   const { status, body } = await src.call("/api/prs");
   assert.equal(status, 200);
   assert.equal(body.freshness.errors, undefined);
+  assert.equal(body.freshness.notices, undefined);
   assert.ok(Date.parse(body.freshness.asOf) >= before - 5000);
   assert.equal(body.freshness.refreshing, false);
   const by = Object.fromEntries(body.items.map((p) => [`${p.role} ${p.repo}${p.number}`, p.bucket]));
@@ -113,6 +114,13 @@ test("one failing search is reported and the rest still renders", () => withSour
   // #7 was also found by the comment search, so it still shows.
   assert.ok(row(body.items, "#7"));
   assert.ok(row(body.items, "#1"));
+}));
+
+test("a capped search is a quiet notice, not an error", () => withSource({ GH_STUB_TOTAL: "mine-open:212" }, async (src) => {
+  const { body } = await src.call("/api/prs");
+  assert.equal(body.freshness.errors, undefined);
+  assert.deepEqual(body.freshness.notices, ["my open PRs: showing 4 of 212 pull requests"]);
+  assert.ok(row(body.items, "#1", "owner/repo"));
 }));
 
 test("gh not logged in gives an empty list and one clear error", () => withSource({ GH_STUB_MODE: "logged-out" }, async (src) => {

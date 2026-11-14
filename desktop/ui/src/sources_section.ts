@@ -131,8 +131,9 @@ export class SourcesSection {
 
     const views = settingsSection(
       "Views",
-      "A view appears in the rail when at least one trusted source serves it. Hiding a view keeps its " +
-        "sources, their data and their trust; it only leaves the rail.",
+      "A view appears in the rail when at least one trusted source serves it; Needs you is always there, " +
+        "since terminals and agents can need you without any source. Hiding a view keeps its " +
+        "sources, their data and their trust; it leaves the rail and stops feeding Needs you and its notifications.",
     );
     for (const view of RAIL_VIEWS) {
       const toggle = document.createElement("input");

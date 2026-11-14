@@ -8,6 +8,7 @@
 //   GH_STUB_FAIL=a,b          fail the named fixtures (exit 1), e.g. requested
 //   GH_STUB_DELAY_MS=n        wait before answering
 //   GH_STUB_LOG=<file>        append the fixture name of every call
+//   GH_STUB_TOTAL=name:n      report n matches for that search (a capped search)
 //
 // In fixture files the string "__DAYS_AGO_<n>__" becomes the ISO time n
 // days before now, so "recently merged" stays recent whenever tests run.
@@ -54,6 +55,13 @@ const answer = () => {
     /"__DAYS_AGO_(\d+)__"/g,
     (_, n) => JSON.stringify(new Date(Date.now() - Number(n) * 86_400_000).toISOString()),
   );
+  const [totalOf, total] = (process.env.GH_STUB_TOTAL ?? "").split(":");
+  if (totalOf === name) {
+    const body = JSON.parse(text);
+    body.data.search.issueCount = Number(total);
+    process.stdout.write(JSON.stringify(body));
+    return;
+  }
   process.stdout.write(text);
 };
 const delay = Number(process.env.GH_STUB_DELAY_MS ?? 0);
