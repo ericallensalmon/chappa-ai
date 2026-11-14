@@ -215,6 +215,7 @@ fn host_tool(tools: &AgentToolsState, name: &str) -> AgentTool {
             transport: Default::default(),
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
         })
         .unwrap()
 }

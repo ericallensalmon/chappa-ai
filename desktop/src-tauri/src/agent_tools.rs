@@ -35,6 +35,30 @@
 //! substituted, the words go on the command line before the tool's own
 //! args. Both are user-editable per tool, so a CLI the templates do not
 //! know can still be resumed.
+//!
+//! Claude Code in the terminal prints its session id nowhere, so for a
+//! claude tool on the `tty` transport the app supplies the announcer. At
+//! startup it writes `<app-config>/claude-hooks.json` (owner-only, rewritten
+//! only when its content would change):
+//!
+//! ```json
+//! {"hooks": {"SessionStart": [{"hooks": [
+//!   {"type": "command", "command": "\"/abs/path/chappa-ai-mcp\" session-hook", "timeout": 5}]}]}}
+//! ```
+//!
+//! and such a tool runs with `--settings <that file>` at the front of its
+//! args and `session_capture: announced`. Claude merges a `--settings` file
+//! with the user's own settings (hooks from every source run) and fires
+//! `SessionStart` on launch, `--resume`, `/clear` and compaction; the hook
+//! posts the id to `POST /processes/{id}/session` for the process named by
+//! `CHAPPA_AI_PROCESS_ID`, and each report replaces the last. The flag is
+//! ordinary visible argv: the store adds it once to a host-runtime claude
+//! tty tool still on the `json` capture (which captures nothing on a tty),
+//! on load and when such a tool is first saved, and a tool whose
+//! `--settings` the user removed is marked `hooks_opt_out` and left alone
+//! from then on. The command names the `chappa-ai-mcp` binary beside the
+//! app's executable (else the first one on `PATH`); with none found the
+//! file holds no hooks and no tool is changed.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -216,6 +240,9 @@ pub struct AgentTool {
     pub resume_argv: Vec<String>,
     /// How the session id of a run is learned.
     pub session_capture: SessionCapture,
+    /// The user took the session-hook `--settings` flag off this tool, so
+    /// the store never adds it back. Set by the store, not the edit form.
+    pub hooks_opt_out: bool,
 }
 
 /// How the app learns the id of the conversation a run is having.
@@ -342,7 +369,29 @@ impl AgentTool {
             transport: Transport::Tty,
             resume_argv: resume_argv_template(tool_type),
             session_capture: SessionCapture::template(tool_type),
+            hooks_opt_out: false,
         }
+    }
+
+    /// Whether the store should give this tool the session hook: a claude
+    /// tool on the host and the tty transport, still on the `json` capture
+    /// (which has no adapter to read on a tty), without a `--settings` of
+    /// its own, and not opted out. A docker-exec tool is left alone: the
+    /// hooks file and the hook binary are host paths.
+    pub fn wants_session_hook(&self) -> bool {
+        self.tool_type == ToolType::Claude
+            && self.transport == Transport::Tty
+            && matches!(self.runtime, Runtime::Host)
+            && self.session_capture == SessionCapture::Json
+            && !has_settings_flag(&self.args)
+            && !self.hooks_opt_out
+    }
+
+    /// `--settings <hooks_file>` at the front of the args; the hook announces
+    /// the id, so the capture becomes `announced`.
+    fn add_session_hook(&mut self, hooks_file: &str) {
+        self.args.splice(0..0, [SETTINGS_FLAG.to_owned(), hooks_file.to_owned()]);
+        self.session_capture = SessionCapture::Announced;
     }
 
     /// The line recognizer for a `regex` capture, `None` for every other
@@ -629,6 +678,94 @@ fn detect_model(args: &[String]) -> Option<String> {
     None
 }
 
+// ---- claude session hook ----------------------------------------------------
+
+/// The hooks settings file the app writes into its config dir.
+pub const CLAUDE_HOOKS_FILE: &str = "claude-hooks.json";
+/// Claude Code's flag for an additional settings file.
+pub const SETTINGS_FLAG: &str = "--settings";
+/// The hook's timeout in seconds, as Claude Code enforces it. The hook
+/// itself gives up well before.
+pub const SESSION_HOOK_TIMEOUT_S: u64 = 5;
+
+/// Whether `args` already carry a `--settings` (either spelling).
+pub fn has_settings_flag(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == SETTINGS_FLAG || a.strip_prefix(SETTINGS_FLAG).is_some_and(|rest| rest.starts_with('=')))
+}
+
+/// The `chappa-ai-mcp` binary: beside `exe_dir` (the app's own executable;
+/// a cargo build puts both in one target dir), else the first absolute
+/// `PATH` entry holding it. `None` when neither exists.
+pub fn find_mcp_binary(exe_dir: Option<&std::path::Path>, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let name = format!("chappa-ai-mcp{}", std::env::consts::EXE_SUFFIX);
+    let beside = exe_dir.map(|d| d.join(&name)).filter(|p| p.is_file());
+    beside.or_else(|| {
+        std::env::split_paths(path_var?)
+            .filter(|d| d.is_absolute())
+            .map(|d| d.join(&name))
+            .find(|p| p.is_file())
+    })
+}
+
+/// The hook's command line. Claude Code runs it through a shell, so the
+/// binary path is quoted: on Windows double-quoted with forward slashes,
+/// which cmd.exe and Git Bash both read as one literal word (a path holding
+/// a character either shell expands inside double quotes, `"` `%` `$` or a
+/// backtick, gets no hook); elsewhere single-quoted for sh. `None` = no safe
+/// spelling.
+pub fn session_hook_command(binary: &std::path::Path, windows: bool) -> Option<String> {
+    let path = binary.to_str()?;
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    let quoted = if windows {
+        if path.chars().any(|c| matches!(c, '"' | '%' | '$' | '`')) {
+            return None;
+        }
+        format!("\"{}\"", path.replace('\\', "/"))
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    };
+    Some(format!("{quoted} session-hook"))
+}
+
+/// The hooks file's content: the `SessionStart` hook running `command`, or
+/// no hooks at all without one (the file still exists, so a tool carrying
+/// `--settings` keeps starting cleanly).
+pub fn claude_hooks_json(command: Option<&str>) -> String {
+    let value = match command {
+        Some(command) => serde_json::json!({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": command, "timeout": SESSION_HOOK_TIMEOUT_S}
+        ]}]}}),
+        None => serde_json::json!({"hooks": {}}),
+    };
+    serde_json::to_string_pretty(&value).unwrap_or_default()
+}
+
+/// Write `<config_dir>/claude-hooks.json` for `binary` (only when the content
+/// would change) and return the file path as the `--settings` argument.
+/// `None` when there is no hook to point at, or when the path cannot travel
+/// as one argument: a claude program is usually an npm `.cmd` shim, and the
+/// spawn refuses arguments cmd.exe would interpret.
+pub fn write_claude_hooks(config_dir: &std::path::Path, binary: Option<&std::path::Path>) -> Option<String> {
+    let path = config_dir.join(CLAUDE_HOOKS_FILE);
+    let command = binary.and_then(|b| session_hook_command(b, cfg!(windows)));
+    let text = claude_hooks_json(command.as_deref());
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        if let Err(err) = project_model::atomic::write_private_text_atomic(&path, &text, "hooks.tmp") {
+            log::error!("[agent_tools] cannot write {}: {err}", path.display());
+            return None;
+        }
+    }
+    command?;
+    let arg = path.to_str()?.to_owned();
+    if term_core::pty::batch_unsafe_char(&arg).is_some() {
+        return None;
+    }
+    Some(arg)
+}
+
 // ---- store ------------------------------------------------------------------
 
 /// On-disk shape: the tools plus the never-reused id counter.
@@ -646,12 +783,22 @@ pub struct AgentToolStore {
     path: PathBuf,
     next_id: u32,
     tools: Vec<AgentTool>,
+    /// The `--settings` argument for the claude session hook, when the app
+    /// has a hook to point at.
+    claude_hooks: Option<String>,
 }
 
 impl AgentToolStore {
     /// Missing / unreadable / unparseable → empty registry, never an error.
     /// Unknown fields are ignored; a half-written entry degrades alone.
     pub fn new(path: PathBuf) -> Self {
+        Self::with_claude_hooks(path, None)
+    }
+
+    /// [`AgentToolStore::new`] with the claude session hook available: each
+    /// loaded tool that [wants it](AgentTool::wants_session_hook) gets it,
+    /// and the file is saved once if any did.
+    pub fn with_claude_hooks(path: PathBuf, claude_hooks: Option<String>) -> Self {
         let parsed = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
@@ -694,11 +841,25 @@ impl AgentToolStore {
         if next_id <= max_id {
             next_id = max_id + 1;
         }
-        Self {
+        let mut store = Self {
             path,
             next_id,
             tools,
+            claude_hooks,
+        };
+        if let Some(hooks) = store.claude_hooks.clone() {
+            let mut changed = false;
+            for tool in store.tools.iter_mut().filter(|t| t.wants_session_hook()) {
+                tool.add_session_hook(&hooks);
+                changed = true;
+            }
+            if changed {
+                if let Err(err) = store.save() {
+                    log::error!("[agent_tools] cannot save the session-hook upgrade: {err}");
+                }
+            }
         }
+        store
     }
 
     pub fn list(&self) -> &[AgentTool] {
@@ -753,6 +914,11 @@ impl AgentToolStore {
             tool.name = tool.program.clone();
         }
         if tool.id == 0 {
+            if let Some(hooks) = self.claude_hooks.as_deref() {
+                if tool.wants_session_hook() {
+                    tool.add_session_hook(hooks);
+                }
+            }
             tool.id = self.next_id;
             self.next_id = self.next_id.wrapping_add(1).max(1);
             self.tools.push(tool.clone());
@@ -762,6 +928,11 @@ impl AgentToolStore {
                 .iter_mut()
                 .find(|t| t.id == tool.id)
                 .ok_or_else(|| format!("no such agent tool: {}", tool.id))?;
+            // The edit form does not carry the opt-out, so it is kept from
+            // the stored tool; an edit that drops `--settings` sets it.
+            tool.hooks_opt_out = tool.hooks_opt_out
+                || slot.hooks_opt_out
+                || (has_settings_flag(&slot.args) && !has_settings_flag(&tool.args));
             *slot = tool.clone();
         }
         self.save()?;
@@ -796,8 +967,16 @@ pub struct AgentToolsState {
 }
 
 impl AgentToolsState {
+    /// Load the store, writing the claude hooks file first so the load can
+    /// point tools at it.
     pub fn init(&self, config_dir: PathBuf) {
-        let store = AgentToolStore::new(config_dir.join(FILE_NAME));
+        let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from));
+        let binary = find_mcp_binary(exe_dir.as_deref(), std::env::var_os("PATH").as_deref());
+        if binary.is_none() {
+            log::warn!("[agent_tools] no chappa-ai-mcp binary found; claude tty tools get no session hook");
+        }
+        let hooks = write_claude_hooks(&config_dir, binary.as_deref());
+        let store = AgentToolStore::with_claude_hooks(config_dir.join(FILE_NAME), hooks);
         if let Ok(mut guard) = self.inner.lock() {
             *guard = Some(store);
         }
@@ -1247,5 +1426,161 @@ mod tests {
         assert!(!reason.contains("old"), "an exited agent does not block");
         assert!(delete_refusal(3, &rows).is_some());
         assert!(delete_refusal(9, &rows).is_none());
+    }
+
+    #[test]
+    fn the_hook_command_quotes_the_binary_for_the_shell() {
+        assert_eq!(
+            session_hook_command(Path::new(r"C:\Program Files\chappa ai\chappa-ai-mcp.exe"), true).as_deref(),
+            Some(r#""C:/Program Files/chappa ai/chappa-ai-mcp.exe" session-hook"#)
+        );
+        for bad in [r"C:\100%\m.exe", r"C:\a$b\m.exe", r"C:\a`b\m.exe", "C:\\a\"b\\m.exe", "C:\\a\nb\\m.exe"] {
+            assert_eq!(session_hook_command(Path::new(bad), true), None, "{bad:?}");
+        }
+        assert_eq!(
+            session_hook_command(Path::new("/opt/chappa ai/chappa-ai-mcp"), false).as_deref(),
+            Some("'/opt/chappa ai/chappa-ai-mcp' session-hook")
+        );
+        assert_eq!(
+            session_hook_command(Path::new("/opt/it's/chappa-ai-mcp"), false).as_deref(),
+            Some(r"'/opt/it'\''s/chappa-ai-mcp' session-hook")
+        );
+        assert!(has_settings_flag(&["--settings".into(), "f".into()]));
+        assert!(has_settings_flag(&["-p".into(), "--settings=f".into()]));
+        assert!(!has_settings_flag(&["--settingsx".into(), "--setting".into()]));
+    }
+
+    #[test]
+    fn the_hooks_file_names_the_binary_and_is_rewritten_only_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let name = format!("chappa-ai-mcp{}", std::env::consts::EXE_SUFFIX);
+        let binary = bin_dir.join(&name);
+        std::fs::write(&binary, "").unwrap();
+
+        let file = dir.path().join(CLAUDE_HOOKS_FILE);
+        let arg = write_claude_hooks(dir.path(), Some(&binary)).expect("a --settings argument");
+        assert_eq!(Path::new(&arg), file);
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let hook = &value["hooks"]["SessionStart"][0]["hooks"][0];
+        assert_eq!(hook["type"], "command");
+        assert_eq!(hook["timeout"], 5);
+        assert_eq!(hook["command"], session_hook_command(&binary, cfg!(windows)).unwrap().as_str());
+
+        // Same content: the file is left untouched (a marker survives).
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, &text).unwrap();
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_claude_hooks(dir.path(), Some(&binary)).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before);
+
+        // No binary: the file stays (a tool carrying --settings still
+        // starts) but holds no hooks, and there is nothing to point at.
+        assert_eq!(write_claude_hooks(dir.path(), None), None);
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!({"hooks": {}}));
+
+        // The binary beside the app wins over PATH; relative PATH entries
+        // are never used; nothing found = None.
+        let path_dir = dir.path().join("path");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::write(path_dir.join(&name), "").unwrap();
+        let path_var = std::env::join_paths([Path::new("bin"), path_dir.as_path()]).unwrap();
+        assert_eq!(find_mcp_binary(Some(&bin_dir), Some(&path_var)), Some(binary.clone()));
+        assert_eq!(find_mcp_binary(Some(dir.path()), Some(&path_var)), Some(path_dir.join(&name)));
+        let relative_only = std::env::join_paths([Path::new("bin")]).unwrap();
+        assert_eq!(find_mcp_binary(Some(dir.path()), Some(&relative_only)), None);
+        assert_eq!(find_mcp_binary(None, None), None);
+    }
+
+    use std::path::Path;
+
+    const HOOKS: &str = "/cfg/claude-hooks.json";
+
+    fn claude_tty() -> AgentTool {
+        AgentTool::template(ToolType::Claude)
+    }
+
+    /// The load-time upgrade touches exactly the stale combination, once.
+    #[test]
+    fn stored_claude_tty_tools_get_the_session_hook_once_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent_tools.json");
+        let mut json_transport = claude_tty();
+        json_transport.transport = Transport::Json;
+        let mut docker_tool = claude_tty();
+        docker_tool.runtime = docker("box", None, None, true);
+        let mut own_settings = claude_tty();
+        own_settings.args = vec!["--settings=mine.json".into()];
+        let mut opted_out = claude_tty();
+        opted_out.hooks_opt_out = true;
+        let mut capture_none = claude_tty();
+        capture_none.session_capture = SessionCapture::None;
+        let mut with_args = claude_tty();
+        with_args.args = vec!["--model".into(), "opus".into()];
+        let tools = [claude_tty(), json_transport, docker_tool, own_settings, opted_out, capture_none, with_args,
+            AgentTool::template(ToolType::Opencode)];
+        {
+            let mut store = AgentToolStore::new(path.clone());
+            for t in tools {
+                store.upsert(t).unwrap();
+            }
+            assert!(store.list().iter().all(|t| !has_settings_flag(&t.args) || t.id == 4), "no hooks without a hook file");
+        }
+        let store = AgentToolStore::with_claude_hooks(path.clone(), Some(HOOKS.into()));
+        let upgraded = store.get(1).unwrap();
+        assert_eq!(upgraded.args, vec!["--settings", HOOKS]);
+        assert_eq!(upgraded.session_capture, SessionCapture::Announced);
+        assert_eq!(store.get(7).unwrap().args, vec!["--settings", HOOKS, "--model", "opus"], "user args kept after the flag");
+        for id in [2, 3, 4, 5, 6, 8] {
+            let t = store.get(id).unwrap();
+            assert!(!t.args.iter().any(|a| a == HOOKS), "tool {id} untouched: {:?}", t.args);
+        }
+        assert_eq!(store.get(2).unwrap().session_capture, SessionCapture::Json, "json transport keeps its capture");
+
+        // Saved once; a second load changes nothing (the flag is there now).
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let again = AgentToolStore::with_claude_hooks(path.clone(), Some(HOOKS.into()));
+        assert_eq!(again.list(), store.list());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        let reread = AgentToolStore::new(path);
+        assert_eq!(reread.get(1).unwrap().args, vec!["--settings", HOOKS]);
+    }
+
+    /// A new claude tty tool gets the hook when first saved; an edit that
+    /// drops the flag opts the tool out for good, even though the edit form
+    /// never sends the opt-out itself.
+    #[test]
+    fn a_removed_session_hook_stays_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent_tools.json");
+        let mut store = AgentToolStore::with_claude_hooks(path.clone(), Some(HOOKS.into()));
+        let stored = store.upsert(claude_tty()).unwrap();
+        assert_eq!(stored.args, vec!["--settings", HOOKS]);
+        assert_eq!(stored.session_capture, SessionCapture::Announced);
+        assert!(!stored.hooks_opt_out);
+
+        // An unrelated edit keeps the flag and the tool stays opted in.
+        let mut edit = stored.clone();
+        edit.name = "renamed".into();
+        assert!(!store.upsert(edit).unwrap().hooks_opt_out);
+
+        // The user deletes the two words and puts the capture back to json.
+        let mut edit = store.get(stored.id).unwrap().clone();
+        edit.args.clear();
+        edit.session_capture = SessionCapture::Json;
+        assert!(store.upsert(edit).unwrap().hooks_opt_out);
+        // A later form save (opt-out absent, so false) does not clear it.
+        let mut edit = store.get(stored.id).unwrap().clone();
+        edit.hooks_opt_out = false;
+        assert!(store.upsert(edit).unwrap().hooks_opt_out);
+
+        let reloaded = AgentToolStore::with_claude_hooks(path, Some(HOOKS.into()));
+        let t = reloaded.get(stored.id).unwrap();
+        assert!(t.args.is_empty(), "{:?}", t.args);
+        assert_eq!(t.session_capture, SessionCapture::Json);
+        assert!(t.hooks_opt_out);
     }
 }

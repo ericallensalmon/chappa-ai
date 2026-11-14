@@ -133,6 +133,7 @@ impl World {
                 transport: Transport::Tty,
                 resume_argv: vec![],
                 session_capture: SessionCapture::None,
+                hooks_opt_out: false,
             })
             .unwrap()
     }

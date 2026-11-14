@@ -193,6 +193,7 @@ impl World {
                 transport: Transport::Tty,
                 resume_argv,
                 session_capture: capture,
+                hooks_opt_out: false,
             })
             .unwrap()
     }
@@ -381,6 +382,7 @@ fn a_json_agent_copies_its_session_from_the_event_stream() {
             transport: Transport::Json,
             resume_argv: vec!["--resume".into(), "{session_id}".into()],
             session_capture: SessionCapture::Json,
+            hooks_opt_out: false,
         })
         .unwrap();
     let spawned = spawn_agent_headless(

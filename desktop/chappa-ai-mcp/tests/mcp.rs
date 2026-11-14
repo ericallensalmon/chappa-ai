@@ -1027,3 +1027,78 @@ fn json_rpc_handshake_and_listing() {
     assert_eq!(call["result"]["isError"], false);
     assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("echo hi"));
 }
+
+// ---- session hook -------------------------------------------------------------
+
+/// What Claude Code writes to a `SessionStart` hook's stdin.
+const HOOK_PAYLOAD: &str = r#"{"session_id":"9e93b89b-6d27-456e-8591-58f578689d2e","transcript_path":"t.jsonl","cwd":"/w","hook_event_name":"SessionStart","source":"startup"}"#;
+
+fn hook_client(endpoint: std::path::PathBuf) -> Client {
+    use chappa_ai_mcp::session_hook::{CONNECT_TIMEOUT, READ_TIMEOUT};
+    Client::from_endpoint_file(endpoint, TokenSource::Literal(TOKEN.into()))
+        .with_identity(Some("12"), None)
+        .with_timeouts(CONNECT_TIMEOUT, READ_TIMEOUT)
+}
+
+#[test]
+fn the_session_hook_reports_the_id_after_the_identity_check() {
+    use chappa_ai_mcp::session_hook::{run, HookOutcome};
+    let server = FakeControlServer::start();
+    let dir = endpoint_dir("hook");
+    let client = hook_client(write_endpoint(&dir, &server.addr, NONCE));
+    let outcome = run(Some(12), &client, &mut HOOK_PAYLOAD.as_bytes());
+    assert_eq!(outcome, HookOutcome::Reported);
+    let ids = server.identity_requests();
+    assert_eq!(ids.len(), 1, "one verified connection");
+    assert_eq!(ids[0].auth, None, "the identity check carries no credentials");
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].method, "POST");
+    assert_eq!(reqs[0].path, "/processes/12/session");
+    assert_eq!(reqs[0].auth.as_deref(), Some(&*format!("Bearer {TOKEN}")));
+    assert_eq!(reqs[0].actor.as_deref(), Some("12"));
+    assert_eq!(
+        reqs[0].body,
+        json!({"session_id": "9e93b89b-6d27-456e-8591-58f578689d2e", "provider": "claude"})
+    );
+
+    // Input without an id sends nothing.
+    assert_eq!(run(Some(12), &client, &mut &b"{\"source\":\"clear\"}"[..]), HookOutcome::NoSessionId);
+    assert_eq!(server.requests().len(), 1);
+
+    // The app refusing (no such process) is a failure for stderr, not a panic.
+    let outcome = run(Some(404), &client, &mut HOOK_PAYLOAD.as_bytes());
+    assert!(matches!(&outcome, HookOutcome::Failed(why) if why.contains("404")), "{outcome:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_session_hook_never_sends_the_token_to_an_impostor_and_gives_up_quickly() {
+    use chappa_ai_mcp::session_hook::{run, HookOutcome};
+    // A squatter that answers the identity check with a made-up proof.
+    let impostor = Impostor::start(|_| http_reply(200, &json!({"addr": "x", "nonce": NONCE, "proof": "00".repeat(32)})));
+    let dir = endpoint_dir("hook-impostor");
+    let client = hook_client(write_endpoint(&dir, &impostor.addr, NONCE));
+    let outcome = run(Some(12), &client, &mut HOOK_PAYLOAD.as_bytes());
+    assert!(matches!(outcome, HookOutcome::Failed(_)), "{outcome:?}");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!impostor.saw(TOKEN), "the token was never sent");
+    assert!(!impostor.saw("9e93b89b"), "nor the session id");
+
+    // A program that accepts and then never answers: the short read timeout
+    // bounds the wait, well inside Claude Code's hook timeout.
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap().to_string();
+    let held = std::thread::spawn(move || {
+        let conn = silent.accept();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        drop(conn);
+    });
+    let client = hook_client(write_endpoint(&dir, &addr, NONCE));
+    let started = std::time::Instant::now();
+    let outcome = run(Some(12), &client, &mut HOOK_PAYLOAD.as_bytes());
+    assert!(matches!(outcome, HookOutcome::Failed(_)), "{outcome:?}");
+    assert!(started.elapsed() < std::time::Duration::from_millis(2500), "{:?}", started.elapsed());
+    let _ = held.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}

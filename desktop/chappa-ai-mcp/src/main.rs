@@ -5,13 +5,22 @@
 //! CHAPPA_AI_CONTROL_TOKEN or CHAPPA_AI_CONTROL_TOKEN_FILE (default: the
 //! app-config `control_token`). All logic lives in the library; this is the
 //! loop.
+//!
+//! `chappa-ai-mcp session-hook` is the other entry point: a Claude Code
+//! `SessionStart` hook that reports the session id of the app-spawned agent
+//! it runs under (see `session_hook`). It always exits 0.
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(chappa_ai_mcp::session_hook::SUBCOMMAND) {
+        chappa_ai_mcp::session_hook::main();
+        return;
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!(
             "chappa-ai-mcp {} — stdio MCP server proxying to the chappa-ai control surface.\n\
              Usage: claude mcp add chappa-ai -- chappa-ai-mcp\n\
+             \x20      chappa-ai-mcp session-hook  (Claude Code SessionStart hook; JSON on stdin)\n\
              Env: CHAPPA_AI_CONTROL_URL, CHAPPA_AI_CONTROL_ENDPOINT_FILE,\n\
              CHAPPA_AI_CONTROL_TOKEN, CHAPPA_AI_CONTROL_TOKEN_FILE\n\
              Default token file: {}\n\

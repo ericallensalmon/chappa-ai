@@ -244,6 +244,7 @@ fn host_tool(tools: &AgentToolsState, name: &str, max_busy: Option<u32>) -> Agen
             transport: Default::default(),
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
         })
         .unwrap()
 }
@@ -469,6 +470,7 @@ fn json_transport_spawns_over_pipes_and_flips_awaiting_input() {
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
         })
         .unwrap();
     // A json transport on a type without a machine mode is refused at upsert.
@@ -584,6 +586,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -616,6 +619,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -696,6 +700,7 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -770,6 +775,7 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -917,6 +923,7 @@ fn docker_tools(dir: &std::path::Path, extra_container: Option<&str>) -> AgentTo
         transport: Default::default(),
         resume_argv: Vec::new(),
         session_capture: Default::default(),
+        hooks_opt_out: false,
     };
     tools.upsert(tool.clone()).unwrap();
     if let Some(container) = extra_container {

@@ -152,7 +152,13 @@ pub fn verify_connection(
         .map(|a| a.to_string())
         .unwrap_or_else(|_| host_header.to_owned());
     let challenge = new_challenge()?;
-    let _ = stream.set_read_timeout(Some(IDENTITY_READ_TIMEOUT));
+    // Capped, never raised: a caller that already set a shorter read
+    // timeout on the stream keeps it.
+    let cap = match stream.read_timeout() {
+        Ok(Some(t)) if t < IDENTITY_READ_TIMEOUT => t,
+        _ => IDENTITY_READ_TIMEOUT,
+    };
+    let _ = stream.set_read_timeout(Some(cap));
     let req = format!(
         "GET {prefix}{IDENTITY_PATH}?challenge={challenge} HTTP/1.1\r\nHost: {host_header}\r\nContent-Length: 0\r\n\r\n"
     );

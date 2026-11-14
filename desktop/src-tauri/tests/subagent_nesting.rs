@@ -349,6 +349,7 @@ fn host_tool(tools: &AgentToolsState, name: &str) -> app_lib::agent_tools::Agent
             transport: app_lib::agent_tools::Transport::Tty,
             resume_argv: Vec::new(),
             session_capture: Default::default(),
+            hooks_opt_out: false,
         })
         .unwrap()
 }

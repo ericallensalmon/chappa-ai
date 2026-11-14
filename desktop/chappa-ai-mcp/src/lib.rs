@@ -25,6 +25,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 pub mod identity;
+pub mod session_hook;
 pub use identity::{identity_proof, Endpoint, ENDPOINT_FILE, IDENTITY_PATH};
 
 pub const SERVER_NAME: &str = "chappa-ai";
@@ -106,6 +107,10 @@ pub struct Client {
     /// `CHAPPA_AI_PROJECT_ID`: the default project scope for the
     /// coordination tools when a call omits `project_id`.
     pub project_id: Option<u64>,
+    /// How long a connect may take, and how long any one read may stall
+    /// (the identity check never waits longer than its own cap either).
+    connect_timeout: Duration,
+    read_timeout: Duration,
 }
 
 /// Where to reach the app.
@@ -148,7 +153,17 @@ impl Client {
             cached: Arc::new(Mutex::new(None)),
             actor: None,
             project_id: None,
+            connect_timeout: CONNECT_TIMEOUT,
+            read_timeout: READ_TIMEOUT,
         }
+    }
+
+    /// Override the connect and per-read timeouts (the session hook runs
+    /// inside the agent's startup and must give up quickly).
+    pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Self {
+        self.connect_timeout = connect;
+        self.read_timeout = read;
+        self
     }
 
     /// Set the identity (tests; `from_env` reads it from the environment).
@@ -272,11 +287,12 @@ impl Client {
         token: &str,
     ) -> Result<(u16, Value), ToolError> {
         let (addr, host, prefix, expected) = self.resolve()?;
-        let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        let mut stream = TcpStream::connect_timeout(&addr, self.connect_timeout)
             .map_err(|e| ToolError::Unreachable(format!("{addr}: {e}")))?;
-        let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(self.connect_timeout));
+        let _ = stream.set_read_timeout(Some(self.read_timeout));
         identity::verify_connection(&mut stream, &host, &prefix, token, expected.as_ref())?;
-        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(self.read_timeout));
         let payload = body.map(|b| b.to_string()).unwrap_or_default();
         // A path PREFIX in CHAPPA_AI_CONTROL_URL is honoured (e.g. a reverse
         // proxy in front of a container's app at `http://host:8324/chappa`);
