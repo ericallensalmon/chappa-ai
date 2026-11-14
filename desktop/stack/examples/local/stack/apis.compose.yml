@@ -1,0 +1,7 @@
+# The `apis` group: the API, on podman. It reaches the database on docker
+# through the host (`DATABASE_URL` uses the db's host port), because two
+# engines share no network.
+services:
+  api:
+    image: registry.example/api:main
+    expose: ["8080"]

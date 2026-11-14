@@ -147,6 +147,14 @@ impl IntentRecord {
         for (name, git_ref) in &plan.refs {
             self.components.entry(name.clone()).or_default().git_ref = Some(git_ref.clone());
         }
+        if let Some(channel) = &plan.channel {
+            for (name, mode) in &plan.modes {
+                if *mode == Mode::Prebuilt {
+                    self.components.entry(name.clone()).or_default().channel =
+                        Some(channel.clone());
+                }
+            }
+        }
         self.updated_utc = now_utc.to_string();
     }
 }

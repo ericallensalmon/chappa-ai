@@ -1,0 +1,4 @@
+# Per-instance override files, intent records, provenance caches and job
+# logs: machine-local state, never committed.
+.work/
+.chappa/stack-state/

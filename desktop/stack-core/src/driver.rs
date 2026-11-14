@@ -663,6 +663,87 @@ pub fn checks_for(inst: &ResolvedInstance, stack: &StackDef) -> Vec<Check> {
     out
 }
 
+/// The checks before applying `plan`: memory and ports only for the
+/// components it starts or recreates and that are not running now, the
+/// registry only when it builds a pushed image, the hostname when the stack
+/// has one, terraform init for the terraform components it touches.
+pub fn checks_for_plan(
+    inst: &ResolvedInstance,
+    stack: &StackDef,
+    plan: &Plan,
+    state: &InstanceState,
+) -> Vec<Check> {
+    let mut out = Vec::new();
+    let starting: Vec<&ResolvedComponent> = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s, Step::Start { .. } | Step::Recreate { .. }))
+        .filter(|s| !state.component(s.component()).running)
+        .filter_map(|s| inst.components.get(s.component()))
+        .collect();
+    let mut memory: IndexMap<String, u32> = IndexMap::new();
+    let mut ports: BTreeSet<u16> = BTreeSet::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for c in &starting {
+        if !seen.insert(c.id.as_str()) {
+            continue;
+        }
+        *memory.entry(c.engine.name.clone()).or_insert(0) += c.memory_mb.unwrap_or(0);
+        ports.extend(c.ports.iter().copied());
+    }
+    for engine in inst.engines() {
+        if !plan
+            .components()
+            .iter()
+            .any(|c| inst.components[c].engine.name == engine.name)
+        {
+            continue;
+        }
+        out.push(Check::EngineReachable {
+            engine: engine.name.clone(),
+        });
+        let needed = memory.get(&engine.name).copied().unwrap_or(0);
+        if needed > 0 {
+            out.push(Check::Memory {
+                engine: engine.name.clone(),
+                needed_mb: needed,
+            });
+        }
+    }
+    if !ports.is_empty() {
+        out.push(Check::PortsFree {
+            ports: ports.into_iter().collect(),
+        });
+    }
+    if let Some(hostname) = &stack.hostname {
+        if !starting.is_empty() {
+            out.push(Check::HostnameResolves {
+                hostname: hostname.clone(),
+            });
+        }
+    }
+    if let Some(registry) = &stack.registry {
+        let pushes = plan.steps.iter().any(|s| {
+            matches!(s, Step::Build { .. }) && !stack.image_dependents(s.component()).is_empty()
+        });
+        if pushes {
+            out.push(Check::RegistryLogin {
+                registry: registry.clone(),
+            });
+        }
+    }
+    for name in plan.components() {
+        if let Some(def) = stack.components.get(&name) {
+            if def.driver == DriverKind::Terraform {
+                if let Some(dir) = &def.dir {
+                    out.push(Check::TerraformInit { dir: dir.clone() });
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn run_checks(checker: &dyn Checker, checks: &[Check]) -> Vec<CheckResult> {
     checks
         .iter()
@@ -1427,6 +1508,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Default,
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap();
@@ -1536,6 +1618,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Default,
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap();
@@ -1569,6 +1652,7 @@ stacks:
                 &Change::Up {
                     selection: Selection::Components(vec!["db".into()]),
                     modes: IndexMap::new(),
+                    channel: None,
                 },
             )
             .unwrap();

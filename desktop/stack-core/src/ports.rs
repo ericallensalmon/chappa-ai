@@ -259,6 +259,7 @@ mod tests {
             GroupDef {
                 engine: Some("docker".into()),
                 label: None,
+                os: None,
             },
         );
         s.groups.insert(
@@ -266,6 +267,7 @@ mod tests {
             GroupDef {
                 engine: Some("podman".into()),
                 label: None,
+                os: None,
             },
         );
         for (name, group, ports, index) in comps {

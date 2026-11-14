@@ -1,0 +1,33 @@
+# The `core` group: a database and its one-shot migration, on docker.
+# Ports are not published here: the generated per-instance override file
+# publishes each slot's own host port, so two slots never collide.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    expose: ["5432"]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    image: postgres:16
+    environment:
+      PGPASSWORD: app
+    # Waits for the database, applies the schema, exits. Judged by exit code.
+    command:
+      - sh
+      - -c
+      - >-
+        until pg_isready -h db -U app; do sleep 1; done;
+        psql -h db -U app -d app -c 'CREATE TABLE IF NOT EXISTS notes (id serial PRIMARY KEY, body text)'
+    restart: "no"
+
+volumes:
+  db-data:

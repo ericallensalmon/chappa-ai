@@ -17,10 +17,22 @@
 //! | [`driver`] | the engine-facing traits and the nine component states, with fakes for tests |
 //! | [`intent`] | the per-instance desired-state record and the active-item file under `.work/` |
 //! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value, and the secret-scan runner ([`safety::secrets`]) |
+//! | [`cli`] | the one [`cli::EngineCli`] trait every engine call goes through (argv, env, cwd, timeout, captured output), the real runner and a recording fake |
+//! | [`jobs`] | run blocks and the steps an applied plan is made of |
+//! | [`hosts`] | the hosts-file check for the stack hostname and the elevated fix |
+//! | [`probe`] | probe rules (`health` / `web` / `any`) over an HTTP trait |
+//! | [`images`] | content-keyed source builds, prebuilt digest resolution, catalog/resolve hooks, the provenance cache |
+//! | [`compose`] | the compose driver: projects, the per-instance override file, verbs as argv, `ps`/`inspect` parsing, the gateway rule |
+//! | [`process`] | the process driver: run blocks with the instance environment |
+//! | [`checks`] | the checks before `up`: engine reachable and OS mode, memory, ports, registry login |
+//! | [`runner`] | the verbs end to end: observe, plan, apply into steps, status, gc, activate |
 //!
-//! Nothing here spawns an engine. The only processes this crate runs are
-//! `git` (see [`provenance::GitCli`]) and, for secret scanning, the
-//! configured scanner (gitleaks or a hook), argv only and only when asked.
+//! Engines are CLIs run argv-only through [`cli::EngineCli`]; a verb hands
+//! a long step (a build, a pull, an `up`, a dev server) back as a run block
+//! for the host to run as a job, and asks only quick questions in place.
+//! Besides those, the processes this crate runs are `git` (see
+//! [`provenance::GitCli`]) and, for secret scanning, the configured scanner
+//! (gitleaks or a hook), argv only and only when asked.
 //!
 //! # Where the definition lives
 //!
@@ -40,11 +52,20 @@
 //! unknown placeholder is an error that names it, never silently kept, so a
 //! typo in a URL template fails at validation instead of at runtime.
 
+pub mod checks;
+pub mod cli;
+pub mod compose;
 pub mod definition;
 pub mod driver;
+pub mod hosts;
+pub mod images;
 pub mod intent;
+pub mod jobs;
 pub mod placeholders;
 pub mod planner;
 pub mod ports;
+pub mod probe;
+pub mod process;
 pub mod provenance;
+pub mod runner;
 pub mod safety;

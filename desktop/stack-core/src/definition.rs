@@ -134,6 +134,10 @@ pub struct StackDef {
     /// Named component sets `up` can be asked for.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub selections: IndexMap<String, Vec<String>>,
+    /// Variables every process, agent and terminal of an instance gets,
+    /// resolved on the host side (`{slot}`, `{port:x}`, `{hostname}` …).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub env: IndexMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProvenanceDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,6 +167,7 @@ impl Default for StackDef {
             data_safety: None,
             secrets: None,
             selections: IndexMap::new(),
+            env: IndexMap::new(),
             provenance: None,
             stop: None,
             ttl_hours: None,
@@ -258,6 +263,44 @@ pub struct GroupDef {
     pub engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The container OS this group's images need. A docker daemon switched
+    /// to the other mode fails the group's reachability check with that
+    /// reason instead of failing every `up` halfway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<ContainerOs>,
+}
+
+/// Which kind of containers an engine runs. Docker Desktop on Windows is
+/// one or the other at a time; podman is always Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerOs {
+    Linux,
+    Windows,
+}
+
+impl ContainerOs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContainerOs::Linux => "linux",
+            ContainerOs::Windows => "windows",
+        }
+    }
+
+    /// Parse the engine's own spelling (`OSType` in `docker info`).
+    pub fn parse(s: &str) -> Option<ContainerOs> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "linux" => Some(ContainerOs::Linux),
+            "windows" => Some(ContainerOs::Windows),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ContainerOs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +522,21 @@ pub struct ModeDef {
     /// dev: the project command that runs the component from its worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// dev: the project command for a rebuild-on-change loop; `command`
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<String>,
+    /// prebuilt: argv that lists the builds available for this image as
+    /// JSON (`[{tag, digest, commit?, branch?, buildId?, buildUrl?, created}]`).
+    /// `{param:image}` is the repository. Without it, only the tag in
+    /// force can be inspected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<Vec<String>>,
+    /// prebuilt: argv that turns a tag into `{commit, branch, buildId,
+    /// buildUrl}` JSON when the image's labels do not say. `{param:image}`
+    /// and `{param:tag}` are filled in. Its answer is cached per digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve: Option<Vec<String>>,
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
 }
@@ -784,7 +842,25 @@ impl ComponentDef {
             push(&mut out, "dataSafety.marker", &ds.marker);
             push(&mut out, "dataSafety.sample", &ds.sample);
         }
+        for (name, m) in &self.modes {
+            push(&mut out, &format!("modes.{name}.catalog"), &m.catalog);
+            push(&mut out, &format!("modes.{name}.resolve"), &m.resolve);
+        }
         out
+    }
+
+    /// The dev-mode command that runs a change loop: `watch`, else `command`.
+    pub fn watch_command(&self) -> Option<&str> {
+        let dev = self.mode(Mode::Dev)?;
+        dev.watch.as_deref().or(dev.command.as_deref())
+    }
+
+    /// The command a dev-mode run uses: the dev mode's own, else the
+    /// component's `command` (the process driver's spelling).
+    pub fn dev_command(&self) -> Option<&str> {
+        self.mode(Mode::Dev)
+            .and_then(|m| m.command.as_deref())
+            .or(self.command.as_deref())
     }
 }
 
@@ -843,6 +919,15 @@ impl StackDef {
     /// Both steps at once.
     pub fn engine_for(&self, component: &str) -> Option<EngineRef> {
         self.engine_ref(&self.engine_name_for(component)?)
+    }
+
+    /// The container OS the groups on `engine` declared, if any did.
+    /// Validation refuses two groups asking one engine for different ones.
+    pub fn os_for_engine(&self, engine: &str) -> Option<ContainerOs> {
+        self.groups
+            .values()
+            .filter(|g| g.engine.as_deref() == Some(engine))
+            .find_map(|g| g.os)
     }
 
     /// Components whose templates mention `{image:<component>}`: they bake
@@ -1122,6 +1207,7 @@ pub enum Rule {
     Placeholder,
     PolicyNotAllowed,
     MissingField,
+    EngineOsConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1220,12 +1306,40 @@ fn validate_stack(
             );
         }
         if let Some(e) = &def.engine {
-            if stack.engine_ref(e).is_none() {
-                err(
+            match stack.engine_ref(e) {
+                None => err(
                     Rule::UnknownEngine,
                     format!("{base}.groups.{g}.engine"),
                     format!("unknown engine `{e}`; use docker, podman, terraform, process, script or a name from `engines:`"),
-                );
+                ),
+                Some(engine) => {
+                    // Podman runs Linux containers only, and one daemon is in
+                    // one mode at a time, so two groups cannot ask the same
+                    // engine for different ones.
+                    if engine.kind == EngineKind::Podman && def.os == Some(ContainerOs::Windows) {
+                        err(
+                            Rule::EngineOsConflict,
+                            format!("{base}.groups.{g}.os"),
+                            "podman runs Linux containers only".into(),
+                        );
+                    }
+                    if let Some(os) = def.os {
+                        if let Some((other, odef)) = stack.groups.iter().find(|(og, o)| {
+                            *og != g
+                                && o.engine.as_deref() == Some(e.as_str())
+                                && o.os.is_some_and(|x| x != os)
+                        }) {
+                            err(
+                                Rule::EngineOsConflict,
+                                format!("{base}.groups.{g}.os"),
+                                format!(
+                                    "group `{other}` needs {} containers from the same engine `{e}`",
+                                    odef.os.map(|o| o.as_str()).unwrap_or_default()
+                                ),
+                            );
+                        }
+                    }
+                }
             }
         }
     }

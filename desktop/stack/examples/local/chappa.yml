@@ -1,0 +1,84 @@
+# An example project with one local stack: a database and a migration on
+# docker, an API on podman, and a web app run as a host process. See the
+# README beside this file for running it by hand.
+name: example-local
+processes:
+  web-dev:
+    command: [npm, run, dev]
+    auto_start: false
+    auto_restart: false
+    restart_when_changed: []
+    env: {}
+  api-dev:
+    command: [cargo, run]
+    auto_start: false
+    auto_restart: false
+    restart_when_changed: []
+    env: {}
+  api-watch:
+    command: [cargo, watch, -x, run]
+    auto_start: false
+    auto_restart: false
+    restart_when_changed: []
+    env: {}
+
+stacks:
+  local:
+    slots: { count: 2, portBase: 14000, portStride: 100 }
+    hostname: dev.example.test
+    groups:
+      core: { engine: docker }
+      apis: { engine: podman }
+    components:
+      db:
+        group: core
+        driver: compose
+        file: stack/core.compose.yml
+        service: db
+        modes:
+          prebuilt: { image: postgres, tag: "16" }
+        persistence: { volume: db-data }
+        ports: 1
+        outputs:
+          url: "postgres://app:app@{hostname}:{port:db}/app"
+        memoryMb: 256
+      migrate:
+        group: core
+        driver: compose
+        file: stack/core.compose.yml
+        service: migrate
+        kind: oneshot
+        modes:
+          prebuilt: { image: postgres, tag: "16" }
+        depends_on: [db]
+        ports: 0
+      api:
+        group: apis
+        driver: compose
+        file: stack/apis.compose.yml
+        service: api
+        modes:
+          prebuilt: { image: registry.example/api, tag: "{channel}" }
+          source: { repo: ../api, dockerfile: Dockerfile }
+          dev: { repo: ../api, command: api-dev, watch: api-watch }
+        default: prebuilt
+        depends_on: [db]
+        env:
+          DATABASE_URL: "postgres://app:app@{host}:{port:db}/app"
+        probe: { url: "http://{hostname}:{port:api}/health/ready", rule: health }
+        outputs:
+          url: "http://{hostname}:{port:api}"
+        memoryMb: 512
+      web:
+        group: core
+        driver: process
+        command: web-dev
+        modes:
+          dev: { repo: ../web }
+        depends_on: [api]
+        env:
+          API_URL: "http://{hostname}:{port:api}"
+          PORT: "{port:web}"
+        probe: { url: "http://{hostname}:{port:web}/", rule: web }
+        outputs:
+          url: "http://{hostname}:{port:web}"

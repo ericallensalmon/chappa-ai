@@ -115,6 +115,10 @@ pub enum Change {
         /// Per-component mode choice for this up.
         #[serde(default)]
         modes: IndexMap<String, Mode>,
+        /// The prebuilt channel or tag this up resolves `{channel}` with.
+        /// Recorded in the intent so later verbs (rebuild, start) reuse it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
     },
     SwitchMode {
         component: String,
@@ -146,6 +150,14 @@ pub enum Change {
         #[serde(default)]
         gateways: IndexMap<String, String>,
     },
+    /// Switch one component to `dev` mode so its watch command runs in a
+    /// pane: the same steps as a mode switch, under its own verb so the
+    /// apply layer knows to hand back the watch run.
+    Watch {
+        component: String,
+        #[serde(default, rename = "ref")]
+        git_ref: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -158,6 +170,7 @@ pub enum Verb {
     Stop,
     Down,
     Start,
+    Watch,
 }
 
 impl Change {
@@ -170,6 +183,7 @@ impl Change {
             Change::Stop { .. } => Verb::Stop,
             Change::Down { .. } => Verb::Down,
             Change::Start { .. } => Verb::Start,
+            Change::Watch { .. } => Verb::Watch,
         }
     }
 }
@@ -315,6 +329,9 @@ pub struct Plan {
     /// Ref after apply, for components the plan checks out.
     #[serde(default)]
     pub refs: IndexMap<String, String>,
+    /// The prebuilt channel in force for this plan's pulls, when `up` chose one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -346,6 +363,7 @@ impl Plan {
             desired: IndexMap::new(),
             modes: IndexMap::new(),
             refs: IndexMap::new(),
+            channel: None,
         }
     }
 
@@ -443,51 +461,28 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
         &state.fingerprint(),
     );
     match change {
-        Change::Up { selection, modes } => {
+        Change::Up {
+            selection,
+            modes,
+            channel,
+        } => {
+            plan.channel = channel.clone();
             plan_up(stack, state, &order, selection, modes, &mut plan)?
         }
         Change::SwitchMode {
             component,
             mode,
             git_ref,
-        } => {
-            require(stack, component)?;
-            if !stack.components[component].has_mode(*mode) {
-                return Err(PlanError::UnknownMode {
-                    component: component.clone(),
-                    mode: *mode,
-                });
-            }
-            let cur = state.component(component);
-            acquire(
-                stack,
-                component,
-                *mode,
-                git_ref.clone().or(cur.git_ref.clone()),
-                &cur,
-                &mut plan,
-            );
-            if cur.exists {
-                plan.push(Step::Recreate {
-                    component: component.clone(),
-                    reason: RecreateReason::ModeChanged {
-                        from: cur.mode,
-                        to: *mode,
-                    },
-                });
-            } else {
-                plan.push(Step::Start {
-                    component: component.clone(),
-                });
-            }
-            recreate_image_dependents(
-                stack,
-                state,
-                &order,
-                std::slice::from_ref(component),
-                &mut plan,
-            );
-        }
+        } => plan_switch(stack, state, &order, component, *mode, git_ref, &mut plan)?,
+        Change::Watch { component, git_ref } => plan_switch(
+            stack,
+            state,
+            &order,
+            component,
+            Mode::Dev,
+            git_ref,
+            &mut plan,
+        )?,
         Change::ChangeRef { component, git_ref } => {
             require(stack, component)?;
             let cur = state.component(component);
@@ -657,6 +652,50 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
         }
     }
     Ok(plan)
+}
+
+/// A mode switch on one component: acquire the new mode's bits, recreate
+/// (or start) it, then recreate whatever pins its image.
+fn plan_switch(
+    stack: &StackDef,
+    state: &InstanceState,
+    order: &[String],
+    component: &str,
+    mode: Mode,
+    git_ref: &Option<String>,
+    plan: &mut Plan,
+) -> Result<(), PlanError> {
+    require(stack, component)?;
+    if !stack.components[component].has_mode(mode) {
+        return Err(PlanError::UnknownMode {
+            component: component.to_string(),
+            mode,
+        });
+    }
+    let cur = state.component(component);
+    acquire(
+        stack,
+        component,
+        mode,
+        git_ref.clone().or(cur.git_ref.clone()),
+        &cur,
+        plan,
+    );
+    if cur.exists {
+        plan.push(Step::Recreate {
+            component: component.to_string(),
+            reason: RecreateReason::ModeChanged {
+                from: cur.mode,
+                to: mode,
+            },
+        });
+    } else {
+        plan.push(Step::Start {
+            component: component.to_string(),
+        });
+    }
+    recreate_image_dependents(stack, state, order, &[component.to_string()], plan);
+    Ok(())
 }
 
 fn require(stack: &StackDef, component: &str) -> Result<(), PlanError> {
@@ -1015,6 +1054,7 @@ stacks:
         Change::Up {
             selection: Selection::Default,
             modes: IndexMap::new(),
+            channel: None,
         }
     }
 
@@ -1082,6 +1122,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Named("linux-only".into()),
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap();
@@ -1092,6 +1133,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Named("nope".into()),
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap_err();
@@ -1103,6 +1145,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Components(vec!["worker".into()]),
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap();
@@ -1114,6 +1157,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Components(vec!["web".into()]),
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap();
@@ -1124,6 +1168,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Components(vec!["cache".into()]),
                 modes: IndexMap::new(),
+                channel: None,
             },
         )
         .unwrap_err();
@@ -1144,6 +1189,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Default,
                 modes,
+                channel: None,
             },
         )
         .unwrap();
@@ -1192,6 +1238,7 @@ stacks:
             &Change::Up {
                 selection: Selection::Default,
                 modes,
+                channel: None,
             },
         )
         .unwrap_err();
@@ -1751,6 +1798,7 @@ stacks:
         let ch = Change::Up {
             selection: Selection::Named("linux-only".into()),
             modes: IndexMap::new(),
+            channel: None,
         };
         let json = serde_json::to_value(&ch).unwrap();
         assert_eq!(json["verb"], "up");
