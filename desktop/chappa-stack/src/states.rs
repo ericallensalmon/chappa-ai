@@ -14,6 +14,7 @@
 //! | `save-state` | the item's overlay, while the item is active in this slot | a job: saves the state now; `mutates` (with a confirm naming the snapshots) when it runs snapshot hooks |
 //! | `resume:<state>` | the item's Saved states section | a job: worktrees to the saved commits, images by digest or content key, the plan, then each snapshot restored or recipe replayed; a missing snapshot blocks only its component; a worktree with uncommitted changes refuses the whole resume |
 //! | `resume-no-save:<state>` | beside it, when another item has the slot | the same without saving that item's state first |
+//! | `resume-tips:<state>` / `resume-exact:<state>` (and their `-no-save` twins) | in place of `resume:` when a worktree's branch moved since the save | stay on the moved branches and build from their tips (the confirm says, per repo, that the code differs from the save), or go to the exact saved commits and leave those worktrees detached; a plain `resume:` is then refused |
 //! | `<verb>-no-save` | Environment, beside a mode switch, watch or down, while an item is bound | the verb without the automatic save before it |
 //! | `down-volumes` | Environment, when a component keeps a volume | down that also deletes the data volumes; the confirm names the saved states whose snapshots live there (`down` itself always keeps them) |
 //!
@@ -63,6 +64,12 @@ use crate::world::World;
 pub const SAVE_ID: &str = "save-state";
 pub const RESUME_PREFIX: &str = "resume:";
 pub const RESUME_NO_SAVE_PREFIX: &str = "resume-no-save:";
+/// When a branch moved since the save: resume on the branches as they are
+/// now, or at the exact saved commits (detached).
+pub const RESUME_TIPS_PREFIX: &str = "resume-tips:";
+pub const RESUME_TIPS_NO_SAVE_PREFIX: &str = "resume-tips-no-save:";
+pub const RESUME_EXACT_PREFIX: &str = "resume-exact:";
+pub const RESUME_EXACT_NO_SAVE_PREFIX: &str = "resume-exact-no-save:";
 /// The twin of an action that would save first: the same without saving.
 pub const NO_SAVE_SUFFIX: &str = "-no-save";
 pub const DOWN_VOLUMES_ID: &str = "down-volumes";
@@ -1101,6 +1108,70 @@ pub struct ResumeProposal {
     pub work: ResumeWork,
     pub confirm: String,
     pub fingerprint: String,
+    /// The branches that moved since the save.
+    pub moved: Vec<Moved>,
+}
+
+/// How a resume treats a branch whose tip is no longer the saved commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeVariant {
+    /// No branch moved: everything goes to the saved commits, which are
+    /// the branch tips.
+    Plain,
+    /// Stay on each moved branch and build from its tip; the code differs
+    /// from the save there.
+    Tips,
+    /// Go to the exact saved commits; a moved branch's worktree is left
+    /// detached there.
+    Exact,
+}
+
+impl ResumeVariant {
+    /// The action id prefix of this variant (and its "without saving" twin).
+    pub fn prefix(self, no_save: bool) -> &'static str {
+        match (self, no_save) {
+            (ResumeVariant::Plain, false) => RESUME_PREFIX,
+            (ResumeVariant::Plain, true) => RESUME_NO_SAVE_PREFIX,
+            (ResumeVariant::Tips, false) => RESUME_TIPS_PREFIX,
+            (ResumeVariant::Tips, true) => RESUME_TIPS_NO_SAVE_PREFIX,
+            (ResumeVariant::Exact, false) => RESUME_EXACT_PREFIX,
+            (ResumeVariant::Exact, true) => RESUME_EXACT_NO_SAVE_PREFIX,
+        }
+    }
+
+    /// `(variant, without saving, state id)` of a resume action id.
+    pub fn parse_id(id: &str) -> Option<(ResumeVariant, bool, &str)> {
+        for v in [
+            ResumeVariant::Plain,
+            ResumeVariant::Tips,
+            ResumeVariant::Exact,
+        ] {
+            for no_save in [false, true] {
+                if let Some(state) = id.strip_prefix(v.prefix(no_save)) {
+                    return Some((v, no_save, state));
+                }
+            }
+        }
+        None
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ResumeVariant::Plain => "",
+            ResumeVariant::Tips => " at branch tips",
+            ResumeVariant::Exact => " exact commits",
+        }
+    }
+}
+
+/// A repo whose branch tip is no longer the commit the state saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    pub component: String,
+    pub repo: String,
+    pub branch: String,
+    pub saved: String,
+    pub tip: String,
 }
 
 /// Blocked components found when a resume was called, kept so the next
@@ -1145,7 +1216,13 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// Plan the resume of `state` of the item in `dir`. `live` asks git, the
 /// engine and the `exists` hooks now (an action call); otherwise `known`
-/// holds what the last call found blocked (a view).
+/// holds what the last call found blocked and `tips` where each repo's
+/// branch pointed when the workspaces were last looked at (a view).
+///
+/// A repo whose branch moved since the save is in [`ResumeProposal::moved`]
+/// whatever the variant; a live [`ResumeVariant::Plain`] call is refused
+/// then (the view offers the other two instead), and a live call of the
+/// other two is refused when nothing moved.
 #[allow(clippy::too_many_arguments)]
 pub fn resume_proposal(
     world: &World,
@@ -1155,6 +1232,8 @@ pub fn resume_proposal(
     state: &SavedState,
     live: bool,
     known: &IndexMap<String, String>,
+    tips: &IndexMap<String, String>,
+    variant: ResumeVariant,
     no_save: bool,
     now_utc: &str,
 ) -> Result<ResumeProposal, (u16, &'static str, String)> {
@@ -1174,6 +1253,9 @@ pub fn resume_proposal(
     let mut restores = Vec::new();
     let mut recipes = Vec::new();
     let mut from_worktrees = Vec::new();
+    let mut moved: Vec<Moved> = Vec::new();
+    // Under `Tips`, the tip a moved component builds from instead.
+    let mut at_tip: IndexMap<String, String> = IndexMap::new();
     for (name, c) in &state.components {
         if blocked.contains_key(name) {
             continue;
@@ -1193,10 +1275,57 @@ pub fn resume_proposal(
         if wanted && mode.uses_repo() {
             let repo = c.repo.clone().or_else(|| loaded.stack.repo_of(name, mode));
             let wt = repo.as_ref().and_then(|r| bound.worktrees.get(r)).cloned();
-            if wt.is_some() {
+            let branch = repo
+                .as_ref()
+                .and_then(|r| rec.repos.get(r))
+                .map(|r| r.branch.clone())
+                .or_else(|| c.git_ref.clone());
+            if let (Some(wt), Some(commit), Some(b), Some(r)) = (&wt, &c.commit, &branch, &repo) {
+                let tip = if live {
+                    git.rev_parse(wt, &format!("refs/heads/{b}")).ok()
+                } else {
+                    tips.get(r).cloned()
+                };
+                if let Some(tip) = tip.filter(|t| t != commit) {
+                    moved.push(Moved {
+                        component: name.clone(),
+                        repo: r.clone(),
+                        branch: b.clone(),
+                        saved: commit.clone(),
+                        tip,
+                    });
+                }
+            }
+            let tip_here = moved
+                .iter()
+                .find(|m| m.component == *name && variant == ResumeVariant::Tips)
+                .cloned();
+            if wt.is_some() && tip_here.is_none() {
                 from_worktrees.push(name.clone());
             }
-            if live {
+            if let (Some(m), Some(wt)) = (&tip_here, &wt) {
+                // Stay on the branch, at its tip: no pin, built from it.
+                if live {
+                    match git.uncommitted(wt) {
+                        Ok(n) if n > 0 => dirty.push(format!(
+                            "{} has {n} uncommitted change{} ({})",
+                            m.repo,
+                            if n == 1 { "" } else { "s" },
+                            wt.display()
+                        )),
+                        Ok(_) => {}
+                        Err(e) => dirty.push(format!("{} cannot be checked ({e})", wt.display())),
+                    }
+                    checkouts.push(CheckoutAt {
+                        component: name.clone(),
+                        repo: m.repo.clone(),
+                        worktree: wt.clone(),
+                        commit: m.tip.clone(),
+                        branch: Some(m.branch.clone()),
+                    });
+                }
+                at_tip.insert(name.clone(), m.tip.clone());
+            } else if live {
                 let engine = &inst.components[name].engine;
                 let image_ok = mode == Mode::Source
                     && c.image
@@ -1296,16 +1425,45 @@ pub fn resume_proposal(
                 _ => {}
             }
         }
+        let pin = if at_tip.contains_key(name) {
+            None
+        } else {
+            Some(c.pin())
+        };
         targets.insert(
             name.clone(),
             ResumeTarget {
                 mode,
                 git_ref: c.git_ref.clone(),
-                pin: Some(c.pin()),
+                pin,
                 desired: c.desired,
                 fresh,
             },
         );
+    }
+    // A moved branch only counts for a component that is resumed.
+    moved.retain(|m| targets.contains_key(&m.component));
+    if live {
+        match (variant, moved.is_empty()) {
+            (ResumeVariant::Plain, false) => {
+                return Err((
+                    409,
+                    "stale-plan",
+                    format!(
+                        "since the state was saved, {}; choose Resume at branch tips or Resume exact commits",
+                        moved_text(&moved)
+                    ),
+                ))
+            }
+            (ResumeVariant::Tips | ResumeVariant::Exact, true) => {
+                return Err((
+                    409,
+                    "stale-plan",
+                    "no branch moved since the state was saved; use Resume".to_string(),
+                ))
+            }
+            _ => {}
+        }
     }
     if !dirty.is_empty() {
         return Err((
@@ -1366,11 +1524,43 @@ pub fn resume_proposal(
     }
     let mut shown = state.clone();
     shown.components.retain(|n, _| targets.contains_key(n));
+    for (n, tip) in &at_tip {
+        if let Some(c) = shown.components.get_mut(n) {
+            c.commit = Some(tip.clone());
+            c.image = None;
+            c.dirty = None;
+        }
+    }
     let diff = diff_lines(&shown, &obs.state);
     if diff.iter().all(|l| l.starts_with("unchanged: ")) {
         parts.push("Nothing differs from what runs now.".into());
     } else {
         parts.push(format!("Changes: {}.", diff.join("; ")));
+    }
+    if !moved.is_empty() {
+        parts.push(format!("Since the save, {}.", moved_text(&moved)));
+        let each: Vec<String> = moved
+            .iter()
+            .map(|m| match variant {
+                ResumeVariant::Tips => format!(
+                    "{} builds from {} at {}, not the saved {}, so its code differs from the save",
+                    m.repo,
+                    m.branch,
+                    c8(&m.tip),
+                    c8(&m.saved)
+                ),
+                _ => format!(
+                    "the worktree of {} is left detached at {} (switch it back to {} afterwards)",
+                    m.repo,
+                    c8(&m.saved),
+                    m.branch
+                ),
+            })
+            .collect();
+        parts.push(match variant {
+            ResumeVariant::Tips => format!("Resumes at the branch tips: {}.", each.join("; ")),
+            _ => format!("Resumes the exact saved commits: {}.", each.join("; ")),
+        });
     }
     if !from_worktrees.is_empty() {
         parts.push(format!(
@@ -1435,7 +1625,25 @@ pub fn resume_proposal(
         },
         confirm,
         fingerprint: fp,
+        moved,
     })
+}
+
+/// "api's branch task/ABC-1 moved from 1a2b3c4d to 5e6f7a8b", per repo.
+fn moved_text(moved: &[Moved]) -> String {
+    moved
+        .iter()
+        .map(|m| {
+            format!(
+                "{}'s branch {} moved from {} to {}",
+                m.repo,
+                m.branch,
+                c8(&m.saved),
+                c8(&m.tip)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 // ----------------------------------------------------------- the views
@@ -1449,6 +1657,9 @@ pub struct OverlayParts {
 
 fn state_row(s: &SavedState, now_utc: &str) -> Value {
     let mut bits = vec![age(&s.saved_utc, now_utc), s.reason.describe().to_string()];
+    if let Some(by) = &s.saved_by {
+        bits.push(format!("by {by}"));
+    }
     let snaps = s.live_snapshots().count();
     if snaps > 0 {
         bits.push(format!(
@@ -1487,6 +1698,11 @@ fn state_row(s: &SavedState, now_utc: &str) -> Value {
 }
 
 /// The Saved states section, its count badge, Save and the Resume actions.
+///
+/// `tips` is where each repo's branch pointed when the workspaces were last
+/// looked at: a state whose branches moved since gets the two variants
+/// instead of one Resume.
+#[allow(clippy::too_many_arguments)]
 pub fn overlay_parts(
     world: &World,
     loaded: &Loaded,
@@ -1494,6 +1710,7 @@ pub fn overlay_parts(
     dir: &Path,
     rec: &ItemRecord,
     blocks: &ResumeBlocks,
+    tips: &IndexMap<String, String>,
     now_utc: &str,
 ) -> OverlayParts {
     let states = list_states(dir);
@@ -1535,33 +1752,46 @@ pub fn overlay_parts(
             let now = world.clock.now_secs();
             for s in states.iter().take(SHOWN) {
                 let known = blocks.get(&rec.key, &s.id, now);
-                let propose = |no_save| {
-                    resume_proposal(world, loaded, obs, rec, s, false, &known, no_save, now_utc)
+                let propose = |variant, no_save| {
+                    resume_proposal(
+                        world, loaded, obs, rec, s, false, &known, tips, variant, no_save, now_utc,
+                    )
                 };
-                let Ok(p) = propose(false) else {
+                let Ok(plain) = propose(ResumeVariant::Plain, false) else {
                     continue;
                 };
-                let saves = p.work.save.clone();
-                resumes.push(endpoint(
-                    &format!("{RESUME_PREFIX}{}", s.id),
-                    &format!("Resume {}", shown_time(&s.saved_utc)),
-                    true,
-                    Some(p.confirm),
-                    json!({ "fingerprint": p.fingerprint, "state": s.id }),
-                ));
-                // Only when resuming would save another item's state first.
-                if let (Some(other), Ok(p)) = (saves, propose(true)) {
+                let variants = if plain.moved.is_empty() {
+                    vec![ResumeVariant::Plain]
+                } else {
+                    vec![ResumeVariant::Tips, ResumeVariant::Exact]
+                };
+                for variant in variants {
+                    let Ok(p) = propose(variant, false) else {
+                        continue;
+                    };
+                    let saves = p.work.save.clone();
+                    let when = shown_time(&s.saved_utc);
                     resumes.push(endpoint(
-                        &format!("{RESUME_NO_SAVE_PREFIX}{}", s.id),
-                        &format!(
-                            "Resume {} without saving {}",
-                            shown_time(&s.saved_utc),
-                            other.item
-                        ),
+                        &format!("{}{}", variant.prefix(false), s.id),
+                        &format!("Resume {when}{}", variant.label()),
                         true,
                         Some(p.confirm),
                         json!({ "fingerprint": p.fingerprint, "state": s.id }),
                     ));
+                    // Only when resuming would save another item's state first.
+                    if let (Some(other), Ok(p)) = (saves, propose(variant, true)) {
+                        resumes.push(endpoint(
+                            &format!("{}{}", variant.prefix(true), s.id),
+                            &format!(
+                                "Resume {when}{} without saving {}",
+                                variant.label(),
+                                other.item
+                            ),
+                            true,
+                            Some(p.confirm),
+                            json!({ "fingerprint": p.fingerprint, "state": s.id }),
+                        ));
+                    }
                 }
             }
         }
@@ -1579,7 +1809,7 @@ pub fn overlay_parts(
 
 /// Whether `id` is one of this module's overlay actions.
 pub fn handles(id: &str) -> bool {
-    id == SAVE_ID || id.starts_with(RESUME_PREFIX) || id.starts_with(RESUME_NO_SAVE_PREFIX)
+    id == SAVE_ID || ResumeVariant::parse_id(id).is_some()
 }
 
 /// Accept (or refuse) `save-state` and `resume:*` on an item's overlay.
@@ -1635,9 +1865,8 @@ pub fn accept(
             mutates,
         };
     }
-    let (sid, no_save) = match id.strip_prefix(RESUME_NO_SAVE_PREFIX) {
-        Some(s) => (s, true),
-        None => (id.strip_prefix(RESUME_PREFIX).unwrap_or(""), false),
+    let Some((variant, no_save, sid)) = ResumeVariant::parse_id(id) else {
+        return refused(409, "not-offered", format!("`{id}` is not a resume action"));
     };
     let state = match SavedState::load(dir, sid) {
         Ok(Some(s)) => s,
@@ -1658,6 +1887,8 @@ pub fn accept(
         &state,
         true,
         &IndexMap::new(),
+        &IndexMap::new(),
+        variant,
         no_save,
         now_utc,
     ) {
@@ -1690,7 +1921,7 @@ pub fn accept(
     job(
         id,
         &rec.key,
-        &format!("Resume {}", shown_time(&state.saved_utc)),
+        &format!("Resume {}{}", shown_time(&state.saved_utc), variant.label()),
         p.confirm,
         JobWork::Resume {
             resume: Box::new(p.work),

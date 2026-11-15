@@ -141,6 +141,12 @@ pub struct JobRecord {
     /// Why it failed, in one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Who asked for it: the actions call's `X-Chappa-Actor`, as kept
+    /// (printable ASCII, capped). `None` for a job nobody asked for (the
+    /// data-safety schedule) or a call that named no actor. A state the
+    /// job saves records it as `savedBy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 /// One step as the runner saw it, for `<id>.result.json`.

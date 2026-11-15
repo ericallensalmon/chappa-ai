@@ -664,8 +664,8 @@ impl Registry {
 
     /// Queue a delivery for `id`, made by `deliver` once the hold lifts.
     /// Answers how many are held for it now.
-    pub fn hold_delivery(&self, id: TermId, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
-        self.holds.hold(id, text, deliver)
+    pub fn hold_delivery(&self, id: TermId, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+        self.holds.hold(id, from, text, deliver)
     }
 
     /// Make the held deliveries whose hold lifted, in order (the data-safety

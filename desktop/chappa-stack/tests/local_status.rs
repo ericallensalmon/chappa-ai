@@ -788,3 +788,86 @@ fn the_status_blocks() {
         }
     }
 }
+
+fn push_owner(ws: &Ws, body: &Value) -> (u16, Value) {
+    post(&ws.src, "/api/work/owner", body, false)
+}
+
+#[test]
+fn an_owner_update_refreshes_the_tracker_status_without_an_action() {
+    let ws = setup();
+    start(&ws, "ABC-1", "In Progress");
+    assert_eq!(state(&ws, "ABC-1"), "dev");
+    assert!(banner(&ws, "ABC-1").is_none());
+
+    // The tracker moved the item: the push alone brings the banner.
+    let (code, body) = push_owner(
+        &ws,
+        &json!({ "source": "tracker", "key": "ABC-1", "item": owner("ABC-1", "Code Review") }),
+    );
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["message"], "ABC-1: the tracker's row was updated");
+    assert_eq!(
+        banner(&ws, "ABC-1").unwrap()["title"],
+        "Tracker: Code Review · here: In development"
+    );
+    assert_eq!(rec(&ws, "ABC-1").status.unwrap().label, "Code Review");
+    // The same row again changes nothing, and writes nothing.
+    let before = fs::read_to_string(ws.p.work().join("ABC-1/item.json")).unwrap();
+    ws.clock.advance(std::time::Duration::from_secs(60));
+    let (code, body) = push_owner(
+        &ws,
+        &json!({ "source": "tracker", "key": "ABC-1", "item": owner("ABC-1", "Code Review") }),
+    );
+    assert_eq!(
+        (code, body["message"].as_str()),
+        (200, Some("ABC-1: nothing changed"))
+    );
+    assert_eq!(
+        fs::read_to_string(ws.p.work().join("ABC-1/item.json")).unwrap(),
+        before
+    );
+    // Done in the tracker: the archive badge.
+    let done = json!({ "key": "ABC-1", "title": "Item ABC-1", "status": { "label": "Done", "category": "done" } });
+    push_owner(
+        &ws,
+        &json!({ "source": "tracker", "key": "ABC-1", "item": done }),
+    );
+    assert!(row(&ws, "ABC-1")["badges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["text"] == "done in tracker — archive?"));
+
+    // Rows it has no workspace for are ignored, also the same key from
+    // another source; the record is untouched.
+    let before = fs::read_to_string(ws.p.work().join("ABC-1/item.json")).unwrap();
+    for body in [
+        json!({ "source": "tracker", "key": "ABC-2", "item": owner("ABC-2", "To Do") }),
+        json!({ "source": "other", "key": "ABC-1", "item": owner("ABC-1", "To Do") }),
+    ] {
+        let (code, reply) = push_owner(&ws, &body);
+        assert_eq!(code, 200, "{reply}");
+        assert!(reply["message"].as_str().unwrap().ends_with("; ignored"));
+    }
+    // A row that names another key, or is not one, changes nothing.
+    let (code, _) = push_owner(
+        &ws,
+        &json!({ "source": "tracker", "key": "ABC-1", "item": owner("ABC-9", "To Do") }),
+    );
+    assert_eq!(code, 200);
+    assert_eq!(
+        fs::read_to_string(ws.p.work().join("ABC-1/item.json")).unwrap(),
+        before
+    );
+    for bad in [
+        json!({ "key": "ABC-1", "item": {} }),
+        json!({ "source": "tracker", "key": "", "item": {} }),
+        json!({ "source": "tracker", "key": "ABC-1" }),
+        json!({ "source": "tracker", "key": "ABC-1", "item": "Done" }),
+    ] {
+        assert_eq!(push_owner(&ws, &bad).0, 400, "{bad}");
+    }
+    let (code, _) = ws.src.handle("POST", "/api/work/owner", None, false, "{}");
+    assert_eq!(code, 401);
+}

@@ -89,8 +89,9 @@ export interface NeedsYouRow {
    *  checked against this source's trusted hosts. */
   sourceId: string | null;
   sourceLabel: string | null;
-  /** Where its actions are read from: each run against its own source. */
-  actions: ActionTarget[];
+  /** Where its actions are read from: each run against its own source;
+   *  `only` draws just those ids of the target's list. */
+  actions: (ActionTarget & { only?: readonly string[] })[];
   /** Terminal rows: the rail key a click selects. */
   terminalKey?: string;
   opens: Opens;
@@ -150,7 +151,7 @@ export function workAttention(raw: unknown): { key: string; title: string; detai
   }
   if (ls.gate === "human-exit") {
     const label = str(ls.label) ?? str(ls.id) ?? "this status";
-    return { key, title, detail: `${oneLine(label)}: only a person can move it on`, url };
+    return { key, title, detail: `${oneLine(label)}: only a person can move it out`, url };
   }
   return null;
 }

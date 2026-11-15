@@ -59,7 +59,7 @@ use crate::registry::{
 use project_model::records::{new_record_id, JobRecord as ProjectJobRecord, RecordKind, Run, TailKind};
 use crate::roots::{check_cwd, Root};
 use crate::settings::SettingsState;
-use crate::sources::actions::{action_verdict, resolve_tool, validate_env, NoteRule, SourceAction, VerdictContext};
+use crate::sources::actions::{action_verdict, check_input_values, resolve_tool, validate_env, NoteRule, SourceAction, VerdictContext};
 use crate::sources::{iso_utc, main_window_only, ActionDto, CallActor, CallTarget, JobRecord, PromptPolicy, SourceInfo, Sources, SourcesListing};
 
 /// A run's pane dump in the exit report is capped here, with a marker.
@@ -147,6 +147,35 @@ pub fn run_action(
     run_action_as(deps, &CallActor::human(), source_id, view, key, action_id, confirmed, note)
 }
 
+/// What the person answered in an endpoint action's dialog besides the
+/// confirm: the note and the input values (`{name: value}`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Answers<'a> {
+    pub confirmed: bool,
+    pub note: Option<&'a str>,
+    pub values: Option<&'a Value>,
+}
+
+/// [`run_action`] with the dialog's input values.
+pub fn run_action_with(deps: &ActionDeps, source_id: &str, view: &str, key: Option<&str>, action_id: &str, answers: Answers<'_>) -> Result<ActionOutcome, String> {
+    let (action, info, target) = deps.sources.action_for_call(source_id, view, key, action_id)?;
+    run_found(deps, &CallActor::human(), source_id, view, key, action, info, target, answers)
+}
+
+/// [`run_item_action`] with the dialog's input values.
+pub fn run_item_action_with(
+    deps: &ActionDeps,
+    source_id: &str,
+    view: &str,
+    owner: &str,
+    key: &str,
+    action_id: &str,
+    answers: Answers<'_>,
+) -> Result<ActionOutcome, String> {
+    let (action, info, target) = deps.sources.item_action(source_id, view, owner, key, action_id)?;
+    run_found(deps, &CallActor::human(), source_id, view, Some(key), action, info, target, answers)
+}
+
 /// [`run_action`] on behalf of `caller` (sent to the source as its
 /// `X-Chappa-Actor`).
 #[allow(clippy::too_many_arguments)]
@@ -161,7 +190,7 @@ pub fn run_action_as(
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
     let (action, info, target) = deps.sources.action_for_call(source_id, view, key, action_id)?;
-    run_found(deps, caller, source_id, view, key, action, info, target, confirmed, note)
+    run_found(deps, caller, source_id, view, key, action, info, target, Answers { confirmed, note, values: None })
 }
 
 /// Run the item action `action_id` that `source_id` offers on the `view`
@@ -179,7 +208,7 @@ pub fn run_item_action(
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
     let (action, info, target) = deps.sources.item_action(source_id, view, owner, key, action_id)?;
-    run_found(deps, &CallActor::human(), source_id, view, Some(key), action, info, target, confirmed, note)
+    run_found(deps, &CallActor::human(), source_id, view, Some(key), action, info, target, Answers { confirmed, note, values: None })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -192,9 +221,9 @@ fn run_found(
     action: SourceAction,
     info: SourceInfo,
     target: CallTarget,
-    confirmed: bool,
-    note: Option<&str>,
+    answers: Answers<'_>,
 ) -> Result<ActionOutcome, String> {
+    let Answers { confirmed, note, values } = answers;
     let tools = deps.tools.list();
     let roots = roots_for(deps, &info);
     let verdict = action_verdict(&action, &VerdictContext { tools: &tools, roots: &roots, link_hosts: &info.link_hosts });
@@ -209,7 +238,7 @@ fn run_found(
             Ok(ActionOutcome::Opened { url })
         }
         SourceAction::Panel { endpoint, .. } => Ok(ActionOutcome::Panel { payload: deps.sources.panel(source_id, &endpoint)? }),
-        SourceAction::Endpoint { id, label: action_label, mutates, confirm, params, note: rule } => {
+        SourceAction::Endpoint { id, label: action_label, mutates, confirm, params, note: rule, inputs } => {
             if mutates && confirm.is_none() {
                 return Err("a mutating action without a confirm text is not offered".into());
             }
@@ -220,6 +249,9 @@ fn run_found(
             if rule == Some(NoteRule::Required) && note.is_none() {
                 return Err(format!("`{id}` needs a note"));
             }
+            // Values the action asks for are checked against what it
+            // declared before anything is sent; the source checks again.
+            let params = check_input_values(&inputs, values, params).map_err(|why| format!("`{id}`: {why}"))?;
             let mut body = json!({ "id": id, "target": target.body(view, key) });
             if let Some(params) = params {
                 body["params"] = params;
@@ -685,13 +717,17 @@ pub async fn source_run_action(
     confirmed: bool,
     note: Option<String>,
     owner: Option<String>,
+    values: Option<Value>,
 ) -> Result<ActionOutcome, String> {
     main_window_only(&window)?;
     let deps = deps_of(&registry, &tools, &settings, &projects, &records, &sources, app);
-    tauri::async_runtime::spawn_blocking(move || match (owner, key) {
-        (Some(owner), Some(key)) => run_item_action(&deps, &source_id, &view, &owner, &key, &action_id, confirmed, note.as_deref()),
-        (Some(_), None) => Err("an item action needs the row's key".into()),
-        (None, key) => run_action(&deps, &source_id, &view, key.as_deref(), &action_id, confirmed, note.as_deref()),
+    tauri::async_runtime::spawn_blocking(move || {
+        let answers = Answers { confirmed, note: note.as_deref(), values: values.as_ref() };
+        match (owner, key) {
+            (Some(owner), Some(key)) => run_item_action_with(&deps, &source_id, &view, &owner, &key, &action_id, answers),
+            (Some(_), None) => Err("an item action needs the row's key".into()),
+            (None, key) => run_action_with(&deps, &source_id, &view, key.as_deref(), &action_id, answers),
+        }
     })
     .await
     .map_err(|e| e.to_string())?

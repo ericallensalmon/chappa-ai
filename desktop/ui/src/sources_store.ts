@@ -134,6 +134,9 @@ export function trustMessage(source: Source, trust: SourceTrust): string {
       lines.push(`    ${a.label} (${a.mutates ? "changes something, asks first" : "read only"}) on ${view} rows of ${where}`);
     }
   }
+  if (trust.ownerUpdates) {
+    lines.push("", "It is sent the rows of other sources' items it adds to, each time one changes.");
+  }
   lines.push("", `Trust covers exactly this: ${trust.hash.slice(0, 16)}…`, "A change to any of it asks again.");
   return lines.join("\n");
 }

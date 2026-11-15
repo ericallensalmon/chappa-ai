@@ -15,10 +15,12 @@
 //! | `add-repo:<repo>` | overlay, per definition repo the item lacks | a job: checks out the naming pattern's branch when origin has it, else creates it from the repo's base; the confirm says which, and the job refuses if origin changed in between |
 //! | `activate` | overlay, when not active in this slot | binds the slot to the item: a planned job that builds or runs each component whose repo the item has from its worktree |
 //! | `terminal:<repo>` | overlay, per worktree | a terminal in the worktree |
+//! | `switch-branch:<repo>` | overlay, while that worktree's HEAD is detached | a terminal running `git switch <branch>` in it (the worktree also carries a `warn` badge until HEAD is on a branch) |
 //! | `archive` | overlay | refused while a worktree is dirty or has unpushed commits (listed); else a job removes the worktrees and moves the folder to `_archive/` |
 //! | `restore:<KEY>` | the Archived panel | a job that recreates the worktrees at their branches |
 //! | `rebuild-changed:<KEY>` / `keep-as-built:<KEY>` | the drift banner on the item | rebuild what the moved branches feed / dismiss until HEAD moves again |
 //! | `move:<state>` / `approve` / `send-back` | overlay (and the tracker-status banner), with a `workflow:` | the item's local status, see [`crate::local_status`] |
+//! | `set-seeds` | overlay, when the stack defines state seeds | which state seeds the item asks for, see [`crate::seeds`] |
 //! | `save-state` / `resume:<state>` | overlay (the Saved states section) | the item's saved stack states, see [`crate::states`] |
 //! | `activate-no-save` / `archive-no-save` / `archive-keep-data` | overlay | activate saves the item the slot leaves first, archive saves the item itself first when it is the one the slot runs; these twins skip the save, or keep the host copies of sensitive states' snapshots |
 //!
@@ -61,6 +63,9 @@ use crate::world::World;
 
 pub const WORK_PATH: &str = "/api/work";
 pub const ARCHIVED_PATH: &str = "/api/work/archived";
+/// Where the app pushes the owner rows this source adds to (the manifest's
+/// `ownerUpdates`).
+pub const OWNER_PATH: &str = "/api/work/owner";
 /// How often the app should poll the Work view, in seconds.
 pub const WORK_POLL_SECONDS: u64 = 30;
 pub const START_WORK_ID: &str = "start-work";
@@ -73,6 +78,8 @@ pub const TERMINAL_PREFIX: &str = "terminal:";
 pub const RESTORE_PREFIX: &str = "restore:";
 pub const REBUILD_PREFIX: &str = "rebuild-changed:";
 pub const KEEP_PREFIX: &str = "keep-as-built:";
+/// A terminal that puts a detached worktree back on the item's branch.
+pub const SWITCH_PREFIX: &str = "switch-branch:";
 /// How long a worktree's facts are trusted.
 pub const FACTS_TTL_SECS: u64 = 30;
 /// How long "origin has / lacks this branch" is trusted.
@@ -345,7 +352,11 @@ impl<'a> Git<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoFacts {
     pub head: Option<String>,
+    /// The branch checked out; `None` when HEAD is detached.
     pub branch: Option<String>,
+    /// Where the item's own branch points (it differs from `head` while
+    /// the worktree is detached, or on another branch).
+    pub tip: Option<String>,
     pub dirty: u32,
     pub unpushed: u32,
     pub ahead: Option<u32>,
@@ -398,6 +409,9 @@ pub struct WorkFacts {
     pub drift: Vec<Drift>,
     /// Ask everything again on the next pass.
     pub stale: bool,
+    /// Counts invalidations, so a pass that began before one does not
+    /// overwrite the cache with what it saw before the change.
+    pub generation: u64,
 }
 
 /// The cache the background thread fills and requests read.
@@ -414,7 +428,9 @@ impl WorkCache {
     /// Forget the ages so the next pass asks git again (after a workspace
     /// change).
     pub fn invalidate(&self) {
-        self.facts.lock().unwrap_or_else(|p| p.into_inner()).stale = true;
+        let mut f = self.facts.lock().unwrap_or_else(|p| p.into_inner());
+        f.stale = true;
+        f.generation += 1;
     }
 
     /// One pass, on the caller's thread (the background refresher's): ask
@@ -448,7 +464,10 @@ impl WorkCache {
                 _ => {
                     let mut repos = IndexMap::new();
                     for (repo, r) in &rec.repos {
-                        repos.insert(repo.clone(), git.facts(&dir.join(&r.path), &r.base));
+                        let wt = dir.join(&r.path);
+                        let mut f = git.facts(&wt, &r.base);
+                        f.tip = git.rev_parse(&wt, &format!("refs/heads/{}", r.branch)).ok();
+                        repos.insert(repo.clone(), f);
                     }
                     ItemFacts {
                         at: now,
@@ -485,6 +504,11 @@ impl WorkCache {
         }
         let drift = compute_drift(loaded, &items, &new_items);
         let mut f = self.facts.lock().unwrap_or_else(|p| p.into_inner());
+        if f.generation != before.generation {
+            // Something changed while git was asked: what this pass saw may
+            // predate it, and the next pass asks again.
+            return;
+        }
         if let Some(ids) = identities {
             f.identities = ids;
             f.identities_at = Some(now);
@@ -914,6 +938,80 @@ fn str_field(v: &Value, name: &str, cap: usize) -> Option<String> {
         .and_then(Value::as_str)
         .map(|s| clean(s, cap))
         .filter(|s| !s.is_empty())
+}
+
+/// Refresh what the workspace in `dir` remembers of its owner's row
+/// (title, link, status: "done in tracker" and the tracker-status banner
+/// read it) from `item`, the owner's row as the app last received it.
+/// Checked like Start work's row; a row that does not parse, or names
+/// another key, changes nothing. Saved only when something changed.
+/// Whether it did.
+pub fn refresh_owner(dir: &Path, rec: &mut ItemRecord, item: &Value, now_utc: &str) -> bool {
+    if !item.is_object() {
+        return false;
+    }
+    let owner = json!({
+        "view": "work",
+        "key": rec.item_ref.key,
+        "source": rec.item_ref.source,
+        "item": item,
+    });
+    let Ok(t) = parse_target_item(&owner) else {
+        return false;
+    };
+    let title = t.title.or(rec.title.clone());
+    let url = t.url.or(rec.url.clone());
+    let status = t.status.or(rec.status.clone());
+    if title == rec.title && url == rec.url && status == rec.status {
+        return false;
+    }
+    rec.title = title;
+    rec.url = url;
+    rec.status = status;
+    rec.updated_utc = now_utc.to_string();
+    rec.save(dir).is_ok()
+}
+
+/// `POST /api/work/owner` (the manifest's `ownerUpdates`): the app pushes
+/// an owner row it polled, `{source, key, item}`, when its content changed.
+/// A row this source has a workspace for (exactly that source and key)
+/// refreshes the workspace's copy; any other row is ignored with `200`,
+/// since the app sends every row this source adds to and need not know
+/// which are current. A malformed body is `400`.
+pub fn owner_update(work_dir: &Path, body: &Value, now_utc: &str) -> (u16, Value) {
+    let field = |name: &str| {
+        body.get(name)
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty() && v.chars().count() <= KEY_CAP)
+            .filter(|v| !v.chars().any(char::is_control))
+    };
+    let (Some(source), Some(key)) = (field("source"), field("key")) else {
+        return (
+            400,
+            json!({ "kind": "bad-request", "message": "the body needs `source` and `key` strings" }),
+        );
+    };
+    let Some(item) = body.get("item").filter(|i| i.is_object()) else {
+        return (
+            400,
+            json!({ "kind": "bad-request", "message": "the body carries no `item` object" }),
+        );
+    };
+    let found = list_items(work_dir)
+        .into_iter()
+        .find(|(_, r)| r.item_ref.source == source && r.item_ref.key == key);
+    let Some((dir, mut rec)) = found else {
+        return (
+            200,
+            json!({ "message": format!("no workspace for {source}:{key}; ignored") }),
+        );
+    };
+    let message = if refresh_owner(&dir, &mut rec, item, now_utc) {
+        format!("{key}: the tracker's row was updated")
+    } else {
+        format!("{key}: nothing changed")
+    };
+    (200, json!({ "message": message }))
 }
 
 /// `target` of a `start-work` call: `{view: "work", key, source, item}`.
@@ -1458,6 +1556,20 @@ fn archive_confirm(rec: &ItemRecord) -> String {
     }
 }
 
+/// "detached at <c8> — switch back to <branch>" while the worktree's HEAD
+/// is on no branch.
+fn detached_text(f: &RepoFacts, r: &ItemRepo) -> Option<String> {
+    if f.error.is_some() || f.branch.is_some() {
+        return None;
+    }
+    let head = f.head.as_deref()?;
+    Some(format!(
+        "detached at {} — switch back to {}",
+        c8(head),
+        r.branch
+    ))
+}
+
 /// The overlay entry of one item.
 pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value {
     let loaded = inp.loaded;
@@ -1495,6 +1607,13 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
     if rec.done_in_tracker() {
         badges.push(badge("done in tracker — archive?", "info"));
     }
+    if let Some(f) = facts {
+        for (repo, r) in &rec.repos {
+            if let Some(text) = f.repos.get(repo).and_then(|x| detached_text(x, r)) {
+                badges.push(badge(format!("{repo} {text}"), "warn"));
+            }
+        }
+    }
 
     let mut rows = Vec::new();
     for (repo, r) in &rec.repos {
@@ -1521,6 +1640,9 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
                         format!("on {}", f.branch.clone().unwrap_or_default()),
                         "warn",
                     ));
+                }
+                if let Some(text) = detached_text(f, r) {
+                    row_badges.push(badge(text, "warn"));
                 }
             }
         }
@@ -1590,6 +1712,31 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
             "cwd": dir.join(&r.path).display().to_string(),
         }));
     }
+    // A worktree left detached (a resume of the exact saved commits) keeps
+    // a way back to the branch until HEAD is on one again.
+    for (repo, r) in &rec.repos {
+        if facts
+            .and_then(|f| f.repos.get(repo))
+            .and_then(|f| detached_text(f, r))
+            .is_some()
+        {
+            actions.push(json!({
+                "kind": "terminal",
+                "id": format!("{SWITCH_PREFIX}{repo}"),
+                "label": format!("Switch {repo} back to {}", r.branch),
+                "cwd": dir.join(&r.path).display().to_string(),
+                "command": ["git", "switch", r.branch],
+            }));
+        }
+    }
+    let tips: IndexMap<String, String> = facts
+        .map(|f| {
+            f.repos
+                .iter()
+                .filter_map(|(r, x)| x.tip.clone().map(|t| (r.clone(), t)))
+                .collect()
+        })
+        .unwrap_or_default();
     let saved = crate::states::overlay_parts(
         inp.world,
         loaded,
@@ -1597,10 +1744,12 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
         dir,
         rec,
         inp.blocks,
+        &tips,
         inp.now_utc,
     );
     badges.extend(saved.badges);
     actions.extend(saved.actions);
+    actions.extend(crate::seeds::overlay_action(loaded, rec));
     for v in archive_variants(loaded, dir, rec) {
         actions.push(endpoint(&v.id, &v.label, true, Some(v.confirm), json!({})));
     }
@@ -1875,20 +2024,8 @@ pub fn accept(
     };
     // An overlay call that carries the owner's row refreshes what the
     // workspace remembers of it (title, link, status: "done in tracker").
-    if let Some(item) = target.get("item").filter(|i| i.is_object()) {
-        let owner = json!({
-            "view": "work",
-            "key": rec.item_ref.key,
-            "source": rec.item_ref.source,
-            "item": item,
-        });
-        if let Ok(t) = parse_target_item(&owner) {
-            rec.title = t.title.or(rec.title);
-            rec.url = t.url.or(rec.url);
-            rec.status = t.status.or(rec.status);
-            rec.updated_utc = inp.now_utc.to_string();
-            let _ = rec.save(&dir);
-        }
+    if let Some(item) = target.get("item") {
+        refresh_owner(&dir, &mut rec, item, inp.now_utc);
     }
     if local_status::handles(id) {
         return local_status::accept(
@@ -1902,6 +2039,9 @@ pub fn accept(
             confirmed,
             inp.now_utc,
         );
+    }
+    if id == crate::seeds::SET_SEEDS_ID {
+        return crate::seeds::accept(inp.loaded, &dir, &mut rec, &params, confirmed, inp.now_utc);
     }
     if crate::states::handles(id) {
         return crate::states::accept(

@@ -11,7 +11,13 @@
 //!   cannot be judged fails closed). A source that sent a block and is now
 //!   down, unreachable, untrusted or failing its Environment poll keeps its
 //!   LAST block in force ("last known: …, source unavailable") until it
-//!   answers again. A source that has never sent a block enforces nothing.
+//!   answers again.
+//! - **Across restarts.** Every answer's block is saved
+//!   ([`crate::sources::verdicts`]); until a source answers after a start,
+//!   its saved verdict counts (a blocking one as the last known one). A
+//!   trusted stack source (`stack:…`) with no saved verdict keeps agents
+//!   out of its folder until it first answers ([`UNHEARD_STATE`]); any
+//!   other source that has never sent a block enforces nothing.
 //! - **Where.** In the folders the block names under `bound` (the active
 //!   item's folder and each of its worktrees), or, when no item is bound,
 //!   the stack project's folder (`project`, else the folder of the project
@@ -37,7 +43,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
@@ -55,21 +61,24 @@ pub const WATCH_EVERY: Duration = Duration::from_secs(1);
 pub const ENVIRONMENT_VIEW: &str = "environment";
 
 /// One finding as the block counts it (never a value).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WireFinding {
     pub rule: String,
     pub count: u64,
 }
 
 /// One component's reason line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WireReason {
     pub component: Option<String>,
     pub text: String,
 }
 
 /// The item a block is bound to and the folders agents work in for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WireBound {
     pub source: Option<String>,
     pub key: String,
@@ -77,7 +86,8 @@ pub struct WireBound {
 }
 
 /// A `dataSafety` block as a source sent it, read leniently.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WireBlock {
     pub instance: String,
     pub state: String,
@@ -177,6 +187,15 @@ pub fn reason_text(block: &WireBlock, current: bool) -> String {
     } else {
         format!("last known: {text}, source unavailable")
     }
+}
+
+/// The `state` of the block a stack source is held to before its first
+/// answer (it has said nothing yet, so its data may be real).
+pub const UNHEARD_STATE: &str = "unknown";
+
+/// The reason of that block.
+pub fn unheard_reason(source_label: &str) -> String {
+    format!("{source_label} has not said yet whether its data is safe — agents wait until it answers")
 }
 
 /// A block in force, as the webview and the gates see it.

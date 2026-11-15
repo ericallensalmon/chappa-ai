@@ -638,3 +638,157 @@ export function commandDialog(
     nameInput.select();
   });
 }
+
+// --- fields dialog (an action that asks for values) ----------------
+
+/** One field of {@link fieldsDialog}. */
+export interface DialogField {
+  name: string;
+  label: string;
+  /** choice: one of `options` (a select); multi: any of them (checkboxes);
+   *  text: one line, at most `max` characters; number: at most `max`. */
+  kind: "choice" | "multi" | "text" | "number";
+  options?: { value: string; label: string }[];
+  required?: boolean;
+  /** What it starts with. */
+  value?: unknown;
+  max?: number | null;
+}
+
+export interface FieldsDialogOptions {
+  okLabel?: string;
+  /** Ask for a note too (refused empty when required). */
+  note?: "optional" | "required" | null;
+  /** Judges the values on OK: a message keeps the dialog open and is shown. */
+  check?: (values: Record<string, unknown>) => string | null;
+  container?: HTMLElement;
+}
+
+export interface FieldsAnswer {
+  /** Per field: the chosen value, the chosen values, the text, the number
+   *  (NaN when what was typed is not one), or null when left empty. */
+  values: Record<string, unknown>;
+  note: string | null;
+}
+
+const ERROR_CSS = "margin:-6px 0 12px;font:12px system-ui,sans-serif;color:#f85149;";
+
+/**
+ * Modal form: `message`, then one control per field, then the note when
+ * asked. Resolves the values on OK (only once `check` passes and a required
+ * note is given) and null on Cancel, Escape or a backdrop press.
+ */
+export function fieldsDialog(message: string, fields: DialogField[], opts: FieldsDialogOptions = {}): Promise<FieldsAnswer | null> {
+  return new Promise<FieldsAnswer | null>((resolve) => {
+    const shell = buildShell(message, opts.okLabel ?? "OK");
+    const readers: Array<[string, () => unknown]> = [];
+    const place = (el: HTMLElement): void => {
+      shell.box.insertBefore(el, shell.buttons);
+    };
+    const label = (text: string): void => {
+      const lab = document.createElement("label");
+      lab.style.cssText = FIELD_LABEL_CSS;
+      lab.textContent = text;
+      place(lab);
+    };
+    let first: HTMLElement | null = null;
+    for (const f of fields) {
+      label(f.required ? `${f.label} *` : f.label);
+      if (f.kind === "choice") {
+        const select = document.createElement("select");
+        select.className = "chappa-dialog-field";
+        select.dataset.name = f.name;
+        select.style.cssText = INPUT_CSS;
+        const blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = f.required ? "(choose one)" : "(none)";
+        select.appendChild(blank);
+        for (const o of f.options ?? []) {
+          const opt = document.createElement("option");
+          opt.value = o.value;
+          opt.textContent = o.label;
+          select.appendChild(opt);
+        }
+        select.value = typeof f.value === "string" ? f.value : "";
+        place(select);
+        readers.push([f.name, () => (select.value === "" ? null : select.value)]);
+        first ??= select;
+      } else if (f.kind === "multi") {
+        const box = document.createElement("div");
+        box.className = "chappa-dialog-field chappa-dialog-multi";
+        box.dataset.name = f.name;
+        const chosen = Array.isArray(f.value) ? f.value : [];
+        for (const o of f.options ?? []) {
+          const row = document.createElement("label");
+          row.style.cssText = CHECK_ROW_CSS;
+          const check = document.createElement("input");
+          check.type = "checkbox";
+          check.value = o.value;
+          check.checked = chosen.includes(o.value);
+          row.append(check, o.label);
+          box.appendChild(row);
+          first ??= check;
+        }
+        place(box);
+        readers.push([f.name, () => [...box.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].filter((c) => c.checked).map((c) => c.value)]);
+      } else {
+        const input = document.createElement("input");
+        input.type = f.kind === "number" ? "number" : "text";
+        input.className = "chappa-dialog-field";
+        input.dataset.name = f.name;
+        input.spellcheck = false;
+        input.style.cssText = INPUT_CSS;
+        if (f.kind === "text") input.maxLength = f.max ?? 200;
+        if (f.kind === "number" && f.max !== null && f.max !== undefined) input.max = String(f.max);
+        input.value = f.value === null || f.value === undefined ? "" : String(f.value);
+        place(input);
+        readers.push([
+          f.name,
+          () => {
+            if (input.value.trim() === "") return null;
+            return f.kind === "number" ? Number(input.value) : input.value;
+          },
+        ]);
+        first ??= input;
+      }
+    }
+    let note: HTMLInputElement | null = null;
+    if (opts.note) {
+      label(opts.note === "required" ? "NOTE (required)" : "NOTE (optional)");
+      note = document.createElement("input");
+      note.type = "text";
+      note.className = "chappa-dialog-input";
+      note.spellcheck = false;
+      note.placeholder = "note";
+      note.style.cssText = INPUT_CSS;
+      place(note);
+      first ??= note;
+    }
+    const error = document.createElement("div");
+    error.className = "chappa-dialog-error";
+    error.style.cssText = ERROR_CSS;
+    error.hidden = true;
+    place(error);
+    const answer = (): FieldsAnswer => ({
+      values: Object.fromEntries(readers.map(([name, read]) => [name, read()])),
+      note: note && note.value.trim() !== "" ? note.value.trim() : null,
+    });
+    const canSubmit = (): boolean => {
+      const a = answer();
+      const why = opts.check?.(a.values) ?? (opts.note === "required" && a.note === null ? "A note is required." : null);
+      error.hidden = why === null;
+      error.textContent = why ?? "";
+      return why === null;
+    };
+    mount<FieldsAnswer | null>(
+      shell,
+      opts.container ?? document.body,
+      resolve,
+      answer,
+      null,
+      canSubmit,
+      () => document.activeElement !== shell.cancel,
+    );
+    (first ?? shell.ok).focus();
+  });
+}

@@ -89,8 +89,10 @@ describe("WorkView", () => {
     expect(r.querySelector(".chappa-sv-meta")?.textContent).toBe("task · high priority · in ABC-100 · from Sam · touched 33 min ago");
     expect([...r.querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["backend", "ops", "blocked", "owner/repo#1 open"]);
     expect(d.actions).toHaveBeenCalledWith("fx", "work", "ABC-1");
-    // The section's open-docs is not the item's own action.
-    expect([...r.querySelectorAll<HTMLButtonElement>(".chappa-sv-action")].map((b) => b.dataset.action)).toEqual(["terminal-here", "approve", "ping", "validate"]);
+    // The section's open-docs is not the item's own action, and `approve`
+    // is a move of its local status: the status block in the panel draws
+    // it, so the row does not repeat it.
+    expect([...r.querySelectorAll<HTMLButtonElement>(".chappa-sv-action")].map((b) => b.dataset.action)).toEqual(["terminal-here", "ping", "validate"]);
     expect(r.querySelector<HTMLButtonElement>('[data-action="terminal-here"]')?.title).toBe("/srv/example/abc-1 is not inside an open project");
     v.dispose();
   });
@@ -415,10 +417,9 @@ describe("WorkView with an item fed by two sources", () => {
     expect([...row(v, "ABC-9").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["not listed by Fixture"]);
     expect([...row(v, "XYZ-1").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["tracker unavailable"]);
     await FLUSH();
-    expect(buttons(row(v, "ABC-2"))).toEqual([
-      ["ws", "ship", null],
-      ["ws", "archive", null],
-    ]);
+    // `ship` is a move of the status the overlay set: its status block in
+    // the panel draws it, so the row does not.
+    expect(buttons(row(v, "ABC-2"))).toEqual([["ws", "archive", null]]);
     // Another source's offer, asked for under the owner, only where it does not add to the row yet.
     expect(buttons(row(v, "ABC-3"))).toEqual([["ws", "start-work", "fx"]]);
     expect(buttons(row(v, "ABC-9"))).toEqual([]);

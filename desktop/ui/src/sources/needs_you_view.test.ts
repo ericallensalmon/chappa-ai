@@ -115,6 +115,46 @@ describe("NeedsYouView", () => {
     v.dispose();
   });
 
+  it("the Data safety row acknowledges with the source's own confirm and required note", async () => {
+    const ack: ipc.SourceActionDto = {
+      action: { kind: "endpoint", id: "data-safety-ack", label: "Acknowledge findings", mutates: true, confirm: "Acknowledge 3 findings on app/0: email-real-domain ×2, card-number ×1", params: { fingerprint: "f1" }, note: "required" },
+      verdict: { enabled: true, reason: null, hidden: false, cwd: null, tool: null },
+      needsPrompt: false,
+    };
+    const other: ipc.SourceActionDto = { ...ack, action: { ...ack.action, id: "down", label: "Down" } as ipc.SourceActionDto["action"] };
+    const actions = vi.fn(async (_s: string, view: string): Promise<ipc.SourceActionDto[]> => (view === "environment" ? [other, ack] : []));
+    const run = vi.fn(async () => ({ kind: "done", message: "Acknowledged the findings of 1 component on app/0" }) as ipc.ActionOutcomeDto);
+    const d = deps({ actions, run });
+    const v = new NeedsYouView(d);
+    const dataSafety: ipc.DataSafetyStateDto = {
+      blocks: [
+        {
+          sourceId: "st", sourceLabel: "Stack", instance: "app/0", state: "not-clean", current: true,
+          reason: "db: 3 findings — acknowledge in Environment", folders: ["/srv/example"], bound: null, component: "db", ackActionId: "data-safety-ack",
+        },
+      ],
+      agents: [],
+      held: [],
+    };
+    v.update({ model: buildNeedsYou({ ...fixtureInput(), dataSafety }), versions: { st: 1 } });
+    await FLUSH();
+    expect(actions).toHaveBeenCalledWith("st", "environment", null);
+    const r = row(v, "ds:st|app/0");
+    const buttons = [...r.querySelectorAll<HTMLButtonElement>(".chappa-sv-action")];
+    expect(buttons.map((b) => b.dataset.action)).toEqual(["data-safety-ack"]);
+    buttons[0].click();
+    await FLUSH();
+    // The same dialog the Environment view asks: every finding, a note.
+    expect(document.querySelector(".chappa-dialog-message")!.textContent).toContain("Acknowledge 3 findings on app/0: email-real-domain ×2, card-number ×1");
+    expect(document.querySelector(".chappa-dialog-message")!.textContent).toContain("A note is required.");
+    document.querySelector<HTMLInputElement>(".chappa-dialog-input")!.value = "test data from the seed";
+    document.querySelector<HTMLButtonElement>(".chappa-dialog-ok")!.click();
+    await FLUSH();
+    expect(run).toHaveBeenCalledWith("st", "environment", null, "data-safety-ack", true, "test data from the seed");
+    expect(d.said).toEqual(["Acknowledged the findings of 1 component on app/0"]);
+    v.dispose();
+  });
+
   it("repaints in place and says why it is empty", () => {
     const v = new NeedsYouView(deps());
     v.update({ model: buildNeedsYou(fixtureInput()), versions: {} });

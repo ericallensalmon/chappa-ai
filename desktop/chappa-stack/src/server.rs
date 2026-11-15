@@ -10,6 +10,7 @@
 //! | `GET /api/work` | bearer | the Work view: one overlay per item workspace (see [`crate::workspaces`]) |
 //! | `GET /api/work/archived` | bearer | the Archived panel |
 //! | `GET /api/work/reviews` | bearer | the Review workspaces panel (see [`crate::reviews`]) |
+//! | `POST /api/work/owner` | bearer | an owner row the app polled, `{source, key, item}` (the manifest's `ownerUpdates`): refreshes the workspace's copy of it; `200` also for rows with no workspace |
 //! | `GET /api/jobs/{id}` | bearer | `{state: running\|done\|failed, log?, exitCode?, error?}` |
 //! | `POST /api/jobs/{id}` | bearer | the pane's exit report, recorded; `200 {}` |
 //!
@@ -55,7 +56,9 @@ use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
 use crate::reviews;
 use crate::states;
-use crate::workspaces::{self, Accepted, WorkCache, WorkInputs, ARCHIVED_PATH, WORK_PATH};
+use crate::workspaces::{
+    self, Accepted, WorkCache, WorkInputs, ARCHIVED_PATH, OWNER_PATH, WORK_PATH,
+};
 use crate::world::World;
 
 pub const ENVIRONMENT_PATH: &str = "/api/environment";
@@ -233,6 +236,10 @@ impl Source {
                 Ok(l) => (200, workspaces::archived_panel(&l, &utc_now())),
                 Err(e) => error(409, "definition", e),
             },
+            ("POST", OWNER_PATH) => match serde_json::from_str::<Value>(body) {
+                Ok(v) => self.owner_update(&v),
+                Err(e) => error(400, "bad-request", format!("the body is not JSON: {e}")),
+            },
             ("POST", ACTIONS_PATH) => match serde_json::from_str::<Value>(body) {
                 Ok(v) => self.action_as(&v, caller),
                 Err(e) => error(400, "bad-request", format!("the body is not JSON: {e}")),
@@ -288,6 +295,7 @@ impl Source {
                 "work": { "list": WORK_PATH, "pollSeconds": workspaces::WORK_POLL_SECONDS },
             },
             "itemActions": item_actions,
+            "ownerUpdates": OWNER_PATH,
             "actions": ACTIONS_PATH,
             "jobs": format!("{JOBS_PREFIX}{{id}}"),
             "linkHosts": hosts,
@@ -469,6 +477,16 @@ impl Source {
         }
     }
 
+    /// `POST /api/work/owner`: under the same one-at-a-time lock as the
+    /// actions, since both write `item.json`.
+    pub fn owner_update(&self, body: &Value) -> Reply {
+        let _one_at_a_time = self.accepting.lock().unwrap_or_else(|p| p.into_inner());
+        match self.work_dir() {
+            Ok(w) => workspaces::owner_update(&w, body, &self.world.clock.now_utc()),
+            Err(r) => r,
+        }
+    }
+
     /// A Work view action: `start-work` from another source's row, an
     /// overlay's, the drift banner's or the Archived panel's.
     fn work_action(&self, body: &Value, caller: &Caller) -> Reply {
@@ -551,15 +569,7 @@ impl Source {
                         &blank
                     }
                 };
-                self.start_job(
-                    &loaded,
-                    &inst,
-                    obs,
-                    &offered,
-                    mutates,
-                    caller.runs_jobs,
-                    &now,
-                )
+                self.start_job(&loaded, &inst, obs, &offered, mutates, caller, &now)
             }
         }
     }
@@ -590,7 +600,6 @@ impl Source {
     /// The data-safety actions are answered by [`Self::ack_action`] and
     /// [`Self::check_action`].
     pub fn action_as(&self, body: &Value, caller: &Caller) -> Reply {
-        let runs_jobs = caller.runs_jobs;
         let _one_at_a_time = self.accepting.lock().unwrap_or_else(|p| p.into_inner());
         let Some(id) = body.get("id").and_then(Value::as_str) else {
             return error(400, "bad-request", "the body names no action `id`");
@@ -646,7 +655,7 @@ impl Source {
             return self.ack_action(body, caller, &loaded, &inst, &obs);
         }
         if id == CHECK_ACTION_ID {
-            return self.check_action(key.as_deref(), runs_jobs, &loaded, &inst, &obs, &now);
+            return self.check_action(key.as_deref(), caller, &loaded, &inst, &obs, &now);
         }
         let channel = channel_for(&obs, &self.config.channel);
         let offered = states::offered(&loaded, &runner, &inst, &obs, &channel);
@@ -680,7 +689,7 @@ impl Source {
                 return error(409, "shared-checkout", e.to_string());
             }
         }
-        self.start_job(&loaded, &inst, &obs, &chosen, true, runs_jobs, &now)
+        self.start_job(&loaded, &inst, &obs, &chosen, true, caller, &now)
     }
 
     /// Store `chosen` as a job and hand back the pane to run it in, or run
@@ -693,9 +702,10 @@ impl Source {
         obs: &Observation,
         chosen: &Offered,
         mutates: bool,
-        runs_jobs: bool,
+        caller: &Caller,
         now: &str,
     ) -> Reply {
+        let runs_jobs = caller.runs_jobs;
         let work_dir = loaded.work_dir();
         let job_id = match records::new_job_id(now) {
             Ok(i) => i,
@@ -735,6 +745,10 @@ impl Source {
             work: chosen.work.clone(),
             report: None,
             error: None,
+            actor: caller
+                .actor
+                .as_deref()
+                .map(|a| stack_core::workflow::clean_actor(Some(a))),
         };
         if let Err(e) = rec.save(&work_dir) {
             return error(500, "job", format!("cannot record the job: {e}"));
@@ -848,7 +862,7 @@ impl Source {
     fn check_action(
         &self,
         key: Option<&str>,
-        runs_jobs: bool,
+        caller: &Caller,
         loaded: &Loaded,
         inst: &ResolvedInstance,
         obs: &Observation,
@@ -884,7 +898,7 @@ impl Source {
                 trigger: data_safety::Trigger::Manual.as_str().to_string(),
             },
         };
-        self.start_job(loaded, inst, obs, &chosen, false, runs_jobs, now)
+        self.start_job(loaded, inst, obs, &chosen, false, caller, now)
     }
 
     /// The `every:` schedule: at most once per [`SCHEDULE_TICK_SECS`] of
@@ -952,7 +966,15 @@ impl Source {
                 trigger: data_safety::Trigger::Every.as_str().to_string(),
             },
         };
-        let (status, body) = self.start_job(&loaded, &inst, &obs, &chosen, false, false, &now);
+        let (status, body) = self.start_job(
+            &loaded,
+            &inst,
+            &obs,
+            &chosen,
+            false,
+            &Caller::default(),
+            &now,
+        );
         match body.get("jobId").and_then(Value::as_str) {
             Some(id) if status == 202 => {
                 for c in &due {

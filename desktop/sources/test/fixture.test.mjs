@@ -247,6 +247,31 @@ test("an echoing action answers with exactly the target, params and note it was 
   } finally { ws.stop(); }
 });
 
+test("the overlay asks for owner updates, notes each one, and offers an action with inputs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "chappa-owner-"));
+  const log = join(dir, "owner.jsonl");
+  const ws = await start(["--data", overlayDir], { CHAPPA_FIXTURE_OWNER_LOG: log });
+  try {
+    const manifest = (await ws.call("/chappa/v1/manifest")).body;
+    assert.equal(manifest.ownerUpdates, "/api/work/owner");
+    const item = { key: "ABC-1", status: { label: "Done" } };
+    const r = await ws.call("/api/work/owner", { method: "POST", body: { source: "fixture", key: "ABC-1", item } });
+    assert.deepEqual(r, { status: 200, body: { message: "noted fixture:ABC-1" } });
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)), [{ source: "fixture", key: "ABC-1", item }]);
+    assert.equal((await ws.call("/api/work/owner", { method: "POST", body: { source: "fixture", key: "ABC-1" } })).status, 400);
+    assert.equal((await ws.call("/api/work/owner", { method: "POST", body: { key: "ABC-1", item }, auth: false })).status, 401);
+    // An action with inputs, under ABC-2's Repos section: echoed like the rest.
+    const abc2 = (await ws.call("/api/work")).body.items.find((i) => i.key === "ABC-2");
+    const pick = abc2.sections[0].actions.find((x) => x.id === "pick-seeds");
+    assert.deepEqual(pick.inputs.map((i) => [i.name, i.kind]), [["seeds", "multi"], ["count", "number"], ["why", "text"], ["size", "choice"]]);
+    const echoed = await ws.call("/api/actions", { method: "POST", body: { id: "pick-seeds", target: { view: "work", key: "ABC-2" }, params: { count: 3, slot: 0, size: "l" }, confirmed: true } });
+    assert.deepEqual(JSON.parse(echoed.body.message).params, { count: 3, slot: 0, size: "l" });
+  } finally {
+    ws.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("an echoing action also echoes the caller's actor header when it sent one", async () => {
   const ws = await start(["--data", overlayDir]);
   try {

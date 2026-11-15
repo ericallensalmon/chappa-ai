@@ -1466,15 +1466,16 @@ impl Waker {
 /// [`Registry::hold_reason`] / [`Registry::hold_delivery`].
 pub trait TimerHold: Send + Sync {
     fn hold_reason(&self, process_id: u32) -> Option<String>;
-    fn hold(&self, process_id: u32, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize;
+    /// `from` names the sender (`timer <id>`), for a list of what is held.
+    fn hold(&self, process_id: u32, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize;
 }
 
 impl TimerHold for Registry {
     fn hold_reason(&self, process_id: u32) -> Option<String> {
         Registry::hold_reason(self, process_id as TermId)
     }
-    fn hold(&self, process_id: u32, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
-        self.hold_delivery(process_id as TermId, text, deliver)
+    fn hold(&self, process_id: u32, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+        self.hold_delivery(process_id as TermId, from, text, deliver)
     }
 }
 
@@ -1641,7 +1642,8 @@ impl TimerService {
                     if gate.hold_reason(job.process_id).is_some() {
                         let (deliverer, store) = (deliverer.clone(), deliver_store.clone());
                         let (process_id, body) = (job.process_id, job.body.clone());
-                        gate.hold(process_id, body, Box::new(move || {
+                        let from = format!("timer {}", job.timer_id);
+                        gate.hold(process_id, from, body, Box::new(move || {
                             let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
                             finish_job(&store, &job, &out);
                         }));

@@ -39,7 +39,23 @@
         {
           "id": "repos",
           "title": "Repos",
-          "rows": [{ "label": "web", "value": "task/ABC-2-web · 5e6f7a8b · 1 ahead, 0 behind main" }]
+          "rows": [{ "label": "web", "value": "task/ABC-2-web · 5e6f7a8b · 1 ahead, 0 behind main" }],
+          "actions": [
+            {
+              "kind": "endpoint",
+              "id": "pick-seeds",
+              "label": "State seeds",
+              "mutates": true,
+              "confirm": "Choose the state seeds ABC-2 is brought up with",
+              "params": { "count": 1, "slot": 0 },
+              "inputs": [
+                { "name": "seeds", "label": "State seeds", "kind": "multi", "options": [{ "value": "db/empty", "label": "db: empty" }, { "value": "db/three", "label": "db: three categories" }], "default": ["db/empty"] },
+                { "name": "count", "label": "Count", "kind": "number", "max": 10 },
+                { "name": "why", "label": "Why", "kind": "text", "max": 20 },
+                { "name": "size", "label": "Size", "kind": "choice", "options": [{ "value": "s", "label": "Small" }, { "value": "l", "label": "Large" }], "required": true, "default": "s" }
+              ]
+            }
+          ]
         }
       ],
       "actions": [

@@ -9,7 +9,9 @@
 //    a `bad` badge "agents blocked — data safety", and its detail a banner
 //    that leads to Environment, where the block is acknowledged;
 //  - Needs you gets one row per block (it opens Environment on the component
-//    the reason is about) and one per running agent inside a covered folder;
+//    the reason is about, and carries the source's acknowledge action while
+//    the source answers and its data is not clean) and one per running agent
+//    inside a covered folder;
 //  - an agent row with held deliveries says how many ("held: 2 messages").
 // The agent buttons themselves are disabled by Rust's verdict, with the
 // reason as their tooltip, like any other disabled action.
@@ -99,6 +101,15 @@ export function heldCount(state: ipc.DataSafetyStateDto, termId: number): number
   return state.held.find((h) => h.termId === termId)?.count ?? 0;
 }
 
+/** The acknowledge action of a block, as the Environment view offers it:
+ *  the source's own view-level action, so it asks the same confirm (every
+ *  finding listed) and the same required note, and Rust sends the person as
+ *  `X-Chappa-Actor`. Only while the source answers and says `not-clean`. */
+export function ackTargets(b: ipc.DataSafetyBlockDto): NeedsYouRow["actions"] {
+  if (!b.ackActionId || !b.current || b.state !== "not-clean") return [];
+  return [{ sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "environment", key: null, only: [b.ackActionId] }];
+}
+
 /** The Needs you section: one row per block, then one per running agent
  *  inside a covered folder. Null when nothing is blocked. */
 export function dataSafetySection(state: ipc.DataSafetyStateDto): NeedsYouSection | null {
@@ -114,7 +125,7 @@ export function dataSafetySection(state: ipc.DataSafetyStateDto): NeedsYouSectio
       counted: true,
       sourceId: b.sourceId,
       sourceLabel: b.sourceLabel,
-      actions: [],
+      actions: ackTargets(b),
       opens: { view: "environment", key: b.component ?? "" },
     });
   }

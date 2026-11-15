@@ -144,6 +144,21 @@ by the snapshot). The newest 20 states per item are kept
 that removes it, and its confirm lists the saved states whose snapshots
 live there.
 
+When an item's branch moved on since a state was saved, its Resume comes
+in two variants, and the confirm names each moved repo: **at branch
+tips** stays on the branch and builds from where it is now (the code
+differs from the save), **exact commits** goes to the saved commit and
+leaves that worktree detached. A detached worktree carries a "detached at
+… — switch back to …" badge and a terminal that runs `git switch` until
+HEAD is on a branch again. A job records who asked for it (the app's
+`X-Chappa-Actor`), and a state shows it as "by …".
+
+A component whose data comes from a recipe (`strategy: recipe`) can
+define `stateSeeds`; the row's **State seeds** action picks the ones the
+item wants (with a box for each `{param:x}`). They are replayed after
+scrub and seed when a resume rebuilds that data, and when an up creates
+or recreates the component while the item is active.
+
 ## Review workspaces
 
 A PR row of a repo the stack has a clone of offers **Review with

@@ -1320,8 +1320,8 @@ pub fn submit_payload(text: &str, submit: bool) -> Vec<u8> {
 /// A delivery to an agent that data safety holds: queued (in order behind
 /// any held before it) and made by `deliver` once the block clears. The
 /// answer says so; nothing was written and nothing is journaled yet.
-fn held(state: &ControlState, id: TermId, reason: String, text: &str, deliver: Box<dyn FnOnce() + Send>) -> Resp {
-    let count = state.registry.hold_delivery(id, text.to_owned(), deliver);
+fn held(state: &ControlState, params: &Params, id: TermId, reason: String, text: &str, deliver: Box<dyn FnOnce() + Send>) -> Resp {
+    let count = state.registry.hold_delivery(id, params.actor.clone(), text.to_owned(), deliver);
     json(200, json!({"written": false, "held": true, "held_count": count, "reason": reason}))
 }
 
@@ -1348,7 +1348,7 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
         if let Some(reason) = hold {
             let registry = state.registry.clone();
             let text = body.text.clone();
-            return held(state, id, reason, &body.text, Box::new(move || {
+            return held(state, params, id, reason, &body.text, Box::new(move || {
                 if let Err(e) = json_send_input(&registry, id, &text, None) {
                     log::warn!("[control] a held message to {id} was not delivered: {e}");
                 }
@@ -1369,7 +1369,7 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
     if let Some(reason) = hold {
         let registry = state.registry.clone();
         let text = body.text.clone();
-        return held(state, id, reason, &body.text, Box::new(move || {
+        return held(state, params, id, reason, &body.text, Box::new(move || {
             registry.write_journaled(id, &payload, text, submit);
         }));
     }
@@ -1402,7 +1402,7 @@ fn send_bytes(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
     if let Some(reason) = state.registry.hold_reason(id) {
         let registry = state.registry.clone();
         let (bytes, shown) = (body.bytes.clone(), text.clone());
-        return held(state, id, reason, &text, Box::new(move || {
+        return held(state, params, id, reason, &text, Box::new(move || {
             registry.write_journaled(id, &bytes, shown, false);
         }));
     }

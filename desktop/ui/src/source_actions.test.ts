@@ -4,6 +4,7 @@ import type { ActionVerdictDto, SourceActionDto } from "./ipc";
 import {
   actionButtonState,
   agentPromptMessage,
+  checkInputValues,
   confirmAgentPrompt,
   confirmEndpoint,
   endpointQuestion,
@@ -165,5 +166,112 @@ describe("the dialogs", () => {
     okButton().click();
     await pending;
     expect(run).toHaveBeenLastCalledWith("ws", "work", "ABC-3", "start-work", true, null, "fx");
+  });
+
+  it("an action with inputs asks for them in one dialog and sends the values", async () => {
+    const run = vi.fn(async () => ({ kind: "done" as const, message: "ok" }));
+    const seeds = {
+      kind: "endpoint" as const,
+      id: "set-seeds",
+      label: "State seeds",
+      mutates: true,
+      confirm: "Set the state seeds ABC-1 asks for",
+      params: {},
+      note: null,
+      inputs: [
+        { name: "seeds", label: "State seeds", kind: "multi" as const, options: [{ value: "db/empty", label: "db: empty" }, { value: "db/three", label: "db: three" }], required: false, default: ["db/empty"], max: null },
+        { name: "size", label: "Size", kind: "choice" as const, options: [{ value: "s", label: "Small" }, { value: "l", label: "Large" }], required: true, default: null, max: null },
+        { name: "count", label: "Count", kind: "number" as const, required: false, default: 3, max: 10 },
+        { name: "why", label: "Why", kind: "text" as const, required: false, default: null, max: 12 },
+      ],
+    };
+    const pending = runAction("st", "Stack", "work", "ABC-1", entry(seeds), { run });
+    await Promise.resolve();
+    const dialog = document.querySelector<HTMLElement>(".chappa-dialog")!;
+    expect(dialog.querySelector(".chappa-dialog-message")!.textContent).toBe("Set the state seeds ABC-1 asks for");
+    // One control per input, each starting at its default.
+    const checks = [...dialog.querySelectorAll<HTMLInputElement>('[data-name="seeds"] input[type=checkbox]')];
+    expect(checks.map((c) => [c.value, c.checked])).toEqual([["db/empty", true], ["db/three", false]]);
+    const size = dialog.querySelector<HTMLSelectElement>('select[data-name="size"]')!;
+    expect([...size.options].map((o) => o.value)).toEqual(["", "s", "l"]);
+    expect(size.value).toBe("");
+    const count = dialog.querySelector<HTMLInputElement>('input[data-name="count"]')!;
+    expect([count.type, count.value, count.max]).toEqual(["number", "3", "10"]);
+    const why = dialog.querySelector<HTMLInputElement>('input[data-name="why"]')!;
+    expect([why.type, why.maxLength]).toEqual(["text", 12]);
+    // A required one left empty keeps the dialog open and says why.
+    okButton().click();
+    await Promise.resolve();
+    expect(document.querySelector(".chappa-dialog")).not.toBeNull();
+    expect(document.querySelector(".chappa-dialog-error")!.textContent).toBe("Size is required.");
+    expect(run).not.toHaveBeenCalled();
+    size.value = "l";
+    count.value = "11";
+    okButton().click();
+    await Promise.resolve();
+    expect(document.querySelector(".chappa-dialog-error")!.textContent).toBe("Count must be at most 10.");
+    count.value = "4";
+    checks[1].checked = true;
+    okButton().click();
+    await pending;
+    // Empty ones are left out; the values ride with the call.
+    expect(run).toHaveBeenLastCalledWith("st", "work", "ABC-1", "set-seeds", true, null, undefined, { seeds: ["db/empty", "db/three"], size: "l", count: 4 });
+  });
+
+  it("a note asked beside inputs is in the same dialog; an item action keeps its owner", async () => {
+    const run = vi.fn(async () => ({ kind: "done" as const, message: "ok" }));
+    const action = {
+      kind: "endpoint" as const,
+      id: "pick",
+      label: "Pick",
+      mutates: false,
+      confirm: null,
+      params: null,
+      note: "required" as const,
+      inputs: [{ name: "size", label: "Size", kind: "choice" as const, options: [{ value: "s", label: "Small" }], required: false, default: "s", max: null }],
+    };
+    const pending = runAction("ws", "Workspaces", "work", "ABC-3", entry(action), { run }, { owner: "fx" });
+    await Promise.resolve();
+    expect(document.querySelector(".chappa-dialog-message")!.textContent).toBe("Pick?");
+    okButton().click();
+    await Promise.resolve();
+    expect(document.querySelector(".chappa-dialog-error")!.textContent).toBe("A note is required.");
+    document.querySelector<HTMLInputElement>(".chappa-dialog-input")!.value = " because ";
+    okButton().click();
+    await pending;
+    expect(run).toHaveBeenLastCalledWith("ws", "work", "ABC-3", "pick", false, "because", "fx", { size: "s" });
+    // Cancelling sends nothing.
+    run.mockClear();
+    const cancelled = runAction("ws", "Workspaces", "work", "ABC-3", entry(action), { run });
+    await Promise.resolve();
+    press("Escape");
+    expect(await cancelled).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkInputValues", () => {
+  const inputs = [
+    { name: "profile", label: "Profile", kind: "choice" as const, options: [{ value: "a", label: "A" }], required: true, default: null, max: null },
+    { name: "many", label: "Many", kind: "multi" as const, options: [{ value: "x", label: "X" }, { value: "y", label: "Y" }], required: false, default: null, max: null },
+    { name: "text", label: "Text", kind: "text" as const, required: false, default: null, max: null },
+    { name: "n", label: "N", kind: "number" as const, required: false, default: null, max: 5 },
+  ];
+  it("the same rules as Rust: required, options, text length and lines, number range", () => {
+    const table: [Record<string, unknown>, string | null][] = [
+      [{ profile: "a" }, null],
+      [{ profile: "a", many: ["x", "y"], text: "x".repeat(200), n: 5 }, null],
+      [{}, "Profile is required."],
+      [{ profile: "  " }, "Profile is required."],
+      [{ profile: "b" }, "Profile: choose one of the options."],
+      [{ profile: "a", many: ["z"] }, "Many: choose among the options."],
+      [{ profile: "a", many: ["x", "x"] }, "Many: each option once."],
+      [{ profile: "a", text: "x".repeat(201) }, "Text is longer than 200 characters."],
+      [{ profile: "a", text: "two\nlines" }, "Text must be one line of printable text."],
+      [{ profile: "a", n: 6 }, "N must be at most 5."],
+      [{ profile: "a", n: Number.NaN }, "N must be a number."],
+      [{ profile: "a", n: "3" }, "N must be a number."],
+    ];
+    for (const [values, expected] of table) expect(checkInputValues(inputs, values), JSON.stringify(values)).toBe(expected);
   });
 });

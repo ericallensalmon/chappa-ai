@@ -1114,6 +1114,7 @@ fn job_records_a_saved_state_refers_to_are_never_pruned() {
             work: JobWork::Gc,
             report: None,
             error: None,
+            actor: None,
         };
         rec.save(&work).unwrap();
     }
@@ -1281,24 +1282,79 @@ fn resume_action(src: &chappa_stack::server::Source) -> Value {
     .clone()
 }
 
+fn refreshed_row(src: &chappa_stack::server::Source) -> Value {
+    src.work.invalidate();
+    src.refresh_work();
+    row(src, "ABC-1")
+}
+
+fn resume_ids(row: &Value) -> Vec<String> {
+    section(row, "saved-states").unwrap()["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn offered_resume(row: &Value, id: &str) -> Value {
+    find(&section(row, "saved-states").unwrap()["actions"], id)
+        .unwrap_or_else(|| panic!("no {id} in {row}"))
+        .clone()
+}
+
 #[test]
-fn resume_puts_the_worktree_on_the_saved_commit_and_refuses_a_dirty_one() {
+fn a_moved_branch_offers_resume_at_tips_or_exact_commits_and_a_detached_worktree_says_so() {
     let Some((p, f, wt, first, second)) = git_item(None) else {
         return;
     };
+    let (a, b) = (&first[..8], &second[..8]);
     let src = source(f.world.clone(), &p.dir);
-    let resume = resume_action(&src);
-    let confirm = resume["confirm"].as_str().unwrap();
+
+    // Before the workspaces were looked at, the view cannot tell; the call
+    // finds the moved branch and says which variants there are.
+    let plain = resume_action(&src);
+    let (status, body) = act(
+        &src,
+        "work",
+        "resume:20261114T110000Z",
+        Some("ABC-1"),
+        plain["params"].clone(),
+    );
+    assert_eq!((status, body["kind"].as_str()), (409, Some("stale-plan")));
+    let message = body["message"].as_str().unwrap();
     assert!(
-        confirm.contains(&format!(
-            "Changes: api: source task/ABC-1 @{} (now source task/ABC-1 @{}); unchanged: db.",
-            &first[..8],
-            &second[..8]
-        )),
+        message.contains(&format!("api's branch task/ABC-1 moved from {a} to {b}"))
+            && message.contains("choose Resume at branch tips or Resume exact commits"),
+        "{message}"
+    );
+
+    let r = refreshed_row(&src);
+    assert_eq!(
+        resume_ids(&r),
+        [
+            "resume-tips:20261114T110000Z",
+            "resume-exact:20261114T110000Z"
+        ]
+    );
+    let exact = offered_resume(&r, "resume-exact:20261114T110000Z");
+    assert_eq!(exact["label"], "Resume 2026-11-14 11:00 UTC exact commits");
+    let confirm = exact["confirm"].as_str().unwrap();
+    assert!(
+        confirm.contains(&format!("Since the save, api's branch task/ABC-1 moved from {a} to {b}."))
+            && confirm.contains(&format!(
+                "Resumes the exact saved commits: the worktree of api is left detached at {a} (switch it back to task/ABC-1 afterwards)."
+            ))
+            && confirm.contains("The worktrees of api go to the saved commits."),
         "{confirm}"
     );
+    let tips = offered_resume(&r, "resume-tips:20261114T110000Z");
+    assert_eq!(tips["label"], "Resume 2026-11-14 11:00 UTC at branch tips");
+    let confirm = tips["confirm"].as_str().unwrap();
     assert!(
-        confirm.contains("The worktrees of api go to the saved commits."),
+        confirm.contains(&format!(
+            "Resumes at the branch tips: api builds from task/ABC-1 at {b}, not the saved {a}, so its code differs from the save."
+        )) && !confirm.contains("go to the saved commits"),
         "{confirm}"
     );
 
@@ -1307,9 +1363,9 @@ fn resume_puts_the_worktree_on_the_saved_commit_and_refuses_a_dirty_one() {
     let (status, body) = act(
         &src,
         "work",
-        "resume:20261114T110000Z",
+        "resume-exact:20261114T110000Z",
         Some("ABC-1"),
-        resume["params"].clone(),
+        exact["params"].clone(),
     );
     assert_eq!(
         (status, body["kind"].as_str()),
@@ -1325,23 +1381,104 @@ fn resume_puts_the_worktree_on_the_saved_commit_and_refuses_a_dirty_one() {
     );
     fs::remove_file(wt.join("notes.txt")).unwrap();
 
+    // Exact: the worktree goes to the saved commit, detached, and api is
+    // built from it again.
     let (status, reply) = act(
         &src,
         "work",
-        "resume:20261114T110000Z",
+        "resume-exact:20261114T110000Z",
         Some("ABC-1"),
-        resume["params"].clone(),
+        exact["params"].clone(),
     );
     assert_eq!(status, 202, "{reply}");
     let (code, pane) = run(&f, &p.dir, &reply);
     assert_eq!(code, EXIT_DONE, "{pane}");
     assert_eq!(test_git(&wt, &["rev-parse", "HEAD"]).trim(), first);
+    assert_eq!(
+        test_git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD"
+    );
     let builds = f.cli.with(|c| c.calls_matching(&["docker", "build"]));
     assert_eq!(builds.len(), 1, "{pane}");
-    assert!(builds[0]
-        .args
+    assert!(builds[0].args.iter().any(|x| x == &format!("api:{a}")));
+
+    // The detached worktree carries a badge and a way back, until HEAD is
+    // on a branch again.
+    let r = refreshed_row(&src);
+    let detached = format!("detached at {a} — switch back to task/ABC-1");
+    assert!(
+        r["badges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["text"] == format!("api {detached}") && x["tone"] == "warn"),
+        "{r}"
+    );
+    let repos = section(&r, "repos").unwrap();
+    assert!(repos["rows"][0]["badges"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|a| a == &format!("api:{}", &first[..8])));
+        .any(|x| x["text"] == detached.as_str()));
+    let switch = find(&r["actions"], "switch-branch:api").expect("a way back");
+    assert_eq!(switch["kind"], "terminal");
+    assert_eq!(switch["label"], "Switch api back to task/ABC-1");
+    assert_eq!(switch["command"], json!(["git", "switch", "task/ABC-1"]));
+    assert_eq!(
+        Path::new(switch["cwd"].as_str().unwrap()),
+        wt.as_path(),
+        "it runs in the worktree"
+    );
+
+    // Tips: back on the branch at its tip; the detached badge goes.
+    let r = refreshed_row(&src);
+    let tips = offered_resume(&r, "resume-tips:20261114T110000Z");
+    let (status, reply) = act(
+        &src,
+        "work",
+        "resume-tips:20261114T110000Z",
+        Some("ABC-1"),
+        tips["params"].clone(),
+    );
+    assert_eq!(status, 202, "{reply}");
+    let (code, pane) = run(&f, &p.dir, &reply);
+    assert_eq!(code, EXIT_DONE, "{pane}");
+    assert_eq!(test_git(&wt, &["rev-parse", "HEAD"]).trim(), second);
+    assert_eq!(
+        test_git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "task/ABC-1"
+    );
+    let r = refreshed_row(&src);
+    assert!(find(&r["actions"], "switch-branch:api").is_none(), "{r}");
+    assert!(
+        !r["badges"].to_string().contains("detached at")
+            && !section(&r, "repos")
+                .unwrap()
+                .to_string()
+                .contains("detached at"),
+        "{r}"
+    );
+
+    // A state at the branch tip: one plain Resume, and the variants are
+    // refused.
+    let dir = p.work().join("ABC-1");
+    let mut s = SavedState::load(&dir, "20261114T110000Z").unwrap().unwrap();
+    s.components.get_mut("api").unwrap().commit = Some(second.clone());
+    s.save(&dir).unwrap();
+    let r = refreshed_row(&src);
+    assert_eq!(resume_ids(&r), ["resume:20261114T110000Z"]);
+    let (status, body) = act(
+        &src,
+        "work",
+        "resume-exact:20261114T110000Z",
+        Some("ABC-1"),
+        exact["params"].clone(),
+    );
+    assert_eq!((status, body["kind"].as_str()), (409, Some("stale-plan")));
+    assert_eq!(
+        body["message"],
+        "no branch moved since the state was saved; use Resume"
+    );
 }
 
 #[test]
@@ -1422,4 +1559,243 @@ fn resuming_another_items_state_saves_the_bound_one_first_or_not() {
         ActiveRecord::load(&p.work()).unwrap().get(0).unwrap().item,
         "ABC-2"
     );
+}
+
+// ------------------------------------------------------------ state seeds
+
+/// The engine of a stack whose db is not up yet: once a `compose up` names
+/// db, `ps` and `inspect` show it running.
+struct Upping(Arc<Locked<FakeCli>>);
+
+impl EngineCli for Upping {
+    fn run(&self, inv: &Invocation) -> Result<CliOutput, CliError> {
+        let up = inv.args.iter().any(|a| a == "up") && inv.args.iter().any(|a| a == "db");
+        let out = self.0.run(inv);
+        if up {
+            let ctrs = [Ctr::running("db"), Ctr::running("api")];
+            let ps: Vec<String> = ctrs.iter().map(|c| c.ps(PROJECT).to_string()).collect();
+            let inspect: Vec<Value> = ctrs.iter().map(|c| c.inspect(PROJECT)).collect();
+            let mut cli = self.0 .0.lock().unwrap();
+            cli.add(
+                &["docker", "compose", "-p", PROJECT, "ps"],
+                CliOutput::success(&ps.join("\n")),
+            );
+            cli.add(
+                &["docker", "inspect", "--type", "container"],
+                CliOutput::success(&Value::from(inspect).to_string()),
+            );
+        }
+        out
+    }
+}
+
+fn set_seeds(src: &chappa_stack::server::Source, params: Value, confirmed: bool) -> (u16, Value) {
+    post(
+        src,
+        "/api/actions",
+        &json!({ "id": "set-seeds", "target": { "view": "work", "key": "ABC-1" }, "params": params, "confirmed": confirmed }),
+        true,
+    )
+}
+
+#[test]
+fn an_item_chooses_its_state_seeds_through_inputs_and_up_replays_them() {
+    let p = project(RECIPE);
+    deploy(&p, DIGEST_A, DIGEST_A);
+    let dir = item(&p, "ABC-1", true);
+    let cli = with_docker_project(
+        docker_facts(FakeCli::new()),
+        PROJECT,
+        &[Ctr::running("api")],
+    )
+    .on(&["exec", CONTAINER, "/scripts/marker.sh"], MARKER_OK)
+    .on(&["exec", CONTAINER, "/scripts/sample.sh"], &clean_sample());
+    let (mut f, _) = world(cli);
+    let upping = Arc::new(Upping(f.cli.clone()));
+    f.world.cli = upping.clone();
+    f.world.steps = Arc::new(CliSteps(upping));
+    let src = source(f.world.clone(), &p.dir);
+
+    let action = find(&row(&src, "ABC-1")["actions"], "set-seeds")
+        .expect("offered: db defines state seeds")
+        .clone();
+    assert_eq!(action["kind"], "endpoint");
+    assert_eq!(action["mutates"], true);
+    assert!(action["confirm"]
+        .as_str()
+        .unwrap()
+        .starts_with("Set the state seeds ABC-1 asks for (now: none)."));
+    assert_eq!(
+        action["inputs"],
+        json!([
+            { "name": "seeds", "label": "State seeds", "kind": "multi",
+              "options": [{ "value": "db/three-categories", "label": "db: three-categories" }],
+              "default": [] },
+            { "name": "param:db/three-categories/count", "label": "db: three-categories — count",
+              "kind": "text", "max": 200 },
+        ])
+    );
+
+    // Checked here too: unconfirmed, unknown seeds, a missing or bad parameter.
+    let picked =
+        json!({ "seeds": ["db/three-categories"], "param:db/three-categories/count": "3" });
+    assert_eq!(
+        set_seeds(&src, picked.clone(), false).1["kind"],
+        "confirmation-required"
+    );
+    for (params, says) in [
+        (
+            json!({ "seeds": "db/three-categories" }),
+            "`seeds` must be a list of strings",
+        ),
+        (
+            json!({ "seeds": ["db/nope"] }),
+            "`db/nope` is not a state seed of this stack",
+        ),
+        (
+            json!({ "seeds": ["db/three-categories"] }),
+            "db: three-categories needs a value for count",
+        ),
+        (
+            json!({ "seeds": ["db/three-categories"], "param:db/three-categories/count": "3\n4" }),
+            "must be printable",
+        ),
+        (
+            json!({ "seeds": ["db/three-categories"], "param:db/three-categories/count": "9".repeat(201) }),
+            "at most 200 characters",
+        ),
+    ] {
+        let (status, body) = set_seeds(&src, params, true);
+        assert_eq!((status, body["kind"].as_str()), (400, Some("bad-input")));
+        assert!(body["message"].as_str().unwrap().contains(says), "{body}");
+    }
+    assert!(ItemRecord::load(&dir)
+        .unwrap()
+        .unwrap()
+        .data_seeds
+        .is_empty());
+
+    let (status, body) = set_seeds(&src, picked, true);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["message"],
+        "ABC-1 asks for these state seeds: db: three-categories (count 3)"
+    );
+    let rec = ItemRecord::load(&dir).unwrap().unwrap();
+    assert_eq!(rec.data_seeds["db"][0].name, "three-categories");
+    assert_eq!(rec.data_seeds["db"][0].params["count"], "3");
+    // The inputs now default to what the item asks for.
+    let action = find(&row(&src, "ABC-1")["actions"], "set-seeds")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        action["inputs"][0]["default"],
+        json!(["db/three-categories"])
+    );
+    assert_eq!(action["inputs"][1]["default"], "3");
+
+    // Up creates db: its recipe runs with the item's seeds after the steps.
+    let up = stack_action(&src, "up").expect("up is offered while db is not running");
+    let (status, reply) = act(&src, "environment", "up", None, up["params"].clone());
+    assert_eq!(status, 202, "{reply}");
+    f.cli.with(|c| c.clear_calls());
+    let (code, pane) = run(&f, &p.dir, &reply);
+    assert_eq!(code, EXIT_DONE, "{pane}");
+    let order: Vec<String> = f
+        .cli
+        .with(|c| c.lines())
+        .into_iter()
+        .filter(|l| l.contains(&format!("exec {CONTAINER}")))
+        .map(|l| l.rsplit(CONTAINER).next().unwrap().trim().to_string())
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "sh stack/scrub.sh",
+            "/scripts/marker.sh",
+            "/scripts/sample.sh",
+            "/scripts/seed.sh",
+            "/scripts/seeds/three.sh 3",
+            "/scripts/marker.sh",
+            "/scripts/sample.sh",
+        ],
+        "{pane}"
+    );
+
+    // Up again with db running: nothing is created, nothing reseeded.
+    f.cli.with(|c| c.clear_calls());
+    if let Some(up) = stack_action(&src, "up") {
+        let (status, reply) = act(&src, "environment", "up", None, up["params"].clone());
+        if status == 202 {
+            let (code, pane) = run(&f, &p.dir, &reply);
+            assert_eq!(code, EXIT_DONE, "{pane}");
+        }
+    }
+    assert!(f
+        .cli
+        .with(|c| c.calls_matching(&["/scripts/seeds/three.sh"]).is_empty()));
+
+    // Choosing none clears them.
+    let (status, _) = set_seeds(&src, json!({ "seeds": [] }), true);
+    assert_eq!(status, 200);
+    assert!(ItemRecord::load(&dir)
+        .unwrap()
+        .unwrap()
+        .data_seeds
+        .is_empty());
+}
+
+// ----------------------------------------------------------- who asked
+
+#[test]
+fn a_job_records_who_asked_for_it_and_a_state_it_saves_says_so() {
+    let p = project(&yml("in-volume", "", true));
+    deploy(&p, DIGEST_A, DIGEST_A);
+    let dir = item(&p, "ABC-1", true);
+    let (f, _) = world(running(&clean_sample()));
+    let src = source(f.world.clone(), &p.dir);
+    let save_action = find(&row(&src, "ABC-1")["actions"], "save-state")
+        .unwrap()
+        .clone();
+    let call = |actor: Option<&str>| {
+        src.handle_as(
+            "POST",
+            "/api/actions",
+            Some(&bearer()),
+            &chappa_stack::server::Caller {
+                runs_jobs: true,
+                actor: actor.map(str::to_string),
+            },
+            &json!({ "id": "save-state", "target": { "view": "work", "key": "ABC-1" },
+                     "params": save_action["params"], "confirmed": true })
+            .to_string(),
+        )
+    };
+    let (status, reply) = call(Some("human:alex"));
+    assert_eq!(status, 202, "{reply}");
+    let id = reply["jobId"].as_str().unwrap();
+    let rec = JobRecord::load(&p.work(), id).unwrap().unwrap();
+    assert_eq!(rec.actor.as_deref(), Some("human:alex"));
+    let (code, pane) = run(&f, &p.dir, &reply);
+    assert_eq!(code, EXIT_DONE, "{pane}");
+    assert_eq!(list_states(&dir)[0].saved_by.as_deref(), Some("human:alex"));
+    let shown = section(&row(&src, "ABC-1"), "saved-states").unwrap()["rows"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(shown.contains("by human:alex"), "{shown}");
+
+    // Kept as the app writes it: printable ASCII, capped.
+    let (_, reply) = call(Some("agent:7\u{1b}[31m"));
+    let rec = JobRecord::load(&p.work(), reply["jobId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.actor.as_deref(), Some("agent:7_[31m"));
+    // No header: no actor, and the state says nothing about who.
+    let (_, reply) = call(None);
+    let rec = JobRecord::load(&p.work(), reply["jobId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.actor, None);
+    assert!(!serde_json::to_string(&rec).unwrap().contains("actor"));
 }

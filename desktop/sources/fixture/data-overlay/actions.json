@@ -3,5 +3,6 @@
   "review-later": { "mutates": false, "status": 200, "echo": true },
   "archive": { "mutates": true, "status": 200, "echo": true },
   "ship": { "mutates": true, "status": 200, "echo": true },
-  "rebuild": { "mutates": true, "status": 200, "echo": true }
+  "rebuild": { "mutates": true, "status": 200, "echo": true },
+  "pick-seeds": { "mutates": true, "status": 200, "echo": true }
 }

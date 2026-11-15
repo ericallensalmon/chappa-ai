@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type * as ipc from "../ipc";
 import {
+  ackTargets,
   BLOCKED_BADGE_TEXT,
   blockForRow,
   blockedBanner,
@@ -98,7 +99,20 @@ describe("data safety in the views", () => {
     expect(s.rows[1].detail).toMatch(/^last known: /);
     expect(s.rows[2].detail).toBe("working next to unscanned/real data in app/0 · held: 2 messages");
     expect(s.rows[2].terminalKey).toBe("term:7");
+    // The block row carries the source's acknowledge action; the last-known
+    // one (the source is not answering) and the agent rows do not.
+    expect(s.rows[0].actions).toEqual([{ sourceId: "st", sourceLabel: "Stack", view: "environment", key: null, only: ["data-safety-ack"] }]);
+    expect(s.rows[1].actions).toEqual([]);
+    expect(s.rows[2].actions).toEqual([]);
     expect(dataSafetySection({ blocks: [], agents: [], held: [] })).toBeNull();
+  });
+
+  it("the acknowledge action is offered only while the source answers and its data is not clean", () => {
+    expect(ackTargets(block())).toHaveLength(1);
+    expect(ackTargets(block({ current: false }))).toEqual([]);
+    expect(ackTargets(block({ state: "error" }))).toEqual([]);
+    expect(ackTargets(block({ state: "unknown" }))).toEqual([]);
+    expect(ackTargets(block({ ackActionId: null }))).toEqual([]);
   });
 
   it("the held marker counts messages", () => {

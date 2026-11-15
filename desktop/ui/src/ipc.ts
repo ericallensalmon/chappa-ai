@@ -1543,6 +1543,9 @@ export interface SourceTrustDto {
   /** The actions the source offers on OTHER sources' rows, sorted by id.
    *  Absent from listings of older builds. */
   itemActions?: SourceItemActionDto[];
+  /** It is sent the rows of other sources' items it adds to, when they
+   *  change. Absent from listings of older builds. */
+  ownerUpdates?: boolean;
   hash: string;
 }
 
@@ -1631,9 +1634,32 @@ export interface SourceActionDto {
 export type SourceActionShape =
   | { kind: "agent"; id: string; label: string; cwd: string; prompt: string; tool: string | null; title: string | null; env: Record<string, string> }
   | { kind: "terminal"; id: string; label: string; cwd: string; command: string[]; env: Record<string, string> }
-  | { kind: "endpoint"; id: string; label: string; mutates: boolean; confirm: string | null; params: Record<string, unknown> | null; note: "optional" | "required" | null }
+  | {
+      kind: "endpoint";
+      id: string;
+      label: string;
+      mutates: boolean;
+      confirm: string | null;
+      params: Record<string, unknown> | null;
+      note: "optional" | "required" | null;
+      /** What the confirm dialog asks for (absent when nothing). */
+      inputs?: EndpointInputDto[];
+    }
   | { kind: "link"; id: string; label: string; url: string }
   | { kind: "panel"; id: string; label: string; endpoint: string };
+
+/** One endpoint input as Rust parsed and checked it. */
+export interface EndpointInputDto {
+  name: string;
+  label: string;
+  kind: "choice" | "multi" | "text" | "number";
+  /** choice / multi only. */
+  options?: { value: string; label: string }[];
+  required: boolean;
+  default: unknown;
+  /** text: the most characters (default 200); number: the largest value. */
+  max: number | null;
+}
 
 export interface ActionVerdictDto {
   enabled: boolean;
@@ -1664,7 +1690,8 @@ export function sourceActions(sourceId: string, view: string, key: string | null
 }
 
 /** Run one action; with `owner`, one of `sourceId`'s item actions on the
- *  row `key` of that other source. */
+ *  row `key` of that other source; with `values`, what the dialog asked
+ *  for (Rust checks them against the action's inputs). */
 export function sourceRunAction(
   sourceId: string,
   view: string,
@@ -1673,8 +1700,12 @@ export function sourceRunAction(
   confirmed: boolean,
   note: string | null,
   owner?: string,
+  values?: Record<string, unknown>,
 ): Promise<ActionOutcomeDto> {
-  return call("source_run_action", owner ? { sourceId, view, key, actionId, confirmed, note, owner } : { sourceId, view, key, actionId, confirmed, note });
+  const args: Record<string, unknown> = { sourceId, view, key, actionId, confirmed, note };
+  if (owner) args.owner = owner;
+  if (values) args.values = values;
+  return call("source_run_action", args);
 }
 
 export function sourceJob(sourceId: string, jobId: string): Promise<SourceJobDto> {

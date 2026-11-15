@@ -9,7 +9,12 @@
 //! to the row; the webview cannot run an id the manifest does not declare
 //! for that row; and every call's `target` names the owner and carries the
 //! owner's row exactly as received (the fixture echoes the call body), or
-//! leaves the row out when the owner does not list it.
+//! leaves the row out when the owner does not list it. A source's actions on
+//! its own rows (Work items, pull requests) carry its own row the same way.
+//! The second source asks for owner updates: the first one's rows it adds to
+//! are posted to it after the first one's polls, when they changed. An
+//! action that asks for inputs gets the values merged into its params, after
+//! they were checked against what it declared.
 //!
 //! The fixture is a Node script; the test skips itself (and says so) when
 //! `node` is not on PATH.
@@ -26,7 +31,7 @@ use app_lib::projects::Projects;
 use app_lib::records::Records;
 use app_lib::registry::Registry;
 use app_lib::settings::SettingsState;
-use app_lib::source_actions::{run_action, run_item_action, ActionDeps, ActionOutcome};
+use app_lib::source_actions::{run_action, run_action_with, run_item_action, ActionDeps, ActionOutcome, Answers};
 use app_lib::sources::identity::{ADDR_ENV, TOKEN_ENV};
 use app_lib::sources::{SourceStatus, Sources, SourcesEmitter};
 use app_lib::workspace::Workspace;
@@ -74,6 +79,32 @@ fn data(dir: &str, name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(fixture_dir().join(dir).join(format!("{name}.json"))).unwrap()).unwrap()
 }
 
+/// The tracker's data, copied so this test can change it while the fixture
+/// runs: its `ping` echoes, and PR #1 offers it too.
+fn tracker_data(into: &Path) {
+    std::fs::create_dir_all(into).unwrap();
+    for entry in std::fs::read_dir(fixture_dir().join("data")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), into.join(entry.file_name())).unwrap();
+    }
+    let mut actions = data("data", "actions");
+    actions["ping"] = json!({"mutates": false, "status": 200, "echo": true});
+    std::fs::write(into.join("actions.json"), actions.to_string()).unwrap();
+    let mut prs = data("data", "prs");
+    let pr1 = prs["items"].as_array_mut().unwrap().iter_mut().find(|p| p["number"] == "#1").unwrap();
+    pr1["actions"].as_array_mut().unwrap().push(json!({"kind": "endpoint", "id": "ping", "label": "Ping", "mutates": false}));
+    std::fs::write(into.join("prs.json"), prs.to_string()).unwrap();
+}
+
+fn json_file(path: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The owner updates the second source logged, in order.
+fn owner_log(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path).unwrap_or_default().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
 /// The fixture's own row `key`, exactly as the file has it.
 fn tracker_row(key: &str) -> Value {
     data("data", "work")["items"].as_array().unwrap().iter().find(|i| i["key"] == key).unwrap().clone()
@@ -107,16 +138,20 @@ fn a_second_source_adds_to_the_first_ones_items_and_acts_on_its_rows() {
 
     // Two launches of the same script with different data, in listing
     // order: the tracker first, the workspaces source second.
+    let tracker_dir = dir.path().join("tracker-data");
+    tracker_data(&tracker_dir);
+    let log = dir.path().join("owner-updates.jsonl");
     let mut children = Vec::new();
-    for (command, data_dir) in [("fixture-source", "data"), ("workspaces-source", "data-overlay")] {
+    for (command, data_dir) in [("fixture-source", tracker_dir.clone()), ("workspaces-source", fixture_dir().join("data-overlay"))] {
         let launch = sources.prepare_launch(project_id, &root, command).unwrap();
         children.push(
             Command::new("node")
                 .arg(fixture_dir().join("index.mjs"))
                 .arg("--data")
-                .arg(fixture_dir().join(data_dir))
+                .arg(&data_dir)
                 .env(ADDR_ENV, &launch.addr)
                 .env(TOKEN_ENV, &launch.token)
+                .env("CHAPPA_FIXTURE_OWNER_LOG", &log)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -134,8 +169,11 @@ fn a_second_source_adds_to_the_first_ones_items_and_acts_on_its_rows() {
     let (tracker, overlay) = (listed[0].id.clone(), listed[1].id.clone());
     assert_eq!(listed[0].manifest_id.as_deref(), Some("fixture"));
     assert_eq!(listed[1].manifest_id.as_deref(), Some("workspaces"));
-    // The trust dialog lists the item actions; the hash covers them.
+    // The trust dialog lists the item actions and the owner updates; the
+    // hash covers them.
     let trust = listed[1].trust.clone().unwrap();
+    assert!(trust.owner_updates);
+    assert!(!listed[0].trust.clone().unwrap().owner_updates);
     assert_eq!(trust.item_actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["review-later", "start-work"]);
     assert_eq!(trust.item_actions[1].sources, ["fixture"]);
     // Before the tracker is trusted, nothing is offered on its rows.
@@ -158,6 +196,7 @@ fn a_second_source_adds_to_the_first_ones_items_and_acts_on_its_rows() {
     // call names the owner but carries no row of an untrusted source.
     let early = echoed(run_action(&deps, &overlay, "work", Some("ABC-2"), "archive", true, None).unwrap());
     assert_eq!(early["target"], json!({"view": "work", "key": "ABC-2", "source": "fixture"}));
+    assert!(owner_log(&log).is_empty(), "nothing is sent before the owner is polled");
 
     let hash = listed[0].trust.clone().unwrap().hash;
     sources.trust_answer(&tracker, true, &hash).unwrap();
@@ -202,7 +241,7 @@ fn a_second_source_adds_to_the_first_ones_items_and_acts_on_its_rows() {
     assert_eq!(sent["target"], json!({"view": "work", "key": "ABC-3", "source": "fixture", "item": tracker_row("ABC-3")}));
     assert_eq!(sent["params"], json!({"from": "tracker", "slot": 0}));
     assert_eq!(sent["note"], "for the demo");
-    let pr1 = data("data", "prs")["items"].as_array().unwrap().iter().find(|p| p["number"] == "#1").unwrap().clone();
+    let pr1 = json_file(&tracker_dir.join("prs.json"))["items"].as_array().unwrap().iter().find(|p| p["number"] == "#1").unwrap().clone();
     let sent = echoed(run_item_action(&deps, &overlay, "prs", &tracker, "github:owner/repo:#1", "review-later", false, None).unwrap());
     assert_eq!(sent["target"], json!({"view": "prs", "key": "github:owner/repo:#1", "source": "fixture", "item": pr1}));
 
@@ -215,8 +254,65 @@ fn a_second_source_adds_to_the_first_ones_items_and_acts_on_its_rows() {
     assert_eq!(sent["target"]["item"], tracker_row("ABC-2"), "a row's banner actions are the row's");
     let sent = echoed(run_action(&deps, &overlay, "work", Some("ABC-9"), "archive", true, None).unwrap());
     assert_eq!(sent["target"], json!({"view": "work", "key": "ABC-9", "source": "fixture"}));
-    // The tracker's own actions on its own rows stay plain.
-    assert_eq!(run_action(&deps, &tracker, "work", Some("ABC-1"), "ping", false, None).unwrap(), ActionOutcome::Done { message: Some("pong".into()) });
+    // A section's actions are the row's too.
+    fn answers(values: &Value) -> Answers<'_> {
+        Answers { confirmed: true, note: None, values: Some(values) }
+    }
+    let seeds = json!({"seeds": ["db/three"], "count": 3, "size": "l"});
+    let sent = echoed(run_action_with(&deps, &overlay, "work", Some("ABC-2"), "pick-seeds", answers(&seeds)).unwrap());
+    assert_eq!(sent["target"], json!({"view": "work", "key": "ABC-2", "source": "fixture", "item": tracker_row("ABC-2")}));
+    // The inputs' values merged into the fixed params (replacing `count`).
+    assert_eq!(sent["params"], json!({"count": 3, "slot": 0, "seeds": ["db/three"], "size": "l"}));
+    // Checked before the call: a value outside what was declared, a missing
+    // required one, an input nothing declared.
+    for (values, says) in [
+        (json!({"size": "l", "count": 11}), "Count must be at most 10"),
+        (json!({"seeds": ["db/empty"]}), "Size is required"),
+        (json!({"size": "xl"}), "Size `xl` is not one of the options"),
+        (json!({"size": "s", "why": "far more than twenty characters"}), "Why is longer than 20 characters"),
+        (json!({"size": "s", "slot": 4}), "asks for no input `slot`"),
+    ] {
+        let err = run_action_with(&deps, &overlay, "work", Some("ABC-2"), "pick-seeds", answers(&values)).unwrap_err();
+        assert!(err.contains(says), "{values}: {err}");
+    }
+
+    // A source's actions on its own rows carry its own row.
+    let sent = echoed(run_action(&deps, &tracker, "work", Some("ABC-1"), "ping", false, None).unwrap());
+    assert_eq!(sent["target"], json!({"view": "work", "key": "ABC-1", "source": "fixture", "item": tracker_row("ABC-1")}));
+    let sent = echoed(run_action(&deps, &tracker, "prs", Some("github:owner/repo:#1"), "ping", false, None).unwrap());
+    assert_eq!(sent["target"], json!({"view": "prs", "key": "github:owner/repo:#1", "source": "fixture", "item": pr1}));
+
+    // Owner updates: the tracker's rows the second source adds to, sent
+    // after the tracker's poll (ABC-9 is not listed by it, XYZ-1 belongs to
+    // another tracker).
+    let first = wait_for("the owner updates", Duration::from_secs(20), || {
+        let got = owner_log(&log);
+        (got.len() >= 2).then_some(got)
+    });
+    let mut keys: Vec<&str> = first.iter().map(|u| u["key"].as_str().unwrap()).collect();
+    keys.sort();
+    assert_eq!(keys, ["ABC-1", "ABC-2"]);
+    for u in &first {
+        assert_eq!(u["source"], "fixture");
+        assert_eq!(u["item"], tracker_row(u["key"].as_str().unwrap()));
+    }
+    // The tracker polls again with nothing changed: nothing more is sent.
+    sources.refresh_soon(&tracker);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(owner_log(&log).len(), 2, "unchanged rows are not sent again");
+    // ABC-1 moves in the tracker: only ABC-1 goes, with its new status.
+    let mut work = json_file(&tracker_dir.join("work.json"));
+    let abc1 = work["items"].as_array_mut().unwrap().iter_mut().find(|i| i["key"] == "ABC-1").unwrap();
+    abc1["status"] = json!({"label": "Done", "category": "done"});
+    let moved = abc1.clone();
+    std::fs::write(tracker_dir.join("work.json"), work.to_string()).unwrap();
+    sources.refresh_soon(&tracker);
+    let all = wait_for("the changed row", Duration::from_secs(20), || {
+        let got = owner_log(&log);
+        (got.len() >= 3).then_some(got)
+    });
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[2], json!({"source": "fixture", "key": "ABC-1", "item": moved}));
 
     sources.shutdown();
 }

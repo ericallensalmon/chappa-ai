@@ -675,6 +675,8 @@ fn spawn_process(
     if is_source {
         let launch = sources.prepare_launch(project_id, &root, name)?;
         spec.env.extend(launch.env());
+        let cwd = spec.cwd.clone().unwrap_or_else(|| root.clone());
+        sources.set_launch_folder(&root, name, crate::sources::launch_folder_of(&cwd, &spec.args));
     }
     let channel = proc
         .channel

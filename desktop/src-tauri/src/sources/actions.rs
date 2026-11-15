@@ -10,7 +10,11 @@
 //!   shown to the user before the first run;
 //! - `terminal`: a shell or an argv in a folder, same folder and env rules;
 //! - `endpoint`: a POST back to the source; one that `mutates` without a
-//!   `confirm` text is not rendered at all (and logged once per source);
+//!   `confirm` text is not rendered at all (and logged once per source).
+//!   It may carry `inputs` ([`EndpointInput`]: a choice, several choices,
+//!   free text or a number) that the confirm dialog asks for; their values
+//!   are checked here against what was declared ([`check_input_values`])
+//!   and merged into `params` before the call;
 //! - `link`: opens `https://` on a trusted host, or plain `http://` when that
 //!   trusted host is this machine (`links.rs`);
 //! - `panel`: a drill-in page fetched from a path the payload named.
@@ -67,6 +71,9 @@ pub enum SourceAction {
         confirm: Option<String>,
         params: Option<Value>,
         note: Option<NoteRule>,
+        /// What the confirm dialog asks for, in order.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<EndpointInput>,
     },
     Link {
         id: String,
@@ -117,6 +124,234 @@ impl SourceAction {
     pub fn is_unconfirmable_mutation(&self) -> bool {
         matches!(self, SourceAction::Endpoint { mutates: true, confirm: None, .. })
     }
+}
+
+/// What kind of value an endpoint input takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputKind {
+    /// One of `options`.
+    Choice,
+    /// Any number of `options`, each at most once.
+    Multi,
+    /// One line of free text, at most `max` characters.
+    Text,
+    /// A number, at most `max` when one is declared.
+    Number,
+}
+
+/// One option of a `choice` / `multi` input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InputOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// One input an endpoint action asks for in its confirm dialog. Its value
+/// goes into the call's `params` under `name` (overriding a fixed param of
+/// that name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointInput {
+    pub name: String,
+    pub label: String,
+    pub kind: InputKind,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<InputOption>,
+    pub required: bool,
+    /// What the dialog starts with; already checked against the kind.
+    pub default: Option<Value>,
+    /// `text`: the most characters (default [`TEXT_INPUT_MAX`]); `number`:
+    /// the largest value. `None` on the others.
+    pub max: Option<serde_json::Number>,
+}
+
+/// Free text is capped here when the input declares no `max`.
+pub const TEXT_INPUT_MAX: u64 = 200;
+/// The most a `text` input may declare as its `max`.
+pub const TEXT_INPUT_MAX_CEILING: u64 = 10_000;
+/// Inputs per action, and options per input: a dialog, not a database.
+pub const INPUTS_MAX: usize = 20;
+pub const OPTIONS_MAX: usize = 200;
+/// The longest input name (it becomes a `params` key).
+pub const INPUT_NAME_MAX: usize = 100;
+
+fn valid_input_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= INPUT_NAME_MAX
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+}
+
+fn parse_inputs(obj: &serde_json::Map<String, Value>) -> Result<Vec<EndpointInput>, String> {
+    let list = match obj.get("inputs") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err("`inputs` must be a list".into()),
+    };
+    if list.len() > INPUTS_MAX {
+        return Err(format!("`inputs` holds {} entries; at most {INPUTS_MAX}", list.len()));
+    }
+    let mut out: Vec<EndpointInput> = Vec::new();
+    for (i, raw) in list.iter().enumerate() {
+        let at = |why: String| format!("inputs[{i}]: {why}");
+        let o = raw.as_object().ok_or_else(|| at("must be an object".into()))?;
+        let name = o.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
+        if !valid_input_name(&name) {
+            return Err(at(format!("`name` must be 1–{INPUT_NAME_MAX} of [A-Za-z0-9._:/-]")));
+        }
+        if out.iter().any(|x| x.name == name) {
+            return Err(at(format!("the name `{name}` is used twice")));
+        }
+        let label = text(o, "label").map_err(at)?;
+        let kind = match o.get("kind").and_then(Value::as_str) {
+            Some("choice") => InputKind::Choice,
+            Some("multi") => InputKind::Multi,
+            Some("text") => InputKind::Text,
+            Some("number") => InputKind::Number,
+            _ => return Err(at("`kind` must be choice, multi, text or number".into())),
+        };
+        let choices = matches!(kind, InputKind::Choice | InputKind::Multi);
+        let options = match o.get("options") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(opts)) => {
+                if !choices {
+                    return Err(at("`options` belong to choice and multi inputs only".into()));
+                }
+                if opts.len() > OPTIONS_MAX {
+                    return Err(at(format!("at most {OPTIONS_MAX} options")));
+                }
+                let mut parsed: Vec<InputOption> = Vec::new();
+                for opt in opts {
+                    let value = opt.get("value").and_then(Value::as_str).filter(|v| !v.is_empty() && !v.chars().any(char::is_control));
+                    let label = opt.get("label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty());
+                    let (Some(value), Some(label)) = (value, label) else {
+                        return Err(at("every option needs a `value` and a `label`".into()));
+                    };
+                    if parsed.iter().any(|p| p.value == value) {
+                        return Err(at(format!("the option `{value}` is listed twice")));
+                    }
+                    parsed.push(InputOption { value: value.to_owned(), label: label.to_owned() });
+                }
+                parsed
+            }
+            Some(_) => return Err(at("`options` must be a list".into())),
+        };
+        if choices && options.is_empty() {
+            return Err(at("a choice or multi input needs `options`".into()));
+        }
+        let required = match o.get("required") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(at("`required` must be a boolean".into())),
+        };
+        let max = match (kind, o.get("max")) {
+            (_, None | Some(Value::Null)) => None,
+            (InputKind::Text, Some(v)) => match v.as_u64() {
+                Some(n) if (1..=TEXT_INPUT_MAX_CEILING).contains(&n) => Some(serde_json::Number::from(n)),
+                _ => return Err(at(format!("`max` of a text input must be a whole number from 1 to {TEXT_INPUT_MAX_CEILING}"))),
+            },
+            (InputKind::Number, Some(Value::Number(n))) => Some(n.clone()),
+            (InputKind::Number, Some(_)) => return Err(at("`max` of a number input must be a number".into())),
+            (_, Some(_)) => return Err(at("`max` belongs to text and number inputs only".into())),
+        };
+        let mut input = EndpointInput { name, label, kind, options, required, default: None, max };
+        if let Some(d) = o.get("default").filter(|d| !d.is_null()) {
+            check_input_value(&input, d).map_err(|why| at(format!("its `default` is unusable: {why}")))?;
+            input.default = Some(d.clone());
+        }
+        out.push(input);
+    }
+    Ok(out)
+}
+
+/// Whether `value` is one `input` takes (presence is judged by the caller).
+fn check_input_value(input: &EndpointInput, value: &Value) -> Result<(), String> {
+    let known = |v: &str| input.options.iter().any(|o| o.value == v);
+    match input.kind {
+        InputKind::Choice => match value.as_str() {
+            Some(v) if known(v) => Ok(()),
+            Some(v) => Err(format!("`{v}` is not one of the options")),
+            None => Err("must be one of the options".into()),
+        },
+        InputKind::Multi => {
+            let list = value.as_array().ok_or("must be a list of options")?;
+            let mut seen: Vec<&str> = Vec::new();
+            for v in list {
+                let v = v.as_str().ok_or("must be a list of options")?;
+                if !known(v) {
+                    return Err(format!("`{v}` is not one of the options"));
+                }
+                if seen.contains(&v) {
+                    return Err(format!("`{v}` is chosen twice"));
+                }
+                seen.push(v);
+            }
+            Ok(())
+        }
+        InputKind::Text => {
+            let v = value.as_str().ok_or("must be text")?;
+            let cap = input.max.as_ref().and_then(serde_json::Number::as_u64).unwrap_or(TEXT_INPUT_MAX);
+            if v.chars().count() as u64 > cap {
+                return Err(format!("is longer than {cap} characters"));
+            }
+            if v.chars().any(char::is_control) {
+                return Err("must be one line of printable text".into());
+            }
+            Ok(())
+        }
+        InputKind::Number => {
+            let n = value.as_f64().filter(|n| n.is_finite()).ok_or("must be a number")?;
+            match &input.max {
+                Some(max) if max.as_f64().is_some_and(|m| n > m) => Err(format!("must be at most {max}")),
+                _ => Ok(()),
+            }
+        }
+    }
+}
+
+/// Check the values the dialog sent for `inputs` (`null` = none) and merge
+/// them into `params`: each input's value under its name, replacing a fixed
+/// param of that name. A name nothing declared, a missing required value,
+/// or a value its input does not take refuses the call before it is made.
+/// An input left empty (null, blank text, nothing chosen) is left out.
+pub fn check_input_values(inputs: &[EndpointInput], values: Option<&Value>, params: Option<Value>) -> Result<Option<Value>, String> {
+    let empty = serde_json::Map::new();
+    let given = match values {
+        None | Some(Value::Null) => &empty,
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err("the input values must be an object".into()),
+    };
+    if let Some(unknown) = given.keys().find(|k| !inputs.iter().any(|i| &i.name == *k)) {
+        return Err(format!("the action asks for no input `{unknown}`"));
+    }
+    let mut merged = match params {
+        Some(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    for input in inputs {
+        let value = given.get(&input.name).filter(|v| match v {
+            Value::Null => false,
+            Value::String(s) => !s.trim().is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            _ => true,
+        });
+        let Some(value) = value else {
+            if input.required {
+                return Err(format!("{} is required", input.label));
+            }
+            continue;
+        };
+        check_input_value(input, value).map_err(|why| format!("{} {why}", input.label))?;
+        let value = match value {
+            Value::String(s) => Value::String(s.trim().to_owned()),
+            other => other.clone(),
+        };
+        merged.insert(input.name.clone(), value);
+    }
+    if merged.is_empty() && values.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Value::Object(merged)))
 }
 
 /// Env names a source may set on a launched agent or terminal:
@@ -206,7 +441,7 @@ pub fn parse_action(value: &Value) -> Result<SourceAction, String> {
                 Some(p @ Value::Object(_)) => Some(p.clone()),
                 Some(_) => return Err("`params` must be an object".into()),
             };
-            Ok(SourceAction::Endpoint { id, label, mutates, confirm: optional_text(obj, "confirm")?, params, note })
+            Ok(SourceAction::Endpoint { id, label, mutates, confirm: optional_text(obj, "confirm")?, params, note, inputs: parse_inputs(obj)? })
         }
         "link" => Ok(SourceAction::Link { id, label, url: text(obj, "url")? }),
         "panel" => Ok(SourceAction::Panel { id, label, endpoint: text(obj, "endpoint")? }),
@@ -568,6 +803,88 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_inputs_are_checked_when_declared_and_when_answered() {
+        let action = parse_action(&json!({"kind": "endpoint", "id": "seed", "label": "Seed", "mutates": true, "confirm": "Seed it?",
+            "params": {"slot": 0, "count": "fixed"},
+            "inputs": [
+                {"name": "profile", "label": "Profile", "kind": "choice", "options": [{"value": "small", "label": "Small"}, {"value": "big", "label": "Big"}], "required": true, "default": "small"},
+                {"name": "seeds", "label": "Seeds", "kind": "multi", "options": [{"value": "db/a", "label": "A"}, {"value": "db/b", "label": "B"}]},
+                {"name": "why", "label": "Why", "kind": "text", "max": 10},
+                {"name": "count", "label": "Count", "kind": "number", "max": 50}
+            ]})).unwrap();
+        let SourceAction::Endpoint { inputs, params, .. } = action else { panic!() };
+        assert_eq!(inputs.iter().map(|i| (i.name.as_str(), i.kind)).collect::<Vec<_>>(), [("profile", InputKind::Choice), ("seeds", InputKind::Multi), ("why", InputKind::Text), ("count", InputKind::Number)]);
+        assert_eq!(inputs[0].default, Some(json!("small")));
+        assert_eq!(inputs[2].max, Some(serde_json::Number::from(10)));
+
+        // Merged into params, an input overriding the fixed param of its name.
+        let merged = check_input_values(&inputs, Some(&json!({"profile": "big", "seeds": ["db/b", "db/a"], "why": "  demo  ", "count": 7})), params.clone()).unwrap().unwrap();
+        assert_eq!(merged, json!({"slot": 0, "count": 7, "profile": "big", "seeds": ["db/b", "db/a"], "why": "demo"}));
+        // Empty optional ones are left out; the fixed params stay.
+        let merged = check_input_values(&inputs, Some(&json!({"profile": "small", "seeds": [], "why": " ", "count": null})), params.clone()).unwrap().unwrap();
+        assert_eq!(merged, json!({"slot": 0, "count": "fixed", "profile": "small"}));
+        // No inputs answered and none declared: the params as they were.
+        assert_eq!(check_input_values(&[], None, params.clone()).unwrap(), params);
+        assert_eq!(check_input_values(&[], None, None).unwrap(), None);
+
+        // Refused before the call.
+        for (values, says) in [
+            (json!({}), "Profile is required"),
+            (json!({"profile": "huge"}), "Profile `huge` is not one of the options"),
+            (json!({"profile": 3}), "Profile must be one of the options"),
+            (json!({"profile": "big", "seeds": ["db/c"]}), "Seeds `db/c` is not one of the options"),
+            (json!({"profile": "big", "seeds": ["db/a", "db/a"]}), "chosen twice"),
+            (json!({"profile": "big", "seeds": "db/a"}), "Seeds must be a list of options"),
+            (json!({"profile": "big", "why": "eleven chars"}), "Why is longer than 10 characters"),
+            (json!({"profile": "big", "why": "two\nlines"}), "one line of printable text"),
+            (json!({"profile": "big", "count": 51}), "Count must be at most 50"),
+            (json!({"profile": "big", "count": "7"}), "Count must be a number"),
+            (json!({"profile": "big", "nope": 1}), "asks for no input `nope`"),
+            (json!(["big"]), "must be an object"),
+        ] {
+            let err = check_input_values(&inputs, Some(&values), params.clone()).unwrap_err();
+            assert!(err.contains(says), "{values}: {err}");
+        }
+        // Text without a declared max is capped at the default.
+        let free = parse_action(&json!({"kind": "endpoint", "id": "n", "label": "N", "mutates": false, "inputs": [{"name": "t", "label": "T", "kind": "text"}]})).unwrap();
+        let SourceAction::Endpoint { inputs: free, .. } = free else { panic!() };
+        assert!(check_input_values(&free, Some(&json!({"t": "x".repeat(200)})), None).is_ok());
+        assert!(check_input_values(&free, Some(&json!({"t": "x".repeat(201)})), None).unwrap_err().contains("longer than 200"));
+    }
+
+    #[test]
+    fn badly_declared_inputs_refuse_the_action() {
+        let with = |inputs: Value| parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false, "inputs": inputs}));
+        let opts = json!([{"value": "a", "label": "A"}]);
+        for (inputs, says) in [
+            (json!({"name": "x"}), "must be a list"),
+            (json!(["x"]), "must be an object"),
+            (json!([{"name": "", "label": "L", "kind": "text"}]), "`name`"),
+            (json!([{"name": "has space", "label": "L", "kind": "text"}]), "`name`"),
+            (json!([{"name": "a", "label": "L", "kind": "text"}, {"name": "a", "label": "M", "kind": "text"}]), "used twice"),
+            (json!([{"name": "a", "label": " ", "kind": "text"}]), "`label`"),
+            (json!([{"name": "a", "label": "L", "kind": "date"}]), "`kind`"),
+            (json!([{"name": "a", "label": "L", "kind": "choice"}]), "needs `options`"),
+            (json!([{"name": "a", "label": "L", "kind": "text", "options": opts}]), "choice and multi inputs only"),
+            (json!([{"name": "a", "label": "L", "kind": "choice", "options": [{"value": "a", "label": "A"}, {"value": "a", "label": "B"}]}]), "listed twice"),
+            (json!([{"name": "a", "label": "L", "kind": "choice", "options": [{"value": "a"}]}]), "`value` and a `label`"),
+            (json!([{"name": "a", "label": "L", "kind": "choice", "options": opts, "default": "b"}]), "`default` is unusable"),
+            (json!([{"name": "a", "label": "L", "kind": "text", "max": 0}]), "`max` of a text input"),
+            (json!([{"name": "a", "label": "L", "kind": "text", "max": 20000}]), "`max` of a text input"),
+            (json!([{"name": "a", "label": "L", "kind": "choice", "options": opts, "max": 3}]), "text and number inputs only"),
+            (json!([{"name": "a", "label": "L", "kind": "text", "required": "yes"}]), "`required`"),
+        ] {
+            let err = with(inputs.clone()).unwrap_err();
+            assert!(err.contains(says), "{inputs}: {err}");
+        }
+        let many: Vec<Value> = (0..=INPUTS_MAX).map(|i| json!({"name": format!("i{i}"), "label": "L", "kind": "text"})).collect();
+        assert!(with(Value::Array(many)).unwrap_err().contains("at most"));
+        // No inputs is no inputs, and they are not serialized then.
+        let plain = parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false})).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("inputs"));
+    }
+
+    #[test]
     fn env_names_follow_the_identifier_rule() {
         let ok: BTreeMap<String, String> = [("CHAPPA_STACK_SLOT", "1"), ("_X", ""), ("A9", "z")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         assert!(validate_env(&ok).is_ok());
@@ -691,12 +1008,12 @@ mod tests {
         let term = SourceAction::Terminal { id: "t".into(), label: "T".into(), cwd: inside.clone(), command: vec![], env: bad_env };
         assert!(action_verdict(&term, &ctx).reason.unwrap().contains("env name"));
 
-        let hidden = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: None, params: None, note: None };
+        let hidden = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: None, params: None, note: None, inputs: vec![] };
         let v = action_verdict(&hidden, &ctx);
         assert!(v.hidden && !v.enabled);
-        let shown = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: Some("Sure?".into()), params: None, note: None };
+        let shown = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: Some("Sure?".into()), params: None, note: None, inputs: vec![] };
         assert!(action_verdict(&shown, &ctx).enabled);
-        let read_only = SourceAction::Endpoint { id: "p".into(), label: "P".into(), mutates: false, confirm: None, params: None, note: None };
+        let read_only = SourceAction::Endpoint { id: "p".into(), label: "P".into(), mutates: false, confirm: None, params: None, note: None, inputs: vec![] };
         assert!(action_verdict(&read_only, &ctx).enabled, "a non-mutating action needs no confirm");
 
         let link = |url: &str| SourceAction::Link { id: "l".into(), label: "L".into(), url: url.into() };

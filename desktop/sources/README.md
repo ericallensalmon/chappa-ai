@@ -166,6 +166,34 @@ Reply with one of:
 An endpoint action with `note: "required"` asks the user for a note
 before it is sent; the source refuses the call without one.
 
+An endpoint action can ask for values in its dialog with `inputs`:
+
+```json
+{ "kind": "endpoint", "id": "seed", "label": "Seed", "mutates": true,
+  "confirm": "Seed the database", "params": { "slot": 0 },
+  "inputs": [
+    { "name": "profile", "label": "Profile", "kind": "choice", "required": true,
+      "options": [{ "value": "small", "label": "Small" }, { "value": "big", "label": "Big" }], "default": "small" },
+    { "name": "seeds", "label": "Seeds", "kind": "multi",
+      "options": [{ "value": "db/empty", "label": "empty" }] },
+    { "name": "why", "label": "Why", "kind": "text", "max": 80 },
+    { "name": "count", "label": "Count", "kind": "number", "max": 50 }
+  ] }
+```
+
+`kind` is `choice` (one of `options`), `multi` (any of them, each once),
+`text` (one line, at most `max` characters, 200 when no `max` is given)
+or `number` (at most `max` when given). `name` is `[A-Za-z0-9._:/-]`, at
+most 100 characters, unique in the action; a `default` must be a value
+its input takes. An action whose `inputs` are malformed is not offered
+(an item action with them makes the manifest unusable). The app shows
+the inputs in the confirm dialog, checks each value against what was
+declared before the call (a missing required value, an unknown option,
+text that is too long or not one line, a number over `max`: the call is
+not made), and sends them merged into `params`, an input replacing a
+fixed param of the same name. An input left empty is left out. Check the
+values again yourself: the app's check is a courtesy, not a guarantee.
+
 Every actions call names who asked for it in an `X-Chappa-Actor` request
 header: `human:<OS user name>` for an action the person ran from the app,
 `agent:<actor id>` for one an agent caused (no agent can run a source
@@ -208,12 +236,24 @@ one row in Work: the tracker owns it, and other sources add to it.
   against you, judged by your trust, like on a row of your own; a
   `banners` entry on an item shows at the top of its panel and as a dot
   on its row.
-- Your endpoint calls for such an entry carry the owner in the target:
+- Your endpoint calls for such an entry (its own actions, its sections'
+  and its banners') carry the owner in the target:
   `target: {view: "work", key: ref.key, source: ref.source, item}`, where
   `item` is the owner's row exactly as the app last received it (left
   out when the owner does not list it). That is how you learn the
   tracker's status. Treat `item` as untrusted input: sanitise its key
-  before it becomes a path, and never put it into a shell.
+  before it becomes a path, and never put it into a shell. A call from a
+  row you own yourself (a work item, a pull request) carries your own
+  `source.id` and your row as you sent it the same way.
+- **Owner updates.** To hear about a tracker's change without waiting for
+  the next action, declare a path in the manifest:
+  `"ownerUpdates": "/api/work/owner"`. After each Work poll of an owning
+  source, the app posts `{source, key, item}` there for every row of it
+  you add to whose content changed since it was last posted to you: once
+  per row per poll, debounced, and only while the user trusts you (the
+  path is part of what they trust). Answer `2xx`; anything else is
+  logged and not retried until the row changes again. After a restart of
+  your process or a new trust answer you get every row once more.
 
 **Offering actions on other sources' rows** (a "Start work" before you
 have anything of your own about the item) goes in the manifest:
@@ -311,6 +351,15 @@ it cannot tell, and the app treats it as blocking (it fails closed).
   last block in force (shown as "last known: …, source unavailable")
   until it answers again. A source that never sends a block (an older
   source, or one that runs no databases) enforces nothing.
+- **Across restarts**: the app keeps each source's last answer (clean
+  or not) on disk. When it starts, before a source has answered again,
+  a kept block that blocks is in force as the last known one, and a kept
+  clean answer allows. A trusted source whose manifest `source.id`
+  starts with `stack:` and that has never answered (a new stack, or the
+  first run of an app that did not keep answers yet) keeps agents out of
+  the folder it was launched on (its `--project`, else its working
+  folder) until its first answer. Removing a source in Settings drops
+  what was kept for it.
 - **Where**: the folders in `bound`, or `project` when nothing is bound
   (the launching project's folder when the block names none). A folder
   and everything below it, compared after resolving `..` and symlinks,
@@ -326,8 +375,11 @@ it cannot tell, and the app treats it as blocking (it fails closed).
   block lifts, then delivered. What the person types is never held.
 - **Lifting it** is the source's: a clean check, or the `ackActionId`
   action, which the app calls with `X-Chappa-Actor: human:<name>` so the
-  acknowledgement records who. The app polls the view again right after
-  an action answers `200`, so a lifted block clears at once.
+  acknowledgement records who. Besides the Environment view, the Needs
+  you row of the block offers that same action (its confirm, its
+  required note) while the source answers and says `not-clean`. The app
+  polls the view again right after an action answers `200`, so a lifted
+  block clears at once.
 
 ## Run the fixture by hand
 

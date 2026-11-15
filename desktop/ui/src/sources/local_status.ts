@@ -43,10 +43,13 @@ function injectStyles(): void {
   document.head.appendChild(el);
 }
 
-/** What a gate means for the user, or "" when anyone may move the item. */
-export function gateText(gate: LocalStatus["gate"]): string {
-  if (gate === "human") return "Only a person can move it on.";
-  if (gate === "human-exit") return "Only a person can move it out of this status.";
+/** What the current status's gate means for the user, or "" when anyone
+ *  may move the item: `human` guards the way IN to the status (an agent
+ *  asking to move an item there waits for a person's approval),
+ *  `human-exit` the way OUT of it. */
+export function gateText(gate: LocalStatus["gate"], label: string): string {
+  if (gate === "human") return `Only a person can move it into ${label}.`;
+  if (gate === "human-exit") return `Only a person can move it out of ${label}.`;
   return "";
 }
 
@@ -122,7 +125,7 @@ export class LocalStatusBlock {
       this.sig = sig;
       this.label.textContent = ls.label;
       this.meta.textContent = statusMeta(ls, now);
-      this.gate.textContent = gateText(ls.gate);
+      this.gate.textContent = gateText(ls.gate, ls.label);
       this.paintPending(ls);
       this.paintHistory(ls, now);
     }

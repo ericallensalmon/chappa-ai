@@ -610,6 +610,7 @@ fn record(id: &str, created: &str, status: JobStatus) -> JobRecord {
         work: JobWork::Gc,
         report: None,
         error: None,
+        actor: None,
     }
 }
 

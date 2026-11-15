@@ -1,8 +1,9 @@
 // The user-facing half of source actions: what a button shows and whether
 // it is enabled, and the two dialogs that stand between a click and a run —
 // the confirm text of a mutating endpoint action (with its optional or
-// required note) and the full prompt of an agent action, shown before the
-// first run (or every run, per the source's prompt policy).
+// required note, and the inputs it asks for) and the full prompt of an agent
+// action, shown before the first run (or every run, per the source's prompt
+// policy).
 //
 // Rust judges every action (`source_actions`) and judges it again when it
 // runs (`source_run_action`); this module only turns those judgements into
@@ -10,7 +11,7 @@
 // views that do read `actionButtonState`, then `confirmEndpoint` /
 // `confirmAgentPrompt`, then `runAction`.
 
-import { confirmDialog, promptDialog } from "./dialog";
+import { confirmDialog, fieldsDialog, promptDialog } from "./dialog";
 import * as ipc from "./ipc";
 
 export type SourceAction = ipc.SourceActionShape;
@@ -91,6 +92,54 @@ export function agentPromptMessage(
 export interface ConfirmedEndpoint {
   confirmed: boolean;
   note: string | null;
+  /** The inputs' values, when the action asks for any. */
+  values?: Record<string, unknown>;
+}
+
+/** Free text is capped here when an input declares no `max` (as in Rust). */
+export const TEXT_INPUT_MAX = 200;
+
+const isEmpty = (v: unknown): boolean => v === null || v === undefined || (typeof v === "string" && v.trim() === "") || (Array.isArray(v) && v.length === 0);
+
+/** Whether `values` are what `inputs` take: the first problem, or null.
+ *  The same rules Rust applies before the call (which refuses whatever
+ *  this lets through); the dialog uses it to keep asking. Pure. */
+export function checkInputValues(inputs: readonly ipc.EndpointInputDto[], values: Record<string, unknown>): string | null {
+  for (const input of inputs) {
+    const v = values[input.name];
+    if (isEmpty(v)) {
+      if (input.required) return `${input.label} is required.`;
+      continue;
+    }
+    const known = (x: unknown): boolean => typeof x === "string" && (input.options ?? []).some((o) => o.value === x);
+    switch (input.kind) {
+      case "choice":
+        if (!known(v)) return `${input.label}: choose one of the options.`;
+        break;
+      case "multi":
+        if (!Array.isArray(v) || !v.every(known)) return `${input.label}: choose among the options.`;
+        if (new Set(v).size !== v.length) return `${input.label}: each option once.`;
+        break;
+      case "text": {
+        const cap = input.max ?? TEXT_INPUT_MAX;
+        if (typeof v !== "string") return `${input.label} must be text.`;
+        if ([...v].length > cap) return `${input.label} is longer than ${cap} characters.`;
+        // eslint-disable-next-line no-control-regex
+        if (/[\u0000-\u001f\u007f-\u009f]/.test(v)) return `${input.label} must be one line of printable text.`;
+        break;
+      }
+      case "number":
+        if (typeof v !== "number" || !Number.isFinite(v)) return `${input.label} must be a number.`;
+        if (input.max !== null && v > input.max) return `${input.label} must be at most ${input.max}.`;
+        break;
+    }
+  }
+  return null;
+}
+
+/** The values to send: empty ones left out (Rust treats them as not given). */
+function sentValues(values: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(values).filter(([, v]) => !isEmpty(v)));
 }
 
 /**
@@ -105,6 +154,17 @@ export async function confirmEndpoint(
   opts: { container?: HTMLElement } = {},
 ): Promise<ConfirmedEndpoint | null> {
   const { confirm, note } = endpointQuestion(action);
+  const inputs = action.inputs ?? [];
+  if (inputs.length) {
+    // One dialog: the question, every input with its default, the note.
+    const answer = await fieldsDialog(
+      confirm ?? `${action.label}?`,
+      inputs.map((i) => ({ name: i.name, label: i.label, kind: i.kind, options: i.options, required: i.required, value: i.default, max: i.max })),
+      { okLabel: action.label, note, check: (values) => checkInputValues(inputs, values), ...opts },
+    );
+    if (answer === null) return null;
+    return { confirmed: confirm !== null, note: answer.note, values: sentValues(answer.values) };
+  }
   if (!confirm && !note) return { confirmed: false, note: null };
   const question = confirm ?? `${action.label}?`;
   if (note) {
@@ -173,12 +233,14 @@ export async function runAction(
   const { action, verdict } = entry;
   let confirmed = false;
   let note: string | null = null;
+  let values: Record<string, unknown> | undefined;
   const dialog = opts.container ? { container: opts.container } : {};
   if (action.kind === "endpoint") {
     const answer = await confirmEndpoint(action, dialog);
     if (answer === null) return null;
     confirmed = answer.confirmed;
     note = answer.note;
+    values = answer.values;
   } else if (action.kind === "agent") {
     if (entry.needsPrompt) {
       if (!(await confirmAgentPrompt(action, verdict, sourceLabel, dialog))) return null;
@@ -186,6 +248,7 @@ export async function runAction(
     // Shown or not needed: either way the launch is the user's call now.
     confirmed = true;
   }
+  if (values) return api.run(sourceId, view, key, action.id, confirmed, note, opts.owner, values);
   return opts.owner
     ? api.run(sourceId, view, key, action.id, confirmed, note, opts.owner)
     : api.run(sourceId, view, key, action.id, confirmed, note);

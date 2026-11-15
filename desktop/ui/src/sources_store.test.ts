@@ -127,6 +127,9 @@ describe("labels", () => {
     expect(offering).toContain("Actions it offers on other sources' items:");
     expect(offering).toContain("    Start work (changes something, asks first) on Work rows of tracker");
     expect(offering).toContain("    Review later (read only) on PRs rows of every other source");
+    expect(offering).not.toContain("each time one changes");
+    // Being sent other sources' rows is part of it too.
+    expect(trustMessage(s, { ...s.trust!, ownerUpdates: true })).toContain("It is sent the rows of other sources' items it adds to, each time one changes.");
     const bare = trustMessage(s, { ...s.trust!, linkHosts: [], roots: [], views: [] });
     expect(bare.match(/\(none\)/g)).toHaveLength(3);
   });

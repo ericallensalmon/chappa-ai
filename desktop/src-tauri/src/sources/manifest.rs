@@ -122,6 +122,10 @@ pub struct Manifest {
     /// Actions this source offers on OTHER sources' rows (a "Start work"
     /// before the source has anything of its own about the item).
     pub item_actions: Vec<ItemAction>,
+    /// Where the app posts the owner rows this source adds to, each time
+    /// one changes (`{source, key, item}`), so it sees a tracker's status
+    /// move without waiting for the next action.
+    pub owner_updates: Option<Endpoint>,
 }
 
 /// One `itemActions` entry: always an `endpoint` action (an agent or a
@@ -268,6 +272,7 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
         link_hosts,
         roots: strings("roots")?,
         item_actions: parse_item_actions(obj.get("itemActions"))?,
+        owner_updates: optional("ownerUpdates")?,
     })
 }
 
@@ -416,6 +421,9 @@ pub struct TrustSummary {
     pub views: Vec<String>,
     /// The actions it offers on other sources' rows, sorted by id.
     pub item_actions: Vec<ItemActionSummary>,
+    /// It is sent the rows of other sources' items it adds to, whenever one
+    /// changes.
+    pub owner_updates: bool,
     pub hash: String,
 }
 
@@ -454,17 +462,24 @@ fn canonical_value(value: &Value) -> String {
 /// and where it is offered.
 fn canonical_item_action(item: &ItemAction) -> String {
     let quoted = |s: &str| Value::String(s.to_owned()).to_string();
-    let (mutates, confirm, params, note) = match &item.action {
-        SourceAction::Endpoint { mutates, confirm, params, note, .. } => (*mutates, confirm.as_deref(), params.as_ref(), *note),
-        _ => (false, None, None, None),
+    let (mutates, confirm, params, note, inputs) = match &item.action {
+        SourceAction::Endpoint { mutates, confirm, params, note, inputs, .. } => (*mutates, confirm.as_deref(), params.as_ref(), *note, inputs.as_slice()),
+        _ => (false, None, None, None, &[][..]),
     };
     let note = note.map(|n| match n {
         NoteRule::Optional => "optional",
         NoteRule::Required => "required",
     });
     let sources: Vec<String> = item.sources.iter().map(|s| quoted(s)).collect();
+    // What it asks for is part of what it does; left out when it asks for
+    // nothing, so an item action trusted before inputs existed keeps its form.
+    let inputs = if inputs.is_empty() {
+        String::new()
+    } else {
+        format!(",\"inputs\":{}", canonical_value(&serde_json::to_value(inputs).unwrap_or(Value::Null)))
+    };
     format!(
-        "{{\"id\":{},\"label\":{},\"mutates\":{},\"confirm\":{},\"note\":{},\"params\":{},\"view\":{},\"sources\":[{}]}}",
+        "{{\"id\":{},\"label\":{},\"mutates\":{},\"confirm\":{},\"note\":{},\"params\":{},\"view\":{},\"sources\":[{}]{}}}",
         quoted(item.id()),
         quoted(item.action.label()),
         mutates,
@@ -472,7 +487,8 @@ fn canonical_item_action(item: &ItemAction) -> String {
         note.map_or_else(|| "null".to_owned(), quoted),
         params.map_or_else(|| "null".to_owned(), canonical_value),
         quoted(&item.view),
-        sources.join(",")
+        sources.join(","),
+        inputs
     )
 }
 
@@ -486,7 +502,8 @@ fn sorted_item_actions(manifest: &Manifest) -> Vec<&ItemAction> {
 /// `{"id":…,"linkHosts":[sorted],"roots":[sorted],"views":[sorted keys]}`
 /// with exactly those keys in that order and no whitespace, plus
 /// `"itemActions":[…sorted by id]` after `views` when the source offers
-/// any (left out otherwise, so a source without them keeps the hash it was
+/// any, then `"ownerUpdates":"<path>"` when it asks to be sent owner rows
+/// (each left out otherwise, so a source without them keeps the hash it was
 /// trusted under). Built by hand rather than through a map so the key order
 /// cannot depend on how `serde_json` was compiled.
 pub fn canonical_trust_json(manifest: &Manifest) -> String {
@@ -508,13 +525,18 @@ pub fn canonical_trust_json(manifest: &Manifest) -> String {
     } else {
         format!(",\"itemActions\":[{}]", items.into_iter().map(canonical_item_action).collect::<Vec<_>>().join(","))
     };
+    let owner_updates = match &manifest.owner_updates {
+        Some(path) => format!(",\"ownerUpdates\":{}", Value::String(path.path().to_owned())),
+        None => String::new(),
+    };
     format!(
-        "{{\"id\":{},\"linkHosts\":{},\"roots\":{},\"views\":{}{}}}",
+        "{{\"id\":{},\"linkHosts\":{},\"roots\":{},\"views\":{}{}{}}}",
         Value::String(manifest.id.clone()),
         list(&hosts),
         list(&roots),
         list(&view_names),
-        item_actions
+        item_actions,
+        owner_updates
     )
 }
 
@@ -556,6 +578,7 @@ pub fn trust_summary(manifest: &Manifest) -> TrustSummary {
                 }
             })
             .collect(),
+        owner_updates: manifest.owner_updates.is_some(),
         hash: trust_hash(manifest),
     }
 }
@@ -833,11 +856,35 @@ mod tests {
     }
 
     #[test]
+    fn owner_updates_are_a_declared_path_and_part_of_what_trust_covers() {
+        let base = json!({"contract": 1, "source": {"id": "ws", "label": "Workspaces", "version": "1"}, "views": {"work": {"list": "/api/work"}}});
+        let plain = parse_manifest(&base).unwrap();
+        assert!(plain.owner_updates.is_none());
+        assert!(!trust_summary(&plain).owner_updates);
+        let mut v = base.clone();
+        v["ownerUpdates"] = json!("/api/work/owner");
+        let asking = parse_manifest(&v).unwrap();
+        assert_eq!(asking.owner_updates.as_ref().unwrap().path(), "/api/work/owner");
+        assert!(trust_summary(&asking).owner_updates);
+        assert!(canonical_trust_json(&asking).ends_with(r#","views":["work"],"ownerUpdates":"/api/work/owner"}"#), "{}", canonical_trust_json(&asking));
+        assert!(!canonical_trust_json(&plain).contains("ownerUpdates"), "a source without it keeps its old canonical form");
+        assert_ne!(trust_hash(&asking), trust_hash(&plain));
+        let mut moved = v.clone();
+        moved["ownerUpdates"] = json!("/api/owner");
+        assert_ne!(trust_hash(&parse_manifest(&moved).unwrap()), trust_hash(&asking));
+        for bad in [json!("http://10.0.0.5/owner"), json!("owner"), json!("/a/../b"), json!(7)] {
+            let mut v = base.clone();
+            v["ownerUpdates"] = bad.clone();
+            assert!(matches!(parse_manifest(&v), Err(ManifestError::Invalid(_))), "{bad}");
+        }
+    }
+
+    #[test]
     fn item_actions_are_part_of_what_trust_covers() {
         let m = parse_manifest(&serde_json::from_str(OVERLAY_FIXTURE).unwrap()).unwrap();
         let canon = canonical_trust_json(&m);
         assert!(
-            canon.ends_with(r#","views":["work"],"itemActions":[{"id":"review-later","label":"Review later","mutates":false,"confirm":null,"note":null,"params":null,"view":"prs","sources":["*"]},{"id":"start-work","label":"Start work","mutates":true,"confirm":"Create a workspace for {key} — {title}","note":"optional","params":{"from":"tracker","slot":0},"view":"work","sources":["fixture"]}]}"#),
+            canon.ends_with(r#","views":["work"],"itemActions":[{"id":"review-later","label":"Review later","mutates":false,"confirm":null,"note":null,"params":null,"view":"prs","sources":["*"]},{"id":"start-work","label":"Start work","mutates":true,"confirm":"Create a workspace for {key} — {title}","note":"optional","params":{"from":"tracker","slot":0},"view":"work","sources":["fixture"]}],"ownerUpdates":"/api/work/owner"}"#),
             "{canon}"
         );
         let hash = trust_hash(&m);
@@ -869,6 +916,12 @@ mod tests {
         none.item_actions.clear();
         assert_ne!(trust_hash(&none), hash, "dropping them is a change too");
         assert!(!canonical_trust_json(&none).contains("itemActions"), "a source without item actions keeps its old canonical form");
+        // Inputs are part of what an item action does.
+        let mut v: Value = serde_json::from_str(OVERLAY_FIXTURE).unwrap();
+        v["itemActions"][0]["inputs"] = json!([{"name": "slot", "label": "Slot", "kind": "number", "max": 3}]);
+        let asking = parse_manifest(&v).unwrap();
+        assert_ne!(trust_hash(&asking), hash);
+        assert!(canonical_trust_json(&asking).contains(r#""inputs":[{"default":null,"kind":"number","label":"Slot","max":3,"name":"slot","required":false}]"#), "{}", canonical_trust_json(&asking));
         let summary = trust_summary(&m);
         assert_eq!(summary.item_actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["review-later", "start-work"]);
         let start = &summary.item_actions[1];

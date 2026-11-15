@@ -46,10 +46,11 @@ afterEach(() => {
 
 describe("the status texts", () => {
   it("gate, meta and history lines", () => {
-    expect(gateText("human")).toBe("Only a person can move it on.");
-    expect(gateText("human-exit")).toBe("Only a person can move it out of this status.");
-    expect(gateText("any")).toBe("");
-    expect(gateText(null)).toBe("");
+    // `human` guards the way in, `human-exit` the way out.
+    expect(gateText("human", "Done")).toBe("Only a person can move it into Done.");
+    expect(gateText("human-exit", "In review")).toBe("Only a person can move it out of In review.");
+    expect(gateText("any", "To do")).toBe("");
+    expect(gateText(null, "To do")).toBe("");
     expect(statusMeta(fixtureStatus(), NOW)).toBe("since 18 h ago · by Alex · round 2");
     expect(statusMeta({ id: "s", label: "S", allowed: [] }, NOW)).toBe("");
     expect(historyLine({ at: "2026-01-14T16:00:00Z", from: "in-progress", to: "in-review", actor: "Alex", note: "Ready" }, NOW)).toBe(
@@ -66,7 +67,7 @@ describe("LocalStatusBlock", () => {
     expect(b.el.hidden).toBe(false);
     expect(b.el.querySelector(".chappa-ls-label")?.textContent).toBe("In review");
     expect(b.el.querySelector(".chappa-ls-meta")?.textContent).toBe("since 18 h ago · by Alex · round 2");
-    expect(b.el.querySelector(".chappa-ls-gate")?.textContent).toBe("Only a person can move it out of this status.");
+    expect(b.el.querySelector(".chappa-ls-gate")?.textContent).toBe("Only a person can move it out of In review.");
     const pending = b.el.querySelector<HTMLElement>(".chappa-ls-pending")!;
     expect(pending.hidden).toBe(false);
     expect(pending.querySelector(".chappa-ls-pending-title")?.textContent).toBe("Waiting for approval: move to done");

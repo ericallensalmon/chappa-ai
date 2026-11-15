@@ -1385,7 +1385,8 @@ impl app_lib::timers::TimerHold for FakeHold {
     fn hold_reason(&self, process_id: u32) -> Option<String> {
         self.blocked.lock().unwrap().contains(&process_id).then(|| "held".to_owned())
     }
-    fn hold(&self, process_id: u32, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+    fn hold(&self, process_id: u32, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+        assert!(from.starts_with("timer "), "a timer names itself as the sender: {from}");
         let mut q = self.queued.lock().unwrap();
         q.push((process_id, text, deliver));
         q.len()

@@ -238,6 +238,17 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
     assert_eq!(blocks[0].reason, "db: 3 findings (email-real-domain ×2, card-number ×1) — acknowledge in Environment");
     assert_eq!(blocks[0].bound.as_ref().map(|b| b.key.as_str()), Some("ABC-1"));
     assert_eq!(blocks[0].component.as_deref(), Some("db"));
+    // An app started again before the source is back has the block from the
+    // start: it was kept, and reads as the last known one.
+    let restarted = Sources::default();
+    restarted.init_with(app_lib::sources::store::SourceStore::new(dir.path().join("sources.json")), Arc::new(Quiet));
+    let kept = restarted.data_safety_blocks();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].source_id, sid);
+    assert!(!kept[0].current);
+    assert!(kept[0].reason.starts_with("last known: db: 3 findings"), "{}", kept[0].reason);
+    assert!(app_lib::data_safety::check_launch(&restarted, &wt).unwrap_err().starts_with(REFUSAL_LEAD));
+    restarted.shutdown();
     let state = state_of(&sources, &registry);
     assert_eq!(state.agents.iter().map(|a| a.term_id).collect::<Vec<_>>(), [running], "the running agent in wt is listed");
 

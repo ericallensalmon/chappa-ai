@@ -171,10 +171,24 @@ const contributionTarget = (c: WorkContribution, ids: readonly string[] = c.acti
   only: ids,
 });
 
-/** Every target of a row's action cell: each contributor's own actions,
- *  then the item actions other sources offer on it. */
+/** A contributor's action ids without the moves its local status block
+ *  draws (`localStatus.allowed`), when the status is that contributor's:
+ *  a move shows once, in the status block. */
+export function idsWithoutMoves(row: WorkRow, c: WorkContribution): string[] {
+  const from = row.localStatusFrom?.sourceId ?? row.sourceId;
+  if (c.sourceId !== from) return c.actionIds;
+  const moves = new Set((row.localStatus?.allowed ?? []).map((m) => m.id));
+  return c.actionIds.filter((id) => !moves.has(id));
+}
+
+/** Every target of a row's action cell: each contributor's own actions
+ *  (without the moves of the status block), then the item actions other
+ *  sources offer on it. */
 export function rowTargets(row: WorkRow, sources: readonly MergeSource[] | undefined): (ActionTarget & { only?: readonly string[] })[] {
-  const own = row.contributions.filter((c) => c.actionIds.length > 0).map((c) => contributionTarget(c));
+  const own = row.contributions
+    .map((c) => ({ c, ids: idsWithoutMoves(row, c) }))
+    .filter(({ ids }) => ids.length > 0)
+    .map(({ c, ids }) => contributionTarget(c, ids));
   return [...own, ...(sources ? workItemActionTargets(row, sources) : [])];
 }
 
@@ -615,9 +629,8 @@ class WorkDetail {
     // status it is: that source's general buttons skip them.
     const statusFrom = row.localStatusFrom ?? { sourceId: row.sourceId, sourceLabel: row.sourceLabel, key: row.key };
     const statusTarget: ActionTarget = { ...statusFrom, view: "work" };
-    const moves = new Set((row.localStatus?.allowed ?? []).map((m) => m.id));
     this.paintSafety(row.dataSafety ?? null);
-    const ownIds = (c: WorkContribution): string[] => (c.sourceId === statusFrom.sourceId ? c.actionIds.filter((id) => !moves.has(id)) : c.actionIds);
+    const ownIds = (c: WorkContribution): string[] => idsWithoutMoves(row, c);
     paintBanners(
       this.banners,
       this.deps,

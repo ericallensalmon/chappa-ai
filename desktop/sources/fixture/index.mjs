@@ -22,10 +22,13 @@
 // `--data desktop/sources/fixture/data-overlay` runs a second source,
 // "Workspaces", that adds to the first one's work items (`ref: {source:
 // "fixture", key}`) and offers `itemActions` on its rows: run both to see
-// one item fed by two sources.
+// one item fed by two sources. Its manifest asks for owner updates: the
+// app posts the first source's rows to its `ownerUpdates` path when they
+// change; `CHAPPA_FIXTURE_OWNER_LOG=<file>` appends each body there as one
+// JSON line (for tests).
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isValidChallenge, proof } from "../lib/identity.mjs";
@@ -159,6 +162,20 @@ async function handleAction(req, res) {
   return send(res, spec.status, spec.body ?? {});
 }
 
+// An owner row the app pushed: `{source, key, item}`. Checked for shape,
+// logged when asked, answered 200 (also for keys this source has nothing
+// for, as a real source would).
+async function handleOwnerUpdate(req, res) {
+  const body = await readJson(req);
+  if (typeof body.source !== "string" || typeof body.key !== "string" || typeof body.item !== "object" || body.item === null) {
+    return fail(res, 400, "bad-request", "an owner update is {source, key, item}");
+  }
+  const log = process.env.CHAPPA_FIXTURE_OWNER_LOG;
+  if (log) appendFileSync(log, `${JSON.stringify(body)}
+`);
+  return send(res, 200, { message: `noted ${body.source}:${body.key}` });
+}
+
 async function handleExitReport(req, res, id) {
   const job = jobs.get(id);
   if (!job) return fail(res, 404, "unknown-job", `No job ${id}`);
@@ -198,6 +215,7 @@ async function route(req, res, url) {
     }
   }
   if (req.method === "POST" && p === "/api/actions") return handleAction(req, res);
+  if (req.method === "POST" && p === data("manifest").ownerUpdates) return handleOwnerUpdate(req, res);
   if (p.startsWith("/api/jobs/")) {
     const id = decodeURIComponent(p.slice("/api/jobs/".length));
     if (get) {

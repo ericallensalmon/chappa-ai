@@ -6,6 +6,7 @@
   },
   "actions": "/api/actions",
   "jobs": "/api/jobs/{id}",
+  "ownerUpdates": "/api/work/owner",
   "linkHosts": ["registry.example"],
   "itemActions": [
     {

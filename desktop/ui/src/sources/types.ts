@@ -301,6 +301,10 @@ export type Action =
       params?: Record<string, unknown>;
       /** Whether the user may or must add a note. */
       note?: "optional" | "required";
+      /** What the confirm dialog asks for; each value goes into `params`
+       *  under its name (replacing a fixed param of that name), checked by
+       *  the app against the declaration before the call. */
+      inputs?: EndpointInput[];
     }
   | { kind: "link"; id: string; label: string; url: string }
   /** Opens a drill-in page served by the source's endpoint. */
@@ -409,8 +413,24 @@ export interface Manifest {
   linkHosts: string[];
   /** Extra directories the source wants to launch in; the user approves them. */
   roots?: string[];
+  /** Where the app posts `{source, key, item}` each time a row of another
+   *  source that this one adds to changes (after that source's Work poll).
+   *  Part of what the user trusts. */
+  ownerUpdates?: string;
   /** Actions offered on OTHER sources' rows (endpoint only; a mutating one
    *  needs `confirm`, where `{key}`, `{title}` and `{source}` are filled by
    *  the app). Part of what the user trusts. */
   itemActions?: (Extract<Action, { kind: "endpoint" }> & { on: { view: "work" | "prs"; sources: string[] | "*" } })[];
+}
+
+/** One input of an endpoint action: a choice, several choices, one line of
+ *  text (at most `max` characters, default 200) or a number (at most `max`). */
+export interface EndpointInput {
+  name: string;
+  label: string;
+  kind: "choice" | "multi" | "text" | "number";
+  options?: { value: string; label: string }[];
+  required?: boolean;
+  default?: unknown;
+  max?: number;
 }

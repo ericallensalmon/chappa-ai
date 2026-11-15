@@ -145,7 +145,7 @@ fn app_accepts(m: &Value) -> Result<(), String> {
             }
         }
     }
-    for k in ["actions", "jobs", "workflows"] {
+    for k in ["actions", "jobs", "workflows", "ownerUpdates"] {
         if let Some(p) = obj.get(k) {
             if !path_ok(p.as_str().ok_or(k)?) {
                 return Err(k.into());
@@ -177,6 +177,7 @@ fn the_manifest_is_one_the_app_accepts_and_links_only_the_stack_hostname() {
     assert_eq!(m["views"]["environment"]["list"], "/api/environment");
     assert_eq!(m["actions"], "/api/actions");
     assert_eq!(m["jobs"], "/api/jobs/{id}");
+    assert_eq!(m["ownerUpdates"], "/api/work/owner");
     assert!(m.get("roots").is_none());
     let hosts: Vec<&str> = m["linkHosts"]
         .as_array()

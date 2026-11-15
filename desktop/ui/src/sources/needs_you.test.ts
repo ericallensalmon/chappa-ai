@@ -172,7 +172,7 @@ describe("buildNeedsYou", () => {
 
   it("a human-exit gate without a pending approval still needs a person", () => {
     const w = workAttention({ key: "ABC-9", title: null, localStatus: { id: "qa", label: "In QA", gate: "human-exit", allowed: [] } });
-    expect(w).toEqual({ key: "ABC-9", title: "ABC-9", detail: "In QA: only a person can move it on", url: null });
+    expect(w).toEqual({ key: "ABC-9", title: "ABC-9", detail: "In QA: only a person can move it out", url: null });
     expect(workAttention({ key: "ABC-8", localStatus: { id: "x", label: "X", gate: "human", allowed: [] } })).toBeNull();
     expect(workAttention({ key: "ABC-7", localStatus: null })).toBeNull();
     expect(workAttention({ title: "no key", localStatus: { gate: "human-exit" } })).toBeNull();

@@ -25,7 +25,13 @@
 //!   failing (stale-while-refresh);
 //! - **crash and restart**: the source's process row dying marks the
 //!   source down and keeps its data; the next launch gets a new port and
-//!   token and proves itself again.
+//!   token and proves itself again;
+//! - **owner updates** ([`owner_updates`]): after an owning source's Work
+//!   poll, the rows a trusted overlay source adds to are posted to it when
+//!   they changed, if its manifest asks for them;
+//! - **data-safety verdicts across restarts** ([`verdicts`]): every
+//!   Environment answer's `dataSafety` block is kept on disk, so a block
+//!   is in force from the moment the app starts, before the source is back.
 //!
 //! Everything HTTP happens here, in Rust. The webview gets the cached
 //! payloads and freshness through Tauri commands that accept only the main
@@ -38,7 +44,9 @@ pub mod client;
 pub mod identity;
 pub mod links;
 pub mod manifest;
+pub mod owner_updates;
 pub mod store;
+pub mod verdicts;
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -55,7 +63,9 @@ use actions::{action_verdict, actions_for, find_action, ActionVerdict, SourceAct
 use client::{PostReply, SourceClient, SourceError};
 use manifest::{backoff_delay, parse_manifest, trust_summary, Endpoint, Manifest, TrustSummary, VIEW_NAMES, WORKFLOWS_POLL, WORKFLOWS_VIEW};
 pub use store::{KeyMatch, PromptPolicy};
+use owner_updates::{pushes_after_poll, sent_key, OverlaySide, OwnerPush, PushQueue};
 use store::{AttachedSource, SourceStore};
+use verdicts::{SavedVerdict, VerdictStore};
 
 use crate::agent_tools::AgentTool;
 use crate::data_safety::{self, active_block, parse_block, ActiveBlock, ENVIRONMENT_VIEW};
@@ -245,6 +255,14 @@ struct SourceState {
     /// The last page of each panel fetched, so the page's own actions can be
     /// judged and run like a view's.
     panels: PanelCache,
+    /// The folder a launched source works on: its `--project`, else the
+    /// command's working folder. What a stack source's data safety covers
+    /// before it has said anything.
+    launch_folder: Option<PathBuf>,
+    /// The hash of each owner row last sent to this source as an owner
+    /// update (see [`owner_updates`]); forgotten on relaunch and re-trust,
+    /// so it hears every row once more.
+    owner_sent: BTreeMap<String, String>,
 }
 
 impl SourceState {
@@ -292,6 +310,10 @@ impl PanelCache {
 
 struct Inner {
     store: Option<SourceStore>,
+    /// Each source's last data-safety verdict, on disk.
+    verdicts: Option<VerdictStore>,
+    /// Owner rows waiting to be sent to the overlay sources that add to them.
+    owner_queue: PushQueue,
     sources: BTreeMap<String, SourceState>,
     emitter: Arc<dyn SourcesEmitter>,
     shutting_down: bool,
@@ -309,6 +331,8 @@ impl Default for Sources {
             inner: Arc::new((
                 Mutex::new(Inner {
                     store: None,
+                    verdicts: None,
+                    owner_queue: PushQueue::default(),
                     sources: BTreeMap::new(),
                     emitter: Arc::new(NullEmitter),
                     shutting_down: false,
@@ -348,6 +372,7 @@ impl Sources {
         let attached: Vec<AttachedSource> = store.attached().to_vec();
         {
             let mut inner = self.lock();
+            inner.verdicts = Some(VerdictStore::beside(store.path()));
             inner.store = Some(store);
             inner.emitter = emitter;
         }
@@ -417,6 +442,7 @@ impl Sources {
             state.status = SourceStatus::Starting;
             state.last_error = None;
             state.trusted = false;
+            state.owner_sent.clear();
             for view in state.views.values_mut() {
                 view.refreshing = false;
                 view.failures = 0;
@@ -440,6 +466,16 @@ impl Sources {
             state.generation
         };
         self.spawn_worker(key, generation);
+    }
+
+    /// Where a launched source works: its `--project` folder, else the
+    /// command's working folder (see [`launch_folder_of`]). Data safety
+    /// covers it for a stack source that has not answered yet.
+    pub fn set_launch_folder(&self, project_path: &Path, command: &str, folder: PathBuf) {
+        let key = SourceStore::launched_key(project_path, command);
+        if let Some(state) = self.lock().sources.get_mut(&key) {
+            state.launch_folder = Some(folder);
+        }
     }
 
     /// The spawn failed after [`Sources::prepare_launch`]: nothing to wait for.
@@ -498,6 +534,7 @@ impl Sources {
             state.status = SourceStatus::Starting;
             state.last_error = None;
             state.trusted = false;
+            state.owner_sent.clear();
             state.generation
         };
         self.notify();
@@ -525,6 +562,9 @@ impl Sources {
                 state.generation += 1;
             }
             inner.sources.remove(&key);
+            if let Some(verdicts) = inner.verdicts.as_mut() {
+                verdicts.remove(source_id)?;
+            }
             let store = inner.store.as_mut().ok_or_else(|| "sources store not initialized".to_owned())?;
             store.remove_attached(&addr)?;
             store.forget_trust(&key)?;
@@ -566,6 +606,7 @@ impl Sources {
             store.mark_trusted(&key, hash)?;
             let state = inner.sources.get_mut(&key).expect("looked up above");
             state.trusted = true;
+            state.owner_sent.clear();
             if state.status == SourceStatus::NeedsReview {
                 state.status = SourceStatus::Starting;
             }
@@ -891,6 +932,13 @@ impl Sources {
                 return true;
             }
             let now = epoch_ms();
+            let fresh = matches!(&result, Ok(payload) if payload.is_object());
+            // An Environment answer is this source's data-safety verdict now,
+            // clean or not; kept on disk for the next start.
+            let verdict = match &result {
+                Ok(payload) if payload.is_object() && view == ENVIRONMENT_VIEW => Some(Self::verdict_of(state, payload, now)),
+                _ => None,
+            };
             let Some(v) = state.views.get_mut(view) else { return false };
             v.refreshing = false;
             match result {
@@ -923,10 +971,124 @@ impl Sources {
                     }
                 }
             }
-            state.id.clone()
+            let id = state.id.clone();
+            if let (Some(verdict), Some(store)) = (verdict, inner.verdicts.as_mut()) {
+                if let Err(e) = store.put(&id, verdict) {
+                    log::warn!("[data-safety] cannot keep the verdict of {id}: {e}");
+                }
+            }
+            let start_sender = fresh && view == "work" && Self::queue_owner_updates(&mut inner, key);
+            (id, start_sender)
         };
+        let (source_id, start_sender) = source_id;
+        if start_sender {
+            self.spawn_owner_sender();
+        }
         self.emit(json!({"event": "view", "source_id": source_id, "view": view}));
         false
+    }
+
+    /// After a Work poll of the source `key`: queue each of its rows that a
+    /// trusted overlay source asking for owner updates adds to and has not
+    /// been sent in this form. Answers whether a sender must be started.
+    fn queue_owner_updates(inner: &mut Inner, key: &str) -> bool {
+        let pushes: Vec<OwnerPush> = {
+            let Some(owner) = inner.sources.get(key) else { return false };
+            let (Some(manifest), Some(work)) = (owner.manifest.as_ref(), owner.views.get("work").and_then(|v| v.payload.as_ref())) else {
+                return false;
+            };
+            let overlays: Vec<OverlaySide<'_>> = inner
+                .sources
+                .values()
+                .filter(|s| s.key != key)
+                .map(|s| OverlaySide {
+                    id: &s.id,
+                    accepts: s.trusted && s.manifest.as_ref().is_some_and(|m| m.owner_updates.is_some()),
+                    work: s.views.get("work").and_then(|v| v.payload.as_ref()),
+                    sent: &s.owner_sent,
+                })
+                .collect();
+            pushes_after_poll(&manifest.id, work, &overlays)
+        };
+        let mut start = false;
+        for push in pushes {
+            if let Some(target) = inner.sources.values_mut().find(|s| s.id == push.target) {
+                // Recorded when queued: a send that fails is not repeated
+                // until the row changes again.
+                target.owner_sent.insert(sent_key(&push.owner, &push.key), push.hash.clone());
+            }
+            start |= inner.owner_queue.add(push);
+        }
+        start
+    }
+
+    /// A sender for the owner-update queue: waits out the debounce, then
+    /// posts what is queued, off the poll thread.
+    fn spawn_owner_sender(&self) {
+        let sources = self.clone();
+        let spawned = std::thread::Builder::new().name("source owner updates".into()).spawn(move || {
+            std::thread::sleep(owner_updates::DEBOUNCE);
+            if sources.is_shutting_down() {
+                return;
+            }
+            let batch = sources.lock().owner_queue.take();
+            for push in batch {
+                sources.send_owner_update(&push);
+            }
+        });
+        if let Err(e) = spawned {
+            log::error!("[sources] cannot start the owner-update sender: {e}");
+        }
+    }
+
+    /// `POST {ownerUpdates}` with one owner row. Only a `2xx` counts; any
+    /// other answer or a failure is logged and dropped.
+    fn send_owner_update(&self, push: &OwnerPush) {
+        let sent = self.client_for(&push.target).and_then(|(mut client, manifest)| {
+            let endpoint = manifest.owner_updates.ok_or_else(|| "it no longer asks for owner updates".to_owned())?;
+            client.post(&endpoint, &[], &push.body()).map_err(|e| e.to_string())
+        });
+        match sent {
+            Ok(reply) if (200..300).contains(&reply.status) => {}
+            Ok(reply) => log::warn!("[sources] owner update {}:{} to {} refused: {}", push.owner, push.key, push.target, reply.as_error()),
+            Err(e) => log::warn!("[sources] owner update {}:{} to {} not sent: {e}", push.owner, push.key, push.target),
+        }
+    }
+
+    /// The record an Environment answer leaves in [`verdicts`].
+    fn verdict_of(state: &SourceState, payload: &Value, now: u64) -> SavedVerdict {
+        let info = Self::info_of(state);
+        SavedVerdict {
+            block: parse_block(payload),
+            source_label: info.label,
+            manifest_id: info.manifest_id,
+            fallback: state.launch_folder.clone().or(info.project_path),
+            saved_ms: now,
+        }
+    }
+}
+
+/// The folder a source command works on: the value of `--project <dir>` (or
+/// `--project=<dir>`) among its arguments, read against `cwd` when
+/// relative, else `cwd` itself. A command given as one shell string is
+/// split on whitespace for this.
+pub fn launch_folder_of(cwd: &Path, args: &[String]) -> PathBuf {
+    let words: Vec<&str> = args.iter().flat_map(|a| a.split_whitespace()).collect();
+    let named = words.iter().enumerate().find_map(|(i, w)| match w.strip_prefix("--project") {
+        Some("") => words.get(i + 1).copied(),
+        Some(rest) => rest.strip_prefix('='),
+        None => None,
+    });
+    match named.map(|n| n.trim_matches(['"', '\''])).filter(|n| !n.is_empty()) {
+        Some(dir) => {
+            let dir = Path::new(dir);
+            if dir.is_absolute() {
+                dir.to_path_buf()
+            } else {
+                cwd.join(dir)
+            }
+        }
+        None => cwd.to_path_buf(),
     }
 }
 
@@ -947,11 +1109,13 @@ pub struct SourceInfo {
 }
 
 /// What an endpoint call's `target` carries besides `view` and `key` when
-/// the row is fed by more than one source. For an item action (offered on
-/// another source's row) and for an overlay's own actions: `source` is the
-/// owning source's manifest id, `item` the owner's row exactly as it was
-/// last received (absent when the owner does not list it, or is not
-/// trusted), and `key` the owner's key.
+/// it names a Work or PR row. For an item action (offered on another
+/// source's row) and for an overlay's actions (its own, its sections',
+/// its banners'): `source` is the owning source's manifest id, `item` the
+/// owner's row exactly as it was last received (absent when the owner does
+/// not list it, or is not trusted), and `key` the owner's key. For the
+/// actions of a row the calling source owns: its own manifest id and the
+/// row as it sent it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CallTarget {
     pub key: Option<String>,
@@ -1195,17 +1359,34 @@ impl Sources {
                 key.map(|k| format!("`{k}`")).unwrap_or_else(|| "the view itself".to_owned())
             )
         })?;
-        let mut target = CallTarget::default();
-        if let (Some(key), "work") = (key, view) {
-            if let Some((owner, owner_key)) = actions::work_entry(&payload, key).and_then(actions::overlay_ref) {
-                target = CallTarget {
+        let info = Self::info_of(state);
+        Ok((found.action, info.clone(), Self::row_target(&inner, &info, &payload, view, key)))
+    }
+
+    /// What a call naming the `view` row `key` of a source's payload
+    /// carries about that row, whichever of the row's actions it is (its
+    /// own, a section's, a banner's): for a work entry that adds to
+    /// another source's item, that owner, its key and its row as last
+    /// received (no row while the owner does not list it); for a row the
+    /// source owns itself (a work item, a pull request), the source and the
+    /// row as it sent it. Nothing for the view's own actions.
+    fn row_target(inner: &Inner, info: &SourceInfo, payload: &Value, view: &str, key: Option<&str>) -> CallTarget {
+        let Some(key) = key else { return CallTarget::default() };
+        if view == "work" {
+            if let Some((owner, owner_key)) = actions::work_entry(payload, key).and_then(actions::overlay_ref) {
+                return CallTarget {
                     key: Some(owner_key.to_owned()),
                     source: Some(owner.to_owned()),
-                    item: Self::owner_row(&inner, owner, "work", owner_key).map(|(_, row)| row),
+                    item: Self::owner_row(inner, owner, "work", owner_key).map(|(_, row)| row),
                 };
             }
         }
-        Ok((found.action, Self::info_of(state), target))
+        if view == "work" || view == "prs" {
+            if let Some(row) = actions::owned_row(payload, view, key) {
+                return CallTarget { key: Some(key.to_owned()), source: Some(info.manifest_id.clone()), item: Some(row.clone()) };
+            }
+        }
+        CallTarget::default()
     }
 
     /// The row `key` of the `view` that the trusted source with manifest id
@@ -1259,13 +1440,14 @@ impl Sources {
             .iter()
             .filter(|a| a.offered_on(view, &owner_manifest.id))
             .map(|a| match &a.action {
-                SourceAction::Endpoint { id, label, mutates, confirm, params, note } => SourceAction::Endpoint {
+                SourceAction::Endpoint { id, label, mutates, confirm, params, note, inputs } => SourceAction::Endpoint {
                     id: id.clone(),
                     label: label.clone(),
                     mutates: *mutates,
                     confirm: confirm.as_deref().map(|c| actions::fill_confirm(c, key, title, &owner_manifest.label)),
                     params: params.clone(),
                     note: *note,
+                    inputs: inputs.clone(),
                 },
                 other => other.clone(),
             })
@@ -1453,26 +1635,84 @@ impl Sources {
 
     // ---- data safety ------------------------------------------------------------
 
-    /// The data-safety blocks in force, one per source whose last
-    /// Environment payload carries a block that keeps agents out (see
-    /// [`crate::data_safety`]). The LAST payload counts while the source is
-    /// down, untrusted or failing its Environment poll: a block stays in
-    /// force until the source answers with one that lifts it, and says it
-    /// is the last known one meanwhile.
+    /// The data-safety blocks in force (see [`crate::data_safety`]), one per
+    /// source:
+    ///
+    /// - a source that answered its Environment view since the app started:
+    ///   the block of its LAST payload, which counts while the source is
+    ///   down, untrusted or failing its Environment poll (marked as the last
+    ///   known one), until it answers with one that lifts it;
+    /// - one that has not answered yet: the verdict saved from its last
+    ///   answer before ([`verdicts`]), last known; one saved as not blocking
+    ///   allows;
+    /// - a trusted stack source (manifest id `stack:…`) with no saved
+    ///   verdict, a new one or one never heard from: its folder is blocked
+    ///   until its first answer;
+    /// - a saved verdict of a source not registered (yet) this run, last
+    ///   known.
     pub fn data_safety_blocks(&self) -> Vec<ActiveBlock> {
         let inner = self.lock();
-        inner
-            .sources
-            .values()
-            .filter_map(|state| {
-                let view = state.views.get(ENVIRONMENT_VIEW)?;
-                let block = parse_block(view.payload.as_ref()?)?;
-                let current = state.trusted && state.status == SourceStatus::Up && view.last_error.is_none();
-                let info = Self::info_of(state);
-                active_block(&state.id, &info.label, &block, current, info.project_path.as_deref())
-            })
-            .collect()
+        let saved = |id: &str| inner.verdicts.as_ref().and_then(|v| v.get(id));
+        let mut out = Vec::new();
+        for state in inner.sources.values() {
+            let info = Self::info_of(state);
+            let fallback = state.launch_folder.clone().or_else(|| info.project_path.clone());
+            let view = state.views.get(ENVIRONMENT_VIEW);
+            if let Some(payload) = view.and_then(|v| v.payload.as_ref()) {
+                let Some(block) = parse_block(payload) else { continue };
+                let current = state.trusted && state.status == SourceStatus::Up && view.is_some_and(|v| v.last_error.is_none());
+                out.extend(active_block(&state.id, &info.label, &block, current, fallback.as_deref()));
+                continue;
+            }
+            match saved(&state.id) {
+                Some(v) => {
+                    let label = state.manifest.as_ref().map(|m| m.label.as_str()).unwrap_or(&v.source_label);
+                    out.extend(saved_block(&state.id, label, v));
+                }
+                None => out.extend(Self::unheard_block(state, &info, fallback)),
+            }
+        }
+        if let Some(store) = &inner.verdicts {
+            for (id, v) in store.all() {
+                if !inner.sources.values().any(|s| &s.id == id) {
+                    out.extend(saved_block(id, &v.source_label, v));
+                }
+            }
+        }
+        out
     }
+
+    /// A trusted stack source that has never sent a verdict (none saved, no
+    /// answer yet): its folder is kept from agents until it answers.
+    fn unheard_block(state: &SourceState, info: &SourceInfo, folder: Option<PathBuf>) -> Option<ActiveBlock> {
+        let manifest = state.manifest.as_ref()?;
+        if !state.trusted || !manifest.id.starts_with(STACK_SOURCE_PREFIX) || !manifest.views.contains_key(ENVIRONMENT_VIEW) {
+            return None;
+        }
+        let folder = folder?;
+        Some(ActiveBlock {
+            source_id: state.id.clone(),
+            source_label: info.label.clone(),
+            instance: manifest.id[STACK_SOURCE_PREFIX.len()..].to_owned(),
+            state: data_safety::UNHEARD_STATE.to_owned(),
+            current: false,
+            reason: data_safety::unheard_reason(&info.label),
+            folders: vec![crate::roots::display(&folder)],
+            bound: None,
+            component: None,
+            ack_action_id: None,
+            covered: vec![folder],
+        })
+    }
+}
+
+/// The manifest id prefix of a stack source: one whose data safety is
+/// enforced from before its first answer.
+pub const STACK_SOURCE_PREFIX: &str = "stack:";
+
+/// A saved verdict in force, as the last known one.
+fn saved_block(id: &str, label: &str, v: &SavedVerdict) -> Option<ActiveBlock> {
+    active_block(id, label, v.block.as_ref()?, false, v.fallback.as_deref())
 }
 
 /// An agent action whose folder data safety blocks is disabled with the
@@ -1507,6 +1747,8 @@ fn fresh_state(key: &str, origin: Origin) -> SourceState {
         unconfirmable_logged: Default::default(),
         jobs: Vec::new(),
         panels: PanelCache::default(),
+        launch_folder: None,
+        owner_sent: BTreeMap::new(),
     }
 }
 
@@ -2079,5 +2321,270 @@ mod tests {
         let me = CallActor::human();
         assert!(matches!(&me, CallActor::Human(n) if !n.is_empty()));
         assert!(me.header_value().starts_with("human:"));
+    }
+
+    /// A stack source's manifest: id `id`, serving the Environment view.
+    fn stack_manifest(id: &str) -> Manifest {
+        parse_manifest(&json!({
+            "contract": 1, "source": {"id": id, "label": "Stack app", "version": "1"},
+            "views": {"environment": {"list": "/api/env"}}
+        }))
+        .unwrap()
+    }
+
+    fn with_manifest(sources: &Sources, id: &str) {
+        sources.lock().sources.get_mut("stack").unwrap().manifest = Some(stack_manifest(id));
+    }
+
+    /// Sources over a config folder, as the app starts them.
+    fn started(config: &Path) -> Sources {
+        let sources = Sources::default();
+        sources.init_with(SourceStore::new(config.join(store::FILE_NAME)), Arc::new(NullEmitter));
+        sources
+    }
+
+    fn block_payload(project: &Path, state: &str, blocks: bool) -> Value {
+        json!({ "components": [], "dataSafety": {
+            "instance": "app/0", "state": state, "blocksAgents": blocks, "bound": null,
+            "project": project.display().to_string(),
+            "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }],
+            "ackActionId": "data-safety-ack",
+        }})
+    }
+
+    fn answer(sources: &Sources, payload: Value) {
+        assert!(!sources.apply_poll("stack", 0, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(payload)), "not cancelled");
+    }
+
+    #[test]
+    fn a_verdict_is_kept_across_a_restart_and_in_force_before_the_first_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = dir.path().join("stack");
+        let inside = project.join(".work").join("ABC-1");
+        std::fs::create_dir_all(&inside).unwrap();
+
+        // First run: the stack source answers that agents are blocked.
+        let first = started(&config);
+        let id = put_environment(&first, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&first, "stack:app");
+        answer(&first, block_payload(&project, "not-clean", true));
+        assert_eq!(first.data_safety_blocks().len(), 1);
+        assert!(config.join(verdicts::FILE_NAME).is_file(), "kept in the config folder");
+
+        // Restart, before the source is even registered: the saved block
+        // is in force, as the last known one.
+        let second = started(&config);
+        let blocks = second.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].source_id, id);
+        assert!(!blocks[0].current);
+        assert!(blocks[0].reason.starts_with("last known: db: 1 finding"), "{}", blocks[0].reason);
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        // Registered (launched, not trusted or answered yet): still in force.
+        put_environment(&second, &project, None, SourceStatus::Starting, false, None);
+        assert_eq!(second.data_safety_blocks().len(), 1);
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        // Its first answer replaces the record: clean now, and allowed.
+        second.lock().sources.get_mut("stack").unwrap().trusted = true;
+        with_manifest(&second, "stack:app");
+        answer(&second, block_payload(&project, "clean", false));
+        assert!(second.data_safety_blocks().is_empty());
+        assert!(crate::data_safety::check_launch(&second, &inside).is_ok());
+
+        // Restart again: a saved clean verdict allows from the start, even
+        // for a stack source that has not answered yet.
+        let third = started(&config);
+        assert!(third.data_safety_blocks().is_empty());
+        put_environment(&third, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&third, "stack:app");
+        assert!(third.data_safety_blocks().is_empty());
+        // And it stays clean while it cannot answer (marked unavailable in
+        // Environment, nothing enforced).
+        third.lock().sources.get_mut("stack").unwrap().status = SourceStatus::Down;
+        assert!(third.data_safety_blocks().is_empty());
+    }
+
+    #[test]
+    fn a_stack_source_never_heard_from_blocks_its_folder_until_it_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = dir.path().join("stack");
+        let deep = project.join(".work").join("ABC-1");
+        std::fs::create_dir_all(&deep).unwrap();
+        let sources = started(&config);
+        put_environment(&sources, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&sources, "stack:app");
+        let blocks = sources.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!((blocks[0].state.as_str(), blocks[0].instance.as_str()), (crate::data_safety::UNHEARD_STATE, "app"));
+        assert!(!blocks[0].current);
+        assert_eq!(blocks[0].reason, "Stack app has not said yet whether its data is safe — agents wait until it answers");
+        let refusal = crate::data_safety::check_launch(&sources, &deep).unwrap_err();
+        assert!(refusal.starts_with(crate::data_safety::REFUSAL_LEAD), "{refusal}");
+        assert!(crate::data_safety::check_launch(&sources, dir.path()).is_ok(), "outside its folder");
+        // The launch folder, when known, is what is covered.
+        let elsewhere = dir.path().join("other").join("stack-project");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        sources.lock().sources.get_mut("stack").unwrap().launch_folder = Some(elsewhere.clone());
+        assert!(crate::data_safety::check_launch(&sources, &elsewhere).is_err());
+        assert!(crate::data_safety::check_launch(&sources, &deep).is_ok());
+        sources.lock().sources.get_mut("stack").unwrap().launch_folder = None;
+        // An answer with no block at all lifts it, and is kept as such.
+        answer(&sources, json!({ "components": [] }));
+        assert!(sources.data_safety_blocks().is_empty());
+        let restarted = started(&config);
+        put_environment(&restarted, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&restarted, "stack:app");
+        assert!(restarted.data_safety_blocks().is_empty(), "it answered before: no longer never heard from");
+    }
+
+    #[test]
+    fn only_a_trusted_stack_source_is_held_to_its_first_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(&project).unwrap();
+        let sources = started(&config);
+        // Not a stack source: never heard from, nothing enforced.
+        put_environment(&sources, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&sources, "github");
+        assert!(sources.data_safety_blocks().is_empty());
+        // A stack source not trusted (yet): nothing either; its manifest
+        // is not something the user agreed to.
+        put_environment(&sources, &project, None, SourceStatus::NeedsReview, false, None);
+        with_manifest(&sources, "stack:app");
+        assert!(sources.data_safety_blocks().is_empty());
+        // One that serves no Environment view cannot answer, so is not held.
+        put_environment(&sources, &project, None, SourceStatus::Up, true, None);
+        sources.lock().sources.get_mut("stack").unwrap().manifest = Some(
+            parse_manifest(&json!({"contract": 1, "source": {"id": "stack:app", "label": "S", "version": "1"}, "views": {"work": {"list": "/w"}}})).unwrap(),
+        );
+        assert!(sources.data_safety_blocks().is_empty());
+        // Without a config folder (no store), the same rule still holds.
+        let bare = Sources::default();
+        put_environment(&bare, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&bare, "stack:app");
+        assert_eq!(bare.data_safety_blocks().len(), 1);
+    }
+
+    #[test]
+    fn a_source_detached_in_settings_takes_its_verdict_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir_all(&project).unwrap();
+        let sources = started(&config);
+        let key = SourceStore::attached_key("127.0.0.1:7000");
+        let mut state = fresh_state(&key, Origin::Attached { addr: "127.0.0.1:7000".into(), token_file: dir.path().join("t"), warning: None });
+        state.trusted = true;
+        state.status = SourceStatus::Up;
+        state.views.insert(
+            ENVIRONMENT_VIEW.into(),
+            ViewState {
+                endpoint: Endpoint::named_in_payload("/api/env").unwrap(),
+                poll: Duration::from_secs(120),
+                payload: None,
+                as_of_ms: None,
+                next_due_ms: 0,
+                refreshing: false,
+                failures: 0,
+                last_error: None,
+            },
+        );
+        let id = state.id.clone();
+        sources.lock().sources.insert(key.clone(), state);
+        assert!(!sources.apply_poll(&key, 0, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(block_payload(&project, "not-clean", true))));
+        assert_eq!(sources.data_safety_blocks().len(), 1);
+        assert!(VerdictStore::beside(&config.join(store::FILE_NAME)).get(&id).is_some());
+        sources.detach(&id).unwrap();
+        assert!(sources.data_safety_blocks().is_empty());
+        assert!(VerdictStore::beside(&config.join(store::FILE_NAME)).get(&id).is_none());
+        assert!(started(&config).data_safety_blocks().is_empty(), "and it is not back after a restart");
+    }
+
+    #[test]
+    fn the_launch_folder_is_the_project_argument_or_the_working_folder() {
+        let cwd = if cfg!(windows) { PathBuf::from("C:\\code\\x") } else { PathBuf::from("/srv/example") };
+        let abs = if cfg!(windows) { "C:\\code\\stack" } else { "/srv/stack" };
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(launch_folder_of(&cwd, &args(&["serve"])), cwd);
+        assert_eq!(launch_folder_of(&cwd, &args(&["serve", "--project", "stack"])), cwd.join("stack"));
+        assert_eq!(launch_folder_of(&cwd, &args(&["serve", "--project", abs])), PathBuf::from(abs));
+        assert_eq!(launch_folder_of(&cwd, &args(&["serve", &format!("--project={abs}")])), PathBuf::from(abs));
+        // A command given as one shell string.
+        assert_eq!(launch_folder_of(&cwd, &args(&["/C", "chappa-stack serve --project stack --slot 1"])), cwd.join("stack"));
+        // Not the flag: a longer word, or no value after it.
+        assert_eq!(launch_folder_of(&cwd, &args(&["--projects", "x"])), cwd);
+        assert_eq!(launch_folder_of(&cwd, &args(&["serve", "--project"])), cwd);
+    }
+
+    /// A source with a Work view whose payload is `work`, under `key`.
+    fn put_work(sources: &Sources, key: &str, manifest: Value, work: Option<Value>, trusted: bool) -> String {
+        let mut state = fresh_state(key, Origin::Attached { addr: "127.0.0.1:1".into(), token_file: PathBuf::from("t"), warning: None });
+        state.trusted = trusted;
+        state.status = SourceStatus::Up;
+        state.manifest = Some(parse_manifest(&manifest).unwrap());
+        state.views.insert(
+            "work".into(),
+            ViewState {
+                endpoint: Endpoint::named_in_payload("/api/work").unwrap(),
+                poll: Duration::from_secs(60),
+                payload: work,
+                as_of_ms: None,
+                next_due_ms: 0,
+                refreshing: false,
+                failures: 0,
+                last_error: None,
+            },
+        );
+        let id = state.id.clone();
+        sources.lock().sources.insert(key.into(), state);
+        id
+    }
+
+    #[test]
+    fn an_owner_poll_queues_changed_rows_for_trusted_overlays_that_ask_for_them() {
+        let sources = Sources::default();
+        // Shut down first: a sender started by a poll then gives up at once,
+        // so the queue is read here rather than sent.
+        sources.shutdown();
+        let manifest = |id: &str, owner_updates: bool| {
+            let mut m = json!({"contract": 1, "source": {"id": id, "label": id, "version": "1"}, "views": {"work": {"list": "/api/work"}}});
+            if owner_updates {
+                m["ownerUpdates"] = json!("/api/work/owner");
+            }
+            m
+        };
+        let overlay = json!({"items": [{"ref": {"source": "tracker", "key": "ABC-1"}}]});
+        let asks = put_work(&sources, "a-asks", manifest("ws", true), Some(overlay.clone()), true);
+        put_work(&sources, "b-silent", manifest("other", false), Some(overlay.clone()), true);
+        put_work(&sources, "c-untrusted", manifest("third", true), Some(overlay.clone()), false);
+        put_work(&sources, "tracker", manifest("tracker", false), None, true);
+        let row = |status: &str| json!({"items": [{"key": "ABC-1", "status": {"label": status}}]});
+        let poll = |status: &str| sources.apply_poll("tracker", 0, "work", Duration::from_secs(60), Ok(row(status)));
+        assert!(!poll("To Do"));
+        let queued = |sources: &Sources| sources.lock().owner_queue.len();
+        assert_eq!(queued(&sources), 1, "only the trusted overlay asking for them");
+        let batch = sources.lock().owner_queue.take();
+        assert_eq!(batch[0].target, asks);
+        assert_eq!(batch[0].body(), json!({"source": "tracker", "key": "ABC-1", "item": {"key": "ABC-1", "status": {"label": "To Do"}}}));
+        // The same row on the next poll: nothing; a changed one: queued.
+        assert!(!poll("To Do"));
+        assert_eq!(queued(&sources), 0);
+        assert!(!poll("Doing"));
+        assert_eq!(queued(&sources), 1);
+        // A failed poll queues nothing.
+        let _ = sources.lock().owner_queue.take();
+        assert!(!sources.apply_poll("tracker", 0, "work", Duration::from_secs(60), Err(SourceError::Unreachable("down".into()))));
+        assert_eq!(queued(&sources), 0);
+        // An overlay re-trusted hears every row once more.
+        sources.lock().sources.get_mut("a-asks").unwrap().owner_sent.clear();
+        assert!(!poll("Doing"));
+        assert_eq!(queued(&sources), 1);
     }
 }

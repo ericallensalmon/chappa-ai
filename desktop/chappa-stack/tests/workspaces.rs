@@ -1142,6 +1142,7 @@ fn the_manifest_offers_start_work_on_every_work_row_or_the_listed_sources() {
                 "confirm": "Check out {key} at its head into a review worktree and bring up slot 0 from it",
                 "on": { "view": "prs", "sources": ["*"] },
             }],
+            "ownerUpdates": "/api/work/owner",
             "actions": "/api/actions",
             "jobs": "/api/jobs/{id}",
             "linkHosts": [],

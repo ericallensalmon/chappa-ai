@@ -31,6 +31,11 @@
 //!    0 done, 1 a step failed (or data safety stopped something), 2
 //!    refused before running anything.
 //!
+//! When the slot's work item asks state seeds for a recipe component the
+//! plan creates or recreates, that component's recipe is replayed after
+//! the steps (scrub, check, seed, the item's state seeds, check), as a
+//! resume replays a saved state's.
+//!
 //! A `data-safety-check` job runs the checks of the components it names
 //! that are running, records the verdicts, applies `stop` / `block-up`
 //! the same way, and fails when any verdict is not clean.
@@ -50,6 +55,7 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use stack_core::checks::EngineChecker;
+use stack_core::definition::DataStrategy;
 use stack_core::definition::ScanWhen;
 use stack_core::definition::StacksDocument;
 use stack_core::driver::{Check, Outcome, ResolvedInstance};
@@ -57,9 +63,10 @@ use stack_core::images::ProvenanceCache;
 use stack_core::intent::{utc_now, ActiveRecord};
 use stack_core::jobs::{JobStep, LocalStep, RunBlock};
 use stack_core::planner::{Change, Plan, PlanError, Step, Verb};
+use stack_core::runner::Observation;
 use stack_core::runner::{ApplyOptions, RunnerError, StackRunner};
 use stack_core::safety::Policy;
-use stack_core::states::SavedState;
+use stack_core::states::{DataSnapshot, RecipeRecord, SavedState, SeedChoice};
 use stack_core::workspace::{c8, ItemRecord};
 
 use crate::data_safety::{self, CheckEntry, SafetyState, Trigger, AFTER_UP_ATTEMPTS};
@@ -282,6 +289,9 @@ fn execute(
         .instance(rec.slot)
         .map_err(|e| (EXIT_REFUSED, e.to_string()))?;
     let mut the_plan: Option<Plan> = None;
+    // Recipe components the plan starts fresh whose data the bound item
+    // asks state seeds for (a resume replays its own recipes instead).
+    let mut seeded: Vec<(String, Option<RecipeRecord>)> = Vec::new();
     let steps: Vec<JobStep> = match &planned {
         Some((change, stored, _, remove_volumes)) => {
             out.say(
@@ -313,6 +323,9 @@ fn execute(
                     .plan(&obs, change)
                     .map_err(|e| (EXIT_REFUSED, format!("cannot plan: {e}")))?,
             };
+            if resume.is_none() {
+                seeded = seeded_by_item(&loaded, work_dir, &plan, &obs);
+            }
             let starts = plan
                 .steps
                 .iter()
@@ -456,7 +469,7 @@ fn execute(
     // step (a verdict that is not clean ends the job there), otherwise once
     // the steps are done.
     // A resume checks what it restores or rebuilds itself, after that.
-    let restored: Vec<&str> = resume
+    let mut restored: Vec<&str> = resume
         .map(|r| {
             r.restores
                 .iter()
@@ -465,6 +478,7 @@ fn execute(
                 .collect()
         })
         .unwrap_or_default();
+    restored.extend(seeded.iter().map(|(c, _)| c.as_str()));
     let (gated, after_up): (Vec<String>, Vec<String>) = match &the_plan {
         Some(plan) => {
             let started: Vec<&str> = plan
@@ -597,6 +611,19 @@ fn execute(
         ),
         None => Vec::new(),
     };
+    let seed_failures = rebuild_data(
+        world,
+        &loaded,
+        &runner,
+        &inst,
+        work_dir,
+        rec,
+        &[],
+        &seeded,
+        (Trigger::AfterUp, "after up"),
+        out,
+        result,
+    );
     let cache = ProvenanceCache::load(work_dir, &inst.id);
     for (c, p) in &cache.components {
         result.provenance.insert(
@@ -608,6 +635,15 @@ fn execute(
         return Err((
             EXIT_FAILED,
             format!("resumed, except: {}", resume_failures.join("; ")),
+        ));
+    }
+    if !seed_failures.is_empty() {
+        return Err((
+            EXIT_FAILED,
+            format!(
+                "the item's state seeds did not all run: {}",
+                seed_failures.join("; ")
+            ),
         ));
     }
     if !stopped_by_policy.is_empty() {
@@ -660,8 +696,15 @@ fn save_now(
         );
     };
     let mut say = |l: &str| out.borrow_mut().say(l);
-    states::save_state(&cx, spec, Some(&rec.id), None, &mut check, &mut say)
-        .map_err(|e| (EXIT_FAILED, e))
+    states::save_state(
+        &cx,
+        spec,
+        Some(&rec.id),
+        rec.actor.as_deref(),
+        &mut check,
+        &mut say,
+    )
+    .map_err(|e| (EXIT_FAILED, e))
 }
 
 /// The automatic save before a destructive change; its failure ends the
@@ -741,6 +784,115 @@ fn resume_data(
         Ok(None) => return vec![format!("the saved state {} is gone", r.state)],
         Err(e) => return vec![e],
     };
+    let snapshots: Vec<(String, DataSnapshot)> = r
+        .restores
+        .iter()
+        .filter_map(|c| {
+            let snap = state.data.get(c).and_then(|d| d.snapshot.clone())?;
+            Some((c.clone(), snap))
+        })
+        .collect();
+    let recipes: Vec<(String, Option<RecipeRecord>)> = r
+        .recipes
+        .iter()
+        .map(|c| (c.clone(), state.data.get(c).and_then(|d| d.recipe.clone())))
+        .collect();
+    failures.extend(rebuild_data(
+        world,
+        loaded,
+        runner,
+        inst,
+        work_dir,
+        rec,
+        &snapshots,
+        &recipes,
+        (Trigger::AfterRestore, "after the resume"),
+        out,
+        result,
+    ));
+    failures
+}
+
+/// The recipe components a plan creates or recreates whose data the
+/// bound work item asks state seeds for, each with the seeds it asks for.
+/// A fresh container starts from the image's data, so its recipe is
+/// replayed with those seeds once the steps ran.
+fn seeded_by_item(
+    loaded: &Loaded,
+    work_dir: &Path,
+    plan: &Plan,
+    obs: &Observation,
+) -> Vec<(String, Option<RecipeRecord>)> {
+    let Some(item) = states::bound_item(loaded) else {
+        return Vec::new();
+    };
+    let Ok(Some(rec)) = ItemRecord::load(&ItemRecord::dir(work_dir, item)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (c, def) in &loaded.stack.components {
+        let Some(d) = def
+            .data
+            .as_ref()
+            .filter(|d| d.strategy == DataStrategy::Recipe)
+        else {
+            continue;
+        };
+        let seeds: Vec<SeedChoice> = rec
+            .data_seeds
+            .get(c)
+            .into_iter()
+            .flatten()
+            .filter(|s| d.state_seeds.contains_key(&s.name))
+            .cloned()
+            .collect();
+        if seeds.is_empty() {
+            continue;
+        }
+        let fresh = plan.steps.iter().any(|s| match s {
+            Step::Recreate { component, .. } => component == c,
+            Step::Start { component } => component == c && !obs.state.component(c).exists,
+            _ => false,
+        });
+        if fresh {
+            out.push((
+                c.clone(),
+                Some(RecipeRecord {
+                    base_image: None,
+                    scripts: Vec::new(),
+                    seeds,
+                }),
+            ));
+        }
+    }
+    out
+}
+
+/// Bring data back after the steps ran: each snapshot checked with
+/// `exists` and restored, then checked; each recipe replayed (scrub,
+/// check, seed, state seeds, check). A component that fails is listed;
+/// the others go on. A component whose check comes out not clean under
+/// `stop` / `block-up` is stopped, its volume kept. `when` names the
+/// check's trigger and the moment, for the failure line.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_data(
+    world: &World,
+    loaded: &Loaded,
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    work_dir: &Path,
+    rec: &JobRecord,
+    snapshots: &[(String, DataSnapshot)],
+    recipes: &[(String, Option<RecipeRecord>)],
+    when: (Trigger, &str),
+    out: &mut Out<'_>,
+    result: &mut JobResult,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if snapshots.is_empty() && recipes.is_empty() {
+        return failures;
+    }
+    let (trigger, moment) = when;
     let table = ProcessTable::load(work_dir, &inst.id);
     let obs = match runner.observe(inst, &table.statuses(&*world.procs)) {
         Ok(o) => o,
@@ -769,7 +921,7 @@ fn resume_data(
                 inst,
                 work_dir,
                 c,
-                Trigger::AfterRestore,
+                trigger,
                 &rec.id,
                 AFTER_UP_ATTEMPTS,
                 &mut o,
@@ -779,10 +931,8 @@ fn resume_data(
         checked.borrow_mut().push((c.to_string(), entry));
         Some(st == SafetyState::Clean)
     };
-    for c in &r.restores {
-        let Some(snap) = state.data.get(c).and_then(|d| d.snapshot.clone()) else {
-            continue;
-        };
+    for (c, snap) in snapshots {
+        let snap = snap.clone();
         let why = match states::snapshot_exists(world, loaded, inst, &obs, &snap) {
             Exists::Present => None,
             Exists::Missing => Some(format!(
@@ -812,8 +962,8 @@ fn resume_data(
             }
         }
     }
-    for c in &r.recipes {
-        let record = state.data.get(c).and_then(|d| d.recipe.as_ref());
+    for (c, record) in recipes {
+        let record = record.as_ref();
         let mut gate = |x: &str| check(x);
         let replayed =
             states::replay_recipe(&cx, c, record, &mut gate, &mut |l| out.borrow_mut().say(l));
@@ -848,7 +998,7 @@ fn resume_data(
             failures.push(e);
         }
         failures.push(format!(
-            "data safety: {} not clean after the resume, so stopped (the volume is kept)",
+            "data safety: {} not clean {moment}, so stopped (the volume is kept)",
             to_stop.join(", ")
         ));
     }
