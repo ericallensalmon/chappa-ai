@@ -1,0 +1,279 @@
+[
+  {
+    "actions": [
+      {
+        "confirm": "Move ABC-1 from To do to In development",
+        "id": "move:dev",
+        "kind": "endpoint",
+        "label": "Move to In development",
+        "mutates": true,
+        "note": "optional",
+        "params": {
+          "from": "todo",
+          "to": "dev"
+        }
+      }
+    ],
+    "banners": [],
+    "key": "ABC-1",
+    "localStatus": {
+      "actor": "tracker",
+      "allowed": [
+        {
+          "id": "move:dev",
+          "label": "Move to In development"
+        }
+      ],
+      "gate": null,
+      "history": [
+        {
+          "actor": "tracker",
+          "at": "2026-11-14T12:00:00Z",
+          "to": "To do",
+          "toId": "todo"
+        }
+      ],
+      "id": "todo",
+      "label": "To do",
+      "pendingApproval": null,
+      "round": 1,
+      "since": "2026-11-14T12:00:00Z"
+    }
+  },
+  {
+    "actions": [
+      {
+        "confirm": "Move ABC-2 from In review to In development",
+        "id": "move:dev",
+        "kind": "endpoint",
+        "label": "Move to In development",
+        "mutates": true,
+        "note": "required",
+        "params": {
+          "from": "review",
+          "to": "dev"
+        }
+      },
+      {
+        "confirm": "Move ABC-2 from In review to Done",
+        "id": "move:done",
+        "kind": "endpoint",
+        "label": "Move to Done",
+        "mutates": true,
+        "note": "optional",
+        "params": {
+          "from": "review",
+          "to": "done"
+        }
+      }
+    ],
+    "banners": [],
+    "key": "ABC-2",
+    "localStatus": {
+      "actor": "tracker",
+      "allowed": [
+        {
+          "humanOnly": true,
+          "id": "move:dev",
+          "label": "Move to In development",
+          "requireNote": true
+        },
+        {
+          "humanOnly": true,
+          "id": "move:done",
+          "label": "Move to Done"
+        }
+      ],
+      "gate": "human-exit",
+      "history": [
+        {
+          "actor": "tracker",
+          "at": "2026-11-14T12:00:00Z",
+          "to": "In review",
+          "toId": "review"
+        }
+      ],
+      "id": "review",
+      "label": "In review",
+      "pendingApproval": null,
+      "round": 1,
+      "since": "2026-11-14T12:00:00Z"
+    }
+  },
+  {
+    "actions": [
+      {
+        "confirm": "Move ABC-3 from Done to In development",
+        "id": "move:dev",
+        "kind": "endpoint",
+        "label": "Move to In development",
+        "mutates": true,
+        "note": "optional",
+        "params": {
+          "from": "done",
+          "to": "dev"
+        }
+      }
+    ],
+    "banners": [],
+    "key": "ABC-3",
+    "localStatus": {
+      "actor": "tracker",
+      "allowed": [
+        {
+          "id": "move:dev",
+          "label": "Move to In development"
+        }
+      ],
+      "gate": "human",
+      "history": [
+        {
+          "actor": "tracker",
+          "at": "2026-11-14T12:00:00Z",
+          "to": "Done",
+          "toId": "done"
+        }
+      ],
+      "id": "done",
+      "label": "Done",
+      "pendingApproval": null,
+      "round": 1,
+      "since": "2026-11-14T12:00:00Z"
+    }
+  },
+  {
+    "actions": [
+      {
+        "confirm": "Approve moving ABC-4 from In development to Done (asked by agent:a1)",
+        "id": "approve",
+        "kind": "endpoint",
+        "label": "Approve: move to Done",
+        "mutates": true,
+        "note": "optional",
+        "params": {
+          "to": "done"
+        }
+      },
+      {
+        "confirm": "Send back the move of ABC-4 to Done (asked by agent:a1); it stays In development",
+        "id": "send-back",
+        "kind": "endpoint",
+        "label": "Send back",
+        "mutates": true,
+        "note": "required",
+        "params": {
+          "to": "done"
+        }
+      },
+      {
+        "confirm": "Move ABC-4 from In development to In review",
+        "id": "move:review",
+        "kind": "endpoint",
+        "label": "Move to In review",
+        "mutates": true,
+        "note": "optional",
+        "params": {
+          "from": "dev",
+          "to": "review"
+        }
+      },
+      {
+        "confirm": "Move ABC-4 from In development to Done",
+        "id": "move:done",
+        "kind": "endpoint",
+        "label": "Move to Done",
+        "mutates": true,
+        "note": "optional",
+        "params": {
+          "from": "dev",
+          "to": "done"
+        }
+      }
+    ],
+    "banners": [
+      {
+        "actions": [
+          {
+            "confirm": "Move ABC-4 from In development to In review",
+            "id": "move:review",
+            "kind": "endpoint",
+            "label": "Move here to In review",
+            "mutates": true,
+            "note": "optional",
+            "params": {
+              "from": "dev",
+              "to": "review"
+            }
+          }
+        ],
+        "id": "tracker-status",
+        "lines": [
+          "The tracker's status means In review here."
+        ],
+        "title": "Tracker: Code Review · here: In development",
+        "tone": "warn"
+      }
+    ],
+    "key": "ABC-4",
+    "localStatus": {
+      "actor": "human:alex",
+      "allowed": [
+        {
+          "humanOnly": true,
+          "id": "approve",
+          "label": "Approve: move to Done"
+        },
+        {
+          "humanOnly": true,
+          "id": "send-back",
+          "label": "Send back",
+          "requireNote": true
+        },
+        {
+          "id": "move:review",
+          "label": "Move to In review"
+        },
+        {
+          "id": "move:done",
+          "label": "Move to Done"
+        }
+      ],
+      "gate": null,
+      "history": [
+        {
+          "actor": "tracker",
+          "at": "2026-11-14T12:00:00Z",
+          "to": "In development",
+          "toId": "dev"
+        },
+        {
+          "actor": "agent:a1",
+          "at": "2026-11-14T12:10:00Z",
+          "from": "In development",
+          "fromId": "dev",
+          "to": "In review",
+          "toId": "review"
+        },
+        {
+          "actor": "human:alex",
+          "at": "2026-11-14T12:10:00Z",
+          "from": "In review",
+          "fromId": "review",
+          "note": "flaky test",
+          "to": "In development",
+          "toId": "dev"
+        }
+      ],
+      "id": "dev",
+      "label": "In development",
+      "pendingApproval": {
+        "by": "agent:a1",
+        "note": "fixed",
+        "to": "Done",
+        "toId": "done"
+      },
+      "round": 2,
+      "since": "2026-11-14T12:10:00Z"
+    }
+  }
+]

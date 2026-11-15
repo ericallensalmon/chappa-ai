@@ -454,6 +454,11 @@ pub struct ItemRecord {
     pub updated_utc: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_utc: Option<String>,
+    /// Where the item stands in the stack's local workflow; none until
+    /// the stack has a `workflow:` block and the item was started or moved
+    /// under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<crate::workflow::WorkflowRecord>,
 }
 
 impl ItemRecord {
@@ -469,6 +474,7 @@ impl ItemRecord {
             created_utc: now_utc.to_string(),
             updated_utc: now_utc.to_string(),
             archived_utc: None,
+            workflow: None,
         }
     }
 

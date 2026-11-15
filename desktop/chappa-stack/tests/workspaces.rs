@@ -727,8 +727,9 @@ fn drift_shows_once_the_branch_moves_and_keep_as_built_dismisses_it() {
     let (code, log) = ws.run(&body);
     assert_eq!(code, EXIT_DONE, "{log}");
     ws.refresh();
-    assert!(
-        ws.work()["banners"].as_array().unwrap().is_empty(),
+    assert_eq!(
+        ws.row("ABC-1")["banners"],
+        json!([]),
         "built from HEAD: no drift"
     );
 
@@ -738,11 +739,13 @@ fn drift_shows_once_the_branch_moves_and_keep_as_built_dismisses_it() {
     let head = git(&wt, &["rev-parse", "HEAD"]).trim().to_string();
     // The cached facts are still fresh: nothing yet, and nothing waited.
     ws.src.refresh_work();
-    assert!(ws.work()["banners"].as_array().unwrap().is_empty());
+    assert_eq!(ws.row("ABC-1")["banners"], json!([]));
     ws.clock.advance(Duration::from_secs(31));
     ws.src.refresh_work();
+    // The banner is the item's own; the view has none of its own.
     let work = ws.work();
-    let banner = &work["banners"][0];
+    assert_eq!(work["banners"], json!([]));
+    let banner = &work["items"][0]["banners"][0];
     assert_eq!(banner["id"], "drift-ABC-1");
     assert_eq!(banner["tone"], "warn");
     let line = format!(
@@ -809,10 +812,10 @@ fn drift_shows_once_the_branch_moves_and_keep_as_built_dismisses_it() {
     );
     assert_eq!(status, 200, "{body}");
     ws.refresh();
-    assert!(ws.work()["banners"].as_array().unwrap().is_empty());
+    assert_eq!(ws.row("ABC-1")["banners"], json!([]));
     commit(&wt, "even-more.txt", "x\n", "even more");
     ws.refresh();
-    assert_eq!(ws.work()["banners"][0]["id"], "drift-ABC-1");
+    assert_eq!(ws.row("ABC-1")["banners"][0]["id"], "drift-ABC-1");
 }
 
 /// git that takes seconds per call, like one on a slow disk or network.
@@ -1003,10 +1006,18 @@ fn the_overlay_payload() {
         true,
     );
     ws.run(&body);
-    // One uncommitted file in ABC-1's web worktree.
+    // One uncommitted file in ABC-1's web worktree, and a commit in its
+    // api worktree after api was built (drift, on ABC-1's own entry).
     let rec = ItemRecord::load(&ws.p.work().join("ABC-1"))
         .unwrap()
         .unwrap();
+    commit(
+        &ws.p.work().join("ABC-1").join(&rec.repos["api"].path),
+        "more.txt",
+        "more
+",
+        "more work",
+    );
     fs::write(
         ws.p.work()
             .join("ABC-1")
@@ -1047,6 +1058,12 @@ fn the_overlay_payload() {
         ])
     );
     assert_eq!(one["folder"], "<project>/.work/ABC-1");
+    assert_eq!(one["banners"][0]["id"], "drift-ABC-1");
+    assert_eq!(work["banners"], json!([]), "no view-level drift banner");
+    assert!(
+        one.get("localStatus").is_none(),
+        "no workflow, no status block"
+    );
     assert!(items[2]["badges"]
         .as_array()
         .unwrap()

@@ -13,7 +13,9 @@
 //! | `POST /api/jobs/{id}` | bearer | the pane's exit report, recorded; `200 {}` |
 //!
 //! `X-Chappa-Actor` on an actions call names who acted (an acknowledgement
-//! records it); without it the actor is "the app".
+//! records it; without it the actor is "the app"). A work item's local
+//! status moves record it too, and their human gates read it: only an
+//! actor starting `human:` counts as a person (see [`crate::local_status`]).
 //!
 //! The listener binds a loopback address only, and every route but the
 //! identity check needs the bearer token, compared in constant time.
@@ -384,7 +386,7 @@ impl Source {
     /// from the cache only; the engines are asked once, for the plans the
     /// Activate and Rebuild changed confirms show.
     pub fn work_view(&self) -> Reply {
-        let now = utc_now();
+        let now = self.world.clock.now_utc();
         let loaded = match self.load() {
             Ok(l) => l,
             Err(e) => {
@@ -430,7 +432,7 @@ impl Source {
     /// A Work view action: `start-work` from another source's row, an
     /// overlay's, the drift banner's or the Archived panel's.
     fn work_action(&self, body: &Value, caller: &Caller) -> Reply {
-        let now = utc_now();
+        let now = self.world.clock.now_utc();
         let loaded = match self.load() {
             Ok(l) => l,
             Err(e) => return error(409, "definition", e),
@@ -459,7 +461,7 @@ impl Source {
             facts: &facts,
             now_utc: &now,
         };
-        let accepted = workspaces::accept(&self.world, &inputs, body);
+        let accepted = workspaces::accept(&self.world, &inputs, body, caller.actor.as_deref());
         self.work.invalidate();
         match accepted {
             Accepted::Done(message) => (200, json!({ "message": message })),

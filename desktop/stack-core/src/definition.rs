@@ -153,8 +153,151 @@ pub struct StackDef {
     /// naming pattern, and per-clone remote and base overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<WorkDef>,
+    /// The local status flow every work item follows, with its human gates
+    /// and how each tracker's statuses map onto it. None: items have no
+    /// local status at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowDef>,
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// The `workflow:` block.
+///
+/// ```yaml
+/// workflow:
+///   states:                               # the first one is where an item starts
+///     - { id: todo,   label: To do }
+///     - { id: dev,    label: In development }
+///     - { id: review, label: In review, gate: human-exit }   # anyone enters, only a person leaves
+///     - { id: done,   label: Done,      gate: human }        # only a person enters
+///   moves: { todo: [dev], dev: [review], review: [dev, done], done: [dev] }
+///   requireNote: [ "review->dev" ]
+///   trackers:                             # by source id; "*" = any source
+///     tracker: { map: { "To Do": todo, "In Progress": dev, "Code Review": review, "Done": done } }
+/// ```
+///
+/// The map is read-only: it says which local state a tracker's status
+/// label means, so the Work row can point out a mismatch. Nothing is ever
+/// written back to a tracker.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDef {
+    #[serde(default)]
+    pub states: Vec<WorkflowStateDef>,
+    /// From a state id to the state ids it may move to.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub moves: IndexMap<String, Vec<String>>,
+    /// Moves (`from->to`) that need a note saying why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_note: Vec<String>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub trackers: IndexMap<String, TrackerMapDef>,
+    #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
+    pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// One state of the workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStateDef {
+    pub id: String,
+    pub label: String,
+    /// `human` or `human-exit`; kept as text so a typo is a finding with a
+    /// path instead of a document that does not load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
+    #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
+    pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// Who may move an item into or out of a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// Only a person may move an item INTO the state. Anyone else asking
+    /// leaves the move waiting for a person's approval.
+    Human,
+    /// Anyone may move an item in; only a person may move it OUT.
+    HumanExit,
+}
+
+impl Gate {
+    pub fn parse(text: &str) -> Option<Gate> {
+        match text {
+            "human" => Some(Gate::Human),
+            "human-exit" => Some(Gate::HumanExit),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Gate::Human => "human",
+            Gate::HumanExit => "human-exit",
+        }
+    }
+}
+
+impl WorkflowStateDef {
+    /// The gate, when it is one this version knows.
+    pub fn gate(&self) -> Option<Gate> {
+        self.gate.as_deref().and_then(Gate::parse)
+    }
+}
+
+/// How one tracker's status labels map onto the local states.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerMapDef {
+    /// Exact status label → local state id.
+    #[serde(default)]
+    pub map: IndexMap<String, String>,
+    #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
+    pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// The separator of a `requireNote` entry: `review->dev`.
+pub const MOVE_ARROW: &str = "->";
+
+impl WorkflowDef {
+    pub fn state(&self, id: &str) -> Option<&WorkflowStateDef> {
+        self.states.iter().find(|s| s.id == id)
+    }
+
+    /// Where every item starts: the first state.
+    pub fn initial(&self) -> Option<&WorkflowStateDef> {
+        self.states.first()
+    }
+
+    /// The label of `id`, or the id itself when the state is gone.
+    pub fn label_of<'a>(&'a self, id: &'a str) -> &'a str {
+        self.state(id).map(|s| s.label.as_str()).unwrap_or(id)
+    }
+
+    /// The states an item in `from` may move to.
+    pub fn moves_from(&self, from: &str) -> &[String] {
+        self.moves.get(from).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Whether `from -> to` needs a note.
+    pub fn needs_note(&self, from: &str, to: &str) -> bool {
+        self.require_note
+            .iter()
+            .filter_map(|m| m.split_once(MOVE_ARROW))
+            .any(|(f, t)| f.trim() == from && t.trim() == to)
+    }
+
+    /// The local state a tracker's status label means: the exact label in
+    /// that source's map first, then in the `"*"` map. A label neither
+    /// names means nothing here.
+    pub fn map_status(&self, source: &str, label: &str) -> Option<&str> {
+        [source, ANY_SOURCE]
+            .iter()
+            .filter_map(|s| self.trackers.get(*s))
+            .find_map(|t| t.map.get(label))
+            .map(String::as_str)
+            .filter(|id| self.state(id).is_some())
+    }
 }
 
 /// The `work:` block.
@@ -314,6 +457,7 @@ impl Default for StackDef {
             auto_destroy: false,
             jobs: None,
             work: None,
+            workflow: None,
             unknown: IndexMap::new(),
         }
     }
@@ -1479,6 +1623,12 @@ pub enum Rule {
     UnusedRepoOverride,
     /// Two different `repo:` paths end in the same folder name.
     RepoNameClash,
+    /// A workflow move, note rule or tracker map names no state.
+    UnknownState,
+    /// Two workflow states share an id.
+    DuplicateState,
+    /// A workflow state's gate is not `human` or `human-exit`.
+    InvalidGate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2116,6 +2266,139 @@ fn validate_stack(
                         Rule::InvalidKey,
                         format!("{base}.work.repos.{name}.base"),
                         format!("`{b}` is not a usable branch name"),
+                    );
+                }
+            }
+        }
+    }
+
+    // workflow
+    if let Some(wf) = &stack.workflow {
+        let wbase = format!("{base}.workflow");
+        for key in wf.unknown.keys() {
+            warn(
+                Rule::UnknownKey,
+                format!("{wbase}.{key}"),
+                format!("unknown key `{key}` (kept, ignored)"),
+            );
+        }
+        if wf.states.is_empty() {
+            err(
+                Rule::MissingField,
+                format!("{wbase}.states"),
+                "a workflow needs at least one state; the first is where items start".into(),
+            );
+        }
+        let mut seen = HashSet::new();
+        for (i, s) in wf.states.iter().enumerate() {
+            let at = format!("{wbase}.states[{i}]");
+            for key in s.unknown.keys() {
+                warn(
+                    Rule::UnknownKey,
+                    format!("{at}.{key}"),
+                    format!("unknown key `{key}` (kept, ignored)"),
+                );
+            }
+            if !is_valid_key(&s.id) {
+                err(
+                    Rule::InvalidKey,
+                    format!("{at}.id"),
+                    format!(
+                        "state id `{}` must match [A-Za-z0-9._-] and be at most {KEY_MAX_LEN} chars",
+                        s.id
+                    ),
+                );
+            }
+            if !seen.insert(s.id.as_str()) {
+                err(
+                    Rule::DuplicateState,
+                    format!("{at}.id"),
+                    format!("state `{}` is listed twice", s.id),
+                );
+            }
+            if s.label.trim().is_empty() {
+                err(
+                    Rule::MissingField,
+                    format!("{at}.label"),
+                    format!("state `{}` needs a label", s.id),
+                );
+            }
+            if let Some(g) = &s.gate {
+                if Gate::parse(g).is_none() {
+                    err(
+                        Rule::InvalidGate,
+                        format!("{at}.gate"),
+                        format!("gate `{g}` is not `human` or `human-exit`"),
+                    );
+                }
+            }
+        }
+        let known = |id: &str| wf.state(id).is_some();
+        let names = || {
+            wf.states
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        for (from, tos) in &wf.moves {
+            if !known(from) {
+                err(
+                    Rule::UnknownState,
+                    format!("{wbase}.moves.{from}"),
+                    format!("no state `{from}` (known: {})", names()),
+                );
+            }
+            for (i, to) in tos.iter().enumerate() {
+                if !known(to) {
+                    err(
+                        Rule::UnknownState,
+                        format!("{wbase}.moves.{from}[{i}]"),
+                        format!("no state `{to}` (known: {})", names()),
+                    );
+                }
+            }
+        }
+        for (i, m) in wf.require_note.iter().enumerate() {
+            let at = format!("{wbase}.requireNote[{i}]");
+            let Some((from, to)) = m.split_once(MOVE_ARROW) else {
+                err(
+                    Rule::UnknownState,
+                    at,
+                    format!("`{m}` is not a move; write it `from{MOVE_ARROW}to`"),
+                );
+                continue;
+            };
+            let (from, to) = (from.trim(), to.trim());
+            let missing: Vec<&str> = [from, to].into_iter().filter(|s| !known(s)).collect();
+            if !missing.is_empty() {
+                err(
+                    Rule::UnknownState,
+                    at,
+                    format!("no state `{}` (known: {})", missing.join("`, `"), names()),
+                );
+            } else if !wf.moves_from(from).iter().any(|t| t == to) {
+                warn(
+                    Rule::UnknownState,
+                    at,
+                    format!("`{m}` is not one of the moves, so its note rule never applies"),
+                );
+            }
+        }
+        for (source, t) in &wf.trackers {
+            for key in t.unknown.keys() {
+                warn(
+                    Rule::UnknownKey,
+                    format!("{wbase}.trackers.{source}.{key}"),
+                    format!("unknown key `{key}` (kept, ignored)"),
+                );
+            }
+            for (label, id) in &t.map {
+                if !known(id) {
+                    err(
+                        Rule::UnknownState,
+                        format!("{wbase}.trackers.{source}.map.{label}"),
+                        format!("no state `{id}` (known: {})", names()),
                     );
                 }
             }
@@ -3155,6 +3438,96 @@ stacks:
         );
         let diags = validate(&doc, &ValidationContext::default());
         assert!(diags.iter().all(|d| !d.path.contains(".work")), "{diags:?}");
+    }
+
+    const WORKFLOW: &str = "    workflow:\n      states:\n        - { id: todo, label: To do }\n        - { id: dev, label: In development }\n        - { id: review, label: In review, gate: human-exit }\n        - { id: done, label: Done, gate: human }\n      moves: { todo: [dev], dev: [review], review: [dev, done], done: [dev] }\n      requireNote: [ \"review->dev\" ]\n      trackers:\n        tracker: { map: { \"To Do\": todo, \"Code Review\": review } }\n        \"*\": { map: { \"Done\": done } }\n    components:\n      db:";
+
+    fn with_workflow(block: &str) -> StacksDocument {
+        StacksDocument::parse(&EXAMPLE.replace("    components:\n      db:", block)).unwrap()
+    }
+
+    #[test]
+    fn the_workflow_block_parses_and_answers_its_questions() {
+        assert_eq!(example_stack().workflow, None);
+        let doc = with_workflow(WORKFLOW);
+        let diags = validate(&doc, &ValidationContext::default());
+        assert!(
+            diags.iter().all(|d| !d.path.contains(".workflow")),
+            "{diags:?}"
+        );
+        let wf = doc.stacks["app"].workflow.clone().unwrap();
+        assert_eq!(wf.initial().unwrap().id, "todo");
+        assert_eq!(wf.state("review").unwrap().gate(), Some(Gate::HumanExit));
+        assert_eq!(wf.state("done").unwrap().gate(), Some(Gate::Human));
+        assert_eq!(wf.state("dev").unwrap().gate(), None);
+        assert_eq!(wf.moves_from("review"), ["dev", "done"]);
+        assert!(wf.moves_from("nowhere").is_empty());
+        assert!(wf.needs_note("review", "dev"));
+        assert!(!wf.needs_note("dev", "review"));
+        assert_eq!(wf.label_of("dev"), "In development");
+        assert_eq!(wf.label_of("gone"), "gone");
+        assert_eq!(wf.map_status("tracker", "Code Review"), Some("review"));
+        assert_eq!(
+            wf.map_status("tracker", "Done"),
+            Some("done"),
+            "falls back to *"
+        );
+        assert_eq!(wf.map_status("other", "Code Review"), None);
+        assert_eq!(
+            wf.map_status("tracker", "code review"),
+            None,
+            "labels match exactly"
+        );
+    }
+
+    #[test]
+    fn the_workflow_block_is_checked() {
+        let doc = with_workflow(
+            "    workflow:\n      sates: []\n      states:\n        - { id: todo, label: To do, colour: red }\n        - { id: todo, label: Again }\n        - { id: \"bad id\", label: Bad }\n        - { id: review, label: \"\", gate: humans }\n      moves: { todo: [review, qa], ghost: [todo] }\n      requireNote: [ \"todo->review\", \"review->todo\", \"todo->qa\", \"nonsense\" ]\n      trackers:\n        tracker: { map: { \"Done\": done }, mapp: {} }\n    components:\n      db:",
+        );
+        let diags = validate(&doc, &ValidationContext::default());
+        let mut got: Vec<(String, Severity, Rule)> = diags
+            .iter()
+            .filter(|d| d.path.contains(".workflow"))
+            .map(|d| (d.path.clone(), d.severity, d.rule))
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        let w = "stacks.app.workflow";
+        let want: Vec<(String, Severity, Rule)> = [
+            ("moves.ghost", Severity::Error, Rule::UnknownState),
+            ("moves.todo[1]", Severity::Error, Rule::UnknownState),
+            ("requireNote[1]", Severity::Warning, Rule::UnknownState),
+            ("requireNote[2]", Severity::Error, Rule::UnknownState),
+            ("requireNote[3]", Severity::Error, Rule::UnknownState),
+            ("sates", Severity::Warning, Rule::UnknownKey),
+            ("states[0].colour", Severity::Warning, Rule::UnknownKey),
+            ("states[1].id", Severity::Error, Rule::DuplicateState),
+            ("states[2].id", Severity::Error, Rule::InvalidKey),
+            ("states[3].gate", Severity::Error, Rule::InvalidGate),
+            ("states[3].label", Severity::Error, Rule::MissingField),
+            (
+                "trackers.tracker.map.Done",
+                Severity::Error,
+                Rule::UnknownState,
+            ),
+            ("trackers.tracker.mapp", Severity::Warning, Rule::UnknownKey),
+        ]
+        .into_iter()
+        .map(|(p, s, r)| (format!("{w}.{p}"), s, r))
+        .collect();
+        assert_eq!(got, want, "{diags:#?}");
+        let at = |p: &str| diags.iter().find(|d| d.path == format!("{w}.{p}")).unwrap();
+        assert_eq!(
+            at("moves.todo[1]").message,
+            "no state `qa` (known: todo, todo, bad id, review)"
+        );
+        assert!(at("requireNote[3]").message.contains("from->to"));
+        assert!(at("requireNote[1]").message.contains("never applies"));
+
+        let empty = with_workflow("    workflow: { states: [] }\n    components:\n      db:");
+        let e = errors(&empty);
+        let e = by_rule(&e, Rule::MissingField);
+        assert_eq!(e[0].path, "stacks.app.workflow.states");
     }
 
     #[test]

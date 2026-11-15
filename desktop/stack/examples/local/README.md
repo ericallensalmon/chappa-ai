@@ -101,6 +101,24 @@ shared clone such as `../web` is refused unless the clone is listed in
 branch a clone happens to be on. The example has no work items, so it
 lists `web` (always `dev`) and `api` there.
 
+## Local status
+
+The `workflow:` block gives every work item a status of its own, shown
+on its Work row: To do → In development → In review → Done, with the
+moves the block lists as buttons. In review may be entered by anyone
+but left only by a person (the app marks the calls its UI makes as a
+person's; an agent's are not), and only a person marks an item Done: an
+agent asking for it leaves the move waiting for a person's Approve or
+Send back. In review → In development needs a note. Each move is kept,
+with who made it and when, in the item's `.work/<KEY>/item.json`.
+
+The `trackers:` map says which state a tracker's status label means
+(`"*"` = any tracker; a team whose tracker uses other labels adds its
+own entry under the tracker's source id). When the tracker says In
+Review and the item here is In development, the row gets a banner with
+"Move here to In review". The stack only reads the tracker's status; it
+never changes it.
+
 ## Running it in the app
 
 `chappa.yml` has one more command, `stack`, marked `source: {}`: it runs

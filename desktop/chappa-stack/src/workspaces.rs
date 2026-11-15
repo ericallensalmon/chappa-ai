@@ -17,7 +17,8 @@
 //! | `terminal:<repo>` | overlay, per worktree | a terminal in the worktree |
 //! | `archive` | overlay | refused while a worktree is dirty or has unpushed commits (listed); else a job removes the worktrees and moves the folder to `_archive/` |
 //! | `restore:<KEY>` | the Archived panel | a job that recreates the worktrees at their branches |
-//! | `rebuild-changed:<KEY>` / `keep-as-built:<KEY>` | the drift banner | rebuild what the moved branches feed / dismiss until HEAD moves again |
+//! | `rebuild-changed:<KEY>` / `keep-as-built:<KEY>` | the drift banner on the item | rebuild what the moved branches feed / dismiss until HEAD moves again |
+//! | `move:<state>` / `approve` / `send-back` | overlay (and the tracker-status banner), with a `workflow:` | the item's local status, see [`crate::local_status`] |
 //!
 //! Every git question the Work list shows (HEADs, dirty and unpushed
 //! counts, ahead / behind, whether origin has a branch, each clone's
@@ -51,6 +52,7 @@ use stack_core::workspace::{
 };
 
 use crate::actions::{confirm_text, mode_now, Offered};
+use crate::local_status;
 use crate::project::{Binding, Loaded};
 use crate::records::JobWork;
 use crate::world::World;
@@ -1242,7 +1244,13 @@ pub fn planned_checkout(
     })
 }
 
-fn endpoint(id: &str, label: &str, mutates: bool, confirm: Option<String>, params: Value) -> Value {
+pub(crate) fn endpoint(
+    id: &str,
+    label: &str,
+    mutates: bool,
+    confirm: Option<String>,
+    params: Value,
+) -> Value {
     let mut a = json!({ "kind": "endpoint", "id": id, "label": label, "mutates": mutates, "params": params });
     if let Some(c) = confirm {
         a["confirm"] = Value::String(c);
@@ -1391,7 +1399,14 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
         json!({}),
     ));
 
-    json!({
+    let status = local_status::overlay_parts(loaded, rec);
+    let mut actions_all = status.actions;
+    actions_all.extend(actions);
+    let mut banners = Vec::new();
+    banners.extend(drift_banner(inp, rec));
+    banners.extend(status.banners);
+
+    let mut entry = json!({
         "ref": { "source": rec.item_ref.source, "key": rec.item_ref.key },
         "key": rec.item_ref.key,
         "title": rec.title,
@@ -1402,12 +1417,18 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
         "branches": branches,
         "badges": badges,
         "sections": [{ "id": "repos", "title": "Repos", "rows": rows }],
-        "actions": actions,
-    })
+        "banners": banners,
+        "actions": actions_all,
+    });
+    if let Some(ls) = status.local_status {
+        entry["localStatus"] = ls;
+    }
+    entry
 }
 
 /// The drift banner of the active item, with Rebuild changed (planned)
-/// and Keep as built.
+/// and Keep as built. It sits on the item's own entry; its actions still
+/// name the item in `params.item`.
 fn drift_banner(inp: &WorkInputs<'_, '_>, rec: &ItemRecord) -> Option<Value> {
     let mine: Vec<&Drift> = inp
         .facts
@@ -1460,11 +1481,6 @@ pub fn work_list(inp: &WorkInputs<'_, '_>) -> Value {
         }
     }
     let mut banners = Vec::new();
-    for (_, rec) in &items {
-        if let Some(b) = drift_banner(inp, rec) {
-            banners.push(b);
-        }
-    }
     let archived = list_archived(&work_dir);
     if !archived.is_empty() {
         banners.push(json!({
@@ -1588,15 +1604,20 @@ fn job(id: &str, key: &str, label: &str, confirm: String, work: JobWork) -> Acce
 
 /// Accept (or refuse) a Work view action: `start-work` from another
 /// source's row, the overlay's own actions, the drift banner's and the
-/// Archived panel's.
-pub fn accept(world: &World, inp: &WorkInputs<'_, '_>, body: &Value) -> Accepted {
+/// Archived panel's. `actor` is the call's `X-Chappa-Actor`.
+pub fn accept(
+    world: &World,
+    inp: &WorkInputs<'_, '_>,
+    body: &Value,
+    actor: Option<&str>,
+) -> Accepted {
     let id = body.get("id").and_then(Value::as_str).unwrap_or("");
     let confirmed = body.get("confirmed").and_then(Value::as_bool) == Some(true);
     let target = body.get("target").cloned().unwrap_or(Value::Null);
     let params = body.get("params").cloned().unwrap_or(Value::Null);
     let work_dir = inp.loaded.work_dir();
     if id == START_WORK_ID {
-        return start_work(world, inp, &target, confirmed);
+        return start_work(world, inp, &target, confirmed, actor);
     }
     if let Some(item) = id.strip_prefix(RESTORE_PREFIX) {
         let Some((_, rec)) = list_archived(&work_dir)
@@ -1660,6 +1681,19 @@ pub fn accept(world: &World, inp: &WorkInputs<'_, '_>, body: &Value) -> Accepted
             rec.updated_utc = inp.now_utc.to_string();
             let _ = rec.save(&dir);
         }
+    }
+    if local_status::handles(id) {
+        return local_status::accept(
+            inp.loaded,
+            &dir,
+            &mut rec,
+            id,
+            &params,
+            body.get("note").and_then(Value::as_str),
+            actor,
+            confirmed,
+            inp.now_utc,
+        );
     }
     if let Some(repo) = id.strip_prefix(ADD_REPO_PREFIX) {
         return add_repo(inp, &rec, repo, &params, confirmed);
@@ -1908,6 +1942,7 @@ fn start_work(
     inp: &WorkInputs<'_, '_>,
     target: &Value,
     confirmed: bool,
+    actor: Option<&str>,
 ) -> Accepted {
     if target.get("view").and_then(Value::as_str) != Some("work") {
         return refused(
@@ -1955,6 +1990,9 @@ fn start_work(
             rec.url = t.url.clone().or(rec.url);
             rec.status = t.status.clone().or(rec.status);
             rec.updated_utc = inp.now_utc.to_string();
+            if rec.workflow.is_none() {
+                rec.workflow = local_status::start_record(inp.loaded, &rec, actor, inp.now_utc);
+            }
             let _ = rec.save(&dir);
             return Accepted::Done(format!("{} already started ({})", t.key, dir.display()));
         }
@@ -1982,6 +2020,7 @@ fn start_work(
     rec.title = t.title.clone();
     rec.url = t.url.clone();
     rec.status = t.status.clone();
+    rec.workflow = local_status::start_record(inp.loaded, &rec, actor, inp.now_utc);
     if let Err(e) = fs::create_dir_all(&dir)
         .map_err(|e| e.to_string())
         .and_then(|_| rec.save(&dir))

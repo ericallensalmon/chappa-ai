@@ -26,6 +26,7 @@
 //! | [`timeouts`] | the per-step time limits |
 //! | [`world`] | every outside tool as a shareable trait object, real or fake |
 //! | [`workspaces`] | item workspaces: Start work, worktrees, activate, archive, drift, served as overlays on a tracker's Work rows |
+//! | [`local_status`] | an item's local workflow on its overlay: the status block, moves, approvals, the tracker-status banner |
 
 pub mod actions;
 pub mod background;
@@ -33,6 +34,7 @@ pub mod commands;
 pub mod data_safety;
 pub mod env_view;
 pub mod identity;
+pub mod local_status;
 pub mod procs;
 pub mod project;
 pub mod records;

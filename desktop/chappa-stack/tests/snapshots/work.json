@@ -35,8 +35,48 @@
           "tone": "warn"
         },
         {
+          "text": "1 unpushed",
+          "tone": "warn"
+        },
+        {
           "text": "active in slot 0",
           "tone": "ok"
+        },
+        {
+          "text": "built from older commits",
+          "tone": "warn"
+        }
+      ],
+      "banners": [
+        {
+          "actions": [
+            {
+              "confirm": "Rebuild api from task/ABC-1-fix-login at e52288d0 (built from 922ff587). Checkout api (task/ABC-1-fix-login); build api; recreate api (rebuilt).",
+              "id": "rebuild-changed:ABC-1",
+              "kind": "endpoint",
+              "label": "Rebuild changed",
+              "mutates": true,
+              "params": {
+                "fingerprint": "<fingerprint>",
+                "item": "ABC-1"
+              }
+            },
+            {
+              "id": "keep-as-built:ABC-1",
+              "kind": "endpoint",
+              "label": "Keep as built",
+              "mutates": false,
+              "params": {
+                "item": "ABC-1"
+              }
+            }
+          ],
+          "id": "drift-ABC-1",
+          "lines": [
+            "api was built from 922ff587; task/ABC-1-fix-login is now at e52288d0"
+          ],
+          "title": "ABC-1: the stack runs older commits than its branches",
+          "tone": "warn"
         }
       ],
       "branches": [
@@ -62,8 +102,14 @@
           "id": "repos",
           "rows": [
             {
+              "badges": [
+                {
+                  "text": "1 unpushed",
+                  "tone": "warn"
+                }
+              ],
               "label": "api",
-              "value": "task/ABC-1-fix-login · 922ff587 · 1 ahead, 0 behind main"
+              "value": "task/ABC-1-fix-login · 922ff587 · 2 ahead, 0 behind main"
             },
             {
               "badges": [
@@ -138,6 +184,7 @@
           "tone": "muted"
         }
       ],
+      "banners": [],
       "branches": [],
       "folder": "<project>/.work/ABC-2",
       "key": "ABC-2",
@@ -224,6 +271,7 @@
           "tone": "info"
         }
       ],
+      "banners": [],
       "branches": [],
       "folder": "<project>/.work/ABC-3",
       "key": "ABC-3",

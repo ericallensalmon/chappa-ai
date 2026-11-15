@@ -250,6 +250,11 @@ fn the_example_loads_and_validates_without_findings() {
     assert_eq!(ids, ["email-real-domain", "card-number"]);
 
     let stack = &doc.stacks["local"];
+    // The workflow maps any tracker's neutral labels onto its states.
+    let wf = stack.workflow.as_ref().unwrap();
+    assert_eq!(wf.initial().unwrap().id, "todo");
+    assert_eq!(wf.map_status("any-tracker", "In Review"), Some("review"));
+    assert!(wf.needs_note("review", "dev"));
     assert_eq!(stack.groups["core"].engine.as_deref(), Some("docker"));
     assert_eq!(stack.groups["apis"].engine.as_deref(), Some("podman"));
     let api = &stack.components["api"];

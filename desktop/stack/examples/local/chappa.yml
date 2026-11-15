@@ -42,6 +42,22 @@ stacks:
       rules: stack/data-safety.yml
       onFinding: block-agents
       unscanned: warn
+    # Each work item's local status. Anyone may move an item into review;
+    # only a person moves it on from there or marks it done (an agent
+    # asking for done would wait for a person's approval). Sending it back
+    # to development needs a note. The "*" map says which state a
+    # tracker's status label means, so a mismatch shows on the item.
+    workflow:
+      states:
+        - { id: todo,   label: To do }
+        - { id: dev,    label: In development }
+        - { id: review, label: In review, gate: human-exit }
+        - { id: done,   label: Done,      gate: human }
+      moves: { todo: [dev], dev: [review], review: [dev, done], done: [dev] }
+      requireNote: [ "review->dev" ]
+      trackers:
+        "*":
+          map: { "To Do": todo, "In Progress": dev, "In Review": review, "Done": done }
     groups:
       core: { engine: docker }
       apis: { engine: podman }
