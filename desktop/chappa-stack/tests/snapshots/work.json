@@ -20,10 +20,26 @@
           "label": "Terminal in web"
         },
         {
-          "confirm": "Archive ABC-1: remove the worktrees of api, web (refused if any has uncommitted or unpushed work) and move the folder to _archive/ABC-1.",
+          "confirm": "Save the stack state of ABC-1 in slot 0: db prebuilt, api source task/ABC-1-fix-login @922ff587.",
+          "id": "save-state",
+          "kind": "endpoint",
+          "label": "Save state",
+          "mutates": false,
+          "params": {}
+        },
+        {
+          "confirm": "Saves the stack state of ABC-1 first (if that fails, nothing else runs). Archive ABC-1: remove the worktrees of api, web (refused if any has uncommitted or unpushed work) and move the folder to _archive/ABC-1.",
           "id": "archive",
           "kind": "endpoint",
           "label": "Archive",
+          "mutates": true,
+          "params": {}
+        },
+        {
+          "confirm": "Archive ABC-1: remove the worktrees of api, web (refused if any has uncommitted or unpushed work) and move the folder to _archive/ABC-1. Without saving the stack state first.",
+          "id": "archive-no-save",
+          "kind": "endpoint",
+          "label": "Archive without saving",
           "mutates": true,
           "params": {}
         }
@@ -135,10 +151,20 @@
     {
       "actions": [
         {
-          "confirm": "Bind slot 0 to ABC-2: api back to prebuilt; others unchanged. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
+          "confirm": "Saves the stack state of ABC-1 first (if that fails, nothing else runs). Bind slot 0 to ABC-2: api back to prebuilt; others unchanged. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
           "id": "activate",
           "kind": "endpoint",
           "label": "Activate in slot 0",
+          "mutates": true,
+          "params": {
+            "fingerprint": "<fingerprint>"
+          }
+        },
+        {
+          "confirm": "Bind slot 0 to ABC-2: api back to prebuilt; others unchanged. Without saving the stack state of ABC-1 first. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
+          "id": "activate-no-save",
+          "kind": "endpoint",
+          "label": "Activate in slot 0 without saving",
           "mutates": true,
           "params": {
             "fingerprint": "<fingerprint>"
@@ -218,10 +244,20 @@
     {
       "actions": [
         {
-          "confirm": "Bind slot 0 to ABC-3: api back to prebuilt; others unchanged. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
+          "confirm": "Saves the stack state of ABC-1 first (if that fails, nothing else runs). Bind slot 0 to ABC-3: api back to prebuilt; others unchanged. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
           "id": "activate",
           "kind": "endpoint",
           "label": "Activate in slot 0",
+          "mutates": true,
+          "params": {
+            "fingerprint": "<fingerprint>"
+          }
+        },
+        {
+          "confirm": "Bind slot 0 to ABC-3: api back to prebuilt; others unchanged. Without saving the stack state of ABC-1 first. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
+          "id": "activate-no-save",
+          "kind": "endpoint",
+          "label": "Activate in slot 0 without saving",
           "mutates": true,
           "params": {
             "fingerprint": "<fingerprint>"

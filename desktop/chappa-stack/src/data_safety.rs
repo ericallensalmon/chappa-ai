@@ -17,7 +17,8 @@
 //! |---|---|
 //! | `after-up` (also the default when `when:` is empty) | inside the `run-job` of any plan that started the component, once its start step succeeded. A hook that fails right after up is retried a few times, since a database may still be starting. Under `onFinding: block-up` the check runs right after the start step, before any later step, whatever `when:` says, and a verdict that is not clean fails the job |
 //! | `every: <duration>` | the background thread looks once a minute and starts a headless check job for each running component whose last check is older than its interval (or that has none) |
-//! | `after-restore`, `before-snapshot` | reserved: accepted by the definition, run by the restore and snapshot jobs once those exist ([`components_for`]) |
+//! | `after-restore` | after a resume restored a snapshot into the component (always, whatever `when:` says), and twice in a recipe replay: after scrub, before any seed touches the data, and after the whole pipeline (see [`crate::states`]) |
+//! | `before-snapshot` | before a saved state takes the component's snapshot |
 //! | the `data-safety-check` action | a job, now, for one component or every running one with a check |
 //!
 //! # Policy, enforced here
@@ -592,6 +593,16 @@ pub fn bound(loaded: &Loaded) -> Value {
     let Some(item) = loaded.binding.item.as_deref() else {
         return Value::Null;
     };
+    if crate::reviews::is_review_binding(item) {
+        // A review workspace: no owner row, its worktree is the folder.
+        let folders: Vec<String> = loaded
+            .binding
+            .worktrees
+            .values()
+            .map(|w| absolute_text(w))
+            .collect();
+        return json!({ "source": null, "key": item, "folders": folders });
+    }
     let dir = stack_core::workspace::ItemRecord::dir(&loaded.work_dir(), item);
     let (source, key) = match stack_core::workspace::ItemRecord::load(&dir) {
         Ok(Some(rec)) => (Value::String(rec.item_ref.source), rec.item_ref.key),

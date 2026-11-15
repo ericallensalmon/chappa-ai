@@ -443,7 +443,18 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    assert_eq!(stack_ids, ["up", "start", "stop", "down", "rebuild", "gc"]);
+    assert_eq!(
+        stack_ids,
+        [
+            "up",
+            "start",
+            "stop",
+            "down",
+            "down-volumes",
+            "rebuild",
+            "gc"
+        ]
+    );
     assert_eq!(
         env["facts"][1]["rows"][0]["value"],
         "v29.0.0 · linux containers · 16.0 GB total"

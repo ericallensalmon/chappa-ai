@@ -652,6 +652,26 @@ impl<'a> StackRunner<'a> {
                     }
                 }
                 Step::Build { key, .. } => {
+                    // A pinned content key (a resumed state) that the engine
+                    // still has is used as is, whatever the repo holds now.
+                    if let Some(p) = plan.pins.get(&component) {
+                        if let Some(pinned) = &p.image {
+                            if image_exists(self.cli, &c.engine, pinned)? {
+                                steps.push(JobStep::note(format!(
+                                    "{component}: {pinned} exists, reused (saved state)"
+                                )));
+                                images.insert(component.clone(), pinned.clone());
+                                let mut prov = Provenance::new(Mode::Source);
+                                prov.git_ref = p.git_ref.clone();
+                                prov.commit = p.commit.clone();
+                                prov.dirty = p.dirty.clone();
+                                prov.image = Some(pinned.clone());
+                                cache.remember(&component, prov, &self.now_utc);
+                                touched.insert(c.group.clone());
+                                continue;
+                            }
+                        }
+                    }
                     let mode = self.mode_def(&component, Mode::Source)?;
                     let repo = self.repo_path(&component, Mode::Source)?;
                     let build = source_build(&component, mode, &repo, self.git, None)?;
@@ -687,28 +707,39 @@ impl<'a> StackRunner<'a> {
                 }
                 Step::Pull { image, .. } => {
                     let mode = self.mode_def(&component, Mode::Prebuilt)?;
-                    let channel = plan.channel.clone().or_else(|| {
-                        obs.intent
-                            .components
-                            .get(&component)
-                            .and_then(|i| i.channel.clone())
-                    });
-                    let tag = resolve_tag(mode, channel.as_deref()).map_err(|source| {
-                        RunnerError::Placeholder {
-                            component: component.clone(),
-                            source,
-                        }
-                    })?;
-                    let reference = tagged_reference(image, &tag);
-                    let os = self.stack.os_for_engine(&c.engine.name);
-                    let lookup = (c.engine.name.clone(), reference.clone());
-                    let digest = match digests.get(&lookup) {
-                        Some(d) => d.clone(),
-                        None => {
-                            let d = resolve_digest(self.cli, &c.engine, &reference, os)?;
-                            digests.insert(lookup, d.clone());
-                            d
-                        }
+                    // A pinned digest (a resumed state) is pulled as is: no
+                    // tag is resolved, so a channel that moved on since does
+                    // not change what comes back.
+                    let pin = plan.pins.get(&component).filter(|p| p.image.is_some());
+                    let (tag, reference, digest) = if let Some(p) = pin {
+                        let tag = p.build_id.clone().unwrap_or_else(|| "pinned".to_string());
+                        let d = p.image.clone();
+                        (tag, pinned_reference(image, d.as_deref().unwrap_or("")), d)
+                    } else {
+                        let channel = plan.channel.clone().or_else(|| {
+                            obs.intent
+                                .components
+                                .get(&component)
+                                .and_then(|i| i.channel.clone())
+                        });
+                        let tag = resolve_tag(mode, channel.as_deref()).map_err(|source| {
+                            RunnerError::Placeholder {
+                                component: component.clone(),
+                                source,
+                            }
+                        })?;
+                        let reference = tagged_reference(image, &tag);
+                        let os = self.stack.os_for_engine(&c.engine.name);
+                        let lookup = (c.engine.name.clone(), reference.clone());
+                        let digest = match digests.get(&lookup) {
+                            Some(d) => d.clone(),
+                            None => {
+                                let d = resolve_digest(self.cli, &c.engine, &reference, os)?;
+                                digests.insert(lookup, d.clone());
+                                d
+                            }
+                        };
+                        (tag, reference, digest)
                     };
                     let pinned = match &digest {
                         Some(d) => pinned_reference(image, d),

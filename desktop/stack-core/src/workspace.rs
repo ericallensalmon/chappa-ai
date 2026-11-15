@@ -459,6 +459,11 @@ pub struct ItemRecord {
     /// under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<crate::workflow::WorkflowRecord>,
+    /// The state seeds the item asks for, per component: replayed after
+    /// the general seed when a recipe component is rebuilt, and recorded
+    /// in every saved state.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub data_seeds: IndexMap<String, Vec<crate::states::SeedChoice>>,
 }
 
 impl ItemRecord {
@@ -475,6 +480,7 @@ impl ItemRecord {
             updated_utc: now_utc.to_string(),
             archived_utc: None,
             workflow: None,
+            data_seeds: IndexMap::new(),
         }
     }
 

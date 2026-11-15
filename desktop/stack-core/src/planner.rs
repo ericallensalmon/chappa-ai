@@ -182,6 +182,56 @@ pub enum Change {
         #[serde(default)]
         release: IndexMap<String, Mode>,
     },
+    /// Bring components back to what a saved state recorded: each in its
+    /// mode, from its pinned image (a prebuilt digest, a source content
+    /// key) or its worktree (dev), wanted running or not as it was. Only
+    /// the components named are touched; one whose bits already match is
+    /// left alone unless `fresh` asks for a clean container.
+    Resume {
+        /// The item resumed, for the notes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        #[serde(default)]
+        targets: IndexMap<String, ResumeTarget>,
+    },
+}
+
+/// What one component is resumed to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeTarget {
+    pub mode: Mode,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// The image (or, for dev, the commit) to run. `None`: build or run
+    /// from whatever the repo has now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<ImagePin>,
+    pub desired: Desired,
+    /// Recreate even when the image is the same: the data comes from the
+    /// image (a recipe), so only a new container starts clean.
+    #[serde(default)]
+    pub fresh: bool,
+}
+
+/// An exact image a component must run, instead of whatever its tag or
+/// worktree resolves to now.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePin {
+    /// prebuilt: the digest (`sha256:…`); source: the content key
+    /// (`api:1a2b3c4d`); dev: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// prebuilt: the tag or build number it was pulled as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<String>,
 }
 
 /// What one component is bound to.
@@ -209,6 +259,7 @@ pub enum Verb {
     Start,
     Watch,
     Bind,
+    Resume,
 }
 
 impl Change {
@@ -224,6 +275,7 @@ impl Change {
             Change::Start { .. } => Verb::Start,
             Change::Watch { .. } => Verb::Watch,
             Change::Bind { .. } => Verb::Bind,
+            Change::Resume { .. } => Verb::Resume,
         }
     }
 }
@@ -248,6 +300,8 @@ pub enum RecreateReason {
         to: String,
     },
     Rebuilt,
+    /// Brought back to a saved state.
+    Resumed,
 }
 
 impl fmt::Display for RecreateReason {
@@ -260,6 +314,7 @@ impl fmt::Display for RecreateReason {
             RecreateReason::PinnedImageChanged { of } => write!(f, "pins image of {of}"),
             RecreateReason::GatewayChanged { from, to } => write!(f, "gateway {from} → {to}"),
             RecreateReason::Rebuilt => f.write_str("rebuilt"),
+            RecreateReason::Resumed => f.write_str("saved state"),
         }
     }
 }
@@ -374,6 +429,10 @@ pub struct Plan {
     /// The prebuilt channel in force for this plan's pulls, when `up` chose one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// Exact images per component (a resumed state's), used instead of
+    /// resolving the tag or reading the worktree.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub pins: IndexMap<String, ImagePin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -406,6 +465,7 @@ impl Plan {
             modes: IndexMap::new(),
             refs: IndexMap::new(),
             channel: None,
+            pins: IndexMap::new(),
         }
     }
 
@@ -710,6 +770,7 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
             bind,
             release,
         } => plan_bind(stack, state, &order, item, bind, release, &mut plan)?,
+        Change::Resume { targets, .. } => plan_resume(stack, state, &order, targets, &mut plan)?,
         Change::Start { gateways } => {
             for name in &order {
                 let cur = state.component(name);
@@ -909,6 +970,122 @@ fn plan_bind(
     }
     recreate_image_dependents(stack, state, order, &changed, plan);
     Ok(())
+}
+
+/// [`Change::Resume`]: the named components in dependency order. One the
+/// state wants running gets its pinned bits when they differ from what
+/// runs now (a pull by digest, the content key reused or rebuilt, nothing
+/// for dev) and is recreated or started; one recorded stopped or absent is
+/// stopped if it runs, never removed (its data stays). Whatever pins a
+/// changed image is recreated after.
+fn plan_resume(
+    stack: &StackDef,
+    state: &InstanceState,
+    order: &[String],
+    targets: &IndexMap<String, ResumeTarget>,
+    plan: &mut Plan,
+) -> Result<(), PlanError> {
+    for (name, t) in targets {
+        require(stack, name)?;
+        if !stack.components[name].has_mode(t.mode) {
+            return Err(PlanError::UnknownMode {
+                component: name.clone(),
+                mode: t.mode,
+            });
+        }
+    }
+    let mut changed: Vec<String> = Vec::new();
+    for name in order {
+        let Some(t) = targets.get(name) else {
+            continue;
+        };
+        let cur = state.component(name);
+        let def = &stack.components[name];
+        plan.modes.insert(name.clone(), t.mode);
+        if t.desired != Desired::Running {
+            if cur.running {
+                plan.push(Step::Stop {
+                    component: name.clone(),
+                    grace_seconds: stack.grace_seconds(name),
+                });
+            } else if cur.desired == Desired::Running {
+                plan.desired.insert(name.clone(), Desired::Stopped);
+            }
+            continue;
+        }
+        if let Some(r) = &t.git_ref {
+            plan.refs.insert(name.clone(), r.clone());
+        }
+        if let Some(p) = &t.pin {
+            plan.pins.insert(name.clone(), p.clone());
+        }
+        let pin = t.pin.clone().unwrap_or_default();
+        let same_bits = cur.mode == Some(t.mode)
+            && match t.mode {
+                Mode::Dev => pin.commit.is_some() && cur.commit == pin.commit,
+                _ => pin.image.is_some() && cur.image == pin.image,
+            };
+        if same_bits && !t.fresh {
+            if cur.running {
+                plan.notes.push(format!("{name} already runs as saved"));
+                continue;
+            }
+            if def.kind == ComponentKind::Oneshot && cur.exit_code == Some(0) {
+                plan.notes.push(format!("{name} already ran to completion"));
+                continue;
+            }
+        }
+        if !same_bits {
+            match t.mode {
+                Mode::Prebuilt => {
+                    let m = def.mode(Mode::Prebuilt);
+                    // Shown in the summary: the build it was and the digest
+                    // it is pulled by (apply uses the pin, not this).
+                    let tag = match (&pin.build_id, &pin.image) {
+                        (Some(b), Some(d)) => Some(format!("{b}@{}", short_digest(d))),
+                        (None, Some(d)) => Some(format!("@{}", short_digest(d))),
+                        _ => m.and_then(|m| m.tag.clone()),
+                    };
+                    plan.push(Step::Pull {
+                        component: name.clone(),
+                        image: m.and_then(|m| m.image.clone()).unwrap_or_default(),
+                        tag,
+                    });
+                }
+                Mode::Source => plan.push(Step::Build {
+                    component: name.clone(),
+                    key: pin.image.clone(),
+                }),
+                Mode::Dev => {}
+            }
+        }
+        if cur.exists && (!same_bits || t.fresh) {
+            plan.push(Step::Recreate {
+                component: name.clone(),
+                reason: RecreateReason::Resumed,
+            });
+            if !same_bits {
+                changed.push(name.clone());
+            }
+        } else {
+            plan.push(Step::Start {
+                component: name.clone(),
+            });
+        }
+    }
+    recreate_image_dependents(stack, state, order, &changed, plan);
+    Ok(())
+}
+
+/// `sha256:` and the first 12 hex digits, as shown.
+pub fn short_digest(digest: &str) -> String {
+    let (algo, hex) = digest.split_once(':').unwrap_or(("", digest));
+    let hex: String = hex.chars().take(12).collect();
+    if algo.is_empty() {
+        hex
+    } else {
+        format!("{algo}:{hex}")
+    }
 }
 
 fn require(stack: &StackDef, component: &str) -> Result<(), PlanError> {
@@ -2264,6 +2441,95 @@ stacks:
                 component: "db".into(),
                 mode: Mode::Source
             }
+        );
+    }
+
+    #[test]
+    fn resuming_pins_the_saved_bits_and_leaves_what_matches() {
+        let st = stack();
+        let state = running_state();
+        let pin = |image: &str| ImagePin {
+            image: Some(image.into()),
+            build_id: Some("main".into()),
+            ..Default::default()
+        };
+        let mut targets = IndexMap::new();
+        // db runs the saved digest already: nothing to do.
+        targets.insert(
+            "db".to_string(),
+            ResumeTarget {
+                mode: Mode::Prebuilt,
+                git_ref: None,
+                pin: Some(pin("sha256:img")),
+                desired: Desired::Running,
+                fresh: false,
+            },
+        );
+        // api was a source build: rebuilt (or reused) by its content key.
+        targets.insert(
+            "api".to_string(),
+            ResumeTarget {
+                mode: Mode::Source,
+                git_ref: Some("task/ABC-1".into()),
+                pin: Some(ImagePin {
+                    image: Some("api:1a2b3c4d".into()),
+                    commit: Some("1a2b3c4d".into()),
+                    ..Default::default()
+                }),
+                desired: Desired::Running,
+                fresh: false,
+            },
+        );
+        // web was not running when saved: stopped, never removed.
+        targets.insert(
+            "web".to_string(),
+            ResumeTarget {
+                mode: Mode::Dev,
+                git_ref: None,
+                pin: None,
+                desired: Desired::Stopped,
+                fresh: false,
+            },
+        );
+        let change = Change::Resume {
+            item: Some("ABC-1".into()),
+            targets: targets.clone(),
+        };
+        let plan = plan(&st, &state, &change).unwrap();
+        assert_eq!(plan.verb, Verb::Resume);
+        assert_eq!(
+            labels(&plan),
+            ["build api", "recreate api", "stop web", "recreate infra"]
+        );
+        assert!(matches!(&plan.steps[0], Step::Build { key: Some(k), .. } if k == "api:1a2b3c4d"));
+        assert!(plan.notes.contains(&"db already runs as saved".to_string()));
+        assert_eq!(plan.pins["api"].image.as_deref(), Some("api:1a2b3c4d"));
+        assert_eq!(plan.refs["api"], "task/ABC-1");
+        assert_eq!(plan.desired["web"], Desired::Stopped);
+        assert!(!plan.steps.iter().any(|s| matches!(s, Step::Remove { .. })));
+
+        // A recipe component is recreated even on the same image (a clean
+        // container); a prebuilt one on another digest is pulled by it.
+        targets["db"].fresh = true;
+        targets["db"].pin = Some(pin("sha256:other0000000000"));
+        let plan = super::plan(
+            &st,
+            &state,
+            &Change::Resume {
+                item: None,
+                targets,
+            },
+        )
+        .unwrap();
+        assert_eq!(labels(&plan)[..2], ["pull db", "recreate db"]);
+        assert_eq!(
+            plan.steps[0].detail().as_deref(),
+            Some("registry.example/db:main@sha256:other0000000")
+        );
+        assert!(
+            plan.summary().contains("Recreate: db (saved state)"),
+            "{}",
+            plan.summary()
         );
     }
 }

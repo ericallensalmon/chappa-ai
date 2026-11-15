@@ -69,7 +69,20 @@ stacks:
         service: db
         modes:
           prebuilt: { image: postgres, tag: "16" }
-        persistence: { volume: db-data }
+        # A saved state snapshots the database into its own volume with
+        # pg_dump, and a resume restores it (`exists` is asked first).
+        data: { strategy: snapshot }
+        persistence:
+          volume: db-data
+          location: in-volume
+          keep: 10
+          snapshot:
+            create: [docker, exec, "{container}", pg_dump, -U, app, -Fc, -f, "/var/lib/postgresql/data/snapshot-{snapshot}.dump", app]
+            restore: [docker, exec, "{container}", pg_restore, -U, app, -d, app, --clean, --if-exists, "/var/lib/postgresql/data/snapshot-{snapshot}.dump"]
+            exists: [docker, exec, "{container}", test, -e, "/var/lib/postgresql/data/snapshot-{snapshot}.dump"]
+            delete: [docker, exec, "{container}", rm, -f, "/var/lib/postgresql/data/snapshot-{snapshot}.dump"]
+            path: "/var/lib/postgresql/data/snapshot-{snapshot}.dump"
+            hint: pg_dump custom
         # Stand-in hooks (node scripts that print fixtures); a real stack
         # runs them in the container, as the scripts' comments show.
         dataSafety:

@@ -41,6 +41,7 @@
 //! job (Start work, Add repo, Archive, Restore) is a git change to an item
 //! folder; see [`crate::workspaces`].
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,15 +56,20 @@ use stack_core::driver::{Check, Outcome, ResolvedInstance};
 use stack_core::images::ProvenanceCache;
 use stack_core::intent::{utc_now, ActiveRecord};
 use stack_core::jobs::{JobStep, LocalStep, RunBlock};
-use stack_core::planner::{Change, PlanError, Step, Verb};
+use stack_core::planner::{Change, Plan, PlanError, Step, Verb};
 use stack_core::runner::{ApplyOptions, RunnerError, StackRunner};
 use stack_core::safety::Policy;
+use stack_core::states::SavedState;
+use stack_core::workspace::{c8, ItemRecord};
 
 use crate::data_safety::{self, CheckEntry, SafetyState, Trigger, AFTER_UP_ATTEMPTS};
 use crate::procs::{log_path, ProcessEntry, ProcessTable};
 use crate::project::Loaded;
 use crate::records::{JobRecord, JobResult, JobStatus, JobWork, StepOutcome};
+use crate::reviews::{self, ReviewOp};
+use crate::states::{self, Exists, ResumeWork, SaveSpec};
 use crate::timeouts::{self, StepKind};
+use crate::workspaces::{Git, WorkspaceOp};
 use crate::world::{open_log, World};
 
 /// Exit codes of `run-job`.
@@ -193,14 +199,79 @@ fn execute(
     let mut loaded = Loaded::load(project_dir, Some(&rec.stack), rec.slot)
         .map_err(|e| (EXIT_REFUSED, format!("cannot load the stack: {e}")))?;
     if let JobWork::Workspace { op } = &rec.work {
+        if let WorkspaceOp::Archive {
+            save: Some(spec), ..
+        } = op
+        {
+            auto_save(world, project_dir, rec, spec, out)?;
+        }
         return crate::workspaces::run_op(world, &loaded, op, &mut |l| out.say(l));
     }
-    let binds: Option<String> = match &rec.work {
-        JobWork::Plan {
-            change: Change::Bind { item, .. },
-            ..
-        } => Some(item.clone()),
+    if let JobWork::SaveState { spec } = &rec.work {
+        return save_now(world, project_dir, rec, spec, out).map(|_| ());
+    }
+    // A review job is git first; with `up`, the slot is brought up from
+    // the review worktree after, planned now that the worktree exists.
+    let mut review_up: Option<(Change, Option<SaveSpec>)> = None;
+    if let JobWork::Review { op } = &rec.work {
+        match reviews::run_op(world, &loaded, op, &mut |l| out.say(l))? {
+            None => return Ok(()),
+            Some(review) => {
+                let change = reviews::bring_up_change(&loaded, &review).ok_or_else(|| {
+                    (
+                        EXIT_FAILED,
+                        format!("no component builds or runs from {}", review.clone),
+                    )
+                })?;
+                let save = match op {
+                    ReviewOp::Create { save, .. } => save.clone(),
+                    ReviewOp::Remove { .. } => None,
+                };
+                review_up = Some((change, save));
+            }
+        }
+    }
+    let resume: Option<&ResumeWork> = match &rec.work {
+        JobWork::Resume { resume } => Some(resume),
         _ => None,
+    };
+    // Everything that runs a plan: the change, the plan confirmed (none
+    // for a bring-up planned here), the automatic save, `down -v`.
+    let planned: Option<(Change, Option<Plan>, Option<SaveSpec>, bool)> = match &rec.work {
+        JobWork::Plan {
+            change,
+            plan,
+            save,
+            remove_volumes,
+        } => Some((
+            change.clone(),
+            Some((**plan).clone()),
+            save.clone(),
+            *remove_volumes,
+        )),
+        JobWork::Resume { resume } => Some((
+            resume.change.clone(),
+            Some(resume.plan.clone()),
+            resume.save.clone(),
+            false,
+        )),
+        JobWork::Review { .. } => review_up.map(|(c, s)| (c, None, s, false)),
+        _ => None,
+    };
+    if let Some((_, _, Some(spec), _)) = &planned {
+        auto_save(world, project_dir, rec, spec, out)?;
+    }
+    if let Some(r) = resume {
+        checkout_worktrees(world, r, out)?;
+    }
+    // The item (or review) the plan builds from, and whether the slot is
+    // bound to it as the job's first step.
+    let (binds, writes_active): (Option<String>, bool) = match planned.as_ref().map(|p| &p.0) {
+        Some(Change::Bind { item, .. }) => (Some(item.clone()), true),
+        Some(Change::Resume {
+            item: Some(item), ..
+        }) => (Some(item.clone()), resume.is_none_or(|r| r.bind)),
+        _ => (None, false),
     };
     if let Some(item) = &binds {
         loaded.bind_item(Some(item));
@@ -210,27 +281,38 @@ fn execute(
     let (inst, _) = runner
         .instance(rec.slot)
         .map_err(|e| (EXIT_REFUSED, e.to_string()))?;
-    let steps: Vec<JobStep> = match &rec.work {
-        JobWork::Plan { plan, .. } => {
-            let acquires = plan
-                .steps
-                .iter()
-                .any(|s| matches!(s, Step::Pull { .. } | Step::Build { .. }));
-            out.say(if acquires {
-                "resolving images…"
-            } else {
-                "looking at the stack…"
-            });
+    let mut the_plan: Option<Plan> = None;
+    let steps: Vec<JobStep> = match &planned {
+        Some((change, stored, _, remove_volumes)) => {
+            out.say(
+                if stored.as_ref().is_some_and(|p| {
+                    p.steps
+                        .iter()
+                        .any(|s| matches!(s, Step::Pull { .. } | Step::Build { .. }))
+                }) {
+                    "resolving images…"
+                } else {
+                    "looking at the stack…"
+                },
+            );
             let table = ProcessTable::load(work_dir, &inst.id);
             let mut obs = runner
                 .observe(&inst, &table.statuses(&*world.procs))
                 .map_err(|e| (EXIT_REFUSED, e.to_string()))?;
-            if let Some(item) = &binds {
-                obs.intent.item = Some(item.clone());
+            if writes_active {
+                if let Some(item) = &binds {
+                    obs.intent.item = Some(item.clone());
+                }
             }
             for note in &obs.notes {
                 out.say(&format!("note: {note}"));
             }
+            let plan = match stored {
+                Some(p) => p.clone(),
+                None => runner
+                    .plan(&obs, change)
+                    .map_err(|e| (EXIT_REFUSED, format!("cannot plan: {e}")))?,
+            };
             let starts = plan
                 .steps
                 .iter()
@@ -245,7 +327,7 @@ fn execute(
                     &*world.ports,
                 );
                 checker.hosts_text = world.hosts_text.clone();
-                let checks = runner.checks(&inst, Some(&obs), Some(plan), &checker);
+                let checks = runner.checks(&inst, Some(&obs), Some(&plan), &checker);
                 let mut blocked = Vec::new();
                 for c in &checks {
                     let name = c.check.key();
@@ -279,8 +361,11 @@ fn execute(
                     ));
                 }
             }
+            let options = ApplyOptions {
+                remove_volumes: *remove_volumes,
+            };
             let applied = runner
-                .apply(&inst, &obs, plan, &ApplyOptions::default())
+                .apply(&inst, &obs, &plan, &options)
                 .map_err(|e| match e {
                     RunnerError::Plan(PlanError::StateChanged { .. }) => (
                         EXIT_REFUSED,
@@ -300,7 +385,7 @@ fn execute(
                 );
             }
             let mut steps = applied.steps;
-            if let Some(item) = &binds {
+            if let (Some(item), true) = (&binds, writes_active) {
                 let mut active =
                     ActiveRecord::load(work_dir).map_err(|e| (EXIT_REFUSED, e.to_string()))?;
                 active.set(rec.slot, item, &inst.id, &now);
@@ -313,63 +398,75 @@ fn execute(
                     ),
                 );
             }
+            the_plan = Some(plan);
             steps
         }
-        JobWork::Restart { component } => {
-            let run = runner.restart(&inst, component).ok_or_else(|| {
+        None => match &rec.work {
+            JobWork::Restart { component } => {
+                let run = runner.restart(&inst, component).ok_or_else(|| {
                 (
                     EXIT_REFUSED,
                     format!("{component} is not a compose component; restart it by stopping and starting it"),
                 )
             })?;
-            vec![JobStep::run(component, run)]
-        }
-        JobWork::DataSafety {
-            components,
-            trigger,
-        } => {
-            return data_safety_job(
-                world,
-                &loaded,
-                &runner,
-                &inst,
-                work_dir,
-                rec,
-                components,
-                Trigger::parse(trigger),
-                out,
-                result,
-            );
-        }
-        JobWork::Workspace { .. } => return Ok(()),
-        JobWork::Gc => {
-            out.say("listing images…");
-            let plans = runner
-                .gc_plan(&[])
-                .map_err(|e| (EXIT_REFUSED, format!("cannot list images: {e}")))?;
-            for p in &plans {
-                out.say(&p.summary());
-                for r in &p.remove {
-                    out.say(&format!("  remove {} ({})", r.reference, r.reason));
-                }
-                for k in &p.kept {
-                    out.say(&format!("  keep {} ({})", k.reference, k.reason));
-                }
+                vec![JobStep::run(component, run)]
             }
-            runner.gc_apply(&plans)
-        }
+            JobWork::DataSafety {
+                components,
+                trigger,
+            } => {
+                return data_safety_job(
+                    world,
+                    &loaded,
+                    &runner,
+                    &inst,
+                    work_dir,
+                    rec,
+                    components,
+                    Trigger::parse(trigger),
+                    out,
+                    result,
+                );
+            }
+            JobWork::Gc => {
+                out.say("listing images…");
+                let plans = runner
+                    .gc_plan(&[])
+                    .map_err(|e| (EXIT_REFUSED, format!("cannot list images: {e}")))?;
+                for p in &plans {
+                    out.say(&p.summary());
+                    for r in &p.remove {
+                        out.say(&format!("  remove {} ({})", r.reference, r.reason));
+                    }
+                    for k in &p.kept {
+                        out.say(&format!("  keep {} ({})", k.reference, k.reason));
+                    }
+                }
+                runner.gc_apply(&plans)
+            }
+            _ => return Ok(()),
+        },
     };
     out.say(&format!("{} step(s):", steps.len()));
     for s in &steps {
         out.say(&format!("  · {}", s.describe()));
     }
-    let forget_processes =
-        matches!(&rec.work, JobWork::Plan { plan, .. } if plan.verb == Verb::Down);
+    let forget_processes = the_plan.as_ref().is_some_and(|p| p.verb == Verb::Down);
     // Data-safety checks after up: under `block-up` right after each start
     // step (a verdict that is not clean ends the job there), otherwise once
     // the steps are done.
-    let (gated, after_up): (Vec<String>, Vec<String>) = match &rec.work {
-        JobWork::Plan { plan, .. } => {
+    // A resume checks what it restores or rebuilds itself, after that.
+    let restored: Vec<&str> = resume
+        .map(|r| {
+            r.restores
+                .iter()
+                .chain(&r.recipes)
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+    let (gated, after_up): (Vec<String>, Vec<String>) = match &the_plan {
+        Some(plan) => {
             let started: Vec<&str> = plan
                 .steps
                 .iter()
@@ -382,7 +479,7 @@ fn execute(
                 .collect();
             let wanted: Vec<String> = data_safety::components_for(&loaded, ScanWhen::AfterUp)
                 .into_iter()
-                .filter(|c| started.contains(&c.as_str()))
+                .filter(|c| started.contains(&c.as_str()) && !restored.contains(&c.as_str()))
                 .collect();
             if data_safety::blocks_up(&loaded) {
                 (wanted, Vec::new())
@@ -390,7 +487,7 @@ fn execute(
                 (Vec::new(), wanted)
             }
         }
-        _ => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new()),
     };
     let mut started_ok: Vec<String> = Vec::new();
     let mut checked: Vec<(String, CheckEntry)> = Vec::new();
@@ -475,7 +572,7 @@ fn execute(
     };
     steps_result?;
     stop_result?;
-    if let JobWork::Plan { plan, .. } = &rec.work {
+    if let Some(plan) = &the_plan {
         // A process that was already stopped gets no stop step from `down`;
         // its entry goes with the rest of the instance.
         if forget_processes {
@@ -494,12 +591,24 @@ fn execute(
             }
         }
     }
+    let resume_failures = match resume {
+        Some(r) => resume_data(
+            world, &loaded, &runner, &inst, work_dir, rec, r, out, result,
+        ),
+        None => Vec::new(),
+    };
     let cache = ProvenanceCache::load(work_dir, &inst.id);
     for (c, p) in &cache.components {
         result.provenance.insert(
             c.clone(),
             serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
         );
+    }
+    if !resume_failures.is_empty() {
+        return Err((
+            EXIT_FAILED,
+            format!("resumed, except: {}", resume_failures.join("; ")),
+        ));
     }
     if !stopped_by_policy.is_empty() {
         return Err((
@@ -511,6 +620,239 @@ fn execute(
         ));
     }
     Ok(())
+}
+
+/// Save `spec` now: the runner bound to its item, the instance observed
+/// afresh, snapshot hooks run (with a data-safety check first where the
+/// component asks for one before snapshots).
+fn save_now(
+    world: &World,
+    project_dir: &Path,
+    rec: &JobRecord,
+    spec: &SaveSpec,
+    out: &mut Out<'_>,
+) -> Result<SavedState, Failure> {
+    let mut loaded = Loaded::load(project_dir, Some(&rec.stack), rec.slot)
+        .map_err(|e| (EXIT_REFUSED, format!("cannot load the stack: {e}")))?;
+    loaded.bind_item(Some(&spec.item));
+    let now = utc_now();
+    let runner = loaded.runner(world, &now);
+    let (inst, _) = runner
+        .instance(rec.slot)
+        .map_err(|e| (EXIT_REFUSED, e.to_string()))?;
+    let work_dir = loaded.work_dir();
+    let table = ProcessTable::load(&work_dir, &inst.id);
+    let obs = runner
+        .observe(&inst, &table.statuses(&*world.procs))
+        .map_err(|e| (EXIT_FAILED, format!("cannot look at the stack: {e}")))?;
+    let cx = states::Ctx {
+        world,
+        loaded: &loaded,
+        runner: &runner,
+        inst: &inst,
+        obs: &obs,
+    };
+    let out = RefCell::new(out);
+    let mut check = |c: &str, trigger: Trigger| {
+        let mut o = out.borrow_mut();
+        check_now(
+            world, &loaded, &runner, &inst, &work_dir, c, trigger, &rec.id, 1, &mut o,
+        );
+    };
+    let mut say = |l: &str| out.borrow_mut().say(l);
+    states::save_state(&cx, spec, Some(&rec.id), None, &mut check, &mut say)
+        .map_err(|e| (EXIT_FAILED, e))
+}
+
+/// The automatic save before a destructive change; its failure ends the
+/// job before anything changed.
+fn auto_save(
+    world: &World,
+    project_dir: &Path,
+    rec: &JobRecord,
+    spec: &SaveSpec,
+    out: &mut Out<'_>,
+) -> Result<(), Failure> {
+    save_now(world, project_dir, rec, spec, out)
+        .map(|_| ())
+        .map_err(|(_, why)| {
+            (
+                EXIT_FAILED,
+                format!(
+                    "the stack state of {} could not be saved first ({why}); nothing else was done. To go ahead anyway, use the action's \"without saving\" variant",
+                    spec.item
+                ),
+            )
+        })
+}
+
+/// Put each worktree a resume builds from on its saved commit; refused,
+/// with nothing moved, when any has uncommitted changes now.
+fn checkout_worktrees(world: &World, r: &ResumeWork, out: &mut Out<'_>) -> Result<(), Failure> {
+    let git = Git::new(&*world.git_cli);
+    for c in &r.checkouts {
+        match git.uncommitted(&c.worktree) {
+            Ok(0) => {}
+            Ok(n) => {
+                return Err((
+                    EXIT_REFUSED,
+                    format!(
+                    "{} has {n} uncommitted change(s) now; nothing was done. Commit or stash first",
+                    c.worktree.display()
+                ),
+                ))
+            }
+            Err(e) => return Err((EXIT_REFUSED, e)),
+        }
+    }
+    for c in &r.checkouts {
+        out.say(&format!("▶ {}: worktree to {}", c.repo, c8(&c.commit)));
+        git.checkout_at(&c.worktree, &c.commit, c.branch.as_deref())
+            .map_err(|e| (EXIT_FAILED, format!("{}: {e}", c.repo)))?;
+    }
+    Ok(())
+}
+
+/// After a resume's plan ran: each snapshot checked with `exists` and
+/// restored, then checked (`after-restore`); each recipe replayed. A
+/// component that fails is listed; the others go on.
+#[allow(clippy::too_many_arguments)]
+fn resume_data(
+    world: &World,
+    loaded: &Loaded,
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    work_dir: &Path,
+    rec: &JobRecord,
+    r: &ResumeWork,
+    out: &mut Out<'_>,
+    result: &mut JobResult,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (c, why) in &r.blocked {
+        out.say(&format!("· {c}: not resumed ({why})"));
+    }
+    if r.restores.is_empty() && r.recipes.is_empty() {
+        return failures;
+    }
+    let item_dir = ItemRecord::dir(work_dir, &r.item);
+    let state = match SavedState::load(&item_dir, &r.state) {
+        Ok(Some(s)) => s,
+        Ok(None) => return vec![format!("the saved state {} is gone", r.state)],
+        Err(e) => return vec![e],
+    };
+    let table = ProcessTable::load(work_dir, &inst.id);
+    let obs = match runner.observe(inst, &table.statuses(&*world.procs)) {
+        Ok(o) => o,
+        Err(e) => return vec![format!("cannot look at the stack: {e}")],
+    };
+    let cx = states::Ctx {
+        world,
+        loaded,
+        runner,
+        inst,
+        obs: &obs,
+    };
+    let checked: RefCell<Vec<(String, CheckEntry)>> = RefCell::new(Vec::new());
+    let out = RefCell::new(out);
+    let check = |c: &str| -> Option<bool> {
+        let def = loaded.stack.components.get(c)?;
+        if !data_safety::has_check(def) {
+            return None;
+        }
+        let entry = {
+            let mut o = out.borrow_mut();
+            check_now(
+                world,
+                loaded,
+                runner,
+                inst,
+                work_dir,
+                c,
+                Trigger::AfterRestore,
+                &rec.id,
+                AFTER_UP_ATTEMPTS,
+                &mut o,
+            )
+        };
+        let (st, _) = data_safety::judged(loaded, &entry);
+        checked.borrow_mut().push((c.to_string(), entry));
+        Some(st == SafetyState::Clean)
+    };
+    for c in &r.restores {
+        let Some(snap) = state.data.get(c).and_then(|d| d.snapshot.clone()) else {
+            continue;
+        };
+        let why = match states::snapshot_exists(world, loaded, inst, &obs, &snap) {
+            Exists::Present => None,
+            Exists::Missing => Some(format!(
+                "{c}: snapshot {} is missing (expected in {}); not restored",
+                snap.name, snap.where_
+            )),
+            Exists::Unknown(e) => Some(format!(
+                "{c}: snapshot {} cannot be checked ({e}); not restored",
+                snap.name
+            )),
+        };
+        if let Some(why) = why {
+            out.borrow_mut().say(&format!("✗ {why}"));
+            failures.push(why);
+            continue;
+        }
+        let restored = states::restore_snapshot(&cx, &snap, &mut |l| out.borrow_mut().say(l));
+        match restored {
+            Ok(()) => {
+                out.borrow_mut()
+                    .say(&format!("✓ {c}: restored {}", snap.name));
+                check(c);
+            }
+            Err(e) => {
+                out.borrow_mut().say(&format!("✗ {c}: {e}"));
+                failures.push(format!("{c}: {e}"));
+            }
+        }
+    }
+    for c in &r.recipes {
+        let record = state.data.get(c).and_then(|d| d.recipe.as_ref());
+        let mut gate = |x: &str| check(x);
+        let replayed =
+            states::replay_recipe(&cx, c, record, &mut gate, &mut |l| out.borrow_mut().say(l));
+        match replayed {
+            Ok(()) => out
+                .borrow_mut()
+                .say(&format!("✓ {c}: data rebuilt from its recipe")),
+            Err(e) => {
+                out.borrow_mut().say(&format!("✗ {e}"));
+                failures.push(e);
+            }
+        }
+    }
+    let out = out.into_inner();
+    let mut to_stop = Vec::new();
+    for (c, entry) in checked.into_inner() {
+        let (st, policy) = data_safety::judged(loaded, &entry);
+        result
+            .data_safety
+            .insert(c.clone(), data_safety::result_value(&entry, st));
+        if matches!(st, SafetyState::NotClean | SafetyState::Error)
+            && matches!(policy, Some(Policy::Stop | Policy::BlockUp))
+            && !to_stop.contains(&c)
+        {
+            to_stop.push(c);
+        }
+    }
+    if !to_stop.is_empty() {
+        if let Err((_, e)) =
+            stop_for_data_safety(world, runner, inst, work_dir, &to_stop, out, result)
+        {
+            failures.push(e);
+        }
+        failures.push(format!(
+            "data safety: {} not clean after the resume, so stopped (the volume is kept)",
+            to_stop.join(", ")
+        ));
+    }
+    failures
 }
 
 /// The component a run step starts, if it is a start (`compose up` of a

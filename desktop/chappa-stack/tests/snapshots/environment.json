@@ -684,6 +684,16 @@
           }
         },
         {
+          "confirm": "Down and DELETE the data volumes env-0-data_db-data. No saved state keeps a snapshot there. Stop db, search, web, api; remove seed, migrate, mailer, db, cache, worker, search, web, api. Containers and these volumes are removed.",
+          "id": "down-volumes",
+          "kind": "endpoint",
+          "label": "Down and delete data",
+          "mutates": true,
+          "params": {
+            "fingerprint": "60c1aa7c428afbfd"
+          }
+        },
+        {
           "confirm": "Pull api (registry.example/api:main), search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), db (postgres:16), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); recreate api (rebuilt), search (rebuilt), worker (rebuilt), cache (rebuilt), db (rebuilt), mailer (rebuilt), migrate (rebuilt), seed (rebuilt).",
           "id": "rebuild",
           "kind": "endpoint",

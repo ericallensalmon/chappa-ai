@@ -119,6 +119,41 @@ Review and the item here is In development, the row gets a banner with
 "Move here to In review". The stack only reads the tracker's status; it
 never changes it.
 
+## Saved states
+
+While a work item is active in slot 0, its row offers **Save state**:
+a small file under `.work/<KEY>/states/<UTC>.json` that records what
+each component runs (mode, ref, commit, image digest or content key)
+and where its data can be found, never the data. `db` keeps its data in
+the `db-data` volume (`data: { strategy: snapshot }`), so a save also
+runs its `create` hook, `pg_dump` into the volume, and the state points
+at that snapshot. A state is marked **sensitive** when `db`'s last
+data-safety check was not clean (or never ran).
+
+A mode switch, `down`, activating another item and archive save the
+active item's state first; if that save fails, nothing else runs, and
+each of those actions has a "without saving" twin. The row's **Saved
+states** section lists them newest first; **Resume** asks `exists` for
+each snapshot, shows what differs from what runs now, pulls images by
+digest, starts `db` and runs `restore` (data typed in since is replaced
+by the snapshot). The newest 20 states per item are kept
+(`work.keepStates`), and the newest 10 snapshots of `db`
+(`persistence.keep`); pruning runs `delete` for the rest.
+
+`down` keeps the volume. **Down and delete data** is the only action
+that removes it, and its confirm lists the saved states whose snapshots
+live there.
+
+## Review workspaces
+
+A PR row of a repo the stack has a clone of offers **Review with
+environment**: its head is fetched (`refs/pull/<n>/head` on GitHub, the
+source branch elsewhere) and checked out under
+`.work/reviews/<forge>-<repo>-<n>/`, with a terminal and an agent there,
+and **Bring up slot 0** to run the stack from it. The Environment view
+lists them in a **Review workspaces** section; remove one when the
+review is done (it is refused while it has uncommitted changes).
+
 ## Running it in the app
 
 `chappa.yml` has one more command, `stack`, marked `source: {}`: it runs

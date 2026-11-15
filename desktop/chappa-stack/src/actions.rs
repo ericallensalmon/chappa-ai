@@ -163,6 +163,8 @@ fn planned(
         work: JobWork::Plan {
             change,
             plan: Box::new(plan),
+            save: None,
+            remove_volumes: false,
         },
     })
 }

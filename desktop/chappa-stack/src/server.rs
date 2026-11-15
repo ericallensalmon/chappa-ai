@@ -9,6 +9,7 @@
 //! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement, `409` unconfirmed / no longer offered / stale plan / note missing, `404` unknown target |
 //! | `GET /api/work` | bearer | the Work view: one overlay per item workspace (see [`crate::workspaces`]) |
 //! | `GET /api/work/archived` | bearer | the Archived panel |
+//! | `GET /api/work/reviews` | bearer | the Review workspaces panel (see [`crate::reviews`]) |
 //! | `GET /api/jobs/{id}` | bearer | `{state: running\|done\|failed, log?, exitCode?, error?}` |
 //! | `POST /api/jobs/{id}` | bearer | the pane's exit report, recorded; `200 {}` |
 //!
@@ -40,7 +41,7 @@ use stack_core::hosts::{check_hosts_file, check_hosts_text, HostOs};
 use stack_core::intent::utc_now;
 use stack_core::runner::Observation;
 
-use crate::actions::{all_actions, channel_for, Offered};
+use crate::actions::{channel_for, Offered};
 use crate::background::{Background, Periodic};
 use crate::data_safety::{
     self, CheckStore, InstanceSafety, SafetyState, ACK_ACTION_ID, ACTOR_CAP, CHECK_ACTION_ID,
@@ -52,6 +53,8 @@ use crate::procs::ProcessTable;
 use crate::project::{Loaded, ProjectConfig};
 use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
+use crate::reviews;
+use crate::states;
 use crate::workspaces::{self, Accepted, WorkCache, WorkInputs, ARCHIVED_PATH, WORK_PATH};
 use crate::world::World;
 
@@ -124,6 +127,8 @@ pub struct Source {
     pub work: WorkCache,
     /// When the workspace facts were last looked at.
     last_work_tick: Mutex<Option<std::time::Instant>>,
+    /// What the last resume calls found blocked, for the next confirm.
+    pub blocks: states::ResumeBlocks,
 }
 
 /// The least time between two looks at the workspaces on the refresher
@@ -158,6 +163,7 @@ impl Source {
             in_flight: Mutex::new(IndexMap::new()),
             work: WorkCache::default(),
             last_work_tick: Mutex::new(None),
+            blocks: states::ResumeBlocks::default(),
         });
         let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
         background.add_periodic(weak);
@@ -222,6 +228,7 @@ impl Source {
             ("GET", MANIFEST_PATH) => (200, self.manifest()),
             ("GET", ENVIRONMENT_PATH) => (200, self.environment()),
             ("GET", WORK_PATH) => self.work_view(),
+            ("GET", reviews::REVIEWS_PATH) => self.reviews_view(),
             ("GET", ARCHIVED_PATH) => match self.load() {
                 Ok(l) => (200, workspaces::archived_panel(&l, &utc_now())),
                 Err(e) => error(409, "definition", e),
@@ -247,7 +254,10 @@ impl Source {
 
     pub fn manifest(&self) -> Value {
         let loaded = self.load().ok();
-        let item_actions = workspaces::item_actions(loaded.as_ref());
+        let mut item_actions = workspaces::item_actions(loaded.as_ref());
+        if let Some(list) = item_actions.as_array_mut() {
+            list.extend(reviews::item_actions(loaded.as_ref()));
+        }
         let (id, label, hosts) = match loaded {
             Some(loaded) => {
                 let hosts = loaded
@@ -315,7 +325,7 @@ impl Source {
         let offered: Vec<Offered> = if loaded.has_errors() {
             Vec::new()
         } else {
-            all_actions(&runner, &inst, &obs, &channel)
+            states::offered(loaded, &runner, &inst, &obs, &channel)
         };
         let mut facts = indexmap::IndexMap::new();
         for e in inst.engines() {
@@ -379,6 +389,12 @@ impl Source {
         if let Some(alerts) = v.get_mut("alerts").and_then(Value::as_array_mut) {
             alerts.extend(workspaces::drift_alerts(&self.work.snapshot()));
         }
+        if let (Some(facts), Some(section)) = (
+            v.get_mut("facts").and_then(Value::as_array_mut),
+            reviews::environment_section(loaded, now),
+        ) {
+            facts.push(section);
+        }
         Ok(v)
     }
 
@@ -408,6 +424,8 @@ impl Source {
         });
         let facts = self.work.snapshot();
         let inputs = WorkInputs {
+            world: &self.world,
+            blocks: &self.blocks,
             loaded: &loaded,
             runner: &runner,
             obs: if loaded.has_errors() {
@@ -419,6 +437,28 @@ impl Source {
             now_utc: &now,
         };
         (200, workspaces::work_list(&inputs))
+    }
+
+    /// `GET /api/work/reviews`: the Review workspaces panel.
+    pub fn reviews_view(&self) -> Reply {
+        let now = self.world.clock.now_utc();
+        let loaded = match self.load() {
+            Ok(l) => l,
+            Err(e) => return error(409, "definition", e),
+        };
+        let runner = loaded.runner(&self.world, &now);
+        let obs = runner.instance(loaded.slot).ok().and_then(|(inst, _)| {
+            let table = ProcessTable::load(&loaded.work_dir(), &inst.id);
+            runner
+                .observe(&inst, &table.statuses(&*self.world.procs))
+                .ok()
+        });
+        let obs = if loaded.has_errors() {
+            None
+        } else {
+            obs.as_ref()
+        };
+        (200, reviews::panel(&self.world, &loaded, obs, &now))
     }
 
     /// Look at the item workspaces with git now (the refresher calls this;
@@ -455,13 +495,35 @@ impl Source {
             .ok();
         let facts = self.work.snapshot();
         let inputs = WorkInputs {
+            world: &self.world,
+            blocks: &self.blocks,
             loaded: &loaded,
             runner: &runner,
             obs: obs.as_ref(),
             facts: &facts,
             now_utc: &now,
         };
-        let accepted = workspaces::accept(&self.world, &inputs, body, caller.actor.as_deref());
+        let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+        let accepted = if reviews::handles(id) {
+            reviews::accept(
+                &self.world,
+                &loaded,
+                obs.as_ref(),
+                id,
+                body.get("target").unwrap_or(&Value::Null),
+                body.get("params").unwrap_or(&Value::Null),
+                body.get("confirmed").and_then(Value::as_bool) == Some(true),
+                &now,
+            )
+        } else if view_of(body) == "prs" {
+            Accepted::Refused(
+                404,
+                "unknown-target",
+                format!("no action `{id}` on PR rows"),
+            )
+        } else {
+            workspaces::accept(&self.world, &inputs, body, caller.actor.as_deref())
+        };
         self.work.invalidate();
         match accepted {
             Accepted::Done(message) => (200, json!({ "message": message })),
@@ -537,7 +599,7 @@ impl Source {
             .pointer("/target/view")
             .and_then(Value::as_str)
             .unwrap_or("environment");
-        if view == "work" || view.starts_with("panel:") {
+        if view == "work" || view == "prs" || view.starts_with("panel:") {
             return self.work_action(body, caller);
         }
         if view != "environment" {
@@ -587,7 +649,7 @@ impl Source {
             return self.check_action(key.as_deref(), runs_jobs, &loaded, &inst, &obs, &now);
         }
         let channel = channel_for(&obs, &self.config.channel);
-        let offered = all_actions(&runner, &inst, &obs, &channel);
+        let offered = states::offered(&loaded, &runner, &inst, &obs, &channel);
         let Some(chosen) = offered.into_iter().find(|o| o.id == id && o.key == key) else {
             return error(
                 409,
@@ -960,6 +1022,13 @@ impl Source {
             .stop_all();
         self.background.shutdown();
     }
+}
+
+/// The view an actions call names (`environment` when it names none).
+fn view_of(body: &Value) -> &str {
+    body.pointer("/target/view")
+        .and_then(Value::as_str)
+        .unwrap_or("environment")
 }
 
 fn loaded_instance(loaded: &Loaded) -> String {

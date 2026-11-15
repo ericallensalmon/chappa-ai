@@ -49,8 +49,27 @@ impl JobStatus {
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum JobWork {
     /// A planned change: the runner re-observes, applies this plan (which
-    /// refuses if the stack moved on since) and runs its steps.
-    Plan { change: Change, plan: Box<Plan> },
+    /// refuses if the stack moved on since) and runs its steps. With
+    /// `save`, the bound item's stack state is saved first, and a failed
+    /// save fails the job before anything changes.
+    Plan {
+        change: Change,
+        plan: Box<Plan>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save: Option<crate::states::SaveSpec>,
+        /// `down` that also deletes the data volumes.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remove_volumes: bool,
+    },
+    /// Save the bound item's stack state now (snapshot hooks included).
+    SaveState { spec: crate::states::SaveSpec },
+    /// Bring an item's stack back to a saved state.
+    Resume {
+        resume: Box<crate::states::ResumeWork>,
+    },
+    /// A PR review workspace: create (and maybe bring a slot up from it),
+    /// bring up, or remove (see [`crate::reviews`]).
+    Review { op: crate::reviews::ReviewOp },
     /// `compose restart` of one component.
     Restart { component: String },
     /// Remove unreferenced images and prune build caches.
@@ -346,10 +365,10 @@ pub fn retention(stack: &StackDef) -> JobsDef {
     stack.jobs.clone().unwrap_or_default()
 }
 
-/// Job ids a saved state refers to. Saved states do not exist yet; this is
-/// where they will be read, so retention already honours them.
-pub fn referenced_by_saved_states(_work_dir: &Path) -> BTreeSet<String> {
-    BTreeSet::new()
+/// Job ids a saved state refers to (live and archived items): retention
+/// never prunes these.
+pub fn referenced_by_saved_states(work_dir: &Path) -> BTreeSet<String> {
+    stack_core::states::referenced_jobs(work_dir)
 }
 
 /// Delete the records retention does not keep; their ids.

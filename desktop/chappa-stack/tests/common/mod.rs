@@ -327,3 +327,84 @@ pub fn eventually(mut f: impl FnMut() -> bool) -> bool {
     }
     false
 }
+
+// ------------------------------------------------------------------- git
+
+/// git for setting test repos up, isolated from the machine's settings and
+/// with fixed dates, so commits come out the same on every run.
+pub fn test_git(dir: &Path, args: &[&str]) -> String {
+    let empty = std::env::temp_dir().join("chappa-stack-test-empty-gitconfig");
+    let _ = fs::write(&empty, "");
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &empty)
+        .env("GIT_AUTHOR_DATE", "2026-11-14T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-11-14T12:00:00Z")
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Whether git is on PATH (tests that need it skip with a line otherwise).
+pub fn has_git() -> bool {
+    let ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("skipped: git is not on PATH");
+    }
+    ok
+}
+
+/// Write `file` and commit it.
+pub fn commit_file(dir: &Path, file: &str, text: &str, message: &str) {
+    fs::write(dir.join(file), text).unwrap();
+    test_git(dir, &["add", file]);
+    test_git(dir, &["commit", "-q", "-m", message]);
+}
+
+/// A bare `origins/<repo>.git` and its shared clone `clones/<repo>` beside
+/// `beside` (the stack project), with one commit on `main` pushed.
+pub fn origin_and_clone(beside: &Path, repo: &str) -> (PathBuf, PathBuf) {
+    let root = beside.parent().unwrap();
+    let origins = root.join("origins");
+    let clones = root.join("clones");
+    fs::create_dir_all(&origins).unwrap();
+    fs::create_dir_all(&clones).unwrap();
+    let bare = origins.join(format!("{repo}.git"));
+    test_git(&origins, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+    let clone = clones.join(repo);
+    test_git(
+        &clones,
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    commit_file(&clone, "README", &format!("{repo}\n"), "start");
+    test_git(&clone, &["push", "-q", "origin", "main"]);
+    (bare, clone)
+}

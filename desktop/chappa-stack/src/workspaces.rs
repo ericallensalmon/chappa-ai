@@ -19,6 +19,8 @@
 //! | `restore:<KEY>` | the Archived panel | a job that recreates the worktrees at their branches |
 //! | `rebuild-changed:<KEY>` / `keep-as-built:<KEY>` | the drift banner on the item | rebuild what the moved branches feed / dismiss until HEAD moves again |
 //! | `move:<state>` / `approve` / `send-back` | overlay (and the tracker-status banner), with a `workflow:` | the item's local status, see [`crate::local_status`] |
+//! | `save-state` / `resume:<state>` | overlay (the Saved states section) | the item's saved stack states, see [`crate::states`] |
+//! | `activate-no-save` / `archive-no-save` / `archive-keep-data` | overlay | activate saves the item the slot leaves first, archive saves the item itself first when it is the one the slot runs; these twins skip the save, or keep the host copies of sensitive states' snapshots |
 //!
 //! Every git question the Work list shows (HEADs, dirty and unpushed
 //! counts, ahead / behind, whether origin has a branch, each clone's
@@ -214,6 +216,70 @@ impl<'a> Git<'a> {
         let p = path.display().to_string();
         self.run(clone, &["worktree", "remove", &p], LOCAL_GIT * 4)
             .map(|_| ())
+    }
+
+    /// A worktree at `commit` with no branch (a review checkout).
+    pub fn worktree_add_detached(
+        &self,
+        clone: &Path,
+        path: &Path,
+        commit: &str,
+    ) -> Result<(), String> {
+        let p = path.display().to_string();
+        self.run(
+            clone,
+            &["worktree", "add", "--detach", &p, commit],
+            LOCAL_GIT * 4,
+        )
+        .map(|_| ())
+    }
+
+    /// Fetch one refspec from origin (`+refs/pull/12/head:refs/remotes/origin/pr/12`).
+    pub fn fetch_spec(&self, clone: &Path, spec: &str) -> Result<(), String> {
+        self.run(clone, &["fetch", "--no-tags", "origin", spec], FETCH)
+            .map(|_| ())
+    }
+
+    /// Put a worktree on `commit`: on `branch` when its tip is that commit
+    /// (so the item's branch stays checked out), else detached there.
+    pub fn checkout_at(
+        &self,
+        worktree: &Path,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(b) = branch {
+            if self
+                .rev_parse(worktree, &format!("refs/heads/{b}"))
+                .ok()
+                .as_deref()
+                == Some(commit)
+            {
+                return self
+                    .run(worktree, &["checkout", "-q", b], LOCAL_GIT * 4)
+                    .map(|_| ());
+            }
+        }
+        self.run(
+            worktree,
+            &["checkout", "-q", "--detach", commit],
+            LOCAL_GIT * 4,
+        )
+        .map(|_| ())
+    }
+
+    /// Uncommitted entries in a worktree (`git status --porcelain` lines).
+    pub fn uncommitted(&self, worktree: &Path) -> Result<u32, String> {
+        self.run(worktree, &["status", "--porcelain"], LOCAL_GIT)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+    }
+
+    /// The last commit that touched `file` in the repo at `dir`.
+    pub fn last_commit_of(&self, dir: &Path, file: &str) -> Option<String> {
+        self.run(dir, &["log", "-1", "--format=%H", "--", file], LOCAL_GIT)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// `core.longpaths` of the clone (git's own setting; unset is off).
@@ -647,6 +713,107 @@ pub fn activation(
     )
 }
 
+/// [`activation`] with the automatic save of the item the slot leaves (a
+/// rebind), or, with `no_save`, the confirm saying it is not saved.
+pub fn activation_saving(
+    loaded: &Loaded,
+    runner: &StackRunner<'_>,
+    obs: &Observation,
+    rec: &ItemRecord,
+    no_save: bool,
+) -> (Change, String, Option<crate::states::SaveSpec>) {
+    let (change, head) = activation(loaded, runner, obs, rec);
+    match crate::states::bound_item(loaded).filter(|p| *p != rec.key) {
+        Some(prev) if no_save => (
+            change,
+            format!("{head} Without saving the stack state of {prev} first."),
+            None,
+        ),
+        Some(prev) => (
+            change,
+            format!(
+                "Saves the stack state of {prev} first (if that fails, nothing else runs). {head}"
+            ),
+            Some(crate::states::SaveSpec {
+                item: prev.to_string(),
+                reason: stack_core::states::SaveReason::BeforeRebind,
+                skip_in_volume: false,
+            }),
+        ),
+        None => (change, head, None),
+    }
+}
+
+/// One way to archive an item, as offered.
+pub struct ArchiveVariant {
+    pub id: String,
+    pub label: String,
+    pub confirm: String,
+    pub save: Option<crate::states::SaveSpec>,
+    pub keep_data: bool,
+}
+
+/// `archive` (saving the stack state first when the item is the one the
+/// slot runs), `archive-no-save` beside it then, and `archive-keep-data`
+/// when a sensitive state has host copies that archive would delete.
+pub fn archive_variants(loaded: &Loaded, dir: &Path, rec: &ItemRecord) -> Vec<ArchiveVariant> {
+    let saves = crate::states::bound_item(loaded) == Some(rec.key.as_str());
+    let sensitive_host = stack_core::states::list_states(dir).iter().any(|s| {
+        s.sensitive
+            && s.live_snapshots()
+                .any(|x| x.location == stack_core::definition::SnapshotLocation::Host)
+    });
+    let base = archive_confirm(rec);
+    let drop = if sensitive_host {
+        " Sensitive saved states keep only their references: their snapshots' host copies are deleted."
+    } else {
+        ""
+    };
+    let save_spec = || crate::states::SaveSpec {
+        item: rec.key.clone(),
+        reason: stack_core::states::SaveReason::BeforeArchive,
+        skip_in_volume: false,
+    };
+    let first = |s: String| {
+        if saves {
+            format!(
+                "Saves the stack state of {} first (if that fails, nothing else runs). {s}",
+                rec.item_ref.key
+            )
+        } else {
+            s
+        }
+    };
+    let mut out = vec![ArchiveVariant {
+        id: ARCHIVE_ID.to_string(),
+        label: "Archive".to_string(),
+        confirm: first(format!("{base}{drop}")),
+        save: saves.then(save_spec),
+        keep_data: false,
+    }];
+    if saves {
+        out.push(ArchiveVariant {
+            id: format!("{ARCHIVE_ID}{}", crate::states::NO_SAVE_SUFFIX),
+            label: "Archive without saving".to_string(),
+            confirm: format!("{base}{drop} Without saving the stack state first."),
+            save: None,
+            keep_data: false,
+        });
+    }
+    if sensitive_host {
+        out.push(ArchiveVariant {
+            id: format!("{ARCHIVE_ID}-keep-data"),
+            label: "Archive and keep data".to_string(),
+            confirm: first(format!(
+                "{base} Sensitive saved states keep their snapshots' host copies (inside the work folder)."
+            )),
+            save: saves.then(save_spec),
+            keep_data: true,
+        });
+    }
+    out
+}
+
 /// The `rebuild-changed` change: the drifted components, rebuilt from
 /// where their branches are now.
 pub fn rebuild_change(rec: &ItemRecord, drift: &[Drift]) -> (Change, String) {
@@ -838,6 +1005,12 @@ pub enum WorkspaceOp {
     },
     Archive {
         item: String,
+        /// Save the item's stack state first (it is active in the slot).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save: Option<crate::states::SaveSpec>,
+        /// Keep the host copies of sensitive states' snapshots.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_data: bool,
     },
     Restore {
         item: String,
@@ -951,7 +1124,9 @@ pub fn run_op(
             }
             add_worktree(&git, loaded, &dir, &mut rec, checkout, &now, say).map_err(|e| (1, e))
         }
-        WorkspaceOp::Archive { item } => archive(&git, loaded, item, &now, say),
+        WorkspaceOp::Archive {
+            item, keep_data, ..
+        } => archive(&git, loaded, item, *keep_data, &now, say),
         WorkspaceOp::Restore { item } => restore(&git, loaded, item, &now, say),
     }
 }
@@ -1086,6 +1261,7 @@ fn archive(
     git: &Git<'_>,
     loaded: &Loaded,
     item: &str,
+    keep_data: bool,
     now: &str,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), OpFailure> {
@@ -1121,6 +1297,10 @@ fn archive(
         git.worktree_remove(&clone, &wt).map_err(|e| (1, e))?;
     }
     let _ = fs::remove_dir(dir.join(SRC_DIR));
+    // States stay with the item; a sensitive one keeps only its references.
+    if !keep_data {
+        crate::states::drop_sensitive_host_data(&dir, now, say);
+    }
     rec.archived_utc = Some(now.to_string());
     rec.updated_utc = now.to_string();
     rec.save(&dir).map_err(|e| (1, e))?;
@@ -1199,6 +1379,9 @@ fn restore(
 
 /// What the Work view and the actions need to know about the instance.
 pub struct WorkInputs<'a, 'r> {
+    pub world: &'a World,
+    /// What the last resume calls found blocked, per state.
+    pub blocks: &'a crate::states::ResumeBlocks,
     pub loaded: &'a Loaded,
     pub runner: &'a StackRunner<'r>,
     /// The instance as last observed; `None` when the engines could not be
@@ -1354,17 +1537,33 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
     let mut actions = Vec::new();
     if !active {
         if let Some(obs) = inp.obs {
-            let (change, head) = activation(loaded, inp.runner, obs, rec);
-            if let Ok(plan) = inp.runner.plan(obs, &change) {
-                let confirm = full_confirm(&head, &plan);
-                let fp = fingerprint(&obs.state.fingerprint(), &confirm);
-                actions.push(endpoint(
-                    ACTIVATE_ID,
-                    &format!("Activate in slot {}", loaded.slot),
-                    true,
-                    Some(confirm),
-                    json!({ "fingerprint": fp }),
-                ));
+            for no_save in [false, true] {
+                let (change, head, save) = activation_saving(loaded, inp.runner, obs, rec, no_save);
+                if no_save && save.is_none() && crate::states::bound_item(loaded).is_none() {
+                    break;
+                }
+                if let Ok(plan) = inp.runner.plan(obs, &change) {
+                    let confirm = full_confirm(&head, &plan);
+                    let fp = fingerprint(&obs.state.fingerprint(), &confirm);
+                    let (id, label) = if no_save {
+                        (
+                            format!("{ACTIVATE_ID}{}", crate::states::NO_SAVE_SUFFIX),
+                            format!("Activate in slot {} without saving", loaded.slot),
+                        )
+                    } else {
+                        (
+                            ACTIVATE_ID.to_string(),
+                            format!("Activate in slot {}", loaded.slot),
+                        )
+                    };
+                    actions.push(endpoint(
+                        &id,
+                        &label,
+                        true,
+                        Some(confirm),
+                        json!({ "fingerprint": fp }),
+                    ));
+                }
             }
         }
     }
@@ -1391,13 +1590,22 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
             "cwd": dir.join(&r.path).display().to_string(),
         }));
     }
-    actions.push(endpoint(
-        ARCHIVE_ID,
-        "Archive",
-        true,
-        Some(archive_confirm(rec)),
-        json!({}),
-    ));
+    let saved = crate::states::overlay_parts(
+        inp.world,
+        loaded,
+        inp.obs,
+        dir,
+        rec,
+        inp.blocks,
+        inp.now_utc,
+    );
+    badges.extend(saved.badges);
+    actions.extend(saved.actions);
+    for v in archive_variants(loaded, dir, rec) {
+        actions.push(endpoint(&v.id, &v.label, true, Some(v.confirm), json!({})));
+    }
+    let mut sections = vec![json!({ "id": "repos", "title": "Repos", "rows": rows })];
+    sections.extend(saved.section);
 
     let status = local_status::overlay_parts(loaded, rec);
     let mut actions_all = status.actions;
@@ -1416,7 +1624,7 @@ pub fn overlay(inp: &WorkInputs<'_, '_>, dir: &Path, rec: &ItemRecord) -> Value 
         "active": active,
         "branches": branches,
         "badges": badges,
-        "sections": [{ "id": "repos", "title": "Repos", "rows": rows }],
+        "sections": sections,
         "banners": banners,
         "actions": actions_all,
     });
@@ -1585,11 +1793,11 @@ pub enum Accepted {
     Refused(u16, &'static str, String),
 }
 
-fn refused(status: u16, kind: &'static str, message: impl Into<String>) -> Accepted {
+pub(crate) fn refused(status: u16, kind: &'static str, message: impl Into<String>) -> Accepted {
     Accepted::Refused(status, kind, message.into())
 }
 
-fn job(id: &str, key: &str, label: &str, confirm: String, work: JobWork) -> Accepted {
+pub(crate) fn job(id: &str, key: &str, label: &str, confirm: String, work: JobWork) -> Accepted {
     Accepted::Job {
         offered: Box::new(Offered {
             id: id.to_string(),
@@ -1695,10 +1903,25 @@ pub fn accept(
             inp.now_utc,
         );
     }
+    if crate::states::handles(id) {
+        return crate::states::accept(
+            world,
+            inp.loaded,
+            inp.obs,
+            &dir,
+            &rec,
+            id,
+            &params,
+            confirmed,
+            inp.blocks,
+            inp.now_utc,
+        );
+    }
     if let Some(repo) = id.strip_prefix(ADD_REPO_PREFIX) {
         return add_repo(inp, &rec, repo, &params, confirmed);
     }
-    if id == ACTIVATE_ID {
+    let activate_no_save = format!("{ACTIVATE_ID}{}", crate::states::NO_SAVE_SUFFIX);
+    if id == ACTIVATE_ID || id == activate_no_save {
         let Some(obs) = inp.obs else {
             return refused(409, "observe", "cannot look at the stack now");
         };
@@ -1712,18 +1935,17 @@ pub fn accept(
                 ),
             );
         }
-        let (change, head) = activation(inp.loaded, inp.runner, obs, &rec);
+        let no_save = id == activate_no_save;
+        if no_save && crate::states::bound_item(inp.loaded).is_none() {
+            return refused(
+                409,
+                "not-offered",
+                "no other item has the slot, so there is nothing to save",
+            );
+        }
+        let (change, head, save) = activation_saving(inp.loaded, inp.runner, obs, &rec, no_save);
         return planned_job(
-            world,
-            inp,
-            obs,
-            &rec,
-            ACTIVATE_ID,
-            "Activate",
-            change,
-            &head,
-            &params,
-            confirmed,
+            world, inp, obs, &rec, id, "Activate", change, &head, save, &params, confirmed,
         );
     }
     if id.strip_prefix(REBUILD_PREFIX).is_some() {
@@ -1743,6 +1965,7 @@ pub fn accept(
             "Rebuild changed",
             change,
             &head,
+            None,
             &params,
             confirmed,
         );
@@ -1774,7 +1997,10 @@ pub fn accept(
                 .join(", ")
         ));
     }
-    if id == ARCHIVE_ID {
+    if let Some(v) = archive_variants(inp.loaded, &dir, &rec)
+        .into_iter()
+        .find(|v| v.id == id)
+    {
         if !confirmed {
             return refused(
                 409,
@@ -1794,13 +2020,15 @@ pub fn accept(
             );
         }
         return job(
-            ARCHIVE_ID,
+            &v.id,
             &rec.key,
             "Archive",
-            archive_confirm(&rec),
+            v.confirm,
             JobWork::Workspace {
                 op: WorkspaceOp::Archive {
                     item: rec.key.clone(),
+                    save: v.save,
+                    keep_data: v.keep_data,
                 },
             },
         );
@@ -1822,6 +2050,7 @@ fn planned_job(
     label: &str,
     change: Change,
     head: &str,
+    save: Option<crate::states::SaveSpec>,
     params: &Value,
     confirmed: bool,
 ) -> Accepted {
@@ -1866,6 +2095,8 @@ fn planned_job(
         JobWork::Plan {
             change,
             plan: Box::new(plan),
+            save,
+            remove_volumes: false,
         },
     )
 }

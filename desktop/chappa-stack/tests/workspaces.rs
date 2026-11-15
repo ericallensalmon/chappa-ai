@@ -684,7 +684,7 @@ fn activate_binds_only_the_items_repos_and_activating_another_rebinds() {
     let activate = action(&row, "activate").unwrap();
     let confirm = activate["confirm"].as_str().unwrap();
     assert!(
-        confirm.starts_with("Bind slot 0 to ABC-2: run web from task/ABC-2-other-thing, api back to prebuilt; others unchanged. "),
+        confirm.starts_with("Saves the stack state of ABC-1 first (if that fails, nothing else runs). Bind slot 0 to ABC-2: run web from task/ABC-2-other-thing, api back to prebuilt; others unchanged. "),
         "{confirm}"
     );
     assert!(
@@ -706,6 +706,17 @@ fn activate_binds_only_the_items_repos_and_activating_another_rebinds() {
             .unwrap()
             .item,
         "ABC-2"
+    );
+    // The slot left ABC-1: its stack state was saved first.
+    let saved = stack_core::states::list_states(&dir);
+    assert_eq!(saved.len(), 1, "{log}");
+    assert_eq!(
+        saved[0].reason,
+        stack_core::states::SaveReason::BeforeRebind
+    );
+    assert_eq!(
+        saved[0].components["api"].mode,
+        Some(stack_core::definition::Mode::Source)
     );
     ws.refresh();
     assert_eq!(ws.row("ABC-1")["active"], false);
@@ -904,9 +915,12 @@ fn archive_is_refused_while_dirty_or_unpushed_and_restore_brings_it_back() {
     active.save(&ws.p.work()).unwrap();
     ws.refresh();
     let archive = action(&ws.row("ABC-1"), "archive").unwrap().clone();
+    // It is the item the slot runs: its stack state is saved first, and
+    // the twin goes ahead without saving.
+    assert!(action(&ws.row("ABC-1"), "archive-no-save").is_some());
     assert_eq!(
         archive["confirm"],
-        "Archive ABC-1: remove the worktrees of api (refused if any has uncommitted or unpushed work) and move the folder to _archive/ABC-1."
+        "Saves the stack state of ABC-1 first (if that fails, nothing else runs). Archive ABC-1: remove the worktrees of api (refused if any has uncommitted or unpushed work) and move the folder to _archive/ABC-1."
     );
     let (status, body) = act(&ws.src, "archive", Some("ABC-1"), json!({}));
     assert_eq!(status, 202, "{body}");
@@ -920,6 +934,13 @@ fn archive_is_refused_while_dirty_or_unpushed_and_restore_brings_it_back() {
         .unwrap()
         .archived_utc
         .is_some());
+    // The automatic save went with the item into the archive.
+    let saved = stack_core::states::list_states(&archived);
+    assert_eq!(saved.len(), 1, "{log}");
+    assert_eq!(
+        saved[0].reason,
+        stack_core::states::SaveReason::BeforeArchive
+    );
     assert!(ActiveRecord::load(&ws.p.work()).unwrap().get(0).is_none());
     let list = git(&ws.clone_of("api"), &["worktree", "list", "--porcelain"]);
     assert_eq!(list.matches("worktree ").count(), 1, "{list}");
@@ -1106,6 +1127,20 @@ fn the_manifest_offers_start_work_on_every_work_row_or_the_listed_sources() {
                 "mutates": true,
                 "confirm": "Create a workspace for {key} — {title}",
                 "on": { "view": "work", "sources": ["*"] },
+            }, {
+                "kind": "endpoint",
+                "id": "review-env",
+                "label": "Review with environment",
+                "mutates": true,
+                "confirm": "Check out {key} at its head into a review worktree",
+                "on": { "view": "prs", "sources": ["*"] },
+            }, {
+                "kind": "endpoint",
+                "id": "review-env-up",
+                "label": "Review with environment in slot 0",
+                "mutates": true,
+                "confirm": "Check out {key} at its head into a review worktree and bring up slot 0 from it",
+                "on": { "view": "prs", "sources": ["*"] },
             }],
             "actions": "/api/actions",
             "jobs": "/api/jobs/{id}",

@@ -72,8 +72,15 @@ pub struct Binding {
 impl Binding {
     /// The binding of `item` (a folder under the work folder): its record's
     /// repos. A missing or unreadable record binds the item with no
-    /// worktrees, so nothing builds from a shared clone in its name.
+    /// worktrees, so nothing builds from a shared clone in its name. A
+    /// review workspace (`review:<name>`) binds its one worktree.
     pub fn of_item(work_dir: &Path, item: &str) -> Binding {
+        if crate::reviews::is_review_binding(item) {
+            return Binding {
+                item: Some(item.to_string()),
+                worktrees: crate::reviews::worktrees_of(work_dir, item),
+            };
+        }
         let dir = ItemRecord::dir(work_dir, item);
         let worktrees = match ItemRecord::load(&dir) {
             Ok(Some(rec)) => rec

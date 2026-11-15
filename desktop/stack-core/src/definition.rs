@@ -322,6 +322,9 @@ pub struct WorkDef {
     pub branch: String,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub repos: IndexMap<String, WorkRepoDef>,
+    /// Saved stack states kept per item; [`DEFAULT_KEEP_STATES`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_states: Option<u32>,
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
 }
@@ -346,6 +349,8 @@ pub const ANY_SOURCE: &str = "*";
 pub const DEFAULT_BRANCH_PATTERN: &str = "task/{key}-{slug}";
 /// The base branch when a clone's override names none.
 pub const DEFAULT_BASE_BRANCH: &str = "main";
+/// Saved stack states kept per item when `work.keepStates` says nothing.
+pub const DEFAULT_KEEP_STATES: u32 = 20;
 
 fn default_work_sources() -> Vec<String> {
     vec![ANY_SOURCE.to_string()]
@@ -360,12 +365,18 @@ impl Default for WorkDef {
             sources: default_work_sources(),
             branch: default_branch_pattern(),
             repos: IndexMap::new(),
+            keep_states: None,
             unknown: IndexMap::new(),
         }
     }
 }
 
 impl WorkDef {
+    /// How many saved states each item keeps.
+    pub fn keep_states(&self) -> u32 {
+        self.keep_states.unwrap_or(DEFAULT_KEEP_STATES)
+    }
+
     /// The base branch of `repo`.
     pub fn base_of(&self, repo: &str) -> &str {
         self.repos
@@ -871,6 +882,9 @@ pub struct DataDef {
     pub state_seeds: IndexMap<String, Vec<String>>,
 }
 
+/// The four argv hooks that save and bring back a component's data, run
+/// with `{container}` (the running container) and `{snapshot}` (the
+/// generated name) filled in.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotHooks {
@@ -882,6 +896,15 @@ pub struct SnapshotHooks {
     pub exists: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete: Option<Vec<String>>,
+    /// Where the artifact is inside the container (`{snapshot}` filled in):
+    /// shown as where a snapshot lives, and the path `location: host`
+    /// copies out after `create` and back in before `restore`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// What kind of artifact it is ("pg_dump custom", "mssql backup"):
+    /// shown with the snapshot, never interpreted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1150,6 +1173,14 @@ impl ComponentDef {
             if let Some(t) = &m.tag {
                 out.push((format!("modes.{name}.tag"), t.as_str()));
             }
+        }
+        if let Some(path) = self
+            .persistence
+            .as_ref()
+            .and_then(|p| p.snapshot.as_ref())
+            .and_then(|s| s.path.as_deref())
+        {
+            out.push(("persistence.snapshot.path".to_string(), path));
         }
         out
     }
@@ -1629,6 +1660,10 @@ pub enum Rule {
     DuplicateState,
     /// A workflow state's gate is not `human` or `human-exit`.
     InvalidGate,
+    /// A setting this version reads but cannot act on yet.
+    NotSupported,
+    /// A number outside what the setting allows.
+    OutOfRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2128,6 +2163,90 @@ fn validate_stack(
                     "`data.strategy: snapshot` needs `persistence`".into(),
                 );
             }
+            if d.strategy == DataStrategy::Snapshot
+                && c.persistence.as_ref().is_some_and(|p| p.snapshot.is_none())
+            {
+                err(
+                    Rule::MissingField,
+                    format!("{cpath}.persistence.snapshot"),
+                    "`data.strategy: snapshot` needs `persistence.snapshot` hooks (create, restore, exists)"
+                        .into(),
+                );
+            }
+            for name in d.state_seeds.keys() {
+                if !is_valid_key(name) {
+                    err(
+                        Rule::InvalidKey,
+                        format!("{cpath}.data.stateSeeds.{name}"),
+                        format!("state seed `{name}` must be [A-Za-z0-9._-], at most {KEY_MAX_LEN} characters"),
+                    );
+                }
+            }
+        }
+        if let Some(p) = &c.persistence {
+            let ppath = format!("{cpath}.persistence");
+            match p.location {
+                SnapshotLocation::Remote => err(
+                    Rule::NotSupported,
+                    format!("{ppath}.location"),
+                    "`location: remote` is not supported yet; it comes with the cloud driver. Use in-volume or host"
+                        .into(),
+                ),
+                SnapshotLocation::Host
+                    if p.snapshot.as_ref().is_none_or(|s| s.path.is_none()) =>
+                {
+                    err(
+                        Rule::MissingField,
+                        format!("{ppath}.snapshot.path"),
+                        "`location: host` copies the snapshot out of the container, so it needs `snapshot.path` (where `create` leaves it)"
+                            .into(),
+                    )
+                }
+                _ => {}
+            }
+            if p.keep == 0 {
+                err(
+                    Rule::OutOfRange,
+                    format!("{ppath}.keep"),
+                    "`keep` must be at least 1".into(),
+                );
+            }
+            if let Some(s) = &p.snapshot {
+                for (hook, argv) in [
+                    ("create", &s.create),
+                    ("restore", &s.restore),
+                    ("exists", &s.exists),
+                ] {
+                    if argv.as_ref().is_none_or(|a| a.is_empty()) {
+                        err(
+                            Rule::MissingField,
+                            format!("{ppath}.snapshot.{hook}"),
+                            format!("snapshot hooks need `{hook}` (argv)"),
+                        );
+                    }
+                }
+                if s.delete.is_none() {
+                    warn(
+                        Rule::MissingField,
+                        format!("{ppath}.snapshot.delete"),
+                        "no `delete` hook: pruned states leave their snapshots behind".into(),
+                    );
+                }
+                let names_snapshot = |a: &Option<Vec<String>>| {
+                    a.iter().flatten().any(|w| {
+                        placeholders::references(w)
+                            .map(|r| r.contains(&Placeholder::Snapshot))
+                            .unwrap_or(false)
+                    })
+                };
+                if s.create.is_some() && !names_snapshot(&s.create) {
+                    warn(
+                        Rule::Placeholder,
+                        format!("{ppath}.snapshot.create"),
+                        "`create` never uses {snapshot}, so every saved state would overwrite the same snapshot".into(),
+                    );
+                }
+            }
         }
         // source mode feeding terraform without a registry
         if c.has_mode(Mode::Source) && stack.registry.is_none() {
@@ -2214,6 +2333,13 @@ fn validate_stack(
                 Rule::UnknownKey,
                 format!("{base}.work.{key}"),
                 format!("unknown key `{key}` (kept, ignored)"),
+            );
+        }
+        if work.keep_states == Some(0) {
+            err(
+                Rule::OutOfRange,
+                format!("{base}.work.keepStates"),
+                "`keepStates` must be at least 1".into(),
             );
         }
         if work.sources.is_empty() {
@@ -2543,6 +2669,9 @@ stacks:
           volume: db-data
           snapshot:
             create: [docker, exec, "{container}", /scripts/snapshot.sh, "{snapshot}"]
+            restore: [docker, exec, "{container}", /scripts/restore.sh, "{snapshot}"]
+            exists: [docker, exec, "{container}", test, -e, "/var/opt/snapshots/{snapshot}"]
+            delete: [docker, exec, "{container}", rm, "/var/opt/snapshots/{snapshot}"]
         dataSafety:
           marker: [docker, exec, "{container}", /scripts/scrub-marker.sh]
           sample: [docker, exec, "{container}", /scripts/sample.sh]
@@ -2858,6 +2987,102 @@ stacks:
             assert_eq!(e.len(), 1, "{volume:?}");
             assert_eq!(e[0].path, "stacks.app.components.db.persistence.volume");
         }
+    }
+
+    #[test]
+    fn data_strategies_and_snapshot_settings_are_checked() {
+        let doc = example();
+        let db = &doc.stacks["app"].components["db"];
+        let snap = db.persistence.as_ref().unwrap().snapshot.as_ref().unwrap();
+        assert!(snap.restore.is_some() && snap.exists.is_some() && snap.delete.is_some());
+        assert_eq!(
+            doc.stacks["app"].work_def().keep_states(),
+            DEFAULT_KEEP_STATES
+        );
+
+        let text = EXAMPLE.replace(
+            "        persistence:\n          volume: db-data\n",
+            "        data:\n          strategy: snapshot\n          stateSeeds: { \"bad name\": [x], ok: [y, \"{param:count}\"] }\n        persistence:\n          volume: db-data\n          location: remote\n          keep: 0\n",
+        )
+        .replace(
+            "            restore: [docker, exec, \"{container}\", /scripts/restore.sh, \"{snapshot}\"]\n",
+            "",
+        )
+        .replace(
+            "            delete: [docker, exec, \"{container}\", rm, \"/var/opt/snapshots/{snapshot}\"]\n",
+            "",
+        )
+        .replace(
+            "    components:\n",
+            "    work: { keepStates: 0 }\n    components:\n",
+        );
+        let doc = StacksDocument::parse(&text).unwrap();
+        let diags = validate(&doc, &ValidationContext::default());
+        let found = |path: &str, rule: Rule, severity: Severity| {
+            diags
+                .iter()
+                .any(|d| d.path == path && d.rule == rule && d.severity == severity)
+        };
+        let p = "stacks.app.components.db";
+        assert!(found(
+            &format!("{p}.persistence.location"),
+            Rule::NotSupported,
+            Severity::Error
+        ));
+        let remote = diags.iter().find(|d| d.rule == Rule::NotSupported).unwrap();
+        assert!(remote.message.contains("not supported yet"), "{remote}");
+        assert!(found(
+            &format!("{p}.persistence.snapshot.restore"),
+            Rule::MissingField,
+            Severity::Error
+        ));
+        assert!(found(
+            &format!("{p}.persistence.snapshot.delete"),
+            Rule::MissingField,
+            Severity::Warning
+        ));
+        assert!(found(
+            &format!("{p}.persistence.keep"),
+            Rule::OutOfRange,
+            Severity::Error
+        ));
+        assert!(found(
+            "stacks.app.work.keepStates",
+            Rule::OutOfRange,
+            Severity::Error
+        ));
+        assert!(found(
+            &format!("{p}.data.stateSeeds.bad name"),
+            Rule::InvalidKey,
+            Severity::Error
+        ));
+        assert!(!diags
+            .iter()
+            .any(|d| d.path.starts_with(&format!("{p}.data.stateSeeds.ok"))));
+
+        // host needs the in-container path; create without {snapshot} warns.
+        let text = EXAMPLE
+            .replace(
+                "          volume: db-data\n",
+                "          volume: db-data\n          location: host\n",
+            )
+            .replace(
+                "/scripts/snapshot.sh, \"{snapshot}\"]",
+                "/scripts/snapshot.sh]",
+            );
+        let diags = validate(
+            &StacksDocument::parse(&text).unwrap(),
+            &ValidationContext::default(),
+        );
+        assert!(diags
+            .iter()
+            .any(|d| d.path == format!("{p}.persistence.snapshot.path")
+                && d.rule == Rule::MissingField));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == format!("{p}.persistence.snapshot.create")
+                && d.rule == Rule::Placeholder
+                && d.severity == Severity::Warning));
     }
 
     #[test]

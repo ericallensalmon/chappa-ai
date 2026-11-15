@@ -27,6 +27,8 @@
 //! | [`world`] | every outside tool as a shareable trait object, real or fake |
 //! | [`workspaces`] | item workspaces: Start work, worktrees, activate, archive, drift, served as overlays on a tracker's Work rows |
 //! | [`local_status`] | an item's local workflow on its overlay: the status block, moves, approvals, the tracker-status banner |
+//! | [`states`] | saved stack states: save (snapshot hooks), prune, resume (exists, restore, recipe replay), the automatic save before destructive verbs, the volume guard |
+//! | [`reviews`] | PR review workspaces: a PR head checked out under `reviews/`, a slot brought up from it, the panel |
 
 pub mod actions;
 pub mod background;
@@ -39,8 +41,10 @@ pub mod procs;
 pub mod project;
 pub mod records;
 pub mod relay;
+pub mod reviews;
 pub mod runjob;
 pub mod server;
+pub mod states;
 pub mod timeouts;
 pub mod workspaces;
 pub mod world;

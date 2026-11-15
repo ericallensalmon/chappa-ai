@@ -142,3 +142,155 @@ fn the_example_database_comes_up_and_goes_down_through_the_protocol() {
     let (_, env) = get(&src, "/api/environment");
     assert_eq!(component(&env, "db")["state"], "not-deployed");
 }
+
+/// An actions call on the Work view, run headless, waited for.
+fn run_work(src: &chappa_stack::server::Source, action: &Value, key: &str) -> String {
+    let body = json!({
+        "id": action["id"],
+        "target": {"view": "work", "key": key},
+        "params": action["params"],
+        "confirmed": true,
+    });
+    let (status, reply) = post(src, "/api/actions", &body, false);
+    assert_eq!(status, 202, "{reply}");
+    let id = reply["jobId"].as_str().unwrap().to_string();
+    wait("the job", Duration::from_secs(600), || {
+        get(src, &format!("/api/jobs/{id}")).1["state"] != "running"
+    });
+    let (_, state) = get(src, &format!("/api/jobs/{id}"));
+    assert_eq!(
+        state["state"],
+        "done",
+        "{}",
+        state["log"].as_str().unwrap_or("")
+    );
+    state["log"].as_str().unwrap_or("").to_string()
+}
+
+fn docker_ready() -> bool {
+    if std::env::var("CHAPPA_TEST_DOCKER").as_deref() != Ok("1") {
+        skip("CHAPPA_TEST_DOCKER is not 1");
+        return false;
+    }
+    match CliRunner.run(&Invocation::new(
+        "docker",
+        &["info", "--format", "{{.OSType}}"],
+    )) {
+        Ok(out) if out.ok() && out.stdout.trim() == "linux" => true,
+        Ok(out) => {
+            skip(&format!("docker is not in Linux mode ({})", out.summary()));
+            false
+        }
+        Err(e) => {
+            skip(&format!("docker is not reachable ({e})"));
+            false
+        }
+    }
+}
+
+#[test]
+fn the_example_saves_its_database_goes_down_and_resumes_it() {
+    if !docker_ready() {
+        return;
+    }
+    let p = Project::example();
+    let _cleanup = Cleanup(p.dir.clone());
+    // A work item with no repos, bound to slot 0 (the example builds
+    // nothing from a clone, so binding changes no component).
+    let item = p.work().join("ABC-1");
+    std::fs::create_dir_all(&item).unwrap();
+    stack_core::workspace::ItemRecord::new(
+        stack_core::workspace::ItemRef {
+            source: "tracker".into(),
+            key: "ABC-1".into(),
+        },
+        "ABC-1",
+        "2026-11-14T12:00:00Z",
+    )
+    .save(&item)
+    .unwrap();
+    let mut active = stack_core::intent::ActiveRecord::default();
+    active.set(0, "ABC-1", "local-0", "2026-11-14T12:00:00Z");
+    active.save(&p.work()).unwrap();
+    let mut world = World::real();
+    world.spawner = Arc::new(ThreadSpawner);
+    world.hosts_text = Some("127.0.0.1 localhost dev.example.test\n".into());
+    let src = source(world, &p.dir);
+
+    let (_, env) = get(&src, "/api/environment");
+    let start_db = component(&env, "db")["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "start")
+        .unwrap()
+        .clone();
+    run(&src, &start_db, Some("db"));
+    wait("db to be up", Duration::from_secs(120), || {
+        component(&get(&src, "/api/environment").1, "db")["state"] == "up"
+    });
+
+    let row = |src: &chappa_stack::server::Source| {
+        get(src, "/api/work").1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["key"] == "ABC-1")
+            .unwrap()
+            .clone()
+    };
+    let save = row(&src)["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "save-state")
+        .unwrap()
+        .clone();
+    let log = run_work(&src, &save, "ABC-1");
+    assert!(log.contains("✓ db: snapshot ABC-1-db-"), "{log}");
+    let states = stack_core::states::list_states(&item);
+    assert_eq!(states.len(), 1);
+    let first = states[0].id.clone();
+
+    // Down saves first, keeps the volume, and the snapshot in it.
+    let (_, env) = get(&src, "/api/environment");
+    let down = env["facts"][0]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "down")
+        .unwrap()
+        .clone();
+    run(&src, &down, None);
+    assert_eq!(stack_core::states::list_states(&item).len(), 2);
+    assert_eq!(
+        component(&get(&src, "/api/environment").1, "db")["state"],
+        "not-deployed"
+    );
+
+    // Resume the first state: db comes back from its digest and the
+    // snapshot is restored once it runs.
+    let r = row(&src);
+    let resume = r["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "saved-states")
+        .unwrap()["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == format!("resume:{first}"))
+        .unwrap()
+        .clone();
+    assert!(resume["confirm"]
+        .as_str()
+        .unwrap()
+        .contains("this overwrites the database db"));
+    let log = run_work(&src, &resume, "ABC-1");
+    assert!(log.contains("docker pull postgres@sha256:"), "{log}");
+    assert!(log.contains("✓ db: restored ABC-1-db-"), "{log}");
+    wait("db to be up again", Duration::from_secs(120), || {
+        component(&get(&src, "/api/environment").1, "db")["state"] == "up"
+    });
+}
