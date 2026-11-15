@@ -34,6 +34,12 @@
 //! A `data-safety-check` job runs the checks of the components it names
 //! that are running, records the verdicts, applies `stop` / `block-up`
 //! the same way, and fails when any verdict is not clean.
+//!
+//! An activation (a plan that binds a work item) builds from the item it
+//! activates: the runner is bound to that item's worktrees before the plan
+//! is applied, and `active.json` is written as the first step. A workspace
+//! job (Start work, Add repo, Archive, Restore) is a git change to an item
+//! folder; see [`crate::workspaces`].
 
 use std::fs::File;
 use std::io::Write;
@@ -47,7 +53,7 @@ use stack_core::definition::ScanWhen;
 use stack_core::definition::StacksDocument;
 use stack_core::driver::{Check, Outcome, ResolvedInstance};
 use stack_core::images::ProvenanceCache;
-use stack_core::intent::utc_now;
+use stack_core::intent::{utc_now, ActiveRecord};
 use stack_core::jobs::{JobStep, LocalStep, RunBlock};
 use stack_core::planner::{Change, PlanError, Step, Verb};
 use stack_core::runner::{ApplyOptions, RunnerError, StackRunner};
@@ -184,8 +190,21 @@ fn execute(
     out: &mut Out<'_>,
     result: &mut JobResult,
 ) -> Result<(), Failure> {
-    let loaded = Loaded::load(project_dir, Some(&rec.stack), rec.slot)
+    let mut loaded = Loaded::load(project_dir, Some(&rec.stack), rec.slot)
         .map_err(|e| (EXIT_REFUSED, format!("cannot load the stack: {e}")))?;
+    if let JobWork::Workspace { op } = &rec.work {
+        return crate::workspaces::run_op(world, &loaded, op, &mut |l| out.say(l));
+    }
+    let binds: Option<String> = match &rec.work {
+        JobWork::Plan {
+            change: Change::Bind { item, .. },
+            ..
+        } => Some(item.clone()),
+        _ => None,
+    };
+    if let Some(item) = &binds {
+        loaded.bind_item(Some(item));
+    }
     let now = utc_now();
     let runner = loaded.runner(world, &now);
     let (inst, _) = runner
@@ -203,9 +222,12 @@ fn execute(
                 "looking at the stack…"
             });
             let table = ProcessTable::load(work_dir, &inst.id);
-            let obs = runner
+            let mut obs = runner
                 .observe(&inst, &table.statuses(&*world.procs))
                 .map_err(|e| (EXIT_REFUSED, e.to_string()))?;
+            if let Some(item) = &binds {
+                obs.intent.item = Some(item.clone());
+            }
             for note in &obs.notes {
                 out.say(&format!("note: {note}"));
             }
@@ -277,7 +299,21 @@ fn execute(
                     serde_json::to_value(ci).unwrap_or(serde_json::Value::Null),
                 );
             }
-            applied.steps
+            let mut steps = applied.steps;
+            if let Some(item) = &binds {
+                let mut active =
+                    ActiveRecord::load(work_dir).map_err(|e| (EXIT_REFUSED, e.to_string()))?;
+                active.set(rec.slot, item, &inst.id, &now);
+                steps.insert(
+                    0,
+                    JobStep::write(
+                        "active item",
+                        ActiveRecord::path(work_dir),
+                        serde_json::to_string_pretty(&active).expect("active serializes"),
+                    ),
+                );
+            }
+            steps
         }
         JobWork::Restart { component } => {
             let run = runner.restart(&inst, component).ok_or_else(|| {
@@ -305,6 +341,7 @@ fn execute(
                 result,
             );
         }
+        JobWork::Workspace { .. } => return Ok(()),
         JobWork::Gc => {
             out.say("listing images…");
             let plans = runner

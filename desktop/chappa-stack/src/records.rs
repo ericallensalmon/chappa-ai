@@ -62,6 +62,8 @@ pub enum JobWork {
         /// What asked for it: `manual` or `every`.
         trigger: String,
     },
+    /// A git change to an item workspace (see [`crate::workspaces`]).
+    Workspace { op: crate::workspaces::WorkspaceOp },
 }
 
 /// The app's report when the pane that ran the job exits.

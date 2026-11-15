@@ -1,0 +1,9 @@
+# Shared clones this stack may build or run from directly, one name per
+# line. Without an entry here, a component in source or dev mode builds
+# only from the worktree of the active work item, so the stack never
+# quietly builds whatever branch a shared clone happens to be on.
+#
+# The example has no work items of its own, so its web app (always dev
+# mode) and the api's source and dev modes run from ../web and ../api.
+web
+api

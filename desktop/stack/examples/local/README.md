@@ -19,6 +19,7 @@ stack/data-safety.yml    detection rules: the starter file, two rules on
 stack/marker-db.js       db's stand-in scrub-marker hook
 stack/sample-db.js       db's stand-in sample hook (prints test fixtures)
 .gitignore               .work/ and .chappa/stack-state/ stay local
+shared-checkouts-allow.txt  ../web and ../api may be built from directly
 ```
 
 `registry.example/api` is a placeholder: point `modes.prebuilt.image` at a
@@ -89,6 +90,16 @@ a `data not clean` badge and a banner saying agents are blocked, with
 
 To see a finding, add the test card number `4111 1111 1111 1111` to the
 `card` values in `stack/sample-db.js` and run the check again.
+
+## Work items and shared clones
+
+A component in `source` or `dev` mode builds from the worktree of the
+active work item (Start work on a tracker's Work row creates
+`.work/<KEY>/`, Activate binds a slot to it). Building straight from a
+shared clone such as `../web` is refused unless the clone is listed in
+`shared-checkouts-allow.txt`, so a stack never quietly builds whatever
+branch a clone happens to be on. The example has no work items, so it
+lists `web` (always `dev`) and `api` there.
 
 ## Running it in the app
 

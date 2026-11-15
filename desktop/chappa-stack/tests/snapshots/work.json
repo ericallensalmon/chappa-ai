@@ -1,0 +1,258 @@
+{
+  "banners": [],
+  "freshness": {
+    "asOf": "<now>",
+    "errors": []
+  },
+  "items": [
+    {
+      "actions": [
+        {
+          "cwd": "<project>/.work/ABC-1/src/api-922ff587",
+          "id": "terminal:api",
+          "kind": "terminal",
+          "label": "Terminal in api"
+        },
+        {
+          "cwd": "<project>/.work/ABC-1/src/web-c996ed59",
+          "id": "terminal:web",
+          "kind": "terminal",
+          "label": "Terminal in web"
+        },
+        {
+          "confirm": "Archive ABC-1: remove the worktrees of api, web (refused if any has uncommitted or unpushed work) and move the folder to _archive/ABC-1.",
+          "id": "archive",
+          "kind": "endpoint",
+          "label": "Archive",
+          "mutates": true,
+          "params": {}
+        }
+      ],
+      "active": true,
+      "badges": [
+        {
+          "text": "1 uncommitted",
+          "tone": "warn"
+        },
+        {
+          "text": "active in slot 0",
+          "tone": "ok"
+        }
+      ],
+      "branches": [
+        {
+          "branch": "task/ABC-1-fix-login",
+          "forge": "github",
+          "repo": "owner/api"
+        },
+        {
+          "branch": "task/ABC-1-fix-login",
+          "forge": "github",
+          "repo": "owner/web"
+        }
+      ],
+      "folder": "<project>/.work/ABC-1",
+      "key": "ABC-1",
+      "ref": {
+        "key": "ABC-1",
+        "source": "tracker"
+      },
+      "sections": [
+        {
+          "id": "repos",
+          "rows": [
+            {
+              "label": "api",
+              "value": "task/ABC-1-fix-login · 922ff587 · 1 ahead, 0 behind main"
+            },
+            {
+              "badges": [
+                {
+                  "text": "1 uncommitted",
+                  "tone": "warn"
+                }
+              ],
+              "label": "web",
+              "value": "task/ABC-1-fix-login · c996ed59 · 0 ahead, 0 behind main"
+            }
+          ],
+          "title": "Repos"
+        }
+      ],
+      "status": {
+        "category": "doing",
+        "label": "In Progress"
+      },
+      "title": "Fix login",
+      "url": "https://tracker.example.com/ABC-1"
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Bind slot 0 to ABC-2: api back to prebuilt; others unchanged. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
+          "id": "activate",
+          "kind": "endpoint",
+          "label": "Activate in slot 0",
+          "mutates": true,
+          "params": {
+            "fingerprint": "<fingerprint>"
+          }
+        },
+        {
+          "confirm": "Create branch `task/ABC-2-other-thing` from `main` in api",
+          "id": "add-repo:api",
+          "kind": "endpoint",
+          "label": "Add api",
+          "mutates": true,
+          "params": {
+            "branch": "task/ABC-2-other-thing",
+            "expect": "new",
+            "repo": "api"
+          }
+        },
+        {
+          "confirm": "Create branch `task/ABC-2-other-thing` from `main` in web",
+          "id": "add-repo:web",
+          "kind": "endpoint",
+          "label": "Add web",
+          "mutates": true,
+          "params": {
+            "branch": "task/ABC-2-other-thing",
+            "expect": "new",
+            "repo": "web"
+          }
+        },
+        {
+          "confirm": "Archive ABC-2: move its folder to _archive/ABC-2.",
+          "id": "archive",
+          "kind": "endpoint",
+          "label": "Archive",
+          "mutates": true,
+          "params": {}
+        }
+      ],
+      "active": false,
+      "badges": [
+        {
+          "text": "not active",
+          "tone": "muted"
+        }
+      ],
+      "branches": [],
+      "folder": "<project>/.work/ABC-2",
+      "key": "ABC-2",
+      "ref": {
+        "key": "ABC-2",
+        "source": "tracker"
+      },
+      "sections": [
+        {
+          "id": "repos",
+          "rows": [
+            {
+              "label": "api",
+              "value": "not in this item"
+            },
+            {
+              "label": "web",
+              "value": "not in this item"
+            }
+          ],
+          "title": "Repos"
+        }
+      ],
+      "status": {
+        "category": "doing",
+        "label": "In Progress"
+      },
+      "title": "Other thing",
+      "url": "https://tracker.example.com/ABC-2"
+    },
+    {
+      "actions": [
+        {
+          "confirm": "Bind slot 0 to ABC-3: api back to prebuilt; others unchanged. Pull api (registry.example/api:main); recreate api (mode source → prebuilt).",
+          "id": "activate",
+          "kind": "endpoint",
+          "label": "Activate in slot 0",
+          "mutates": true,
+          "params": {
+            "fingerprint": "<fingerprint>"
+          }
+        },
+        {
+          "confirm": "Create branch `task/ABC-3-finished-thing` from `main` in api",
+          "id": "add-repo:api",
+          "kind": "endpoint",
+          "label": "Add api",
+          "mutates": true,
+          "params": {
+            "branch": "task/ABC-3-finished-thing",
+            "expect": "new",
+            "repo": "api"
+          }
+        },
+        {
+          "confirm": "Create branch `task/ABC-3-finished-thing` from `main` in web",
+          "id": "add-repo:web",
+          "kind": "endpoint",
+          "label": "Add web",
+          "mutates": true,
+          "params": {
+            "branch": "task/ABC-3-finished-thing",
+            "expect": "new",
+            "repo": "web"
+          }
+        },
+        {
+          "confirm": "Archive ABC-3: move its folder to _archive/ABC-3.",
+          "id": "archive",
+          "kind": "endpoint",
+          "label": "Archive",
+          "mutates": true,
+          "params": {}
+        }
+      ],
+      "active": false,
+      "badges": [
+        {
+          "text": "not active",
+          "tone": "muted"
+        },
+        {
+          "text": "done in tracker — archive?",
+          "tone": "info"
+        }
+      ],
+      "branches": [],
+      "folder": "<project>/.work/ABC-3",
+      "key": "ABC-3",
+      "ref": {
+        "key": "ABC-3",
+        "source": "tracker"
+      },
+      "sections": [
+        {
+          "id": "repos",
+          "rows": [
+            {
+              "label": "api",
+              "value": "not in this item"
+            },
+            {
+              "label": "web",
+              "value": "not in this item"
+            }
+          ],
+          "title": "Repos"
+        }
+      ],
+      "status": {
+        "category": "done",
+        "label": "Done"
+      },
+      "title": "Finished thing",
+      "url": "https://tracker.example.com/ABC-3"
+    }
+  ]
+}

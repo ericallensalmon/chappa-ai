@@ -167,6 +167,34 @@ pub enum Change {
         #[serde(default, rename = "ref")]
         git_ref: Option<String>,
     },
+    /// Bind a work item to the instance: every component in `bind` builds
+    /// (source) or runs (dev) from the item's branch, in the item's
+    /// worktree; every one in `release` goes back to the given mode (it
+    /// was bound to a previous item's worktree, which the new one does not
+    /// have). The rest keep their mode. A component that exists is
+    /// recreated; one that does not only has its mode and ref recorded, so
+    /// its next start builds from the item.
+    Bind {
+        /// The item's folder name, for the notes.
+        item: String,
+        #[serde(default)]
+        bind: IndexMap<String, BindTarget>,
+        #[serde(default)]
+        release: IndexMap<String, Mode>,
+    },
+}
+
+/// What one component is bound to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindTarget {
+    pub mode: Mode,
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// Build (or restart) again even when mode and ref are unchanged: the
+    /// branch moved since the instance was built from it.
+    #[serde(default)]
+    pub rebuild: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -180,6 +208,7 @@ pub enum Verb {
     Down,
     Start,
     Watch,
+    Bind,
 }
 
 impl Change {
@@ -194,6 +223,7 @@ impl Change {
             Change::RebuildAll => Verb::Rebuild,
             Change::Start { .. } => Verb::Start,
             Change::Watch { .. } => Verb::Watch,
+            Change::Bind { .. } => Verb::Bind,
         }
     }
 }
@@ -675,6 +705,11 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 plan.push(Step::Remove { component: name });
             }
         }
+        Change::Bind {
+            item,
+            bind,
+            release,
+        } => plan_bind(stack, state, &order, item, bind, release, &mut plan)?,
         Change::Start { gateways } => {
             for name in &order {
                 let cur = state.component(name);
@@ -757,6 +792,122 @@ fn plan_switch(
         });
     }
     recreate_image_dependents(stack, state, order, &[component.to_string()], plan);
+    Ok(())
+}
+
+/// [`Change::Bind`]: components in definition order, then whatever pins
+/// the image of one that changed.
+fn plan_bind(
+    stack: &StackDef,
+    state: &InstanceState,
+    order: &[String],
+    item: &str,
+    bind: &IndexMap<String, BindTarget>,
+    release: &IndexMap<String, Mode>,
+    plan: &mut Plan,
+) -> Result<(), PlanError> {
+    for (name, t) in bind {
+        require(stack, name)?;
+        if !stack.components[name].has_mode(t.mode) {
+            return Err(PlanError::UnknownMode {
+                component: name.clone(),
+                mode: t.mode,
+            });
+        }
+        if !t.mode.uses_repo() {
+            return Err(PlanError::NotRepoMode {
+                component: name.clone(),
+                mode: t.mode,
+            });
+        }
+    }
+    for (name, mode) in release {
+        require(stack, name)?;
+        if !stack.components[name].has_mode(*mode) {
+            return Err(PlanError::UnknownMode {
+                component: name.clone(),
+                mode: *mode,
+            });
+        }
+    }
+    let mut changed: Vec<String> = Vec::new();
+    for name in order {
+        let cur = state.component(name);
+        if let Some(t) = bind.get(name) {
+            let verb = if t.mode == Mode::Dev {
+                "runs"
+            } else {
+                "builds"
+            };
+            if !cur.exists {
+                plan.modes.insert(name.clone(), t.mode);
+                plan.refs.insert(name.clone(), t.git_ref.clone());
+                plan.notes.push(format!(
+                    "{name} is not deployed; it {verb} from {} of {item} when it starts",
+                    t.git_ref
+                ));
+                continue;
+            }
+            let same_mode = cur.mode == Some(t.mode);
+            let same_ref = cur.git_ref.as_deref() == Some(t.git_ref.as_str());
+            if same_mode && same_ref && !t.rebuild {
+                plan.modes.insert(name.clone(), t.mode);
+                plan.notes
+                    .push(format!("{name} already {verb} from {}", t.git_ref));
+                continue;
+            }
+            // The commit at the bound ref is the worktree's, known only once
+            // the build looks; a rebuild forgets the image so it is made again.
+            let fresh = ComponentCurrent {
+                commit: None,
+                dirty: None,
+                image: if t.rebuild { None } else { cur.image.clone() },
+                git_ref: if t.rebuild && same_ref {
+                    None
+                } else {
+                    cur.git_ref.clone()
+                },
+                ..cur.clone()
+            };
+            acquire(stack, name, t.mode, Some(t.git_ref.clone()), &fresh, plan);
+            let reason = if !same_mode {
+                RecreateReason::ModeChanged {
+                    from: cur.mode,
+                    to: t.mode,
+                }
+            } else if !same_ref {
+                RecreateReason::RefChanged {
+                    from: cur.git_ref.clone(),
+                    to: t.git_ref.clone(),
+                }
+            } else {
+                RecreateReason::Rebuilt
+            };
+            plan.push(Step::Recreate {
+                component: name.clone(),
+                reason,
+            });
+            changed.push(name.clone());
+        } else if let Some(mode) = release.get(name) {
+            if !cur.exists {
+                plan.modes.insert(name.clone(), *mode);
+                continue;
+            }
+            if cur.mode == Some(*mode) {
+                continue;
+            }
+            acquire(stack, name, *mode, None, &cur, plan);
+            plan.push(Step::Recreate {
+                component: name.clone(),
+                reason: RecreateReason::ModeChanged {
+                    from: cur.mode,
+                    to: *mode,
+                },
+            });
+            changed.push(name.clone());
+        }
+    }
+    recreate_image_dependents(stack, state, order, &changed, plan);
     Ok(())
 }
 
@@ -1944,6 +2095,175 @@ stacks:
                 "recreate migrate",
                 "recreate infra"
             ]
+        );
+    }
+
+    fn bind(item: &str, targets: &[(&str, Mode, &str, bool)], release: &[(&str, Mode)]) -> Change {
+        Change::Bind {
+            item: item.into(),
+            bind: targets
+                .iter()
+                .map(|(c, m, r, rebuild)| {
+                    (
+                        c.to_string(),
+                        BindTarget {
+                            mode: *m,
+                            git_ref: r.to_string(),
+                            rebuild: *rebuild,
+                        },
+                    )
+                })
+                .collect(),
+            release: release.iter().map(|(c, m)| (c.to_string(), *m)).collect(),
+        }
+    }
+
+    #[test]
+    fn binding_an_item_rebuilds_only_its_repos_components() {
+        let st = stack();
+        let state = running_state();
+        let p = plan(
+            &st,
+            &state,
+            &bind(
+                "ABC-1",
+                &[
+                    ("api", Mode::Source, "task/ABC-1-fix", false),
+                    ("web", Mode::Dev, "task/ABC-1-fix", false),
+                ],
+                &[],
+            ),
+        )
+        .unwrap();
+        assert_eq!(p.verb, Verb::Bind);
+        assert_eq!(
+            labels(&p),
+            [
+                "checkout api",
+                "build api",
+                "recreate api",
+                "checkout web",
+                "recreate web",
+                "recreate infra"
+            ]
+        );
+        assert_eq!(p.refs["api"], "task/ABC-1-fix");
+        assert_eq!(p.modes["api"], Mode::Source);
+        assert!(!p.modes.contains_key("db"), "db keeps its mode");
+        match &p.steps[2] {
+            Step::Recreate { reason, .. } => assert_eq!(
+                *reason,
+                RecreateReason::ModeChanged {
+                    from: Some(Mode::Prebuilt),
+                    to: Mode::Source
+                }
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // Rebinding: api moves to the other item's branch, web is released.
+        let mut bound = state.clone();
+        bound.components["api"].mode = Some(Mode::Source);
+        bound.components["api"].git_ref = Some("task/ABC-1-fix".into());
+        let p = plan(
+            &st,
+            &bound,
+            &bind(
+                "ABC-2",
+                &[("api", Mode::Source, "task/ABC-2-other", false)],
+                &[],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            labels(&p),
+            [
+                "checkout api",
+                "build api",
+                "recreate api",
+                "recreate infra"
+            ]
+        );
+        match &p.steps[2] {
+            Step::Recreate { reason, .. } => assert_eq!(
+                *reason,
+                RecreateReason::RefChanged {
+                    from: Some("task/ABC-1-fix".into()),
+                    to: "task/ABC-2-other".into()
+                }
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // Same mode and ref: nothing to do but say so; a rebuild builds again.
+        let p = plan(
+            &st,
+            &bound,
+            &bind(
+                "ABC-1",
+                &[("api", Mode::Source, "task/ABC-1-fix", false)],
+                &[],
+            ),
+        )
+        .unwrap();
+        assert!(p.steps.is_empty());
+        assert_eq!(p.notes, ["api already builds from task/ABC-1-fix"]);
+        let p = plan(
+            &st,
+            &bound,
+            &bind(
+                "ABC-1",
+                &[("api", Mode::Source, "task/ABC-1-fix", true)],
+                &[],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            labels(&p),
+            [
+                "checkout api",
+                "build api",
+                "recreate api",
+                "recreate infra"
+            ]
+        );
+        assert!(matches!(&p.steps[1], Step::Build { key: None, .. }));
+
+        // A component that is not deployed only has its binding recorded.
+        let fresh = InstanceState::new("app", 0);
+        let p = plan(
+            &st,
+            &fresh,
+            &bind(
+                "ABC-1",
+                &[("api", Mode::Source, "task/ABC-1-fix", false)],
+                &[],
+            ),
+        )
+        .unwrap();
+        assert!(p.steps.is_empty());
+        assert_eq!(p.refs["api"], "task/ABC-1-fix");
+        assert_eq!(
+            p.notes,
+            ["api is not deployed; it builds from task/ABC-1-fix of ABC-1 when it starts"]
+        );
+
+        // Released components go back to the given mode.
+        let p = plan(&st, &bound, &bind("ABC-3", &[], &[("api", Mode::Prebuilt)])).unwrap();
+        assert_eq!(labels(&p), ["pull api", "recreate api", "recreate infra"]);
+
+        let e = plan(
+            &st,
+            &state,
+            &bind("X", &[("db", Mode::Source, "b", false)], &[]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            PlanError::UnknownMode {
+                component: "db".into(),
+                mode: Mode::Source
+            }
         );
     }
 }

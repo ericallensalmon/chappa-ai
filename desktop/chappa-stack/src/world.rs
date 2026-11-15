@@ -34,6 +34,9 @@ pub struct World {
     /// Registry questions (`manifest inspect`) asked off the status path.
     pub registry: Shared<dyn EngineCli + Send + Sync>,
     pub git: Shared<dyn GitFacts + Send + Sync>,
+    /// `git` for item workspaces (worktrees, fetches, `ls-remote`), argv
+    /// only, each call under its own time limit.
+    pub git_cli: Shared<dyn EngineCli + Send + Sync>,
     pub http: Shared<dyn ProbeHttp + Send + Sync>,
     pub gateways: Shared<dyn GatewayResolver + Send + Sync>,
     pub ports: Shared<dyn PortProbe + Send + Sync>,
@@ -70,6 +73,7 @@ impl World {
             cli: cli.clone(),
             registry: cli.clone(),
             git: Arc::new(GitCli::default()),
+            git_cli: Arc::new(CliRunner),
             http: Arc::new(StdHttp),
             gateways: Arc::new(CachedGateways::new(CliGateways(cli))),
             ports: Arc::new(StdPortProbe),

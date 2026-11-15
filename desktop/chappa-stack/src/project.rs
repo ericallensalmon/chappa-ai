@@ -8,11 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
+use indexmap::IndexMap;
 use stack_core::definition::{
     validate, Diagnostic, Severity, StackDef, StacksDocument, ValidationContext,
 };
-use stack_core::intent::instance_id;
-use stack_core::runner::{StackRunner, Tools};
+use stack_core::intent::{instance_id, ActiveRecord};
+use stack_core::runner::{SharedCheckoutGuard, StackRunner, Tools};
+use stack_core::workspace::{load_allow_file, ItemRecord, ALLOW_FILE};
 
 use crate::commands::ProjectCommands;
 use crate::world::World;
@@ -54,6 +56,38 @@ pub struct Loaded {
     pub diagnostics: Vec<Diagnostic>,
     pub commands: ProjectCommands,
     pub slot: u32,
+    /// The work item bound to this slot and its worktrees.
+    pub binding: Binding,
+}
+
+/// The item a slot is bound to (`active.json`) and its worktree per clone:
+/// what every runner of the slot builds and runs from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Binding {
+    /// The item's folder name.
+    pub item: Option<String>,
+    pub worktrees: IndexMap<String, PathBuf>,
+}
+
+impl Binding {
+    /// The binding of `item` (a folder under the work folder): its record's
+    /// repos. A missing or unreadable record binds the item with no
+    /// worktrees, so nothing builds from a shared clone in its name.
+    pub fn of_item(work_dir: &Path, item: &str) -> Binding {
+        let dir = ItemRecord::dir(work_dir, item);
+        let worktrees = match ItemRecord::load(&dir) {
+            Ok(Some(rec)) => rec
+                .repos
+                .keys()
+                .filter_map(|r| rec.worktree(&dir, r).map(|w| (r.clone(), w)))
+                .collect(),
+            _ => IndexMap::new(),
+        };
+        Binding {
+            item: Some(item.to_string()),
+            worktrees,
+        }
+    }
 }
 
 impl Loaded {
@@ -98,7 +132,7 @@ impl Loaded {
             ));
         }
         let commands = ProjectCommands::load(dir)?;
-        Ok(Loaded {
+        let mut loaded = Loaded {
             dir: dir.to_path_buf(),
             stack_name: name,
             stack: def,
@@ -106,10 +140,40 @@ impl Loaded {
             diagnostics,
             commands,
             slot,
-        })
+            binding: Binding::default(),
+        };
+        let active = ActiveRecord::load(&loaded.work_dir())
+            .ok()
+            .and_then(|a| a.get(slot).map(|s| s.item.clone()));
+        loaded.bind_item(active.as_deref());
+        Ok(loaded)
+    }
+
+    /// Bind (or unbind) this slot's runners to `item`, whatever
+    /// `active.json` says: an activation job builds from the item it is
+    /// activating before the file says so.
+    pub fn bind_item(&mut self, item: Option<&str>) {
+        self.binding = match item {
+            Some(i) => Binding::of_item(&self.work_dir(), i),
+            None => Binding::default(),
+        };
+    }
+
+    /// The shared-checkout guard: the allow file in the stack project.
+    pub fn guard(&self) -> SharedCheckoutGuard {
+        SharedCheckoutGuard {
+            allowed: load_allow_file(&self.dir),
+            file: self.dir.join(ALLOW_FILE),
+        }
     }
 
     pub fn runner<'a>(&'a self, world: &'a World, now_utc: &str) -> StackRunner<'a> {
+        self.plain_runner(world, now_utc)
+            .with_binding(self.binding.worktrees.clone(), Some(self.guard()))
+    }
+
+    /// A runner with no binding and no guard.
+    pub fn plain_runner<'a>(&'a self, world: &'a World, now_utc: &str) -> StackRunner<'a> {
         StackRunner::new(
             &self.stack_name,
             &self.stack,

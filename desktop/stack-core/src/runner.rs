@@ -32,6 +32,13 @@
 //! Checkouts are not performed here: the item-workspace layer owns
 //! worktrees. A checkout step whose repo is already on the planned ref is
 //! a note; any other is refused with [`RunnerError::CheckoutUnsupported`].
+//!
+//! A runner may be bound to a work item ([`StackRunner::with_binding`]):
+//! a component whose clone the item has a worktree of builds and runs in
+//! that worktree. With a [`SharedCheckoutGuard`], building or running from
+//! a shared clone the item does not cover is refused unless the clone is
+//! allowed, so a stack never quietly builds whatever branch a shared clone
+//! happens to be on.
 
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
@@ -101,6 +108,13 @@ pub enum RunnerError {
     },
     #[error("component `{component}` has no compose project")]
     NoProject { component: String },
+    #[error("component `{component}` would {verb} from the shared clone `{clone}`, on whatever branch that clone has checked out; activate a work item with a `{clone}` worktree, or list `{clone}` in {file} to allow building from the shared clone")]
+    SharedCheckout {
+        component: String,
+        clone: String,
+        verb: &'static str,
+        file: PathBuf,
+    },
     #[error("{0}")]
     Io(String),
 }
@@ -189,6 +203,22 @@ pub struct StackRunner<'a> {
     pub gateways: &'a dyn GatewayResolver,
     pub labels: LabelMap,
     pub now_utc: String,
+    /// The bound item's worktree per clone name: a component whose repo is
+    /// one of these builds and runs there instead of in the shared clone.
+    pub worktrees: IndexMap<String, PathBuf>,
+    /// When set, building or running from a shared clone (no worktree for
+    /// it) is refused unless the clone is allowed. `None`: no guard.
+    pub shared_guard: Option<SharedCheckoutGuard>,
+}
+
+/// The shared-checkout guard: which shared clones a stack may build from
+/// directly, and the file that says so (named in every refusal). Without
+/// it, a stack quietly builds whatever branch a shared clone happens to be
+/// on.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SharedCheckoutGuard {
+    pub allowed: BTreeSet<String>,
+    pub file: PathBuf,
 }
 
 impl<'a> StackRunner<'a> {
@@ -214,7 +244,20 @@ impl<'a> StackRunner<'a> {
             gateways: tools.gateways,
             labels,
             now_utc: now_utc.to_string(),
+            worktrees: IndexMap::new(),
+            shared_guard: None,
         }
+    }
+
+    /// The same runner bound to an item's worktrees, with the guard.
+    pub fn with_binding(
+        mut self,
+        worktrees: IndexMap<String, PathBuf>,
+        guard: Option<SharedCheckoutGuard>,
+    ) -> Self {
+        self.worktrees = worktrees;
+        self.shared_guard = guard;
+        self
     }
 
     /// The stack's work folder, absolute.
@@ -255,23 +298,79 @@ impl<'a> StackRunner<'a> {
         })
     }
 
-    /// The repo of `component` in `mode`: the mode's `repo`, under the
-    /// stack `root` (or the project) when relative.
+    /// The repo of `component` in `mode`: the bound item's worktree of that
+    /// clone when there is one, else the mode's `repo`, under the stack
+    /// `root` (or the project) when relative.
     pub fn repo_path(&self, component: &str, mode: Mode) -> Result<PathBuf, RunnerError> {
         let m = self.mode_def(component, mode)?;
         let repo = m.repo.as_ref().ok_or_else(|| RunnerError::NoRepo {
             component: component.to_string(),
             mode,
         })?;
-        if repo.is_absolute() {
-            return Ok(repo.clone());
+        if let Some(w) = crate::definition::repo_name(repo).and_then(|n| self.worktrees.get(&n)) {
+            return Ok(w.clone());
         }
-        let root = match &self.stack.root {
-            Some(r) if r.is_absolute() => r.clone(),
-            Some(r) => self.project_dir.join(r),
-            None => self.project_dir.to_path_buf(),
+        Ok(self.stack.repo_dir(self.project_dir, repo))
+    }
+
+    /// Refuse building (`verb`) `component` in `mode` from a shared clone
+    /// the guard does not allow. A worktree of the bound item, a mode with
+    /// no repo, and a runner without a guard are always fine.
+    pub fn check_shared(
+        &self,
+        component: &str,
+        mode: Mode,
+        verb: &'static str,
+    ) -> Result<(), RunnerError> {
+        let Some(guard) = &self.shared_guard else {
+            return Ok(());
         };
-        Ok(root.join(repo))
+        if !mode.uses_repo() {
+            return Ok(());
+        }
+        let Some(clone) = self.stack.repo_of(component, mode) else {
+            return Ok(());
+        };
+        if self.worktrees.contains_key(&clone) || guard.allowed.contains(&clone) {
+            return Ok(());
+        }
+        Err(RunnerError::SharedCheckout {
+            component: component.to_string(),
+            clone,
+            verb,
+            file: guard.file.clone(),
+        })
+    }
+
+    /// [`StackRunner::check_shared`] over every step of a plan that builds
+    /// or runs from a repo, so a refusal comes before anything is stored.
+    pub fn guard_plan(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        plan: &Plan,
+    ) -> Result<(), RunnerError> {
+        for step in &plan.steps {
+            let component = step.component();
+            let mode = plan
+                .modes
+                .get(component)
+                .copied()
+                .or_else(|| self.current_mode(inst, &obs.cache, component));
+            match step {
+                Step::Build { .. } => self.check_shared(component, Mode::Source, "build")?,
+                Step::Checkout { .. } => {
+                    self.check_shared(component, mode.unwrap_or(Mode::Source), "check out")?
+                }
+                Step::Start { .. } | Step::Recreate { .. }
+                    if Self::runs_as_process(inst, component, mode) =>
+                {
+                    self.check_shared(component, mode.unwrap_or(Mode::Dev), "run")?
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn mode_def(&self, component: &str, mode: Mode) -> Result<&'a ModeDef, RunnerError> {
@@ -513,6 +612,7 @@ impl<'a> StackRunner<'a> {
         opts: &ApplyOptions,
     ) -> Result<Applied, RunnerError> {
         plan.check_against(&obs.state)?;
+        self.guard_plan(inst, obs, plan)?;
         let work_dir = self.work_dir();
         let projects = self.projects(inst);
         let mut cache = obs.cache.clone();
@@ -656,6 +756,14 @@ impl<'a> StackRunner<'a> {
                     let is_process = Self::runs_as_process(inst, &component, after);
                     let cur = obs.state.component(&component);
                     if is_process {
+                        // A process is not replaced by starting it again: the
+                        // old one (another worktree, another ref) stops first.
+                        if was_process && cur.running && matches!(step, Step::Recreate { .. }) {
+                            steps.push(JobStep::StopProcess {
+                                component: component.clone(),
+                                grace_seconds: self.stack.grace_seconds(&component),
+                            });
+                        }
                         if c.driver == DriverKind::Compose && cur.exists && !was_process {
                             let project = self.project_of(&projects, inst, &component)?;
                             steps.push(JobStep::run(

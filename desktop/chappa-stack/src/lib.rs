@@ -25,6 +25,7 @@
 //! | [`relay`] | the gateway-only TCP relay |
 //! | [`timeouts`] | the per-step time limits |
 //! | [`world`] | every outside tool as a shareable trait object, real or fake |
+//! | [`workspaces`] | item workspaces: Start work, worktrees, activate, archive, drift, served as overlays on a tracker's Work rows |
 
 pub mod actions;
 pub mod background;
@@ -39,4 +40,5 @@ pub mod relay;
 pub mod runjob;
 pub mod server;
 pub mod timeouts;
+pub mod workspaces;
 pub mod world;

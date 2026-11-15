@@ -7,6 +7,8 @@
 //! | `GET /chappa/v1/manifest` | bearer | the manifest |
 //! | `GET /api/environment` | bearer | the Environment payload |
 //! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement, `409` unconfirmed / no longer offered / stale plan / note missing, `404` unknown target |
+//! | `GET /api/work` | bearer | the Work view: one overlay per item workspace (see [`crate::workspaces`]) |
+//! | `GET /api/work/archived` | bearer | the Archived panel |
 //! | `GET /api/jobs/{id}` | bearer | `{state: running\|done\|failed, log?, exitCode?, error?}` |
 //! | `POST /api/jobs/{id}` | bearer | the pane's exit report, recorded; `200 {}` |
 //!
@@ -48,6 +50,7 @@ use crate::procs::ProcessTable;
 use crate::project::{Loaded, ProjectConfig};
 use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
+use crate::workspaces::{self, Accepted, WorkCache, WorkInputs, ARCHIVED_PATH, WORK_PATH};
 use crate::world::World;
 
 pub const ENVIRONMENT_PATH: &str = "/api/environment";
@@ -115,7 +118,15 @@ pub struct Source {
     last_tick: Mutex<Option<u64>>,
     /// Periodic check jobs started and maybe still running, per component.
     in_flight: Mutex<IndexMap<String, String>>,
+    /// What git says about the item workspaces, filled off the request path.
+    pub work: WorkCache,
+    /// When the workspace facts were last looked at.
+    last_work_tick: Mutex<Option<std::time::Instant>>,
 }
+
+/// The least time between two looks at the workspaces on the refresher
+/// thread (each entry has its own, longer, time to live).
+pub const WORK_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Source {
     pub fn new(world: World, config: ProjectConfig, token: Token, addr: String) -> Arc<Source> {
@@ -143,6 +154,8 @@ impl Source {
             accepting: Mutex::new(()),
             last_tick: Mutex::new(None),
             in_flight: Mutex::new(IndexMap::new()),
+            work: WorkCache::default(),
+            last_work_tick: Mutex::new(None),
         });
         let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
         background.add_periodic(weak);
@@ -206,6 +219,11 @@ impl Source {
         match (method, path) {
             ("GET", MANIFEST_PATH) => (200, self.manifest()),
             ("GET", ENVIRONMENT_PATH) => (200, self.environment()),
+            ("GET", WORK_PATH) => self.work_view(),
+            ("GET", ARCHIVED_PATH) => match self.load() {
+                Ok(l) => (200, workspaces::archived_panel(&l, &utc_now())),
+                Err(e) => error(409, "definition", e),
+            },
             ("POST", ACTIONS_PATH) => match serde_json::from_str::<Value>(body) {
                 Ok(v) => self.action_as(&v, caller),
                 Err(e) => error(400, "bad-request", format!("the body is not JSON: {e}")),
@@ -226,8 +244,10 @@ impl Source {
     }
 
     pub fn manifest(&self) -> Value {
-        let (id, label, hosts) = match self.load() {
-            Ok(loaded) => {
+        let loaded = self.load().ok();
+        let item_actions = workspaces::item_actions(loaded.as_ref());
+        let (id, label, hosts) = match loaded {
+            Some(loaded) => {
                 let hosts = loaded
                     .runner(&self.world, &utc_now())
                     .instance(loaded.slot)
@@ -239,7 +259,7 @@ impl Source {
                     hosts,
                 )
             }
-            Err(_) => (
+            None => (
                 self.config
                     .stack
                     .clone()
@@ -251,7 +271,11 @@ impl Source {
         json!({
             "contract": CONTRACT,
             "source": { "id": format!("stack:{id}"), "label": label, "version": env!("CARGO_PKG_VERSION") },
-            "views": { "environment": { "list": ENVIRONMENT_PATH, "pollSeconds": POLL_SECONDS } },
+            "views": {
+                "environment": { "list": ENVIRONMENT_PATH, "pollSeconds": POLL_SECONDS },
+                "work": { "list": WORK_PATH, "pollSeconds": workspaces::WORK_POLL_SECONDS },
+            },
+            "itemActions": item_actions,
             "actions": ACTIONS_PATH,
             "jobs": format!("{JOBS_PREFIX}{{id}}"),
             "linkHosts": hosts,
@@ -349,7 +373,131 @@ impl Source {
             safety: &safety,
             now_utc: now,
         };
-        Ok(env_view::environment(&inputs, &errors))
+        let mut v = env_view::environment(&inputs, &errors);
+        if let Some(alerts) = v.get_mut("alerts").and_then(Value::as_array_mut) {
+            alerts.extend(workspaces::drift_alerts(&self.work.snapshot()));
+        }
+        Ok(v)
+    }
+
+    /// `GET /api/work`: the item workspaces as overlays. Reads git facts
+    /// from the cache only; the engines are asked once, for the plans the
+    /// Activate and Rebuild changed confirms show.
+    pub fn work_view(&self) -> Reply {
+        let now = utc_now();
+        let loaded = match self.load() {
+            Ok(l) => l,
+            Err(e) => {
+                return (
+                    200,
+                    json!({
+                        "freshness": { "asOf": now, "errors": [{ "source": "definition", "message": e }] },
+                        "items": [],
+                    }),
+                )
+            }
+        };
+        let runner = loaded.runner(&self.world, &now);
+        let obs = runner.instance(loaded.slot).ok().and_then(|(inst, _)| {
+            let table = ProcessTable::load(&loaded.work_dir(), &inst.id);
+            runner
+                .observe(&inst, &table.statuses(&*self.world.procs))
+                .ok()
+        });
+        let facts = self.work.snapshot();
+        let inputs = WorkInputs {
+            loaded: &loaded,
+            runner: &runner,
+            obs: if loaded.has_errors() {
+                None
+            } else {
+                obs.as_ref()
+            },
+            facts: &facts,
+            now_utc: &now,
+        };
+        (200, workspaces::work_list(&inputs))
+    }
+
+    /// Look at the item workspaces with git now (the refresher calls this;
+    /// tests call it directly).
+    pub fn refresh_work(&self) {
+        if let Ok(loaded) = self.load() {
+            self.work.refresh(&self.world, &loaded);
+        }
+    }
+
+    /// A Work view action: `start-work` from another source's row, an
+    /// overlay's, the drift banner's or the Archived panel's.
+    fn work_action(&self, body: &Value, caller: &Caller) -> Reply {
+        let now = utc_now();
+        let loaded = match self.load() {
+            Ok(l) => l,
+            Err(e) => return error(409, "definition", e),
+        };
+        if loaded.has_errors() {
+            return error(
+                409,
+                "definition",
+                "the stack definition has errors; fix them first",
+            );
+        }
+        let runner = loaded.runner(&self.world, &now);
+        let (inst, intent) = match runner.instance(loaded.slot) {
+            Ok(i) => i,
+            Err(e) => return error(409, "definition", e.to_string()),
+        };
+        let table = ProcessTable::load(&loaded.work_dir(), &inst.id);
+        let obs = runner
+            .observe(&inst, &table.statuses(&*self.world.procs))
+            .ok();
+        let facts = self.work.snapshot();
+        let inputs = WorkInputs {
+            loaded: &loaded,
+            runner: &runner,
+            obs: obs.as_ref(),
+            facts: &facts,
+            now_utc: &now,
+        };
+        let accepted = workspaces::accept(&self.world, &inputs, body);
+        self.work.invalidate();
+        match accepted {
+            Accepted::Done(message) => (200, json!({ "message": message })),
+            Accepted::Refused(status, kind, message) => error(status, kind, message),
+            Accepted::Job { offered, mutates } => {
+                // A workspace job needs no observation; its record only
+                // names the bound item.
+                let blank;
+                let obs = match &obs {
+                    Some(o) => o,
+                    None => {
+                        blank = Observation {
+                            intent,
+                            cache: Default::default(),
+                            state: stack_core::planner::InstanceState::new(
+                                &loaded.stack_name,
+                                loaded.slot,
+                            ),
+                            actual: IndexMap::new(),
+                            ps: IndexMap::new(),
+                            containers: IndexMap::new(),
+                            gateways: IndexMap::new(),
+                            notes: Vec::new(),
+                        };
+                        &blank
+                    }
+                };
+                self.start_job(
+                    &loaded,
+                    &inst,
+                    obs,
+                    &offered,
+                    mutates,
+                    caller.runs_jobs,
+                    &now,
+                )
+            }
+        }
     }
 
     /// The instance's data safety now.
@@ -387,6 +535,9 @@ impl Source {
             .pointer("/target/view")
             .and_then(Value::as_str)
             .unwrap_or("environment");
+        if view == "work" || view.starts_with("panel:") {
+            return self.work_action(body, caller);
+        }
         if view != "environment" {
             return error(
                 404,
@@ -459,6 +610,11 @@ impl Source {
                     chosen.confirm
                 ),
             );
+        }
+        if let JobWork::Plan { plan, .. } = &chosen.work {
+            if let Err(e) = runner.guard_plan(&inst, &obs, plan) {
+                return error(409, "shared-checkout", e.to_string());
+            }
         }
         self.start_job(&loaded, &inst, &obs, &chosen, true, runs_jobs, &now)
     }
@@ -778,6 +934,7 @@ impl Source {
         match records::record_exit_report(&work_dir, id, body, &utc_now()) {
             Ok(_) => {
                 self.background.invalidate_facts();
+                self.work.invalidate();
                 (200, json!({}))
             }
             Err(e) => error(500, "job", e),
@@ -881,5 +1038,19 @@ fn respond(source: &Source, mut request: tiny_http::Request) {
 impl Periodic for Source {
     fn tick(&self) {
         self.data_safety_tick();
+        let due = {
+            let mut last = self
+                .last_work_tick
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let due = last.is_none_or(|t| t.elapsed() >= WORK_TICK);
+            if due {
+                *last = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            self.refresh_work();
+        }
     }
 }

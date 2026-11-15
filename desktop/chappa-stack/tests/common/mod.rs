@@ -16,7 +16,7 @@ use chappa_stack::server::Source;
 use chappa_stack::world::{CliSteps, Locked, ProcessHost, SystemClock, ThreadSpawner, World};
 use serde_json::Value;
 use stack_core::checks::FakePorts;
-use stack_core::cli::FakeCli;
+use stack_core::cli::{CliRunner, FakeCli};
 use stack_core::compose::FakeGateways;
 use stack_core::jobs::RunBlock;
 use stack_core::probe::FakeHttp;
@@ -156,6 +156,7 @@ pub fn fakes(cli: FakeCli, http: FakeHttp) -> Fakes {
         cli: cli.clone(),
         registry: cli.clone(),
         git: Locked::new(FakeGit),
+        git_cli: Arc::new(CliRunner),
         http: http.clone(),
         gateways: Locked::new(FakeGateways::default()),
         ports: Locked::new(FakePorts::default()),

@@ -1419,3 +1419,129 @@ fn stack_core_db_check(doc: &StacksDocument) -> stack_core::definition::Componen
         .clone()
         .expect("db declares a data-safety check")
 }
+
+#[test]
+fn a_bound_item_builds_and_runs_in_its_worktrees_and_the_guard_refuses_shared_clones() {
+    use stack_core::planner::BindTarget;
+    use stack_core::runner::SharedCheckoutGuard;
+    let ex = example();
+    bring_up(&ex);
+    let (core, apis) = all_running();
+    let git = FakeGit {
+        branch: Some("task/ABC-1-fix".into()),
+        ..FakeGit::default()
+    };
+    let gateways = FakeGateways::default();
+    let cli = engines_with(&core, &apis);
+    let (inst, obs) = running_observation(&ex, &cli);
+    let wt = ex.dir.join(".work/ABC-1/src");
+    let worktrees: IndexMap<String, PathBuf> = [
+        ("api".to_string(), wt.join("api-01234567")),
+        ("web".to_string(), wt.join("web-01234567")),
+    ]
+    .into_iter()
+    .collect();
+    let guard = SharedCheckoutGuard {
+        allowed: Default::default(),
+        file: ex.dir.join("shared-checkouts-allow.txt"),
+    };
+    let bind = |r: &str| Change::Bind {
+        item: "ABC-1".into(),
+        bind: [
+            (
+                "api".to_string(),
+                BindTarget {
+                    mode: Mode::Source,
+                    git_ref: r.into(),
+                    rebuild: false,
+                },
+            ),
+            (
+                "web".to_string(),
+                BindTarget {
+                    mode: Mode::Dev,
+                    git_ref: r.into(),
+                    rebuild: false,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        release: IndexMap::new(),
+    };
+    let r = runner(&ex, &cli, &git, &gateways).with_binding(worktrees.clone(), Some(guard.clone()));
+    assert_eq!(
+        r.repo_path("api", Mode::Source).unwrap(),
+        wt.join("api-01234567")
+    );
+    let plan = r.plan(&obs, &bind("task/ABC-1-fix")).unwrap();
+    assert_eq!(plan.verb, Verb::Bind);
+    let applied = r
+        .apply(&inst, &obs, &plan, &ApplyOptions::default())
+        .unwrap();
+    let described: Vec<String> = applied.steps.iter().map(|s| s.describe()).collect();
+    assert!(
+        described.contains(&"api: already on task/ABC-1-fix".to_string()),
+        "{described:?}"
+    );
+    let rs = runs(&applied.steps);
+    let (_, build) = rs
+        .iter()
+        .find(|(_, r)| r.argv.get(1).map(String::as_str) == Some("build"))
+        .unwrap();
+    assert_eq!(build.cwd, wt.join("api-01234567"));
+    // web runs as a process: the old one stops before the new one starts
+    // in the worktree.
+    let web_stop = applied
+        .steps
+        .iter()
+        .position(|s| matches!(s, JobStep::StopProcess { component, .. } if component == "web"))
+        .expect("web is stopped first");
+    let web_start = applied
+        .steps
+        .iter()
+        .position(|s| matches!(s, JobStep::Run { component, run } if component == "web" && run.cwd == wt.join("web-01234567")))
+        .expect("web starts in its worktree");
+    assert!(web_stop < web_start);
+    let intent = applied.intent.components["api"].clone();
+    assert_eq!(
+        (intent.mode, intent.git_ref.as_deref()),
+        (Some(Mode::Source), Some("task/ABC-1-fix"))
+    );
+
+    // Without the item's worktrees the same build is refused, naming the file.
+    let bare =
+        runner(&ex, &cli, &git, &gateways).with_binding(IndexMap::new(), Some(guard.clone()));
+    let e = bare
+        .apply(&inst, &obs, &plan, &ApplyOptions::default())
+        .unwrap_err();
+    match &e {
+        RunnerError::SharedCheckout {
+            component,
+            clone,
+            file,
+            ..
+        } => {
+            assert_eq!((component.as_str(), clone.as_str()), ("api", "api"));
+            assert!(file.ends_with("shared-checkouts-allow.txt"));
+        }
+        other => panic!("{other}"),
+    }
+    assert!(e.to_string().contains("shared-checkouts-allow.txt"), "{e}");
+    // Listed in the allow file: allowed.
+    let allowed = SharedCheckoutGuard {
+        allowed: ["api".to_string(), "web".to_string()].into_iter().collect(),
+        ..guard.clone()
+    };
+    let on_main = FakeGit::default();
+    let ok = runner(&ex, &cli, &on_main, &gateways).with_binding(IndexMap::new(), Some(allowed));
+    let main_plan = ok.plan(&obs, &bind("main")).unwrap();
+    assert!(ok
+        .apply(&inst, &obs, &main_plan, &ApplyOptions::default())
+        .is_ok());
+    // No guard (a runner nobody bound): as before.
+    let plain = runner(&ex, &cli, &on_main, &gateways);
+    assert!(plain
+        .apply(&inst, &obs, &main_plan, &ApplyOptions::default())
+        .is_ok());
+}

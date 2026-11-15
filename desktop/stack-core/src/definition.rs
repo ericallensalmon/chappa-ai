@@ -149,8 +149,112 @@ pub struct StackDef {
     /// How long job records under `.work/jobs/` are kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<JobsDef>,
+    /// Item workspaces: which tracker rows offer Start work, the branch
+    /// naming pattern, and per-clone remote and base overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkDef>,
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// The `work:` block.
+///
+/// ```yaml
+/// work:
+///   sources: [tracker]              # whose Work rows offer Start work; default ["*"]
+///   branch: "task/{key}-{slug}"     # the naming pattern Add repo creates or looks for
+///   repos:
+///     api: { remote: "https://example.com/owner/api.git", base: develop }
+/// ```
+///
+/// A *repo* is a shared clone under `root:` that component `repo:` paths
+/// name; `repos:` only overrides what the clone says about itself (its
+/// `origin` and the base branch new item branches start from).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkDef {
+    #[serde(default = "default_work_sources")]
+    pub sources: Vec<String>,
+    #[serde(default = "default_branch_pattern")]
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub repos: IndexMap<String, WorkRepoDef>,
+    #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
+    pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// One clone's overrides under `work.repos`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkRepoDef {
+    /// The remote the clone's PRs live on; the clone's `origin` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// The branch new item branches start from; [`DEFAULT_BASE_BRANCH`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
+    pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// Every Work row offers Start work unless `work.sources` narrows it.
+pub const ANY_SOURCE: &str = "*";
+/// The branch naming pattern when the definition names none.
+pub const DEFAULT_BRANCH_PATTERN: &str = "task/{key}-{slug}";
+/// The base branch when a clone's override names none.
+pub const DEFAULT_BASE_BRANCH: &str = "main";
+
+fn default_work_sources() -> Vec<String> {
+    vec![ANY_SOURCE.to_string()]
+}
+fn default_branch_pattern() -> String {
+    DEFAULT_BRANCH_PATTERN.to_string()
+}
+
+impl Default for WorkDef {
+    fn default() -> Self {
+        Self {
+            sources: default_work_sources(),
+            branch: default_branch_pattern(),
+            repos: IndexMap::new(),
+            unknown: IndexMap::new(),
+        }
+    }
+}
+
+impl WorkDef {
+    /// The base branch of `repo`.
+    pub fn base_of(&self, repo: &str) -> &str {
+        self.repos
+            .get(repo)
+            .and_then(|r| r.base.as_deref())
+            .unwrap_or(DEFAULT_BASE_BRANCH)
+    }
+}
+
+/// How one component uses a shared clone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoUse {
+    pub component: String,
+    pub mode: Mode,
+}
+
+/// A shared clone named by component `repo:` paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoDef {
+    /// The clone's name: the last part of its `repo:` path (`../api` is `api`).
+    pub name: String,
+    /// The path as the first component wrote it.
+    pub path: PathBuf,
+    pub uses: Vec<RepoUse>,
+}
+
+/// The clone name a `repo:` path stands for: its last normal part.
+pub fn repo_name(path: &Path) -> Option<String> {
+    path.components().rev().find_map(|c| match c {
+        std::path::Component::Normal(s) => s.to_str().map(str::to_string),
+        _ => None,
+    })
 }
 
 /// Job-record retention. A record is kept while it is younger than
@@ -209,6 +313,7 @@ impl Default for StackDef {
             ttl_hours: None,
             auto_destroy: false,
             jobs: None,
+            work: None,
             unknown: IndexMap::new(),
         }
     }
@@ -974,6 +1079,67 @@ pub struct EngineRef {
 }
 
 impl StackDef {
+    /// The `work:` block, or its defaults when the stack has none.
+    pub fn work_def(&self) -> WorkDef {
+        self.work.clone().unwrap_or_default()
+    }
+
+    /// The shared clones the components name, in definition order, each
+    /// with every (component, mode) that builds or runs from it. A clone is
+    /// known by its name (the last part of the `repo:` path): it names the
+    /// item worktrees (`src/<name>-<c8>`) and the allow-file entries, so two
+    /// different paths ending in one name are a validation error.
+    pub fn repos(&self) -> IndexMap<String, RepoDef> {
+        let mut out: IndexMap<String, RepoDef> = IndexMap::new();
+        for (component, c) in &self.components {
+            for mode in Mode::ALL {
+                let Some(path) = c.mode(mode).and_then(|m| m.repo.as_ref()) else {
+                    continue;
+                };
+                let Some(name) = repo_name(path) else {
+                    continue;
+                };
+                out.entry(name.clone())
+                    .or_insert_with(|| RepoDef {
+                        name,
+                        path: path.clone(),
+                        uses: Vec::new(),
+                    })
+                    .uses
+                    .push(RepoUse {
+                        component: component.clone(),
+                        mode,
+                    });
+            }
+        }
+        out
+    }
+
+    /// The clone `component` builds or runs from in `mode`, by name.
+    pub fn repo_of(&self, component: &str, mode: Mode) -> Option<String> {
+        self.components
+            .get(component)?
+            .mode(mode)?
+            .repo
+            .as_deref()
+            .and_then(repo_name)
+    }
+
+    /// Where a `repo:` path is on disk: as written when absolute, else under
+    /// the stack `root` (itself under the project when relative), else under
+    /// the project.
+    pub fn repo_dir(&self, project_dir: &Path, repo: &Path) -> PathBuf {
+        if repo.is_absolute() {
+            return repo.to_path_buf();
+        }
+        let root = match &self.root {
+            Some(r) if r.is_absolute() => r.clone(),
+            Some(r) => project_dir.join(r),
+            None => project_dir.to_path_buf(),
+        };
+        root.join(repo)
+    }
+
     /// The engine name a component resolves to: its own, else its group's,
     /// else the stack default, else the driver's built-in default. `None`
     /// when the component does not exist.
@@ -1309,6 +1475,10 @@ pub enum Rule {
     PolicyNotAllowed,
     MissingField,
     EngineOsConflict,
+    /// `work.repos` names a clone no component builds from.
+    UnusedRepoOverride,
+    /// Two different `repo:` paths end in the same folder name.
+    RepoNameClash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1860,6 +2030,92 @@ fn validate_stack(
                         format!(
                             "`{dep}` runs on engine `{dep_engine}`, `{name}` on `{my_engine}`; engines share no network, so reach it as `{{host}}:{{port:{dep}}}` (path depends_on[{i}])"
                         ),
+                    );
+                }
+            }
+        }
+    }
+
+    // work
+    let repos = stack.repos();
+    for (name, def) in &repos {
+        for u in &def.uses {
+            let written = stack.components[&u.component]
+                .mode(u.mode)
+                .and_then(|m| m.repo.as_deref());
+            if let Some(w) = written {
+                if stack.repo_dir(Path::new(""), w) != stack.repo_dir(Path::new(""), &def.path) {
+                    err(
+                        Rule::RepoNameClash,
+                        format!("{base}.components.{}.modes.{}.repo", u.component, u.mode),
+                        format!(
+                            "`{}` and `{}` are both the clone `{name}`; a clone is known by its folder name, so give them different names",
+                            w.display(),
+                            def.path.display()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(work) = &stack.work {
+        for key in work.unknown.keys() {
+            warn(
+                Rule::UnknownKey,
+                format!("{base}.work.{key}"),
+                format!("unknown key `{key}` (kept, ignored)"),
+            );
+        }
+        if work.sources.is_empty() {
+            warn(
+                Rule::MissingField,
+                format!("{base}.work.sources"),
+                "no sources listed, so no Work row offers Start work; leave it out for every source".into(),
+            );
+        }
+        match crate::workspace::check_branch_pattern(&work.branch) {
+            Ok(true) => {}
+            Ok(false) => warn(
+                Rule::Placeholder,
+                format!("{base}.work.branch"),
+                format!(
+                    "`{}` has no {{key}}, so every item would get the same branch",
+                    work.branch
+                ),
+            ),
+            Err(e) => err(Rule::Placeholder, format!("{base}.work.branch"), e),
+        }
+        for (name, r) in &work.repos {
+            for key in r.unknown.keys() {
+                warn(
+                    Rule::UnknownKey,
+                    format!("{base}.work.repos.{name}.{key}"),
+                    format!("unknown key `{key}` (kept, ignored)"),
+                );
+            }
+            if !repos.contains_key(name) {
+                let known: Vec<&str> = repos.keys().map(String::as_str).collect();
+                warn(
+                    Rule::UnusedRepoOverride,
+                    format!("{base}.work.repos.{name}"),
+                    if known.is_empty() {
+                        format!(
+                            "no component builds from a clone named `{name}` (none names a repo)"
+                        )
+                    } else {
+                        format!(
+                            "no component builds from a clone named `{name}` (known: {})",
+                            known.join(", ")
+                        )
+                    },
+                );
+            }
+            if let Some(b) = &r.base {
+                if !crate::workspace::is_valid_branch(b) {
+                    err(
+                        Rule::InvalidKey,
+                        format!("{base}.work.repos.{name}.base"),
+                        format!("`{b}` is not a usable branch name"),
                     );
                 }
             }
@@ -2856,6 +3112,103 @@ stacks:
             severity: Severity::Warning,
             ..d
         }]));
+    }
+
+    #[test]
+    fn the_work_block_parses_with_defaults_and_lists_the_clones() {
+        let stack = example_stack();
+        assert_eq!(stack.work, None);
+        let work = stack.work_def();
+        assert_eq!(work.sources, vec!["*"]);
+        assert_eq!(work.branch, "task/{key}-{slug}");
+        assert_eq!(work.base_of("api"), "main");
+        let repos = stack.repos();
+        assert_eq!(repos.keys().collect::<Vec<_>>(), ["api", "web"]);
+        assert_eq!(repos["api"].path, PathBuf::from("../api"));
+        assert_eq!(
+            repos["web"].uses,
+            vec![RepoUse {
+                component: "web".into(),
+                mode: Mode::Dev
+            }]
+        );
+        assert_eq!(stack.repo_of("api", Mode::Source).as_deref(), Some("api"));
+        assert_eq!(stack.repo_of("api", Mode::Prebuilt), None);
+        assert_eq!(
+            stack.repo_dir(Path::new("/srv/example/stack"), Path::new("../api")),
+            PathBuf::from("/srv/example/stack/../api")
+        );
+
+        let text = EXAMPLE.replace(
+            "    components:\n      db:",
+            "    work:\n      sources: [tracker]\n      branch: \"feature/{key}\"\n      repos:\n        api: { remote: \"https://git.example.com/team/api.git\", base: develop }\n    components:\n      db:",
+        );
+        let doc = StacksDocument::parse(&text).unwrap();
+        let work = doc.stacks["app"].work_def();
+        assert_eq!(work.sources, vec!["tracker"]);
+        assert_eq!(work.branch, "feature/{key}");
+        assert_eq!(work.base_of("api"), "develop");
+        assert_eq!(work.base_of("web"), "main");
+        assert_eq!(
+            work.repos["api"].remote.as_deref(),
+            Some("https://git.example.com/team/api.git")
+        );
+        let diags = validate(&doc, &ValidationContext::default());
+        assert!(diags.iter().all(|d| !d.path.contains(".work")), "{diags:?}");
+    }
+
+    #[test]
+    fn the_work_block_warns_on_unknown_keys_and_unused_overrides() {
+        let text = EXAMPLE.replace(
+            "    components:\n      db:",
+            "    work:\n      sorces: [tracker]\n      sources: []\n      branch: \"wip/{slug}\"\n      repos:\n        api: { remot: x }\n        tools: { base: main }\n        web: { base: \"bad..name\" }\n    components:\n      db:",
+        );
+        let doc = StacksDocument::parse(&text).unwrap();
+        let diags = validate(&doc, &ValidationContext::default());
+        let at =
+            |path: &str| -> Vec<&Diagnostic> { diags.iter().filter(|d| d.path == path).collect() };
+        let w = at("stacks.app.work.sorces");
+        assert_eq!(
+            (w.len(), w[0].severity, w[0].rule),
+            (1, Severity::Warning, Rule::UnknownKey)
+        );
+        let w = at("stacks.app.work.repos.api.remot");
+        assert_eq!((w.len(), w[0].rule), (1, Rule::UnknownKey));
+        let w = at("stacks.app.work.repos.tools");
+        assert_eq!(
+            (w.len(), w[0].severity, w[0].rule),
+            (1, Severity::Warning, Rule::UnusedRepoOverride)
+        );
+        assert!(w[0].message.contains("known: api, web"), "{}", w[0].message);
+        let w = at("stacks.app.work.sources");
+        assert_eq!((w.len(), w[0].severity), (1, Severity::Warning));
+        let w = at("stacks.app.work.branch");
+        assert_eq!(
+            (w.len(), w[0].severity, w[0].rule),
+            (1, Severity::Warning, Rule::Placeholder)
+        );
+        let e = at("stacks.app.work.repos.web.base");
+        assert_eq!((e.len(), e[0].severity), (1, Severity::Error));
+
+        let bad = EXAMPLE.replace(
+            "    components:\n      db:",
+            "    work: { branch: \"task/{item}\" }\n    components:\n      db:",
+        );
+        let errs = errors(&StacksDocument::parse(&bad).unwrap());
+        let e = by_rule(&errs, Rule::Placeholder);
+        assert_eq!(e[0].path, "stacks.app.work.branch");
+        assert!(e[0].message.contains("{item}"), "{}", e[0].message);
+
+        let clash = EXAMPLE
+            .replace(
+                "modes: { dev: { repo: ../web } }",
+                "modes: { dev: { repo: ../api } }",
+            )
+            .replace("source:   { repo: ../api,", "source:   { repo: vendor/api,");
+        let errs = errors(&StacksDocument::parse(&clash).unwrap());
+        let e = by_rule(&errs, Rule::RepoNameClash);
+        assert_eq!(e.len(), 1, "{errs:?}");
+        assert_eq!(e[0].path, "stacks.app.components.web.modes.dev.repo");
     }
 
     mod file_rule {

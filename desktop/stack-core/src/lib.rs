@@ -26,6 +26,7 @@
 //! | [`process`] | the process driver: run blocks with the instance environment |
 //! | [`checks`] | the checks before `up`: engine reachable and OS mode, memory, ports, registry login |
 //! | [`runner`] | the verbs end to end: observe, plan, apply into steps, status, gc, activate |
+//! | [`workspace`] | item workspaces: folder names from tracker keys, branch patterns, remote identity, the path-length check, the allow file, `item.json` |
 //!
 //! Engines are CLIs run argv-only through [`cli::EngineCli`]; a verb hands
 //! a long step (a build, a pull, an `up`, a dev server) back as a run block
@@ -69,3 +70,4 @@ pub mod process;
 pub mod provenance;
 pub mod runner;
 pub mod safety;
+pub mod workspace;
