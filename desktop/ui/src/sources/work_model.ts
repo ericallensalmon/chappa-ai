@@ -5,7 +5,10 @@
 //
 // Keys are per source: two sources may both have an `ABC-1` and they stay
 // two rows, each addressed as `{sourceId, key}` (the actions of a row run
-// against its own source). A payload arrives exactly as the source sent it,
+// against its own source). The exception is an entry that says it adds to
+// another source's item (`ref`): it is merged into that item's row, as
+// `work_merge.ts` describes, and PRs from the PRs view join rows by the
+// rules there. A payload arrives exactly as the source sent it,
 // so nothing here trusts its shape: an item without a usable key is skipped
 // and counted, an optional field that is absent or of the wrong type reads
 // as absent, unknown fields are ignored, and a payload speaking another
@@ -25,8 +28,19 @@ import {
   type Tone,
   type ViewPayload,
 } from "./prs_model";
+import type { PrRow } from "./prs_model";
 import { readBanners, readSections } from "./sections";
 import type { Banner, LocalStatus, Section } from "./types";
+import {
+  joinPrs,
+  mergeWorkEntries,
+  type JoinHow,
+  type KeyMatchRule,
+  type LocalField,
+  type MergeSource,
+  type WorkEntry,
+  type WorkJoins,
+} from "./work_merge";
 
 export type WorkCategory = "doing" | "todo" | "done";
 
@@ -44,6 +58,32 @@ export interface WorkPrChip {
   tone: Tone;
   /** The PRs view currently lists this PR. */
   loaded: boolean;
+  /** How it came to be on the row: listed by a source, or joined. */
+  how: JoinHow;
+}
+
+/** What one source contributes to a row: its actions run against it, under
+ *  its own key, judged by its own trust. */
+export interface WorkContribution {
+  sourceId: string;
+  sourceLabel: string;
+  /** The tracker that owns the item, or a source adding to it. */
+  role: "owner" | "overlay";
+  /** The key its actions are filed under in its payload. */
+  key: string;
+  badges: Chip[];
+  sections: Section[];
+  /** Ids of its own actions (not its sections'). */
+  actionIds: string[];
+  hasActions: boolean;
+}
+
+/** A banner on a row, with the source and key its actions belong to. */
+export interface WorkRowBanner {
+  sourceId: string;
+  sourceLabel: string;
+  key: string;
+  banner: Banner;
 }
 
 export interface WorkRow {
@@ -78,6 +118,29 @@ export interface WorkRow {
   actionIds: string[];
   /** The item or one of its sections carries actions: worth asking Rust. */
   hasActions: boolean;
+  /** Branches of the item, in the PRs' own terms (forge, repo, branch). */
+  branches: { forge: string; repo: string; branch: string }[];
+  /** The row's banners from every contributor. */
+  banners: WorkRowBanner[];
+  /** The worst tone among the banners (the row's dot), or null. */
+  bannerTone: Banner["tone"] | null;
+  /** Every source feeding the row: the owner first, then the sources
+   *  adding to it in the Settings order. */
+  contributions: WorkContribution[];
+  /** The source that lists the item as its own; null when only sources
+   *  adding to it do (the owner is missing). */
+  owner: { sourceId: string; manifestId: string } | null;
+  /** What the row's entries point at, when they add to another source's
+   *  item (an overlay read on its own, or a row whose owner is missing). */
+  ownerRef: { source: string; key: string } | null;
+  /** Why the owner row is missing (also among the badges). */
+  missingOwner?: Chip;
+  /** The source whose key-match rule applies (its keys are the row's). */
+  keySourceId: string | null;
+  /** The source the folder came from, when a source adding to the row set it. */
+  folderFrom?: string;
+  /** The source whose local status the row shows (its moves run there). */
+  localStatusFrom?: { sourceId: string; sourceLabel: string; key: string };
 }
 
 export type WorkGroupId = "active" | WorkCategory | "other";
@@ -114,6 +177,16 @@ export interface WorkModel {
   banners: { sourceId: string; sourceLabel: string; banner: Banner }[];
   /** At least one source has served a payload. */
   hasData: boolean;
+  /** The PRs joined to rows (by row) and the rows each PR joined (by PR). */
+  joins: WorkJoins;
+}
+
+/** The PR state of a joined PR row as a chip tone. */
+const STATE_TONE: Record<string, Tone> = { open: "info", draft: "warn", merged: "ok", closed: "muted" };
+
+/** A PR row joined to a work row, as the row's chip. */
+function joinedChip(pr: PrRow, how: JoinHow): WorkPrChip {
+  return { id: pr.id, key: pr.primary.key, text: `${pr.repo}${pr.number}`, url: pr.url || null, status: pr.state, tone: STATE_TONE[pr.state] ?? "muted", loaded: true, how };
 }
 
 /** Group order and headings. Active leads: it is what the environment is
@@ -199,10 +272,30 @@ function actionIdsOf(v: unknown): string[] {
     .filter((id): id is string => !!id);
 }
 
-/** One item read leniently; null when it has no usable key. */
+/** An overlay's `ref`, or null for an entry its source owns. */
+export function readRef(v: unknown): { source: string; key: string } | null {
+  const r = obj(v);
+  const source = str(r?.source);
+  const key = str(r?.key);
+  return source && source.trim() !== "" && key && key.trim() !== "" ? { source, key } : null;
+}
+
+/** An item's `branches`, leniently: entries missing a part are dropped. */
+function readBranches(v: unknown): WorkRow["branches"] {
+  return list(v)
+    .map(obj)
+    .filter((b): b is Record<string, unknown> => b !== null && !!str(b.forge) && !!str(b.repo) && !!text(b.branch))
+    .map((b) => ({ forge: b.forge as string, repo: b.repo as string, branch: (b.branch as string).trim() }));
+}
+
+const TONE_RANK = { info: 1, warn: 2, bad: 3 } as const;
+
+/** One item read leniently; null when it has no usable key. An entry adding
+ *  to another source's item may leave its key out: it is `ref.key`. */
 export function readWorkItem(raw: unknown, sourceId: string, sourceLabel: string, loadedPrs: ReadonlySet<string>): WorkRow | null {
   const w = obj(raw);
-  const key = str(w?.key);
+  const ref = readRef(w?.ref);
+  const key = str(w?.key) ?? ref?.key ?? null;
   if (!w || !key || key.trim() === "") return null;
   const status = obj(w.status);
   const statusLabel = text(status?.label);
@@ -213,6 +306,10 @@ export function readWorkItem(raw: unknown, sourceId: string, sourceLabel: string
   const title = text(w.title);
   const sections = readSections(w.sections);
   const actionIds = actionIdsOf(w.actions);
+  const badges = readBadges(w.badges).map((b) => ({ text: b.text, tone: (b.tone ?? "info") as Tone, ...(b.title ? { title: b.title } : {}) }));
+  const banners = readBanners(w.banners).map((banner) => ({ sourceId, sourceLabel, key, banner }));
+  const hasActions = actionIds.length > 0 || sections.some((s) => (s.actions ?? []).length > 0) || banners.some((b) => (b.banner.actions ?? []).length > 0);
+  const bannerTone = banners.reduce<Banner["tone"] | null>((t, b) => (t === null || TONE_RANK[b.banner.tone] > TONE_RANK[t] ? b.banner.tone : t), null);
   return {
     id: `${sourceId}|${key}`,
     sourceId,
@@ -248,14 +345,29 @@ export function readWorkItem(raw: unknown, sourceId: string, sourceLabel: string
           status,
           tone: PR_TONE[status?.toLowerCase() ?? ""] ?? "muted",
           loaded: loadedPrs.has(id),
+          how: "linked" as const,
         };
       }),
-    badges: readBadges(w.badges).map((b) => ({ text: b.text, tone: (b.tone ?? "info") as Tone, ...(b.title ? { title: b.title } : {}) })),
+    badges,
     localStatus: readLocalStatus(w.localStatus),
     sections,
     actionIds,
-    hasActions: actionIds.length > 0 || sections.some((s) => (s.actions ?? []).length > 0),
+    hasActions,
+    branches: readBranches(w.branches),
+    banners,
+    bannerTone,
+    contributions: [{ sourceId, sourceLabel, role: ref ? "overlay" : "owner", key, badges, sections, actionIds, hasActions }],
+    owner: null,
+    ownerRef: ref,
+    keySourceId: ref ? null : sourceId,
   };
+}
+
+/** Which local fields an entry sets: present and not null. */
+function localSets(raw: unknown): Record<LocalField, boolean> {
+  const w = obj(raw) ?? {};
+  const set = (k: string): boolean => w[k] !== undefined && w[k] !== null;
+  return { folder: set("folder"), active: set("active"), localStatus: set("localStatus"), branches: set("branches") };
 }
 
 /** Whether a row passes the text filter: every word of it appears in the
@@ -275,7 +387,18 @@ const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n =
  */
 export function buildWorkModel(
   payloads: ViewPayload[],
-  opts: { needsUpdate?: NeedsUpdate[]; filter?: WorkFilter; loadedPrs?: ReadonlySet<string> } = {},
+  opts: {
+    needsUpdate?: NeedsUpdate[];
+    filter?: WorkFilter;
+    loadedPrs?: ReadonlySet<string>;
+    /** The listed sources, in the Settings order: who is who (manifest
+     *  ids, for `ref`), and why an owner is missing. */
+    sources?: readonly MergeSource[];
+    /** The PRs view's rows, to join to work rows. */
+    prRows?: readonly PrRow[];
+    /** A source's key-match rule (default: on, with the default pattern). */
+    keyMatch?: (sourceId: string | null) => KeyMatchRule | null | undefined;
+  } = {},
 ): WorkModel {
   const stale: NeedsUpdate[] = [...(opts.needsUpdate ?? [])];
   const usable: ViewPayload[] = [];
@@ -288,10 +411,12 @@ export function buildWorkModel(
   }
   const freshness = summarizeFreshness(usable);
   const loaded = opts.loadedPrs ?? new Set<string>();
-  const all: WorkRow[] = [];
+  const entries: WorkEntry[] = [];
+  const listedBy = new Set<string>();
   const banners: WorkModel["banners"] = [];
   for (const p of usable) {
     if (p.payload === null || p.payload === undefined) continue;
+    listedBy.add(p.sourceId);
     for (const banner of readBanners(obj(p.payload)?.banners)) banners.push({ sourceId: p.sourceId, sourceLabel: p.sourceLabel, banner });
     const seen = new Set<string>();
     let skipped = 0;
@@ -309,18 +434,27 @@ export function buildWorkModel(
         continue;
       }
       seen.add(row.key);
-      all.push(row);
+      entries.push({ sourceId: p.sourceId, sourceLabel: p.sourceLabel, ref: row.ownerRef, row, sets: localSets(raw) });
     }
     const say = (line: string): void => void freshness.errors.push(usable.length > 1 ? `${p.sourceLabel}: ${line}` : line);
     if (skipped > 0) say(`${plural(skipped, "work item")} could not be read`);
     if (repeated > 0) say(`${plural(repeated, "work item")} repeated a key and ${repeated === 1 ? "was" : "were"} left out`);
   }
+  const all = mergeWorkEntries(entries, opts.sources, listedBy);
+  const joins = joinPrs(all, opts.prRows ?? [], opts.keyMatch ?? (() => null));
+  for (const row of all) {
+    const extra = joins.byRow.get(row.id);
+    if (extra) row.prs = [...row.prs, ...extra.filter((j) => !row.prs.some((p) => p.id === j.pr.id)).map((j) => joinedChip(j.pr, j.how))];
+  }
   const anyAssigned = all.some((r) => r.assignedToMe);
   const assignedOnly = opts.filter?.assignedOnly ?? anyAssigned;
   const textFilter = opts.filter?.text ?? "";
   // The active item stays on top even when it is not assigned to the user:
-  // it is what the environment is set up for. The text filter still applies.
-  const passes = (r: WorkRow): boolean => (!assignedOnly || r.assignedToMe || r.active) && matchesText(r, textFilter);
+  // it is what the environment is set up for. A row whose tracker does not
+  // list it (or is not here) cannot say whether it is assigned, so it stays
+  // too: a workspace never disappears because a query changed. The text
+  // filter still applies.
+  const passes = (r: WorkRow): boolean => (!assignedOnly || r.assignedToMe || r.active || r.owner === null) && matchesText(r, textFilter);
   const shownRows = all.filter(passes);
   const groupOf = (r: WorkRow): WorkGroupId => (r.active ? "active" : (r.status?.category ?? "other"));
   const groups = WORK_GROUPS.map((g) => ({ ...g, rows: shownRows.filter((r) => groupOf(r) === g.id) })).filter((g) => g.rows.length > 0);
@@ -334,5 +468,6 @@ export function buildWorkModel(
     needsUpdate: stale,
     banners,
     hasData: usable.some((p) => p.payload !== null && p.payload !== undefined),
+    joins,
   };
 }

@@ -8,6 +8,13 @@
 // there is one way back. A `panel` action opens the source's drill-in page
 // over the whole view.
 //
+// One item can be fed by several sources (a tracker owns the row, a
+// workspace source adds its folder, status and actions): the row merges
+// them (`work_merge.ts`), and the detail shows each source's actions and
+// sections under its own name, after the item's banners. Actions other
+// sources offer on the row ("Start work") show there too, under theirs.
+// A row with banners carries a dot of their worst tone.
+//
 // Built like the other source pages: the app hands it the payloads on every
 // change, and rows are keyed and repainted only when their content changed,
 // so a poll that changed one item touches one row and focus survives.
@@ -17,7 +24,7 @@ import { formatAgo } from "../record_pane";
 import { LocalStatusBlock } from "./local_status";
 import type { ActionTarget } from "./needs_you";
 import { withPanels, type PanelPage } from "./panel_view";
-import type { NeedsUpdate, ViewPayload } from "./prs_model";
+import type { NeedsUpdate, PrRow, ViewPayload } from "./prs_model";
 import { SectionsBlock, paintBanners, type SectionsContext } from "./sections";
 import {
   ActionsCell,
@@ -28,7 +35,8 @@ import {
   truncate,
   type SourceViewDeps,
 } from "./view_common";
-import { buildWorkModel, type WorkFilter, type WorkGroup, type WorkGroupId, type WorkModel, type WorkPrChip, type WorkRow } from "./work_model";
+import { workItemActionTargets, type ItemActionTarget, type KeyMatchRule, type MergeSource } from "./work_merge";
+import { buildWorkModel, type WorkContribution, type WorkFilter, type WorkGroup, type WorkGroupId, type WorkModel, type WorkPrChip, type WorkRow } from "./work_model";
 
 export interface WorkViewDeps extends SourceViewDeps {
   /** Open another view at an item (a PR chip → the PRs view); false when
@@ -46,6 +54,17 @@ export interface WorkViewInput {
   servedBy: string[];
   /** Bumped per source whenever its payload was re-read. */
   versions: Record<string, number>;
+  /** The listed sources in the Settings order: whose `ref` is whose, why an
+   *  owner is missing, the item actions they offer, their key-match rules.
+   *  Absent: every source stands alone and offers nothing on others' rows. */
+  sources?: readonly MergeSource[];
+  /** The PRs view's rows, joined to work rows by branch and key. */
+  prRows?: readonly PrRow[];
+}
+
+/** Each source's key-match rule, by registry id (absent = the default). */
+export function keyMatchOf(sources: readonly MergeSource[] | undefined): (sourceId: string | null) => KeyMatchRule | null {
+  return (sourceId) => (sourceId === null ? null : (sources?.find((s) => s.id === sourceId)?.keyMatch ?? null));
 }
 
 export const WORK_VIEW_CSS = `
@@ -77,6 +96,15 @@ export const WORK_VIEW_CSS = `
 .chappa-work-field-name{color:#8b949e;}
 .chappa-work-field-value{color:#d6d8dc;min-width:0;overflow-wrap:anywhere;display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
 .chappa-work-detail .chappa-sv-actions{margin-bottom:10px;}
+.chappa-work-dot{flex:none;width:8px;height:8px;border-radius:50%;background:#5ea6ff;}
+.chappa-work-dot[data-tone="warn"]{background:#f0b429;}
+.chappa-work-dot[data-tone="bad"]{background:#f85149;}
+.chappa-work-dot[hidden]{display:none;}
+.chappa-work-detail-banners:empty{display:none;}
+.chappa-work-detail-banners{margin-bottom:10px;}
+.chappa-work-from{margin:12px 0 6px;font:600 11px system-ui,sans-serif;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;}
+.chappa-work-from[hidden]{display:none;}
+.chappa-work-pr[data-how="branch"],.chappa-work-pr[data-how="key in branch"],.chappa-work-pr[data-how="key in title"]{border-style:dashed;}
 `;
 
 let stylesInjected = false;
@@ -122,6 +150,27 @@ export function workMeta(row: WorkRow, now: number): string {
 
 const targetOf = (row: WorkRow): ActionTarget => ({ sourceId: row.sourceId, sourceLabel: row.sourceLabel, view: "work", key: row.key });
 
+/** A contributor's actions: under its own key, only its own ids. */
+const contributionTarget = (c: WorkContribution, ids: readonly string[] = c.actionIds): ActionTarget & { only: readonly string[] } => ({
+  sourceId: c.sourceId,
+  sourceLabel: c.sourceLabel,
+  view: "work",
+  key: c.key,
+  only: ids,
+});
+
+/** Every target of a row's action cell: each contributor's own actions,
+ *  then the item actions other sources offer on it. */
+export function rowTargets(row: WorkRow, sources: readonly MergeSource[] | undefined): (ActionTarget & { only?: readonly string[] })[] {
+  const own = row.contributions.filter((c) => c.actionIds.length > 0).map((c) => contributionTarget(c));
+  return [...own, ...(sources ? workItemActionTargets(row, sources) : [])];
+}
+
+/** The version a row's actions are cached under: every source it asks. */
+function versionOf(sourceIds: readonly string[], versions: Record<string, number>): string {
+  return [...new Set(sourceIds)].map((id) => `${id}:${versions[id] ?? 0}`).join(",");
+}
+
 interface GroupRefs {
   el: HTMLElement;
   head: HTMLButtonElement;
@@ -131,6 +180,7 @@ interface GroupRefs {
 
 interface RowRefs {
   el: HTMLElement;
+  dot: HTMLElement;
   key: HTMLElement;
   title: HTMLButtonElement;
   status: HTMLElement;
@@ -265,7 +315,8 @@ export class WorkView {
       this.pendingFocus = key;
       return true;
     }
-    const row = model.all.find((r) => r.key === key);
+    // A row id (`<sourceId>|<key>`) names one row when two sources share a key.
+    const row = model.all.find((r) => r.id === key) ?? model.all.find((r) => r.key === key);
     if (!row) return false;
     this.frame.clearSubpages();
     const shown = model.groups.some((g) => g.rows.some((r) => r.id === row.id));
@@ -296,7 +347,14 @@ export class WorkView {
   private paint(): void {
     const input = this.input;
     if (!input) return;
-    const model = buildWorkModel(input.payloads, { needsUpdate: input.needsUpdate, filter: this.filter, loadedPrs: input.loadedPrs });
+    const model = buildWorkModel(input.payloads, {
+      needsUpdate: input.needsUpdate,
+      filter: this.filter,
+      loadedPrs: input.loadedPrs,
+      sources: input.sources,
+      prRows: input.prRows,
+      keyMatch: keyMatchOf(input.sources),
+    });
     this.model = model;
     this.frame.paintStatus(model.freshness, model.needsUpdate, this.deps.now());
     this.assignedBtn.setAttribute("aria-pressed", String(model.assignedOnly));
@@ -319,7 +377,7 @@ export class WorkView {
       placeAt(this.list, refs.el, i);
       g.rows.forEach((row, j) => {
         const r = this.rowRefs(row.id);
-        this.paintRow(r, row, version(row.sourceId));
+        this.paintRow(r, row, input);
         placeAt(refs.rows, r.el, j);
       });
       truncate(refs.rows, g.rows.length);
@@ -336,7 +394,7 @@ export class WorkView {
     }
     this.split.classList.toggle("has-detail", sel !== null);
     this.frame.host.classList.toggle("detail-open", sel !== null);
-    if (sel) this.detail.show(sel, version(sel.sourceId));
+    if (sel) this.detail.show(sel, input);
     else this.detail.hide();
     for (const [id, r] of this.rows) {
       r.el.classList.toggle("selected", id === this.selected);
@@ -397,6 +455,9 @@ export class WorkView {
     el.dataset.id = id;
     const top = document.createElement("div");
     top.className = "chappa-sv-top";
+    const dot = document.createElement("span");
+    dot.className = "chappa-work-dot";
+    dot.hidden = true;
     const key = document.createElement("span");
     key.className = "chappa-work-key";
     const title = document.createElement("button");
@@ -404,14 +465,14 @@ export class WorkView {
     title.className = "chappa-sv-title";
     const status = document.createElement("span");
     status.className = "chappa-work-status";
-    top.append(key, title, status);
+    top.append(dot, key, title, status);
     const meta = document.createElement("div");
     meta.className = "chappa-sv-meta";
     const chips = document.createElement("div");
     chips.className = "chappa-sv-chips";
     const actions = new ActionsCell(this.ui);
     el.append(top, meta, chips, actions.el);
-    const r: RowRefs = { el, key, title, status, meta, chips, actions, sig: "", row: null };
+    const r: RowRefs = { el, dot, key, title, status, meta, chips, actions, sig: "", row: null };
     title.addEventListener("click", () => {
       if (r.row) this.select(this.selected === r.row.id ? null : r.row.id);
     });
@@ -419,15 +480,18 @@ export class WorkView {
     return r;
   }
 
-  private paintRow(r: RowRefs, row: WorkRow, version: string): void {
+  private paintRow(r: RowRefs, row: WorkRow, input: WorkViewInput): void {
     r.row = row;
-    if (row.hasActions && row.actionIds.length) r.actions.load([targetOf(row)], version, row.actionIds);
-    else r.actions.load([], version);
+    const targets = rowTargets(row, input.sources);
+    r.actions.load(targets, versionOf(targets.map((t) => t.sourceId), input.versions));
     const now = this.deps.now();
     const meta = workMeta(row, now);
-    const sig = JSON.stringify([row.key, row.title, row.statusChip, meta, row.labels, row.badges, row.prs, row.active, row.sourceLabel]);
+    const sig = JSON.stringify([row.key, row.title, row.statusChip, meta, row.labels, row.badges, row.prs, row.active, row.sourceLabel, row.banners]);
     if (sig === r.sig) return;
     r.sig = sig;
+    r.dot.hidden = row.bannerTone === null;
+    r.dot.dataset.tone = row.bannerTone ?? "";
+    r.dot.title = row.banners.map((b) => b.banner.title).join("\n");
     r.el.dataset.key = row.key;
     r.el.dataset.tone = row.active ? "info" : "";
     r.key.textContent = row.key;
@@ -457,8 +521,12 @@ export function prChipEl(p: WorkPrChip, sourceId: string, deps: WorkViewDeps): H
   btn.className = "chappa-sv-chip chappa-work-pr";
   btn.dataset.tone = p.tone;
   btn.dataset.pr = p.key;
-  btn.textContent = p.status ? `${p.text} ${p.status}` : p.text;
-  btn.title = p.loaded ? `Show ${p.text} in PRs` : p.url ? `Open ${p.url}` : p.text;
+  btn.dataset.how = p.how;
+  // A joined PR says how it joined, so a wrong join is visible at a glance.
+  const how = p.how === "linked" ? "" : ` · ${p.how}`;
+  btn.textContent = `${p.status ? `${p.text} ${p.status}` : p.text}${how}`;
+  const what = p.loaded ? `Show ${p.text} in PRs` : p.url ? `Open ${p.url}` : p.text;
+  btn.title = p.how === "linked" ? what : `${what} (matched by ${p.how === "branch" ? "its branch" : p.how})`;
   btn.disabled = !p.loaded && !p.url;
   btn.addEventListener("mousedown", (e) => e.preventDefault());
   btn.addEventListener("click", () => {
@@ -468,14 +536,28 @@ export function prChipEl(p: WorkPrChip, sourceId: string, deps: WorkViewDeps): H
   return btn;
 }
 
+/** One more source's part of the detail: its name, its actions, and (for
+ *  a source feeding the row) its sections. */
+interface ExtraBlock {
+  el: HTMLElement;
+  head: HTMLElement;
+  actions: ActionsCell;
+  sections: SectionsBlock;
+}
+
 /** The detail pane of the selected item. */
 class WorkDetail {
   readonly el: HTMLElement;
   private readonly title: HTMLElement;
+  private readonly banners: HTMLElement;
   private readonly fields: HTMLElement;
+  /** The first source's name, shown when more than one feeds the item. */
+  private readonly from: HTMLElement;
   private readonly actions: ActionsCell;
   private readonly status: LocalStatusBlock;
   private readonly sections: SectionsBlock;
+  private readonly extras: HTMLElement;
+  private readonly extraBlocks = new Map<string, ExtraBlock>();
   private sig = "";
   private shownId: string | null = null;
 
@@ -492,24 +574,51 @@ class WorkDetail {
       arrowClass: "chappa-work-detail-back",
       titleClass: "chappa-work-detail-title",
     }).title;
+    this.banners = document.createElement("div");
+    this.banners.className = "chappa-work-detail-banners";
     this.fields = document.createElement("div");
     this.fields.className = "chappa-work-fields";
+    this.from = document.createElement("div");
+    this.from.className = "chappa-work-from";
+    this.from.hidden = true;
     this.actions = new ActionsCell(deps);
     this.status = new LocalStatusBlock(deps);
     this.sections = new SectionsBlock(deps);
-    this.el.append(head, this.fields, this.actions.el, this.status.el, this.sections.el);
+    this.extras = document.createElement("div");
+    this.extras.className = "chappa-work-extras";
+    this.el.append(head, this.banners, this.fields, this.from, this.actions.el, this.status.el, this.sections.el, this.extras);
   }
 
-  show(row: WorkRow, version: string): void {
+  show(row: WorkRow, input: WorkViewInput): void {
+    const v = (id: string): string => versionOf([id], input.versions);
+    const primary = row.contributions[0];
     const target = targetOf(row);
-    // The moves are drawn by the status block: the general buttons skip them.
+    // The moves are drawn by the status block, against the source whose
+    // status it is: that source's general buttons skip them.
+    const statusFrom = row.localStatusFrom ?? { sourceId: row.sourceId, sourceLabel: row.sourceLabel, key: row.key };
+    const statusTarget: ActionTarget = { ...statusFrom, view: "work" };
     const moves = new Set((row.localStatus?.allowed ?? []).map((m) => m.id));
-    const own = row.actionIds.filter((id) => !moves.has(id));
-    if (own.length) this.actions.load([target], version, own);
-    else this.actions.load([], version);
-    this.status.update(row.localStatus, target, version);
-    const ctx: SectionsContext = { sourceId: row.sourceId, target, version };
-    this.sections.update(row.sections, ctx);
+    const ownIds = (c: WorkContribution): string[] => (c.sourceId === statusFrom.sourceId ? c.actionIds.filter((id) => !moves.has(id)) : c.actionIds);
+    paintBanners(
+      this.banners,
+      this.deps,
+      row.banners.map((b) => ({
+        banner: b.banner,
+        ctx: { sourceId: b.sourceId, target: { sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "work", key: b.key }, version: v(b.sourceId) },
+      })),
+    );
+    const offered = input.sources ? workItemActionTargets(row, input.sources) : [];
+    const many = row.contributions.length + offered.length > 1;
+    this.from.hidden = !many || !primary;
+    this.from.textContent = primary ? primary.sourceLabel : "";
+    const own = primary ? ownIds(primary) : [];
+    if (primary && own.length) this.actions.load([contributionTarget(primary, own)], v(primary.sourceId));
+    else this.actions.load([], v(row.sourceId));
+    this.status.update(row.localStatus, statusTarget, v(statusFrom.sourceId));
+    const primaryTarget: ActionTarget = primary ? { sourceId: primary.sourceId, sourceLabel: primary.sourceLabel, view: "work", key: primary.key } : target;
+    const ctx: SectionsContext = { sourceId: primaryTarget.sourceId, target: primaryTarget, version: v(primaryTarget.sourceId) };
+    this.sections.update(primary ? primary.sections : row.sections, ctx);
+    this.paintExtras(row.contributions.slice(1), offered, ownIds, v);
     const now = this.deps.now();
     const sig = JSON.stringify([row, Math.floor(now / 60_000)]);
     if (sig === this.sig && this.shownId === row.id) return;
@@ -524,6 +633,52 @@ class WorkDetail {
     this.shownId = null;
     this.sig = "";
     delete this.el.dataset.id;
+  }
+
+  /** The blocks after the first source's: each further source feeding the
+   *  row (its actions and sections), then each source offering actions on
+   *  it, under their names. */
+  private paintExtras(
+    rest: WorkContribution[],
+    offered: ItemActionTarget[],
+    ownIds: (c: WorkContribution) => string[],
+    v: (id: string) => string,
+  ): void {
+    const wanted: string[] = [];
+    const block = (id: string, label: string, role: string): ExtraBlock => {
+      let b = this.extraBlocks.get(id);
+      if (!b) {
+        const el = document.createElement("div");
+        el.className = "chappa-work-extra";
+        const head = document.createElement("div");
+        head.className = "chappa-work-from";
+        const actions = new ActionsCell(this.deps);
+        const sections = new SectionsBlock(this.deps);
+        el.append(head, actions.el, sections.el);
+        b = { el, head, actions, sections };
+        this.extraBlocks.set(id, b);
+      }
+      b.el.dataset.source = id.slice(id.indexOf(":") + 1);
+      b.el.dataset.role = role;
+      b.head.textContent = label;
+      wanted.push(id);
+      return b;
+    };
+    for (const c of rest) {
+      const b = block(`from:${c.sourceId}`, c.sourceLabel, "contributor");
+      const ids = ownIds(c);
+      b.actions.load(ids.length ? [contributionTarget(c, ids)] : [], v(c.sourceId));
+      const t: ActionTarget = { sourceId: c.sourceId, sourceLabel: c.sourceLabel, view: "work", key: c.key };
+      b.sections.update(c.sections, { sourceId: c.sourceId, target: t, version: v(c.sourceId) });
+    }
+    for (const t of offered) {
+      const b = block(`offers:${t.sourceId}`, t.sourceLabel, "offers");
+      b.actions.load([t], `${v(t.sourceId)},${v(t.owner)}`);
+      b.sections.update([], { sourceId: t.sourceId, target: null, version: v(t.sourceId) });
+    }
+    wanted.forEach((id, i) => placeAt(this.extras, this.extraBlocks.get(id)!.el, i));
+    truncate(this.extras, wanted.length);
+    for (const id of [...this.extraBlocks.keys()]) if (!wanted.includes(id)) this.extraBlocks.delete(id);
   }
 
   private paintFields(row: WorkRow, now: number): void {
@@ -555,7 +710,8 @@ class WorkDetail {
     add("Reporter", row.reporter ? (row.reporter.isMe ? `${row.reporter.name} (me)` : row.reporter.name) : null);
     add("Created", when(row.created));
     add("Last touched", when(row.lastTouchedUtc));
-    add("Folder", row.folder);
+    add("Folder", row.folder && row.folderFrom && row.folderFrom !== row.sourceLabel ? `${row.folder} (from ${row.folderFrom})` : row.folder);
+    add("Branches", row.branches.length ? row.branches.map((b) => `${b.repo}: ${b.branch}`).join(", ") : null);
     add("Pull requests", row.prs.map((p) => prChipEl(p, row.sourceId, this.deps)));
     add("Badges", row.badges.map((b) => chipEl(b)));
     if (row.url) {
@@ -567,6 +723,6 @@ class WorkDetail {
       link.addEventListener("click", () => openChecked(this.deps, row.sourceId, row.url!));
       add("Link", [link]);
     }
-    add("Source", row.sourceLabel);
+    add("Source", row.contributions.length > 1 ? row.contributions.map((c) => c.sourceLabel).join(", ") : row.sourceLabel);
   }
 }

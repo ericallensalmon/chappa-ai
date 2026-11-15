@@ -167,6 +167,85 @@ An endpoint action with `note: "required"` asks the user for a note
 before it is sent; the source refuses the call without one. The app may
 name who acted in an `X-Chappa-Actor` request header.
 
+## One item, several sources
+
+A work item lives in a tracker, its pull requests on a forge, and its
+workspace (folder, local status) with whatever sets that up. It is still
+one row in Work: the tracker owns it, and other sources add to it.
+
+**Adding to another source's item.** A Work entry with
+`ref: {source, key}` adds to the item `key` of the source whose manifest
+`source.id` is `source`:
+
+```json
+{ "ref": { "source": "tracker", "key": "ABC-1" }, "key": "ABC-1",
+  "title": "Fix login", "url": "https://…",
+  "folder": "/srv/example/abc-1", "active": true,
+  "branches": [{ "forge": "github", "repo": "owner/api", "branch": "task/ABC-1-fix-login" }],
+  "badges": [], "banners": [], "sections": [], "actions": [] }
+```
+
+- The owner's tracker fields win (key, title, type, status, url,
+  priority, labels, parent, reporter, created, assigned to me). Yours are
+  used only when the owner does not list the item: send the last `title`
+  and `url` you know, and the row still shows, badged "not listed by
+  <owner>" or "<owner> unavailable". A workspace never disappears
+  because a query changed.
+- Your local fields win: `folder`, `active`, `localStatus`, `branches`
+  (the owner's count only when no source adding to the item sets one).
+  When two sources set one differently, the first in Settings ▸ Sources
+  wins and the row says so.
+- `badges`, `banners`, `sections`, `actions` and `prs` are added to the
+  owner's (PRs deduped by forge, repo and number). Your actions run
+  against you, judged by your trust, like on a row of your own; a
+  `banners` entry on an item shows at the top of its panel and as a dot
+  on its row.
+- Your endpoint calls for such an entry carry the owner in the target:
+  `target: {view: "work", key: ref.key, source: ref.source, item}`, where
+  `item` is the owner's row exactly as the app last received it (left
+  out when the owner does not list it). That is how you learn the
+  tracker's status. Treat `item` as untrusted input: sanitise its key
+  before it becomes a path, and never put it into a shell.
+
+**Offering actions on other sources' rows** (a "Start work" before you
+have anything of your own about the item) goes in the manifest:
+
+```json
+"itemActions": [
+  { "kind": "endpoint", "id": "start-work", "label": "Start work", "mutates": true,
+    "confirm": "Create a workspace for {key} — {title}", "note": "optional",
+    "on": { "view": "work", "sources": ["tracker"] } }
+]
+```
+
+Only `endpoint` actions; a mutating one needs its `confirm`. `on.view` is
+`work` or `prs`; `on.sources` lists manifest ids, or `"*"` for every
+other source. The app fills `{key}`, `{title}` (one line, at most 80
+characters) and `{source}` (the owner's label) from the row, and that is
+the question the user answers. The action is offered on every matching
+row except the ones you already add to (your entry brings its own
+actions), and it is part of what the user trusts: changing an item
+action asks again. The call is `{id, target: {view, key, source, item},
+params, note, confirmed}`; for a PR row `key` is `forge:repo:number` and
+`item` the PR.
+
+**PRs join the item** by three rules, in order: the item's `prs` names
+the PR ("linked"); one of its `branches` is the PR's `sourceBranch` on
+the same forge and repo, `refs/heads/` ignored on both sides ("branch");
+or the owner's item key appears as a whole word in the PR's
+`sourceBranch` or `title` ("key in branch" / "key in title"). The last
+one is a per-source setting in Settings ▸ Sources (on by default): a
+pattern, `[A-Z][A-Z0-9]+-\d+` unless changed, finds candidate keys, and
+a PR joins only an item whose key it found exactly (`ABC-12` never joins
+`ABC-1`; case counts). A joined PR shows on the item saying how, and the
+PR's row gets a chip with the item's key.
+
+Run the fixture twice to see it: once as above, once with
+`--data desktop/sources/fixture/data-overlay` (a "Workspaces" source that
+adds to the first one's ABC-1 and ABC-2, keeps ABC-9 the tracker no
+longer lists, and offers Start work on the rest). Its actions answer with
+the call they received, so the target can be read back.
+
 ## Data safety on the Environment view
 
 A source that runs databases can say whether their data is known to be

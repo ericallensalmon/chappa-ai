@@ -207,3 +207,42 @@ test("refuses a non-loopback address and a bad token", async () => {
     assert.equal(code, 2, JSON.stringify(env));
   }
 });
+
+const overlayDir = fileURLToPath(new URL("../fixture/data-overlay/", import.meta.url));
+
+test("the overlay data runs a second source that adds to the first one's work items", async () => {
+  const ws = await start(["--data", overlayDir]);
+  try {
+    const manifest = (await ws.call("/chappa/v1/manifest")).body;
+    assert.equal(manifest.source.id, "workspaces");
+    assert.deepEqual(Object.keys(manifest.views), ["work"]);
+    assert.deepEqual(manifest.itemActions.map((a) => [a.id, a.kind, a.mutates, a.on.view]), [["start-work", "endpoint", true, "work"], ["review-later", "endpoint", false, "prs"]]);
+    assert.match(manifest.itemActions[0].confirm, /\{key\}.*\{title\}/);
+    const work = (await ws.call("/api/work")).body;
+    assert.ok(work.freshness);
+    // Every entry points at the item it adds to; one of them at a source that is not the fixture.
+    assert.deepEqual(work.items.map((i) => [i.ref.source, i.ref.key, i.key]), [
+      ["fixture", "ABC-1", "ABC-1"],
+      ["fixture", "ABC-2", "ABC-2"],
+      ["fixture", "ABC-9", "ABC-9"],
+      ["tracker", "XYZ-1", "XYZ-1"],
+    ]);
+    // The tracker lists ABC-1 and ABC-2 but not ABC-9: the owner-missing case.
+    const tracker = JSON.parse(readFileSync(join(dataDir, "work.json"), "utf8")).items.map((i) => i.key);
+    assert.ok(tracker.includes("ABC-1") && tracker.includes("ABC-2") && !tracker.includes("ABC-9"));
+  } finally { ws.stop(); }
+});
+
+test("an echoing action answers with exactly the target, params and note it was sent", async () => {
+  const ws = await start(["--data", overlayDir]);
+  try {
+    const item = { key: "ABC-3", title: "Retire the old queue" };
+    const refused = await ws.call("/api/actions", { method: "POST", body: { id: "start-work", target: { view: "work", key: "ABC-3", source: "fixture", item } } });
+    assert.equal(refused.status, 409);
+    const r = await ws.call("/api/actions", { method: "POST", body: { id: "start-work", target: { view: "work", key: "ABC-3", source: "fixture", item }, params: { from: "tracker", slot: 0 }, note: "n", confirmed: true } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(r.body.message), { target: { view: "work", key: "ABC-3", source: "fixture", item }, params: { from: "tracker", slot: 0 }, note: "n" });
+    const later = await ws.call("/api/actions", { method: "POST", body: { id: "review-later", target: { view: "prs", key: "github:owner/repo:#1" } } });
+    assert.deepEqual(JSON.parse(later.body.message), { target: { view: "prs", key: "github:owner/repo:#1" }, params: null, note: null });
+  } finally { ws.stop(); }
+});

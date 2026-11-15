@@ -63,7 +63,7 @@ describe("buildWorkModel", () => {
       hasActions: true,
     });
     expect(abc1.prs).toEqual([
-      { id: "github/owner/repo/#1", key: "github:owner/repo:#1", text: "owner/repo#1", url: "https://registry.example/owner/repo/pull/1", status: "open", tone: "info", loaded: true },
+      { id: "github/owner/repo/#1", key: "github:owner/repo:#1", text: "owner/repo#1", url: "https://registry.example/owner/repo/pull/1", status: "open", tone: "info", loaded: true, how: "linked" },
     ]);
     expect(abc1.badges).toEqual([{ text: "blocked", tone: "bad", title: "Waiting on approval" }]);
     expect(abc1.actionIds).toEqual(["agent-here", "terminal-here", "approve", "start-build", "run-seed", "flaky-deploy", "ping", "open-item", "validate"]);

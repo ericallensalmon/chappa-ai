@@ -39,6 +39,8 @@ export interface SourcesApi {
   attachSource(addr: string, tokenFile: string): Promise<SourcesListing>;
   detachSource(sourceId: string): Promise<SourcesListing>;
   setSourcePromptPolicy(sourceId: string, policy: ipc.SourcePromptPolicy): Promise<SourcesListing>;
+  /** Absent in older test seams: the key-match controls then do nothing. */
+  setSourceKeyMatch?(sourceId: string, enabled: boolean, pattern: string | null): Promise<SourcesListing>;
   /** Subscribe to `term://sources`; resolves the unlisten function. Absent
    *  outside Tauri (the store then only refreshes on demand). */
   listen?(handler: (event: ipc.SourcesEvent) => void): Promise<() => void>;
@@ -52,6 +54,7 @@ const tauriSourcesApi: SourcesApi = {
   attachSource: ipc.attachSource,
   detachSource: ipc.detachSource,
   setSourcePromptPolicy: ipc.setSourcePromptPolicy,
+  setSourceKeyMatch: ipc.setSourceKeyMatch,
   // Decided at call time, not module load: this module is imported by code
   // that also runs outside a webview (tests, the plain-browser dev page).
   listen: async (handler) => {
@@ -122,6 +125,15 @@ export function trustMessage(source: Source, trust: SourceTrust): string {
   lines.push(...(trust.linkHosts.length ? trust.linkHosts.map((h) => `    ${h}`) : ["    (none)"]));
   lines.push("", "Extra folders it asks to launch in:");
   lines.push(...(trust.roots.length ? trust.roots.map((r) => `    ${r}`) : ["    (none)"]));
+  const offered = trust.itemActions ?? [];
+  if (offered.length) {
+    lines.push("", "Actions it offers on other sources' items:");
+    for (const a of offered) {
+      const where = a.sources.includes("*") ? "every other source" : a.sources.join(", ");
+      const view = isRailView(a.view) ? VIEW_LABELS[a.view] : a.view;
+      lines.push(`    ${a.label} (${a.mutates ? "changes something, asks first" : "read only"}) on ${view} rows of ${where}`);
+    }
+  }
   lines.push("", `Trust covers exactly this: ${trust.hash.slice(0, 16)}…`, "A change to any of it asks again.");
   return lines.join("\n");
 }
@@ -196,6 +208,13 @@ export class SourcesStore {
    *  action until accepted. */
   async setPromptPolicy(sourceId: string, policy: ipc.SourcePromptPolicy): Promise<void> {
     this.adopt(await this.api.setSourcePromptPolicy(sourceId, policy));
+  }
+
+  /** Whether a source's work item keys join PRs that mention them, and the
+   *  pattern that finds them (blank = the default). */
+  async setKeyMatch(sourceId: string, enabled: boolean, pattern: string | null): Promise<void> {
+    if (!this.api.setSourceKeyMatch) return;
+    this.adopt(await this.api.setSourceKeyMatch(sourceId, enabled, pattern));
   }
 
   /** One view's cached payload + freshness, straight from Rust. */

@@ -73,6 +73,8 @@ export interface PrRow {
   author: string;
   /** "feature → main", or null when the source sent neither branch. */
   branch: string | null;
+  /** The source branch as the source sent it (what work rows join on). */
+  sourceBranch: string | null;
   state: Pr["state"];
   role: Pr["role"];
   bucket: Bucket | "other";
@@ -542,6 +544,7 @@ function toRow(id: string, pr: Pr, primary: PrOrigin, origins: PrOrigin[]): PrRo
     title: oneLine(pr.title) || `${pr.repo}${pr.number}`,
     author: pr.author.name,
     branch,
+    sourceBranch: pr.sourceBranch ?? null,
     state: pr.state,
     role: pr.role,
     bucket,

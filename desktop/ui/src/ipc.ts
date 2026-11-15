@@ -1540,7 +1540,28 @@ export interface SourceTrustDto {
   linkHosts: string[];
   roots: string[];
   views: string[];
+  /** The actions the source offers on OTHER sources' rows, sorted by id.
+   *  Absent from listings of older builds. */
+  itemActions?: SourceItemActionDto[];
   hash: string;
+}
+
+/** One `itemActions` entry as the trust dialog lists it: where it is
+ *  offered (`sources`: manifest ids, or `*` for every other source). */
+export interface SourceItemActionDto {
+  id: string;
+  label: string;
+  view: "work" | "prs" | string;
+  sources: string[];
+  mutates: boolean;
+  confirm: string | null;
+}
+
+/** Whether a source's work item keys join PRs that mention them, and the
+ *  pattern that finds them (null = the default). */
+export interface SourceKeyMatchDto {
+  enabled: boolean;
+  pattern: string | null;
 }
 
 /** One cached view (or the `workflows` list) of a source. */
@@ -1574,6 +1595,9 @@ export interface SourceDto {
   promptsShown: string[];
   /** Jobs started from this source, oldest first. */
   jobs: SourceJobDto[];
+  /** Whether its work item keys join PRs that mention them (absent from
+   *  listings of older builds: on, with the default pattern). */
+  keyMatch?: SourceKeyMatchDto;
 }
 
 export type SourcePromptPolicy = "first_time" | "always";
@@ -1633,10 +1657,14 @@ export type ActionOutcomeDto =
   | { kind: "panel"; payload: unknown }
   | { kind: "launched"; term_id: number; what: "agent" | "terminal" };
 
-export function sourceActions(sourceId: string, view: string, key: string | null): Promise<SourceActionDto[]> {
-  return call("source_actions", { sourceId, view, key });
+/** The judged actions of a row. With `owner`: the item actions `sourceId`
+ *  offers on the row `key` of that OTHER source. */
+export function sourceActions(sourceId: string, view: string, key: string | null, owner?: string): Promise<SourceActionDto[]> {
+  return call("source_actions", owner ? { sourceId, view, key, owner } : { sourceId, view, key });
 }
 
+/** Run one action; with `owner`, one of `sourceId`'s item actions on the
+ *  row `key` of that other source. */
 export function sourceRunAction(
   sourceId: string,
   view: string,
@@ -1644,8 +1672,9 @@ export function sourceRunAction(
   actionId: string,
   confirmed: boolean,
   note: string | null,
+  owner?: string,
 ): Promise<ActionOutcomeDto> {
-  return call("source_run_action", { sourceId, view, key, actionId, confirmed, note });
+  return call("source_run_action", owner ? { sourceId, view, key, actionId, confirmed, note, owner } : { sourceId, view, key, actionId, confirmed, note });
 }
 
 export function sourceJob(sourceId: string, jobId: string): Promise<SourceJobDto> {
@@ -1666,6 +1695,11 @@ export function openSourceLink(sourceId: string, url: string): Promise<void> {
 
 export function setSourcePromptPolicy(sourceId: string, policy: SourcePromptPolicy): Promise<SourcesListingDto> {
   return call("set_source_prompt_policy", { sourceId, policy });
+}
+
+/** Switch a source's key matching on or off; a blank pattern is the default. */
+export function setSourceKeyMatch(sourceId: string, enabled: boolean, pattern: string | null): Promise<SourcesListingDto> {
+  return call("set_source_key_match", { sourceId, enabled, pattern });
 }
 
 export interface SourcesListingDto {

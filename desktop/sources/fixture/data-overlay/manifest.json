@@ -1,0 +1,29 @@
+{
+  "contract": 1,
+  "source": { "id": "workspaces", "label": "Workspaces", "version": "0.1.0" },
+  "views": {
+    "work": { "list": "/api/work", "pollSeconds": 60 }
+  },
+  "actions": "/api/actions",
+  "jobs": "/api/jobs/{id}",
+  "linkHosts": ["registry.example"],
+  "itemActions": [
+    {
+      "kind": "endpoint",
+      "id": "start-work",
+      "label": "Start work",
+      "mutates": true,
+      "confirm": "Create a workspace for {key} — {title}",
+      "note": "optional",
+      "params": { "from": "tracker", "slot": 0 },
+      "on": { "view": "work", "sources": ["fixture"] }
+    },
+    {
+      "kind": "endpoint",
+      "id": "review-later",
+      "label": "Review later",
+      "mutates": false,
+      "on": { "view": "prs", "sources": "*" }
+    }
+  ]
+}

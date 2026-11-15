@@ -3,7 +3,9 @@
 // serves with their freshness), a Trust button that opens the trust dialog
 // for a source awaiting review, Detach for attached ones, the per-view hide
 // switches, and the attach line (address + token file) for a server started
-// elsewhere.
+// elsewhere. A trusted source serving Work also gets its key-match line:
+// whether its item keys join pull requests that mention them in a branch
+// or title, and the pattern that finds them.
 //
 // House rules as the rest of the pane: toggles persist immediately through
 // the store, which adopts what Rust returns; errors show inline under the
@@ -11,6 +13,7 @@
 // with the same multi-line list shape the project trust prompt uses.
 
 import { confirmDialog } from "./dialog";
+import { DEFAULT_KEY_PATTERN, keyPatternError } from "./sources/work_merge";
 import {
   RAIL_VIEWS,
   VIEW_LABELS,
@@ -226,6 +229,7 @@ export class SourcesSection {
           s.trust?.hash ?? "",
           s.warning ?? "",
           s.promptPolicy,
+          JSON.stringify(s.keyMatch ?? null),
           s.views.map((v) => [v.name, v.asOf ?? "", v.lastError ?? "", v.refreshing ? 1 : 0, v.hasPayload ? 1 : 0].join(",")).join(";"),
         ].join("\u001f"),
       )
@@ -308,6 +312,8 @@ export class SourcesSection {
     origin.dataset.role = "origin";
     row.appendChild(origin);
 
+    if (source.trusted && source.views.some((v) => v.name === "work")) row.appendChild(this.keyMatchLine(source));
+
     if (source.lastError) {
       const err = document.createElement("div");
       err.style.cssText = ERROR_CSS;
@@ -336,5 +342,44 @@ export class SourcesSection {
       row.appendChild(views);
     }
     return row;
+  }
+
+  /** The key-match switch and pattern of a source serving Work. The pattern
+   *  is checked here before it is stored; a blank one is the default. */
+  private keyMatchLine(source: Source): HTMLElement {
+    const rule = source.keyMatch ?? { enabled: true, pattern: null };
+    const line = document.createElement("div");
+    line.style.cssText = ATTACH_ROW_CSS;
+    line.dataset.role = "keyMatch";
+    const label = document.createElement("label");
+    label.style.cssText = "display:flex;align-items:center;gap:6px;font:12px system-ui,sans-serif;color:#adb3bd;";
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.style.cssText = CHECKBOX_CSS;
+    toggle.checked = rule.enabled;
+    toggle.dataset.action = "keyMatch";
+    label.append(toggle, document.createTextNode("Join PRs that name an item key in their branch or title"));
+    const pattern = document.createElement("input");
+    pattern.type = "text";
+    pattern.style.cssText = INPUT_CSS + "width:180px;font-family:ui-monospace,monospace;";
+    pattern.placeholder = DEFAULT_KEY_PATTERN;
+    pattern.value = rule.pattern ?? "";
+    pattern.disabled = !rule.enabled;
+    pattern.dataset.action = "keyPattern";
+    pattern.title = "Finds candidate keys (case-sensitive); a PR joins an item only when what it finds is exactly the item's key, as a whole word";
+    const err = document.createElement("span");
+    err.style.cssText = ERROR_CSS;
+    err.dataset.role = "keyPatternError";
+    const save = (): void => {
+      const why = keyPatternError(pattern.value);
+      err.textContent = why ?? "";
+      if (why) return;
+      const text = pattern.value.trim();
+      void this.store.setKeyMatch(source.id, toggle.checked, text === "" ? null : text).catch((e) => this.showError(String(e)));
+    };
+    toggle.addEventListener("change", save);
+    pattern.addEventListener("change", save);
+    line.append(label, pattern, err);
+    return line;
   }
 }

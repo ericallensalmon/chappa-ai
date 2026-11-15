@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ipc from "../ipc";
-import { prId } from "./prs_model";
-import { fixture, payload } from "./test-utils";
+import { buildPrsModel, prId } from "./prs_model";
+import { fixture, overlayFixture, payload, source } from "./test-utils";
 import { WorkView, workMeta, type WorkViewDeps, type WorkViewInput } from "./work_view";
 import { buildWorkModel } from "./work_model";
 
@@ -347,5 +347,157 @@ describe("WorkView", () => {
   it("workMeta leaves out what the item does not have", () => {
     const [bare] = buildWorkModel([payload("a", { items: [{ key: "K-1", reporter: { name: "Alex", isMe: true } }] })]).all;
     expect(workMeta(bare, NOW)).toBe("from me");
+  });
+});
+
+describe("WorkView with an item fed by two sources", () => {
+  const endpoint = (id: string, label: string, confirm = `${label}?`): ipc.SourceActionDto => ({
+    action: { kind: "endpoint", id, label, mutates: true, confirm, params: null, note: null },
+    verdict: ok,
+    needsPrompt: false,
+  });
+  const listing = (): ipc.SourceDto[] => [
+    source("fx", ["work", "prs"], { label: "Fixture", manifestId: "fixture" }),
+    source("ws", ["work"], {
+      label: "Workspaces",
+      manifestId: "workspaces",
+      trust: {
+        id: "workspaces",
+        label: "Workspaces",
+        linkHosts: [],
+        roots: [],
+        views: ["work"],
+        hash: "h",
+        itemActions: [{ id: "start-work", label: "Start work", view: "work", sources: ["fixture"], mutates: true, confirm: "Create a workspace for {key} — {title}" }],
+      },
+    }),
+  ];
+  /** Rust's answers: the overlay's own actions, its banner's, and the item
+   *  action with its confirm filled from the row. */
+  const pairDeps = () =>
+    deps({
+      actions: vi.fn(async (sourceId: string, _view: string, key: string | null, owner?: string) => {
+        if (owner) return key === "ABC-3" ? [endpoint("start-work", "Start work", "Create a workspace for ABC-3 — Retire the old queue")] : [];
+        if (sourceId === "ws" && key === "ABC-2") return [endpoint("ship", "Ship"), endpoint("archive", "Archive"), endpoint("rebuild", "Rebuild")];
+        if (sourceId === "fx" && key === "ABC-1") return ABC1_ACTIONS;
+        return [];
+      }),
+    });
+  const pairInput = (over: Partial<WorkViewInput> = {}): WorkViewInput =>
+    input({
+      payloads: [payload("fx", fixture("work"), { sourceLabel: "Fixture" }), payload("ws", overlayFixture("work"), { sourceLabel: "Workspaces" })],
+      servedBy: ["Fixture", "Workspaces"],
+      versions: { fx: 1, ws: 1 },
+      sources: listing(),
+      ...over,
+    });
+  const showAll = (v: WorkView) => {
+    if (assigned(v).getAttribute("aria-pressed") === "true") assigned(v).click();
+  };
+  const open = async (v: WorkView, k: string) => {
+    showAll(v);
+    row(v, k).querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
+    await FLUSH();
+  };
+  const buttons = (el: Element | null) =>
+    [...(el?.querySelectorAll<HTMLButtonElement>(".chappa-sv-action") ?? [])].map((b) => [b.dataset.source, b.dataset.action, b.dataset.owner ?? null]);
+
+  it("one row per item: a row with banners carries a dot of their worst tone, each source's actions run under its own key", async () => {
+    const v = new WorkView(pairDeps());
+    v.update(pairInput());
+    showAll(v);
+    expect(v.host.querySelectorAll('.chappa-work-row[data-key="ABC-2"]').length).toBe(1);
+    const dot = row(v, "ABC-2").querySelector<HTMLElement>(".chappa-work-dot")!;
+    expect([dot.hidden, dot.dataset.tone, dot.title]).toEqual([false, "warn", "ABC-2: the stack runs older commits than its branch"]);
+    expect(row(v, "ABC-3").querySelector<HTMLElement>(".chappa-work-dot")!.hidden).toBe(true);
+    // The overlay's badges join the tracker's row; owner-missing rows say why.
+    expect([...row(v, "ABC-2").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["1 unpushed"]);
+    expect([...row(v, "ABC-9").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["not listed by Fixture"]);
+    expect([...row(v, "XYZ-1").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["tracker unavailable"]);
+    await FLUSH();
+    expect(buttons(row(v, "ABC-2"))).toEqual([
+      ["ws", "ship", null],
+      ["ws", "archive", null],
+    ]);
+    // Another source's offer, asked for under the owner, only where it does not add to the row yet.
+    expect(buttons(row(v, "ABC-3"))).toEqual([["ws", "start-work", "fx"]]);
+    expect(buttons(row(v, "ABC-9"))).toEqual([]);
+    v.dispose();
+  });
+
+  it("the item panel: banners on top, then each source's actions and sections under its name, the status from the source that set it", async () => {
+    const v = new WorkView(pairDeps());
+    v.update(pairInput());
+    await open(v, "ABC-2");
+    const d = detail(v);
+    expect(d.querySelector(".chappa-work-detail-banners .chappa-banner-title")?.textContent).toBe("ABC-2: the stack runs older commits than its branch");
+    expect(buttons(d.querySelector(".chappa-work-detail-banners"))).toEqual([["ws", "rebuild", null]]);
+    expect(field(v, "Folder")).toBe("/srv/example/abc-2 (from Workspaces)");
+    expect(field(v, "Branches")).toBe("owner/repo: task/ABC-2-web");
+    expect(field(v, "Source")).toBe("Fixture, Workspaces");
+    expect(field(v, "Status")).toBe("To do");
+    // The tracker's part (no actions on ABC-2), then the workspace source's.
+    const from = d.querySelector<HTMLElement>(":scope > .chappa-work-from")!;
+    expect([from.hidden, from.textContent]).toEqual([false, "Fixture"]);
+    const extra = d.querySelector<HTMLElement>('.chappa-work-extra[data-source="ws"]')!;
+    expect([extra.dataset.role, extra.querySelector(".chappa-work-from")?.textContent]).toEqual(["contributor", "Workspaces"]);
+    // Its move "Ship" is drawn by the status block, not again among its buttons.
+    expect(buttons(extra.querySelector(":scope > .chappa-sv-actions"))).toEqual([["ws", "archive", null]]);
+    expect(extra.querySelector('.chappa-sec[data-section="repos"]')).not.toBeNull();
+    const ls = d.querySelector<HTMLElement>(".chappa-ls")!;
+    expect(ls.hidden).toBe(false);
+    expect([...ls.querySelectorAll<HTMLElement>(".chappa-ls-move")].map((m) => m.dataset.move)).toEqual(["ship"]);
+    v.dispose();
+  });
+
+  it("another source's offer sits under its name and is asked for with the row's owner", async () => {
+    const dd = pairDeps();
+    const v = new WorkView(dd);
+    v.update(pairInput());
+    await open(v, "ABC-3");
+    const offer = detail(v).querySelector<HTMLElement>('.chappa-work-extra[data-role="offers"]')!;
+    expect(offer.querySelector(".chappa-work-from")?.textContent).toBe("Workspaces");
+    expect(dd.actions).toHaveBeenCalledWith("ws", "work", "ABC-3", "fx");
+    expect(buttons(offer)).toEqual([["ws", "start-work", "fx"]]);
+    v.dispose();
+  });
+
+  it("a lone row keeps the plain layout: no source names, no extra blocks", async () => {
+    const v = new WorkView(deps());
+    v.update(input({ sources: [source("fx", ["work"], { label: "Fixture", manifestId: "fixture" })] }));
+    await open(v, "ABC-1");
+    expect(detail(v).querySelector<HTMLElement>(":scope > .chappa-work-from")!.hidden).toBe(true);
+    expect(detail(v).querySelectorAll(".chappa-work-extra").length).toBe(0);
+    v.dispose();
+  });
+
+  it("PRs joined by branch or key show on the row saying how, and open in the PRs view", () => {
+    const prs = buildPrsModel([payload("fx", fixture("prs"), { sourceLabel: "Fixture" })]);
+    const seen = new Set<string>();
+    const prRows = [...prs.mine, ...prs.reviewing, ...prs.all].flatMap((g) => g.rows).filter((r) => !seen.has(r.id) && !!seen.add(r.id));
+    const d = pairDeps();
+    const v = new WorkView(d);
+    v.update(pairInput({ prRows, loadedPrs: new Set(prRows.map((r) => r.id)) }));
+    showAll(v);
+    const chips = (k: string) => [...row(v, k).querySelectorAll<HTMLButtonElement>(".chappa-work-pr")].map((c) => [c.textContent, c.dataset.how]);
+    expect(chips("ABC-1")).toEqual([["owner/repo#1 open", "linked"]]);
+    // The PR's branch carries refs/heads/ and the overlay's does not: one branch still.
+    expect(chips("ABC-2")).toEqual([["owner/repo#3 open · branch", "branch"]]);
+    expect(chips("ABC-3")).toEqual([["owner/repo#5 merged · key in branch", "key in branch"]]);
+    // `ABC-12-other` is not ABC-1.
+    expect(chips("owner/repo#2")).toEqual([]);
+    const chip = row(v, "ABC-3").querySelector<HTMLButtonElement>(".chappa-work-pr")!;
+    expect(chip.title).toBe("Show owner/repo#5 in PRs (matched by key in branch)");
+    chip.click();
+    expect(d.openView).toHaveBeenCalledWith("prs", "github:owner/repo:#5");
+    v.dispose();
+  });
+
+  it("focus by row id picks one of two rows sharing a key", () => {
+    const v = new WorkView(deps());
+    v.update(input({ payloads: [payload("a", { items: [{ key: "K-1" }] }, { sourceLabel: "A" }), payload("b", { items: [{ key: "K-1" }] }, { sourceLabel: "B" })] }));
+    expect(v.focus("b|K-1")).toBe(true);
+    expect(v.selectedId).toBe("b|K-1");
+    v.dispose();
   });
 });

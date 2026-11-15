@@ -11,6 +11,11 @@
 // (default: ./data next to this file), re-read on every request so a test
 // or a person can swap them while it runs. No packages; one line per
 // request on stderr.
+//
+// `--data desktop/sources/fixture/data-overlay` runs a second source,
+// "Workspaces", that adds to the first one's work items (`ref: {source:
+// "fixture", key}`) and offers `itemActions` on its rows: run both to see
+// one item fed by two sources.
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -96,6 +101,9 @@ async function handleAction(req, res) {
     return fail(res, 409, "confirmation-required", "A mutating action must be confirmed", "send confirmed: true after the user accepts");
   }
   if (spec.job) return send(res, 202, startJob(spec, req.headers["x-chappa-runs-jobs"] === "1"));
+  // `echo`: answer with what the call carried, so a test sees the exact
+  // target (view, key, and for rows of other sources the owner and its row).
+  if (spec.echo) return send(res, spec.status, { message: JSON.stringify({ target: body.target ?? null, params: body.params ?? null, note: body.note ?? null }) });
   return send(res, spec.status, spec.body ?? {});
 }
 

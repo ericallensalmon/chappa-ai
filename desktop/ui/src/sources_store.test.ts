@@ -115,6 +115,18 @@ describe("labels", () => {
     expect(text).toContain("abcdef0123456789…");
     // Empty lists say so rather than vanishing: an approval of "nothing"
     // must read as that.
+    expect(text).not.toContain("other sources' items");
+    // What it offers on other sources' rows is part of what is trusted.
+    const offering = trustMessage(s, {
+      ...s.trust!,
+      itemActions: [
+        { id: "start-work", label: "Start work", view: "work", sources: ["tracker"], mutates: true, confirm: "Create {key}?" },
+        { id: "later", label: "Review later", view: "prs", sources: ["*"], mutates: false, confirm: null },
+      ],
+    });
+    expect(offering).toContain("Actions it offers on other sources' items:");
+    expect(offering).toContain("    Start work (changes something, asks first) on Work rows of tracker");
+    expect(offering).toContain("    Review later (read only) on PRs rows of every other source");
     const bare = trustMessage(s, { ...s.trust!, linkHosts: [], roots: [], views: [] });
     expect(bare.match(/\(none\)/g)).toHaveLength(3);
   });

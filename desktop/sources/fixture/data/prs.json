@@ -101,6 +101,7 @@
       "number": "#2",
       "url": "https://registry.example/owner/repo/pull/2",
       "title": "Change 2",
+      "sourceBranch": "ABC-12-other",
       "author": {
         "id": "u-alex",
         "name": "Alex",
@@ -134,6 +135,7 @@
       "number": "#3",
       "url": "https://registry.example/owner/repo/pull/3",
       "title": "Change 3",
+      "sourceBranch": "refs/heads/task/ABC-2-web",
       "author": {
         "id": "u-alex",
         "name": "Alex",
@@ -185,6 +187,7 @@
       "number": "#5",
       "url": "https://registry.example/owner/repo/pull/5",
       "title": "Change 5",
+      "sourceBranch": "feature/ABC-3-queue",
       "author": {
         "id": "u-alex",
         "name": "Alex",

@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::actions::{parse_action, NoteRule, SourceAction};
 use super::identity::MANIFEST_PATH;
 
 /// The one contract version this build speaks. Changes within it are
@@ -32,6 +33,10 @@ pub const BACKOFF_CAP_MULTIPLIER: u32 = 8;
 pub const VIEW_NAMES: [&str; 4] = ["work", "prs", "attention", "environment"];
 /// The pseudo-view under which the `workflows` list is cached.
 pub const WORKFLOWS_VIEW: &str = "workflows";
+/// The views whose rows another source's `itemActions` may be offered on.
+pub const ITEM_ACTION_VIEWS: [&str; 2] = ["work", "prs"];
+/// `on.sources` value meaning "the rows of every other source".
+pub const ANY_SOURCE: &str = "*";
 
 /// A path the source named in its manifest. Private field: the ONLY ways
 /// to get one are parsing a manifest and [`Endpoint::manifest`], so a request
@@ -114,6 +119,36 @@ pub struct Manifest {
     /// As declared (the trust hash sorts its own copy).
     pub link_hosts: Vec<String>,
     pub roots: Vec<String>,
+    /// Actions this source offers on OTHER sources' rows (a "Start work"
+    /// before the source has anything of its own about the item).
+    pub item_actions: Vec<ItemAction>,
+}
+
+/// One `itemActions` entry: always an `endpoint` action (an agent or a
+/// terminal would need a folder that cannot exist yet), plus where it is
+/// offered. A mutating one carries its confirm text, or the manifest is
+/// refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemAction {
+    pub action: SourceAction,
+    /// `work` or `prs`.
+    pub view: String,
+    /// The manifest ids of the sources whose rows get it, sorted; `["*"]`
+    /// for every other source.
+    pub sources: Vec<String>,
+}
+
+impl ItemAction {
+    pub fn id(&self) -> &str {
+        self.action.id()
+    }
+
+    /// Whether it is offered on a `view` row owned by the source whose
+    /// manifest id is `owner`.
+    pub fn offered_on(&self, view: &str, owner: &str) -> bool {
+        self.view == view && self.sources.iter().any(|s| s == ANY_SOURCE || s == owner)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,7 +267,68 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
         jobs: optional("jobs")?,
         link_hosts,
         roots: strings("roots")?,
+        item_actions: parse_item_actions(obj.get("itemActions"))?,
     })
+}
+
+/// `itemActions`: a list of endpoint actions, each with `on: {view, sources}`.
+/// Any bad entry refuses the manifest (as a bad path does): an action the
+/// user is asked to trust must mean exactly what it says.
+fn parse_item_actions(value: Option<&Value>) -> Result<Vec<ItemAction>, ManifestError> {
+    let list = match value {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err(ManifestError::Invalid("`itemActions` must be a list".into())),
+    };
+    let mut out: Vec<ItemAction> = Vec::new();
+    for (i, raw) in list.iter().enumerate() {
+        let bad = |why: String| ManifestError::Invalid(format!("itemActions[{i}]: {why}"));
+        let action = parse_action(raw).map_err(bad)?;
+        if !matches!(action, SourceAction::Endpoint { .. }) {
+            return Err(bad(format!(
+                "`{}` is a `{}` action; only `endpoint` actions can be offered on other sources' rows",
+                action.id(),
+                action.kind()
+            )));
+        }
+        if action.is_unconfirmable_mutation() {
+            return Err(bad(format!("`{}` changes something and has no `confirm` text", action.id())));
+        }
+        if out.iter().any(|a| a.id() == action.id()) {
+            return Err(bad(format!("the id `{}` is used twice", action.id())));
+        }
+        let on = raw
+            .get("on")
+            .and_then(Value::as_object)
+            .ok_or_else(|| bad("`on` must be an object with `view` and `sources`".into()))?;
+        let view = on
+            .get("view")
+            .and_then(Value::as_str)
+            .filter(|v| ITEM_ACTION_VIEWS.contains(v))
+            .ok_or_else(|| bad(format!("`on.view` must be one of {}", ITEM_ACTION_VIEWS.join(", "))))?
+            .to_owned();
+        let mut sources: Vec<String> = match on.get("sources") {
+            Some(Value::String(s)) if s == ANY_SOURCE => vec![ANY_SOURCE.to_owned()],
+            Some(Value::Array(ids)) => ids
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| bad("`on.sources` entries must be non-empty source ids".into()))
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err(bad("`on.sources` must be a list of source ids or \"*\"".into())),
+        };
+        if sources.iter().any(|s| s == ANY_SOURCE) {
+            sources = vec![ANY_SOURCE.to_owned()];
+        }
+        sources.sort();
+        sources.dedup();
+        out.push(ItemAction { action, view, sources });
+    }
+    Ok(out)
 }
 
 /// A manifest path is RELATIVE TO THE SOURCE'S ADDRESS: an absolute path on
@@ -318,14 +414,81 @@ pub struct TrustSummary {
     pub link_hosts: Vec<String>,
     pub roots: Vec<String>,
     pub views: Vec<String>,
+    /// The actions it offers on other sources' rows, sorted by id.
+    pub item_actions: Vec<ItemActionSummary>,
     pub hash: String,
+}
+
+/// What the trust dialog says about one item action, and what the webview
+/// needs to know which rows to ask about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemActionSummary {
+    pub id: String,
+    pub label: String,
+    pub view: String,
+    pub sources: Vec<String>,
+    pub mutates: bool,
+    pub confirm: Option<String>,
+}
+
+/// JSON with every object's keys sorted, so a source re-serialising the same
+/// `params` in another key order keeps the same hash.
+fn canonical_value(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}:{}", Value::String(k.clone()), canonical_value(&map[k])))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Array(items) => format!("[{}]", items.iter().map(canonical_value).collect::<Vec<_>>().join(",")),
+        other => other.to_string(),
+    }
+}
+
+/// One item action in canonical form: everything that decides what it does
+/// and where it is offered.
+fn canonical_item_action(item: &ItemAction) -> String {
+    let quoted = |s: &str| Value::String(s.to_owned()).to_string();
+    let (mutates, confirm, params, note) = match &item.action {
+        SourceAction::Endpoint { mutates, confirm, params, note, .. } => (*mutates, confirm.as_deref(), params.as_ref(), *note),
+        _ => (false, None, None, None),
+    };
+    let note = note.map(|n| match n {
+        NoteRule::Optional => "optional",
+        NoteRule::Required => "required",
+    });
+    let sources: Vec<String> = item.sources.iter().map(|s| quoted(s)).collect();
+    format!(
+        "{{\"id\":{},\"label\":{},\"mutates\":{},\"confirm\":{},\"note\":{},\"params\":{},\"view\":{},\"sources\":[{}]}}",
+        quoted(item.id()),
+        quoted(item.action.label()),
+        mutates,
+        confirm.map_or_else(|| "null".to_owned(), quoted),
+        note.map_or_else(|| "null".to_owned(), quoted),
+        params.map_or_else(|| "null".to_owned(), canonical_value),
+        quoted(&item.view),
+        sources.join(",")
+    )
+}
+
+fn sorted_item_actions(manifest: &Manifest) -> Vec<&ItemAction> {
+    let mut items: Vec<&ItemAction> = manifest.item_actions.iter().collect();
+    items.sort_by(|a, b| a.id().cmp(b.id()));
+    items
 }
 
 /// The canonical JSON the trust hash is taken over:
 /// `{"id":…,"linkHosts":[sorted],"roots":[sorted],"views":[sorted keys]}`
-/// with exactly those keys in that order and no whitespace. Built by hand
-/// rather than through a map so the key order cannot depend on how
-/// `serde_json` was compiled.
+/// with exactly those keys in that order and no whitespace, plus
+/// `"itemActions":[…sorted by id]` after `views` when the source offers
+/// any (left out otherwise, so a source without them keeps the hash it was
+/// trusted under). Built by hand rather than through a map so the key order
+/// cannot depend on how `serde_json` was compiled.
 pub fn canonical_trust_json(manifest: &Manifest) -> String {
     let mut hosts = manifest.link_hosts.clone();
     hosts.sort();
@@ -339,18 +502,26 @@ pub fn canonical_trust_json(manifest: &Manifest) -> String {
         format!("[{}]", quoted.join(","))
     };
     let view_names: Vec<String> = views.into_iter().cloned().collect();
+    let items = sorted_item_actions(manifest);
+    let item_actions = if items.is_empty() {
+        String::new()
+    } else {
+        format!(",\"itemActions\":[{}]", items.into_iter().map(canonical_item_action).collect::<Vec<_>>().join(","))
+    };
     format!(
-        "{{\"id\":{},\"linkHosts\":{},\"roots\":{},\"views\":{}}}",
+        "{{\"id\":{},\"linkHosts\":{},\"roots\":{},\"views\":{}{}}}",
         Value::String(manifest.id.clone()),
         list(&hosts),
         list(&roots),
-        list(&view_names)
+        list(&view_names),
+        item_actions
     )
 }
 
 /// The trust hash: BLAKE3 hex of [`canonical_trust_json`], like the project
 /// file's content hash. Trust covers exactly this hash; any change to the
-/// id, the hosts, the roots or the set of views re-arms the gate.
+/// id, the hosts, the roots, the set of views or the item actions re-arms
+/// the gate.
 pub fn trust_hash(manifest: &Manifest) -> String {
     project_model::hash::content_hash(canonical_trust_json(manifest).as_bytes())
 }
@@ -368,6 +539,23 @@ pub fn trust_summary(manifest: &Manifest) -> TrustSummary {
         link_hosts,
         roots,
         views: manifest.views.keys().cloned().collect(),
+        item_actions: sorted_item_actions(manifest)
+            .into_iter()
+            .map(|item| {
+                let (mutates, confirm) = match &item.action {
+                    SourceAction::Endpoint { mutates, confirm, .. } => (*mutates, confirm.clone()),
+                    _ => (false, None),
+                };
+                ItemActionSummary {
+                    id: item.id().to_owned(),
+                    label: item.action.label().to_owned(),
+                    view: item.view.clone(),
+                    sources: item.sources.clone(),
+                    mutates,
+                    confirm,
+                }
+            })
+            .collect(),
         hash: trust_hash(manifest),
     }
 }
@@ -580,5 +768,112 @@ mod tests {
         assert_eq!(summary.hash, hash);
         assert_eq!(summary.link_hosts, ["dev.example.test", "registry.example"]);
         assert_eq!(summary.views, ["attention", "environment", "prs", "work"]);
+        assert!(summary.item_actions.is_empty());
+    }
+
+    /// The overlay fixture's manifest: a second source that adds to the
+    /// first one's work items and offers actions on its rows.
+    const OVERLAY_FIXTURE: &str = include_str!("../../../sources/fixture/data-overlay/manifest.json");
+
+    fn with_item_actions(items: Value) -> Result<Manifest, ManifestError> {
+        parse_manifest(&json!({
+            "contract": 1, "source": {"id": "ws", "label": "Workspaces", "version": "1"},
+            "views": {"work": {"list": "/api/work"}}, "actions": "/api/actions",
+            "itemActions": items
+        }))
+    }
+
+    #[test]
+    fn item_actions_are_endpoint_actions_with_a_place_to_be_offered() {
+        let m = parse_manifest(&serde_json::from_str(OVERLAY_FIXTURE).unwrap()).unwrap();
+        assert_eq!(m.item_actions.iter().map(ItemAction::id).collect::<Vec<_>>(), ["start-work", "review-later"]);
+        let start = &m.item_actions[0];
+        assert_eq!((start.view.as_str(), start.sources.as_slice()), ("work", &["fixture".to_owned()][..]));
+        assert!(start.offered_on("work", "fixture"));
+        assert!(!start.offered_on("work", "other"), "only the listed sources' rows");
+        assert!(!start.offered_on("prs", "fixture"), "only the named view");
+        let later = &m.item_actions[1];
+        assert_eq!((later.view.as_str(), later.sources.as_slice()), ("prs", &[ANY_SOURCE.to_owned()][..]));
+        assert!(later.offered_on("prs", "anything"));
+
+        // "*" as a string, or inside a list, means every other source.
+        let ok = |sources: Value| {
+            with_item_actions(json!([{"kind": "endpoint", "id": "x", "label": "X", "mutates": false, "on": {"view": "work", "sources": sources}}]))
+                .unwrap()
+                .item_actions[0]
+                .sources
+                .clone()
+        };
+        assert_eq!(ok(json!("*")), ["*"]);
+        assert_eq!(ok(json!(["tracker", "*"])), ["*"]);
+        assert_eq!(ok(json!(["b", "a", "b"])), ["a", "b"]);
+        assert!(ok(json!([])).is_empty(), "an empty list is offered nowhere");
+
+        let bad = |entry: Value| match with_item_actions(json!([entry])) {
+            Err(ManifestError::Invalid(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        let on = json!({"view": "work", "sources": "*"});
+        assert!(bad(json!({"kind": "agent", "id": "a", "label": "A", "cwd": "/x", "prompt": "p", "on": on})).contains("only `endpoint`"));
+        assert!(bad(json!({"kind": "link", "id": "l", "label": "L", "url": "https://x", "on": on})).contains("only `endpoint`"));
+        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": true, "on": on})).contains("no `confirm`"));
+        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false})).contains("`on`"));
+        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "environment", "sources": "*"}})).contains("`on.view`"));
+        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "work"}})).contains("`on.sources`"));
+        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "work", "sources": "tracker"}})).contains("`on.sources`"));
+        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "work", "sources": [""]}})).contains("non-empty"));
+        assert!(bad(json!({"kind": "endpoint", "label": "M", "mutates": false, "on": on})).contains("`id`"));
+        let twice = with_item_actions(json!([
+            {"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": on},
+            {"kind": "endpoint", "id": "m", "label": "N", "mutates": false, "on": on}
+        ]));
+        assert!(matches!(twice, Err(ManifestError::Invalid(why)) if why.contains("used twice")));
+        assert!(matches!(with_item_actions(json!({"id": "m"})), Err(ManifestError::Invalid(why)) if why.contains("must be a list")));
+        assert!(with_item_actions(Value::Null).unwrap().item_actions.is_empty());
+    }
+
+    #[test]
+    fn item_actions_are_part_of_what_trust_covers() {
+        let m = parse_manifest(&serde_json::from_str(OVERLAY_FIXTURE).unwrap()).unwrap();
+        let canon = canonical_trust_json(&m);
+        assert!(
+            canon.ends_with(r#","views":["work"],"itemActions":[{"id":"review-later","label":"Review later","mutates":false,"confirm":null,"note":null,"params":null,"view":"prs","sources":["*"]},{"id":"start-work","label":"Start work","mutates":true,"confirm":"Create a workspace for {key} — {title}","note":"optional","params":{"from":"tracker","slot":0},"view":"work","sources":["fixture"]}]}"#),
+            "{canon}"
+        );
+        let hash = trust_hash(&m);
+        // Reordering the entries or their params' keys is not a change…
+        let mut reordered = m.clone();
+        reordered.item_actions.reverse();
+        assert_eq!(trust_hash(&reordered), hash);
+        let mut v: Value = serde_json::from_str(OVERLAY_FIXTURE).unwrap();
+        v["itemActions"][0]["params"] = json!({"slot": 0, "from": "tracker"});
+        assert_eq!(trust_hash(&parse_manifest(&v).unwrap()), hash);
+        // …but every part of what an item action does or where it shows is.
+        for change in [
+            json!({"label": "Begin"}),
+            json!({"confirm": "Do it to {key}?"}),
+            json!({"mutates": false, "confirm": null}),
+            json!({"note": "required"}),
+            json!({"params": {"from": "tracker", "slot": 1}}),
+            json!({"on": {"view": "work", "sources": "*"}}),
+            json!({"on": {"view": "prs", "sources": ["fixture"]}}),
+            json!({"id": "begin"}),
+        ] {
+            let mut v: Value = serde_json::from_str(OVERLAY_FIXTURE).unwrap();
+            for (k, val) in change.as_object().unwrap() {
+                v["itemActions"][0][k] = val.clone();
+            }
+            assert_ne!(trust_hash(&parse_manifest(&v).unwrap()), hash, "{change}");
+        }
+        let mut none = m.clone();
+        none.item_actions.clear();
+        assert_ne!(trust_hash(&none), hash, "dropping them is a change too");
+        assert!(!canonical_trust_json(&none).contains("itemActions"), "a source without item actions keeps its old canonical form");
+        let summary = trust_summary(&m);
+        assert_eq!(summary.item_actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["review-later", "start-work"]);
+        let start = &summary.item_actions[1];
+        assert_eq!((start.label.as_str(), start.view.as_str(), start.mutates), ("Start work", "work", true));
+        assert_eq!(start.confirm.as_deref(), Some("Create a workspace for {key} — {title}"));
+        assert_eq!(start.sources, ["fixture"]);
     }
 }

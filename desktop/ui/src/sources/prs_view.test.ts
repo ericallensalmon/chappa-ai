@@ -4,14 +4,15 @@ import type * as ipc from "../ipc";
 import { buildPrsModel } from "./prs_model";
 import { PrsView, prsEmptyText, type PrsViewInput } from "./prs_view";
 import { fixture, payload, pr, prsBody } from "./test-utils";
-import type { SourceViewDeps } from "./view_common";
+import type { PrsViewDeps } from "./prs_view";
+import { source } from "./test-utils";
 
 const FLUSH = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const NOW = Date.parse("2026-01-15T10:03:00Z");
 
 const ok: ipc.ActionVerdictDto = { enabled: true, reason: null, hidden: false, cwd: null, tool: null };
 
-function deps(over: Partial<SourceViewDeps> = {}): SourceViewDeps & { said: string[] } {
+function deps(over: Partial<PrsViewDeps> = {}): PrsViewDeps & { said: string[] } {
   const said: string[] = [];
   return {
     actions: vi.fn(async () => []),
@@ -360,6 +361,50 @@ describe("PrsView", () => {
     v.focus("github:owner/repo:#99");
     v.update(input());
     expect(d.said).toEqual(["github:owner/repo:#99 is not in the PRs list."]);
+    v.dispose();
+  });
+});
+
+describe("PrsView and work items", () => {
+  it("a PR joined to work items carries a chip per item key that opens the item in Work", () => {
+    const openView = vi.fn(() => true);
+    const v = new PrsView(deps({ openView }));
+    const workItems = new Map([
+      ["github/owner/repo/#1", [{ rowId: "fx|ABC-1", key: "ABC-1", title: "Add a health route to api", how: "linked" as const }, { rowId: "ws|ABC-9", key: "ABC-9", title: "ABC-9", how: "key in title" as const }]],
+    ]);
+    v.update(input(undefined, { workItems }));
+    const chips = [...row(v, "github/owner/repo/#1").querySelectorAll<HTMLButtonElement>(".chappa-pr-item")];
+    expect(chips.map((c) => [c.textContent, c.dataset.how, c.title])).toEqual([
+      ["ABC-1", "linked", "ABC-1 Add a health route to api (linked by the item); show it in Work"],
+      ["ABC-9", "key in title", "ABC-9 (matched by key in title); show it in Work"],
+    ]);
+    chips[1].click();
+    expect(openView).toHaveBeenCalledWith("work", "ws|ABC-9");
+    expect(row(v, "github/owner/repo/#2").querySelectorAll(".chappa-pr-item").length).toBe(0);
+    v.dispose();
+  });
+
+  it("another source's item actions on a PR row are asked for under the PR's source, after the PR's own", async () => {
+    const actions = vi.fn(async (sourceId: string, _view: string, _key: string | null, owner?: string): Promise<ipc.SourceActionDto[]> =>
+      owner
+        ? [{ action: { kind: "endpoint", id: "later", label: "Review later", mutates: false, confirm: null, params: null, note: null }, verdict: ok, needsPrompt: false }]
+        : sourceId === "fx"
+          ? [{ action: { kind: "link", id: "open", label: "Open", url: "https://registry.example/owner/repo/pull/1" }, verdict: ok, needsPrompt: false }]
+          : [],
+    );
+    const v = new PrsView(deps({ actions }));
+    const sources = [
+      source("fx", ["prs"], { label: "Fixture", manifestId: "fixture" }),
+      source("ws", ["work"], { label: "Workspaces", manifestId: "workspaces", trust: { id: "workspaces", label: "Workspaces", linkHosts: [], roots: [], views: ["work"], hash: "h", itemActions: [{ id: "later", label: "Review later", view: "prs", sources: ["*"], mutates: false, confirm: null }] } }),
+    ];
+    v.update(input(undefined, { sources, versions: { fx: 1, ws: 1 } }));
+    await FLUSH();
+    expect(actions).toHaveBeenCalledWith("ws", "prs", "github:owner/repo:#1", "fx");
+    const btns = [...row(v, "github/owner/repo/#1").querySelectorAll<HTMLButtonElement>(".chappa-sv-actions > .chappa-sv-action")];
+    expect(btns.map((b) => [b.dataset.source, b.dataset.action, b.dataset.owner ?? null])).toEqual([
+      ["fx", "open", null],
+      ["ws", "later", "fx"],
+    ]);
     v.dispose();
   });
 });

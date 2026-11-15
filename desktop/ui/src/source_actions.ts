@@ -157,7 +157,9 @@ export function outcomeText(outcome: ActionOutcome): string {
  * The whole click: ask what the action needs asked, then run it. The
  * `agent` prompt dialog is shown when Rust says it must be (`needsPrompt`),
  * and `confirmed: true` goes out only after the user accepted. Resolves
- * null when the user backed out.
+ * null when the user backed out. `opts.owner`: the action is one of
+ * `sourceId`'s item actions on the row `key` of that other source (its
+ * confirm text already names the row; Rust filled it).
  */
 export async function runAction(
   sourceId: string,
@@ -166,22 +168,25 @@ export async function runAction(
   key: string | null,
   entry: ipc.SourceActionDto,
   api: { run: typeof ipc.sourceRunAction } = { run: ipc.sourceRunAction },
-  opts: { container?: HTMLElement } = {},
+  opts: { container?: HTMLElement; owner?: string } = {},
 ): Promise<ActionOutcome | null> {
   const { action, verdict } = entry;
   let confirmed = false;
   let note: string | null = null;
+  const dialog = opts.container ? { container: opts.container } : {};
   if (action.kind === "endpoint") {
-    const answer = await confirmEndpoint(action, opts);
+    const answer = await confirmEndpoint(action, dialog);
     if (answer === null) return null;
     confirmed = answer.confirmed;
     note = answer.note;
   } else if (action.kind === "agent") {
     if (entry.needsPrompt) {
-      if (!(await confirmAgentPrompt(action, verdict, sourceLabel, opts))) return null;
+      if (!(await confirmAgentPrompt(action, verdict, sourceLabel, dialog))) return null;
     }
     // Shown or not needed: either way the launch is the user's call now.
     confirmed = true;
   }
-  return api.run(sourceId, view, key, action.id, confirmed, note);
+  return opts.owner
+    ? api.run(sourceId, view, key, action.id, confirmed, note, opts.owner)
+    : api.run(sourceId, view, key, action.id, confirmed, note);
 }

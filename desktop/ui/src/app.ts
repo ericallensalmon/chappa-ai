@@ -70,7 +70,9 @@ import {
 import { firstLine } from "./markdown";
 import { Dashboard, tailLine, type CardActionId, type CardInput, type CardLive, type DashGroupInput } from "./dashboard";
 import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, visibleViews, type RailView, type SourcesStore } from "./sources_store";
-import { buildPrsModel, prsNeedingYou, type PrsModel } from "./sources/prs_model";
+import { buildPrsModel, prsNeedingYou, type PrRow, type PrsModel } from "./sources/prs_model";
+import { buildWorkModel, type WorkModel } from "./sources/work_model";
+import { keyMatchOf } from "./sources/work_view";
 import { SeenBaselines, buildNeedsYou, pollResult, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
 import { SourceViewsData, type DataView } from "./sources/views_data";
 import { PrsView } from "./sources/prs_view";
@@ -852,7 +854,7 @@ export interface AppOptions {
 const BUILT_VIEWS: readonly RailView[] = ["work", "prs", "attention", "environment"];
 
 const tauriSourceActions: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel"> = {
-  actions: (sourceId, view, key) => ipc.sourceActions(sourceId, view, key),
+  actions: (sourceId, view, key, owner) => ipc.sourceActions(sourceId, view, key, owner),
   run: ipc.sourceRunAction,
   openLink: ipc.openSourceLink,
   panel: ipc.sourcePanel,
@@ -1478,6 +1480,9 @@ export class App {
   private viewPrev: PagePrev = null;
   /** The merged PRs model, rebuilt when a PRs payload moves. */
   private prsModel: PrsModel | null = null;
+  /** The merged Work rows with the PRs joined to them (for the PRs view's
+   *  item-key chips), rebuilt when a Work or PRs payload or the listing moves. */
+  private workJoinModel: WorkModel | null = null;
   /** The Environment model, rebuilt when an environment payload moves. */
   private environmentModel: EnvironmentModel | null = null;
   /** The Needs you model as last built (the rail badge reads its count). */
@@ -6610,7 +6615,7 @@ export class App {
     }
     if (view === "prs") {
       if (!this.prsView) {
-        this.prsView = new PrsView(deps);
+        this.prsView = new PrsView({ ...deps, openView: (target, key) => this.openViewAt(target, key) });
         this.stack.appendChild(this.prsView.host);
       }
       return this.prsView;
@@ -6653,6 +6658,7 @@ export class App {
    *  notifications first, then every surface that shows source data. */
   private onSourceData(change: { sourceId: string; view: DataView } | null): void {
     if (change === null || change.view === "prs") this.prsModel = null;
+    if (change === null || change.view === "prs" || change.view === "work") this.workJoinModel = null;
     if (change === null || change.view === "environment") this.environmentModel = null;
     if (change) {
       this.noteSourceNews(change.sourceId, change.view);
@@ -6671,6 +6677,27 @@ export class App {
   private currentPrsModel(): PrsModel {
     this.prsModel ??= buildPrsModel(this.viewsData.payloadsFor("prs"), this.viewsData.needsUpdate());
     return this.prsModel;
+  }
+
+  /** Every PR row the PRs view holds, once each (a review sits in two tabs). */
+  private currentPrRows(): PrRow[] {
+    const prs = this.currentPrsModel();
+    const seen = new Set<string>();
+    return [...prs.mine, ...prs.reviewing, ...prs.all].flatMap((g) => g.rows).filter((r) => !seen.has(r.id) && !!seen.add(r.id));
+  }
+
+  /** The Work rows merged across sources with the PRs joined to them,
+   *  rebuilt only after a Work or PRs payload (or the listing) moved. */
+  private currentWorkJoins(): WorkModel {
+    const sources = this.viewsData.current.sources;
+    this.workJoinModel ??= buildWorkModel(this.viewsData.payloadsFor("work"), {
+      needsUpdate: this.viewsData.needsUpdate(),
+      filter: { assignedOnly: false, text: "" },
+      sources,
+      prRows: this.currentPrRows(),
+      keyMatch: keyMatchOf(sources),
+    });
+    return this.workJoinModel;
   }
 
   /** The Environment model, rebuilt only after an environment payload moved. */
@@ -6693,6 +6720,8 @@ export class App {
         loadedPrs,
         servedBy: servedBy(data.current, "work").map((s) => s.label),
         versions: data.versions(),
+        sources: data.current.sources,
+        prRows: prs ? this.currentPrRows() : [],
       });
     }
     if (this.environmentView?.active) {
@@ -6703,10 +6732,14 @@ export class App {
       });
     }
     if (this.prsView?.active) {
+      // Item-key chips open Work only while it is in the rail.
+      const work = this.railViews().includes("work") ? this.currentWorkJoins() : null;
       this.prsView.update({
         model: this.currentPrsModel(),
         servedBy: servedBy(this.viewsData.current, "prs").map((s) => s.label),
         versions: this.viewsData.versions(),
+        workItems: work?.joins.byPr,
+        sources: this.viewsData.current.sources,
       });
     }
   }

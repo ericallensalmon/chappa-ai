@@ -9,9 +9,14 @@
 //!   "attached": [{"addr": "127.0.0.1:7000", "token_file": "/home/me/.config/x/token"}],
 //!   "hidden_views": ["prs"],
 //!   "prompt_policy": {"<key>": "always"},
-//!   "prompts_shown": {"<key>": ["agent-here"]}
+//!   "prompts_shown": {"<key>": ["agent-here"]},
+//!   "key_match": {"<key>": {"enabled": false, "pattern": "[A-Z]+-\\d+"}}
 //! }
 //! ```
+//!
+//! `key_match` is per source that owns work items: whether its item keys
+//! are looked for in pull requests' branches and titles, and the pattern
+//! that finds candidate keys there (absent = on, with the default pattern).
 //!
 //! `prompt_policy` is per source: `first_time` (the default) shows an
 //! `agent` action's prompt once per action id and remembers it in
@@ -69,7 +74,31 @@ struct FileShape {
     prompt_policy: BTreeMap<String, PromptPolicy>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     prompts_shown: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    key_match: BTreeMap<String, KeyMatch>,
 }
+
+/// Whether a source's work item keys join pull requests that mention them
+/// in their branch or title, and the pattern that finds the candidates
+/// (`None` = the app's default). The webview applies it; this only keeps
+/// the choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyMatch {
+    pub enabled: bool,
+    #[serde(default)]
+    pub pattern: Option<String>,
+}
+
+impl Default for KeyMatch {
+    fn default() -> Self {
+        Self { enabled: true, pattern: None }
+    }
+}
+
+/// The longest key pattern kept: a pattern is a short regular expression,
+/// not a document.
+pub const KEY_PATTERN_MAX: usize = 200;
 
 #[derive(Debug)]
 pub struct SourceStore {
@@ -189,6 +218,33 @@ impl SourceStore {
         Ok(())
     }
 
+    /// How a source's item keys join pull requests (default: on, default pattern).
+    pub fn key_match(&self, key: &str) -> KeyMatch {
+        self.data.key_match.get(key).cloned().unwrap_or_default()
+    }
+
+    /// Store the key-match choice. A blank pattern means the default; a
+    /// pattern with control characters or longer than [`KEY_PATTERN_MAX`]
+    /// is refused.
+    pub fn set_key_match(&mut self, key: &str, enabled: bool, pattern: Option<&str>) -> Result<(), String> {
+        let pattern = pattern.map(str::trim).filter(|p| !p.is_empty());
+        if let Some(p) = pattern {
+            if p.chars().count() > KEY_PATTERN_MAX {
+                return Err(format!("a key pattern is at most {KEY_PATTERN_MAX} characters"));
+            }
+            if p.chars().any(char::is_control) {
+                return Err("a key pattern cannot hold control characters".into());
+            }
+        }
+        let choice = KeyMatch { enabled, pattern: pattern.map(str::to_owned) };
+        if choice == KeyMatch::default() {
+            self.data.key_match.remove(key);
+        } else {
+            self.data.key_match.insert(key.to_owned(), choice);
+        }
+        self.save()
+    }
+
     /// A changed trust hash means the source may be a different program:
     /// what it showed before no longer counts as shown.
     pub fn forget_prompts(&mut self, key: &str) -> Result<(), String> {
@@ -274,6 +330,23 @@ mod tests {
         assert!(!text.contains("prompt_policy") && !text.contains("prompts_shown"), "defaults leave no keys: {text}");
         assert_eq!(PromptPolicy::parse("always"), Some(PromptPolicy::Always));
         assert_eq!(PromptPolicy::parse("sometimes"), None);
+    }
+
+    #[test]
+    fn key_match_choices_round_trip_and_defaults_leave_no_key() {
+        let (dir, mut store) = temp_store();
+        assert_eq!(store.key_match("k"), KeyMatch { enabled: true, pattern: None });
+        store.set_key_match("k", false, Some("  [A-Z]+-\\d+ ")).unwrap();
+        let reopened = SourceStore::new(dir.path().join(FILE_NAME));
+        assert_eq!(reopened.key_match("k"), KeyMatch { enabled: false, pattern: Some("[A-Z]+-\\d+".into()) });
+        assert_eq!(reopened.key_match("other"), KeyMatch::default());
+        let mut reopened = reopened;
+        assert!(reopened.set_key_match("k", true, Some(&"x".repeat(KEY_PATTERN_MAX + 1))).unwrap_err().contains("at most"));
+        assert!(reopened.set_key_match("k", true, Some("a
+b")).unwrap_err().contains("control"));
+        reopened.set_key_match("k", true, Some("  ")).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+        assert!(!text.contains("key_match"), "on with the default pattern is the default: {text}");
     }
 
     #[test]

@@ -6,12 +6,15 @@
 // one PR touches one row, and focus inside the page survives). The
 // sources' view-level banners sit above the tabs; a PR's sections are
 // folded inside its row; a `panel` action opens the source's drill-in page
-// over the view.
+// over the view. A PR joined to work items carries a chip per item key
+// that opens the item in Work, and the actions other sources offer on PR
+// rows sit with the PR's own.
 
 import type { ActionTarget } from "./needs_you";
 import { withPanels } from "./panel_view";
 import { prId, type PrGroup, type PrRow, type PrsModel, type PrsTab } from "./prs_model";
 import { SectionsBlock, paintBanners } from "./sections";
+import { prItemActionTargets, type JoinHow, type MergeSource } from "./work_merge";
 import {
   ActionsCell,
   ViewFrame,
@@ -40,6 +43,23 @@ export interface PrsViewInput {
   /** Bumped per source whenever its payload was re-read, so a row's
    *  actions are read again after a poll. */
   versions: Record<string, number>;
+  /** Per PR id: the work items it joined (the row's item-key chips). */
+  workItems?: ReadonlyMap<string, readonly { rowId: string; key: string; title: string; how: JoinHow }[]>;
+  /** The listed sources: the item actions they offer on PR rows. */
+  sources?: readonly MergeSource[];
+}
+
+/** What the PRs page needs beyond any view: opening an item in Work. */
+export interface PrsViewDeps extends SourceViewDeps {
+  /** Open another view at an item (an item-key chip → Work); false when
+   *  that view is not available. */
+  openView?(view: string, key: string): boolean;
+}
+
+/** An item-key chip's tooltip: the item, and how the PR joined it. */
+export function itemChipTitle(item: { key: string; title: string; how: JoinHow }): string {
+  const how = item.how === "linked" ? "linked by the item" : item.how === "branch" ? "matched by its branch" : `matched by ${item.how}`;
+  return `${item.title === item.key ? item.key : `${item.key} ${item.title}`} (${how}); show it in Work`;
 }
 
 interface GroupRefs {
@@ -100,6 +120,9 @@ const CSS = `
 .chappa-pr-row.focused{box-shadow:0 0 0 1px #5ea6ff;}
 .chappa-pr-row .chappa-secs:empty{display:none;}
 .chappa-pr-row .chappa-sec{margin:2px 0 0;}
+.chappa-pr-item{cursor:pointer;background:none;}
+.chappa-pr-item:hover{border-color:#5ea6ff;}
+.chappa-pr-item:disabled{cursor:default;}
 `;
 
 let stylesInjected = false;
@@ -129,7 +152,7 @@ export class PrsView {
   /** A focus asked for before the data arrived. */
   private pendingFocus: string | null = null;
 
-  constructor(private readonly deps: SourceViewDeps) {
+  constructor(private readonly deps: PrsViewDeps) {
     injectStyles();
     this.frame = new ViewFrame("PRs", "prs", () => deps.onClose());
     this.ui = withPanels(() => this.frame, deps);
@@ -249,7 +272,7 @@ export class PrsView {
       g.rows.forEach((row, j) => {
         live.add(row.id);
         const r = this.rowRefs(row.id);
-        this.paintRow(r, row, input.versions);
+        this.paintRow(r, row, input);
         placeAt(refs.rows, r.el, j);
       });
       truncate(refs.rows, g.rows.length);
@@ -347,19 +370,24 @@ export class PrsView {
     return r;
   }
 
-  private paintRow(r: RowRefs, row: PrRow, versions: Record<string, number>): void {
+  private paintRow(r: RowRefs, row: PrRow, input: PrsViewInput): void {
+    const versions = input.versions;
     r.row = row;
-    const targets = prTargets(row);
-    // The sections draw their own actions; the row's cell draws the rest.
+    // The sections draw their own actions; the row's cell draws the rest,
+    // then what other sources offer on the PR.
     const own = row.sections.some((s) => (s.actions ?? []).length > 0) ? [...new Set(row.origins.flatMap((o) => o.actionIds))] : undefined;
-    r.actions.load(own?.length === 0 ? [] : targets, targets.map((t) => `${t.sourceId}:${versions[t.sourceId] ?? 0}`).join(","), own);
+    const offered = input.sources ? prItemActionTargets(row, input.sources) : [];
+    const targets = [...(own?.length === 0 ? [] : prTargets(row).map((t) => (own ? { ...t, only: own } : t))), ...offered];
+    const asked = [...new Set([...targets.map((t) => t.sourceId), ...offered.map((t) => t.owner)])];
+    r.actions.load(targets, asked.map((id) => `${id}:${versions[id] ?? 0}`).join(","));
     const p = row.primary;
     r.sections.update(row.sections, {
       sourceId: p.sourceId,
       target: { sourceId: p.sourceId, sourceLabel: p.sourceLabel, view: "prs", key: p.key },
       version: `${p.sourceId}:${versions[p.sourceId] ?? 0}`,
     });
-    const sig = JSON.stringify([row.title, row.url, row.repo, row.number, row.author, row.branch, row.reasons, row.chips, row.bucket, row.primary.sourceLabel]);
+    const items = input.workItems?.get(row.id) ?? [];
+    const sig = JSON.stringify([row.title, row.url, row.repo, row.number, row.author, row.branch, row.reasons, row.chips, row.bucket, row.primary.sourceLabel, items]);
     if (sig === r.sig) return;
     r.sig = sig;
     r.el.dataset.bucket = row.bucket;
@@ -370,5 +398,24 @@ export class PrsView {
     fillLines(r.reasons, "chappa-sv-reason", row.reasons);
     r.chips.textContent = "";
     for (const chip of row.chips) r.chips.appendChild(chipEl(chip));
+    for (const item of items) r.chips.appendChild(this.itemChip(item));
+  }
+
+  /** A work item the PR joined: its key, opening the item in Work. */
+  private itemChip(item: { rowId: string; key: string; title: string; how: JoinHow }): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chappa-sv-chip chappa-pr-item";
+    btn.dataset.tone = "info";
+    btn.dataset.item = item.rowId;
+    btn.dataset.how = item.how;
+    btn.textContent = item.key;
+    btn.title = itemChipTitle(item);
+    btn.disabled = !this.deps.openView;
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", () => {
+      if (this.deps.openView && !this.deps.openView("work", item.rowId)) this.deps.say("Work is not available.", "error");
+    });
+    return btn;
   }
 }

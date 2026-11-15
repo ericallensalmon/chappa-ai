@@ -54,7 +54,7 @@ use term_core::actor::epoch_ms;
 use actions::{action_verdict, actions_for, find_action, ActionVerdict, SourceAction, VerdictContext};
 use client::{PostReply, SourceClient, SourceError};
 use manifest::{backoff_delay, parse_manifest, trust_summary, Endpoint, Manifest, TrustSummary, VIEW_NAMES, WORKFLOWS_POLL, WORKFLOWS_VIEW};
-pub use store::PromptPolicy;
+pub use store::{KeyMatch, PromptPolicy};
 use store::{AttachedSource, SourceStore};
 
 use crate::agent_tools::AgentTool;
@@ -907,6 +907,33 @@ pub struct SourceInfo {
     pub link_hosts: Vec<String>,
 }
 
+/// What an endpoint call's `target` carries besides `view` and `key` when
+/// the row is fed by more than one source. For an item action (offered on
+/// another source's row) and for an overlay's own actions: `source` is the
+/// owning source's manifest id, `item` the owner's row exactly as it was
+/// last received (absent when the owner does not list it, or is not
+/// trusted), and `key` the owner's key.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CallTarget {
+    pub key: Option<String>,
+    pub source: Option<String>,
+    pub item: Option<Value>,
+}
+
+impl CallTarget {
+    /// The `target` object of the call body.
+    pub fn body(&self, view: &str, key: Option<&str>) -> Value {
+        let mut target = json!({ "view": view, "key": self.key.as_deref().or(key) });
+        if let Some(source) = &self.source {
+            target["source"] = Value::String(source.clone());
+        }
+        if let Some(item) = &self.item {
+            target["item"] = item.clone();
+        }
+        target
+    }
+}
+
 /// An action found in a cached payload together with its verdict.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -987,6 +1014,27 @@ impl Sources {
                 .as_mut()
                 .ok_or_else(|| "sources store not initialized".to_owned())?
                 .set_prompt_policy(&key, policy)?;
+        }
+        self.emit_sources();
+        Ok(())
+    }
+
+    /// Whether this source's work item keys join pull requests that mention
+    /// them, and with which pattern (blank = the default).
+    pub fn set_key_match(&self, source_id: &str, enabled: bool, pattern: Option<&str>) -> Result<(), String> {
+        {
+            let mut inner = self.lock();
+            let key = inner
+                .sources
+                .values()
+                .find(|s| s.id == source_id)
+                .map(|s| s.key.clone())
+                .ok_or_else(|| format!("no source {source_id}"))?;
+            inner
+                .store
+                .as_mut()
+                .ok_or_else(|| "sources store not initialized".to_owned())?
+                .set_key_match(&key, enabled, pattern)?;
         }
         self.emit_sources();
         Ok(())
@@ -1090,6 +1138,13 @@ impl Sources {
     /// The action `action_id` under `key` in the cached `view` payload, with
     /// the source it belongs to. The runner judges it again before acting.
     pub fn action(&self, source_id: &str, view: &str, key: Option<&str>, action_id: &str) -> Result<(SourceAction, SourceInfo), String> {
+        self.action_for_call(source_id, view, key, action_id).map(|(action, info, _)| (action, info))
+    }
+
+    /// [`Sources::action`] plus what its call's `target` carries: for an
+    /// action of a work entry that adds to another source's item, that item's
+    /// owner and the owner's row as last received.
+    pub fn action_for_call(&self, source_id: &str, view: &str, key: Option<&str>, action_id: &str) -> Result<(SourceAction, SourceInfo, CallTarget), String> {
         let inner = self.lock();
         let state = Self::trusted_state(&inner, source_id)?;
         let payload = Self::cached_payload(state, view)?;
@@ -1100,7 +1155,112 @@ impl Sources {
                 key.map(|k| format!("`{k}`")).unwrap_or_else(|| "the view itself".to_owned())
             )
         })?;
-        Ok((found.action, Self::info_of(state)))
+        let mut target = CallTarget::default();
+        if let (Some(key), "work") = (key, view) {
+            if let Some((owner, owner_key)) = actions::work_entry(&payload, key).and_then(actions::overlay_ref) {
+                target = CallTarget {
+                    key: Some(owner_key.to_owned()),
+                    source: Some(owner.to_owned()),
+                    item: Self::owner_row(&inner, owner, "work", owner_key).map(|(_, row)| row),
+                };
+            }
+        }
+        Ok((found.action, Self::info_of(state), target))
+    }
+
+    /// The row `key` of the `view` that the trusted source with manifest id
+    /// `owner` itself lists, as last received, with that source. Sources are
+    /// asked in listing order (the Settings order), so the first one that
+    /// lists the row answers.
+    fn owner_row<'a>(inner: &'a Inner, owner: &str, view: &str, key: &str) -> Option<(&'a SourceState, Value)> {
+        inner
+            .sources
+            .values()
+            .filter(|s| s.trusted && s.manifest.as_ref().is_some_and(|m| m.id == owner))
+            .find_map(|s| {
+                let payload = s.views.get(view)?.payload.as_ref()?;
+                actions::owned_row(payload, view, key).map(|row| (s, row.clone()))
+            })
+    }
+
+    /// The item actions `source_id` offers on the `view` row `key` of the
+    /// source `owner_id`, their confirm texts filled from that row, and the
+    /// call target. Refused when either source is not trusted, when the owner
+    /// is the declaring source itself, or when the owner does not list the
+    /// row. Empty when the declaring source already adds to the row (its
+    /// overlay brings its own actions) or offers nothing there.
+    fn item_actions_on(inner: &Inner, source_id: &str, view: &str, owner_id: &str, key: &str) -> Result<(Vec<SourceAction>, SourceInfo, CallTarget), String> {
+        let state = Self::trusted_state(inner, source_id)?;
+        let owner = Self::trusted_state(inner, owner_id)?;
+        if owner.id == state.id {
+            return Err(format!("source {} offers its item actions on other sources' rows only", state.id));
+        }
+        let manifest = state.manifest.as_ref().expect("trusted implies a manifest");
+        let owner_manifest = owner.manifest.as_ref().expect("trusted implies a manifest");
+        let row = owner
+            .views
+            .get(view)
+            .and_then(|v| v.payload.as_ref())
+            .and_then(|p| actions::owned_row(p, view, key))
+            .ok_or_else(|| format!("{} lists no `{key}` in its `{view}` view", owner_manifest.label))?;
+        let target = CallTarget { key: Some(key.to_owned()), source: Some(owner_manifest.id.clone()), item: Some(row.clone()) };
+        let adds_to_it = view == "work"
+            && state
+                .views
+                .get("work")
+                .and_then(|v| v.payload.as_ref())
+                .is_some_and(|p| actions::has_overlay(p, &owner_manifest.id, key));
+        if adds_to_it {
+            return Ok((Vec::new(), Self::info_of(state), target));
+        }
+        let title = row.get("title").and_then(Value::as_str);
+        let offered = manifest
+            .item_actions
+            .iter()
+            .filter(|a| a.offered_on(view, &owner_manifest.id))
+            .map(|a| match &a.action {
+                SourceAction::Endpoint { id, label, mutates, confirm, params, note } => SourceAction::Endpoint {
+                    id: id.clone(),
+                    label: label.clone(),
+                    mutates: *mutates,
+                    confirm: confirm.as_deref().map(|c| actions::fill_confirm(c, key, title, &owner_manifest.label)),
+                    params: params.clone(),
+                    note: *note,
+                },
+                other => other.clone(),
+            })
+            .collect();
+        Ok((offered, Self::info_of(state), target))
+    }
+
+    /// The judged item actions `source_id` offers on the `view` row `key`
+    /// of the source `owner_id` (see [`Sources::item_actions_on`]).
+    pub fn item_actions(&self, source_id: &str, view: &str, owner_id: &str, key: &str, tools: &[AgentTool], roots: &[Root]) -> Result<Vec<ActionDto>, String> {
+        let (offered, info) = {
+            let inner = self.lock();
+            let (offered, info, _) = Self::item_actions_on(&inner, source_id, view, owner_id, key)?;
+            (offered, info)
+        };
+        let ctx = VerdictContext { tools, roots, link_hosts: &info.link_hosts };
+        Ok(offered
+            .into_iter()
+            .map(|action| {
+                let verdict = action_verdict(&action, &ctx);
+                ActionDto { action, verdict, needs_prompt: false }
+            })
+            .collect())
+    }
+
+    /// The item action `action_id` of `source_id` on the `view` row `key` of
+    /// `owner_id`, for the runner. Only an id the source's trusted manifest
+    /// declares for that row can be named: the webview cannot invent one.
+    pub fn item_action(&self, source_id: &str, view: &str, owner_id: &str, key: &str, action_id: &str) -> Result<(SourceAction, SourceInfo, CallTarget), String> {
+        let inner = self.lock();
+        let (offered, info, target) = Self::item_actions_on(&inner, source_id, view, owner_id, key)?;
+        let action = offered.into_iter().find(|a| a.id() == action_id).ok_or_else(|| {
+            format!("source {} offers no item action `{action_id}` on `{key}` of that source's `{view}` view", info.id)
+        })?;
+        Ok((action, info, target))
     }
 
     /// Rule for links a trusted source hands over: on a host the user
@@ -1348,6 +1508,8 @@ pub struct SourceDto {
     pub prompts_shown: Vec<String>,
     /// The jobs started from this source, oldest first.
     pub jobs: Vec<JobRecord>,
+    /// Whether its work item keys join pull requests that mention them.
+    pub key_match: KeyMatch,
 }
 
 /// One job a source started with a 202 reply: polled (`run: false`) or
@@ -1452,6 +1614,7 @@ fn source_dto(state: &SourceState, store: Option<&SourceStore>) -> SourceDto {
         prompt_policy: store.map(|s| s.prompt_policy(&state.key)).unwrap_or_default(),
         prompts_shown: store.map(|s| s.prompts_shown(&state.key)).unwrap_or_default(),
         jobs: state.jobs.clone(),
+        key_match: store.map(|s| s.key_match(&state.key)).unwrap_or_default(),
     }
 }
 
@@ -1532,6 +1695,21 @@ pub fn set_source_view_hidden(
 ) -> Result<SourcesListing, String> {
     main_window_only(&window)?;
     sources.set_view_hidden(&view, hidden)?;
+    Ok(sources.listing())
+}
+
+/// Switch a source's key matching on or off and set its pattern (blank =
+/// the default).
+#[tauri::command]
+pub fn set_source_key_match(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    source_id: String,
+    enabled: bool,
+    pattern: Option<String>,
+) -> Result<SourcesListing, String> {
+    main_window_only(&window)?;
+    sources.set_key_match(&source_id, enabled, pattern.as_deref())?;
     Ok(sources.listing())
 }
 

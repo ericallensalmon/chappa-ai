@@ -15,6 +15,12 @@ export function fixture(name: "prs" | "attention" | "work" | "environment" | "ma
   return JSON.parse(readFileSync(`${DATA_DIR}/${name}.json`, "utf8"));
 }
 
+/** A payload of the second fixture source, the one that adds to the first
+ *  one's work items (`data-overlay/`). */
+export function overlayFixture(name: "work" | "manifest"): Record<string, unknown> & { items: Record<string, unknown>[] } {
+  return JSON.parse(readFileSync(`${DATA_DIR}-overlay/${name}.json`, "utf8"));
+}
+
 /** One source's payload as the data layer hands it over. */
 export function payload(sourceId: string, body: unknown, over: Partial<ViewPayload> = {}): ViewPayload {
   return { sourceId, sourceLabel: sourceId, payload: body, freshness: { asOf: null, refreshing: false, errors: [] }, ...over };

@@ -18,8 +18,10 @@ import type { Chip, FreshnessSummary, NeedsUpdate } from "./prs_model";
 /** What a source view needs from the app. */
 export interface SourceViewDeps {
   /** Rust's judged actions of one item (`source_actions`); `key` null =
-   *  the view's (or page's) own, which is where its banners' actions are. */
-  actions(sourceId: string, view: string, key: string | null): Promise<ipc.SourceActionDto[]>;
+   *  the view's (or page's) own, which is where its banners' actions are.
+   *  With `owner`: the item actions `sourceId` offers on the row `key` of
+   *  that other source. */
+  actions(sourceId: string, view: string, key: string | null, owner?: string): Promise<ipc.SourceActionDto[]>;
   /** `source_run_action`; only ever called through `runAction`. */
   run: typeof ipc.sourceRunAction;
   /** Open a source's link after Rust's trusted-host check (https, or plain
@@ -323,8 +325,10 @@ export class ActionsCell {
   }
 
   /** `only`: draw just these action ids (a section's own actions out of
-   *  its item's list), in the order Rust lists them. */
-  load(targets: ActionTarget[], version: string, only?: readonly string[]): void {
+   *  its item's list), in the order Rust lists them; a target's own `only`
+   *  takes its place for that target (rows fed by several sources, whose
+   *  ids are each source's own). */
+  load(targets: (ActionTarget & { only?: readonly string[] })[], version: string, only?: readonly string[]): void {
     const sig = `${version}\u001e${JSON.stringify(targets)}\u001e${only ? JSON.stringify(only) : ""}`;
     if (sig === this.sig) return;
     this.sig = sig;
@@ -335,8 +339,7 @@ export class ActionsCell {
     }
     void Promise.all(
       targets.map((t) =>
-        this.deps
-          .actions(t.sourceId, t.view, t.key)
+        (t.owner ? this.deps.actions(t.sourceId, t.view, t.key, t.owner) : this.deps.actions(t.sourceId, t.view, t.key))
           .then((entries) => entries.map((entry) => ({ t, entry })))
           .catch(() => []),
       ),
@@ -347,10 +350,11 @@ export class ActionsCell {
       const ids = new Set<string>();
       const many = targets.length > 1;
       for (const { t, entry } of lists.flat()) {
-        if (only && !only.includes(entry.action.id)) continue;
+        const allowed = t.only ?? only;
+        if (allowed && !allowed.includes(entry.action.id)) continue;
         // One target can carry an id twice (a page's own "Re-run" and its
         // banner's); Rust runs the first, so one button.
-        const id = `${t.sourceId}\u001f${t.key ?? ""}\u001f${entry.action.id}`;
+        const id = `${t.sourceId}\u001f${t.owner ?? ""}\u001f${t.key ?? ""}\u001f${entry.action.id}`;
         if (ids.has(id)) continue;
         ids.add(id);
         // Two sources serving the same PR both offer "open it": one button.
@@ -365,6 +369,7 @@ export class ActionsCell {
         btn.className = "chappa-sv-action";
         btn.dataset.action = entry.action.id;
         btn.dataset.source = t.sourceId;
+        if (t.owner) btn.dataset.owner = t.owner;
         btn.textContent = state.asksFirst ? `${state.label}…` : state.label;
         btn.title = many ? `${state.title} (${t.sourceLabel})` : state.title;
         btn.disabled = state.disabled;
@@ -377,7 +382,7 @@ export class ActionsCell {
 
   private async click(t: ActionTarget, entry: ipc.SourceActionDto): Promise<void> {
     try {
-      const outcome = await runAction(t.sourceId, t.sourceLabel, t.view, t.key, entry, { run: this.deps.run });
+      const outcome = await runAction(t.sourceId, t.sourceLabel, t.view, t.key, entry, { run: this.deps.run }, t.owner ? { owner: t.owner } : {});
       if (!outcome) return;
       if (outcome.kind === "panel" && entry.action.kind === "panel") {
         this.deps.openPanel?.({ sourceId: t.sourceId, sourceLabel: t.sourceLabel, label: entry.action.label, endpoint: entry.action.endpoint }, outcome.payload);

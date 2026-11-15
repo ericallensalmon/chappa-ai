@@ -1,0 +1,67 @@
+{
+  "freshness": { "asOf": "2026-01-15T10:00:00Z" },
+  "items": [
+    {
+      "ref": { "source": "fixture", "key": "ABC-1" },
+      "key": "ABC-1",
+      "title": "An older title the tracker no longer uses",
+      "url": "https://registry.example/tracker/ABC-1",
+      "folder": "/srv/example/abc-1",
+      "active": true,
+      "prs": [
+        { "forge": "github", "repo": "owner/repo", "number": "#1", "url": "https://registry.example/owner/repo/pull/1", "status": "open" }
+      ],
+      "badges": [{ "text": "active in slot 0", "tone": "ok" }]
+    },
+    {
+      "ref": { "source": "fixture", "key": "ABC-2" },
+      "key": "ABC-2",
+      "title": "Rename the web build step",
+      "folder": "/srv/example/abc-2",
+      "active": false,
+      "branches": [{ "forge": "github", "repo": "owner/repo", "branch": "task/ABC-2-web" }],
+      "localStatus": {
+        "id": "review",
+        "label": "In review",
+        "allowed": [{ "id": "ship", "label": "Ship" }]
+      },
+      "badges": [{ "text": "1 unpushed", "tone": "warn" }],
+      "banners": [
+        {
+          "id": "drift-ABC-2",
+          "tone": "warn",
+          "title": "ABC-2: the stack runs older commits than its branch",
+          "lines": ["web was built from 1a2b3c4d; task/ABC-2-web is now at 5e6f7a8b"],
+          "actions": [{ "kind": "endpoint", "id": "rebuild", "label": "Rebuild", "mutates": true, "confirm": "Rebuild web from task/ABC-2-web?" }]
+        }
+      ],
+      "sections": [
+        {
+          "id": "repos",
+          "title": "Repos",
+          "rows": [{ "label": "web", "value": "task/ABC-2-web · 5e6f7a8b · 1 ahead, 0 behind main" }]
+        }
+      ],
+      "actions": [
+        { "kind": "endpoint", "id": "ship", "label": "Ship", "mutates": true, "confirm": "Move ABC-2 to shipped?" },
+        { "kind": "endpoint", "id": "archive", "label": "Archive", "mutates": true, "confirm": "Archive ABC-2: remove its worktrees and move the folder to the archive." }
+      ]
+    },
+    {
+      "ref": { "source": "fixture", "key": "ABC-9" },
+      "key": "ABC-9",
+      "title": "A workspace the tracker stopped listing",
+      "url": "https://registry.example/tracker/ABC-9",
+      "folder": "/srv/example/abc-9",
+      "actions": [
+        { "kind": "endpoint", "id": "archive", "label": "Archive", "mutates": true, "confirm": "Archive ABC-9?" }
+      ]
+    },
+    {
+      "ref": { "source": "tracker", "key": "XYZ-1" },
+      "key": "XYZ-1",
+      "title": "From a tracker that is not configured here",
+      "folder": "/srv/example/xyz-1"
+    }
+  ]
+}

@@ -155,4 +155,15 @@ describe("the dialogs", () => {
     await runAction("src", "Fixture", "work", "ABC-1", entry({ kind: "link", id: "o", label: "Open", url: "https://x" }), { run });
     expect(run).toHaveBeenLastCalledWith("src", "work", "ABC-1", "o", false, null);
   });
+
+  it("an item action on another source's row: its filled confirm is the question, and the call names the owner", async () => {
+    const run = vi.fn(async () => ({ kind: "done" as const, message: "ok" }));
+    const start = { kind: "endpoint" as const, id: "start-work", label: "Start work", mutates: true, confirm: "Create a workspace for ABC-3 — Retire the old queue", params: null, note: null };
+    const pending = runAction("ws", "Workspaces", "work", "ABC-3", entry(start), { run }, { owner: "fx" });
+    await Promise.resolve();
+    expect(document.querySelector(".chappa-dialog-message")!.textContent).toBe("Create a workspace for ABC-3 — Retire the old queue");
+    okButton().click();
+    await pending;
+    expect(run).toHaveBeenLastCalledWith("ws", "work", "ABC-3", "start-work", true, null, "fx");
+  });
 });

@@ -5,7 +5,10 @@
 //! Every action is looked up in the source's CACHED payload by view, key
 //! and id — the webview names an action, never its contents — and judged
 //! again here before anything runs, so a view cannot be talked into an
-//! action the payload does not carry. Then, per kind:
+//! action the payload does not carry. An item action (one a source offers
+//! on ANOTHER source's row) is looked up the same way in the declaring
+//! source's trusted manifest, against the owner's cached row. Then, per
+//! kind:
 //!
 //! - `link`: the trusted-host check (https, or plain http to this
 //!   machine), then the OS opener;
@@ -13,7 +16,8 @@
 //!   is kept, so its own actions are looked up and run the same way under
 //!   the view name `panel:<path>`;
 //! - `endpoint`: `POST {actions}` with `confirmed: true` only when the
-//!   dialog was accepted; `200` is done, `202 {jobId}` is polled from a
+//!   dialog was accepted, and, for a row fed by more than one source, the
+//!   owning source and its row in `target` (see `sources::CallTarget`); `200` is done, `202 {jobId}` is polled from a
 //!   thread, `202 {jobId, run}` spawns the run's argv in a pane of the
 //!   source's project and reports the exit back, `503` is "may or may not
 //!   have happened" and is never retried;
@@ -49,7 +53,7 @@ use project_model::records::{new_record_id, JobRecord as ProjectJobRecord, Recor
 use crate::roots::{check_cwd, Root};
 use crate::settings::SettingsState;
 use crate::sources::actions::{action_verdict, resolve_tool, validate_env, NoteRule, SourceAction, VerdictContext};
-use crate::sources::{iso_utc, main_window_only, ActionDto, JobRecord, PromptPolicy, SourceInfo, Sources, SourcesListing};
+use crate::sources::{iso_utc, main_window_only, ActionDto, CallTarget, JobRecord, PromptPolicy, SourceInfo, Sources, SourcesListing};
 
 /// A run's pane dump in the exit report is capped here, with a marker.
 pub const OUTPUT_CAP_BYTES: usize = 4 * 1024 * 1024;
@@ -132,7 +136,40 @@ pub fn run_action(
     confirmed: bool,
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
-    let (action, info) = deps.sources.action(source_id, view, key, action_id)?;
+    let (action, info, target) = deps.sources.action_for_call(source_id, view, key, action_id)?;
+    run_found(deps, source_id, view, key, action, info, target, confirmed, note)
+}
+
+/// Run the item action `action_id` that `source_id` offers on the `view`
+/// row `key` of the source `owner`. The call goes to `source_id` and its
+/// target names the owner and carries the owner's row.
+#[allow(clippy::too_many_arguments)]
+pub fn run_item_action(
+    deps: &ActionDeps,
+    source_id: &str,
+    view: &str,
+    owner: &str,
+    key: &str,
+    action_id: &str,
+    confirmed: bool,
+    note: Option<&str>,
+) -> Result<ActionOutcome, String> {
+    let (action, info, target) = deps.sources.item_action(source_id, view, owner, key, action_id)?;
+    run_found(deps, source_id, view, Some(key), action, info, target, confirmed, note)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_found(
+    deps: &ActionDeps,
+    source_id: &str,
+    view: &str,
+    key: Option<&str>,
+    action: SourceAction,
+    info: SourceInfo,
+    target: CallTarget,
+    confirmed: bool,
+    note: Option<&str>,
+) -> Result<ActionOutcome, String> {
     let tools = deps.tools.list();
     let roots = roots_for(deps, &info);
     let verdict = action_verdict(&action, &VerdictContext { tools: &tools, roots: &roots, link_hosts: &info.link_hosts });
@@ -158,7 +195,7 @@ pub fn run_action(
             if rule == Some(NoteRule::Required) && note.is_none() {
                 return Err(format!("`{id}` needs a note"));
             }
-            let mut body = json!({ "id": id, "target": { "view": view, "key": key } });
+            let mut body = json!({ "id": id, "target": target.body(view, key) });
             if let Some(params) = params {
                 body["params"] = params;
             }
@@ -575,8 +612,10 @@ fn deps_of(
 // ---- Tauri commands (main window only) ---------------------------------------------
 
 /// The judged actions under `key` in a source's cached `view`, or on a
-/// fetched panel page (`panel:<path>`).
+/// fetched panel page (`panel:<path>`). With `owner`: the item actions the
+/// source offers on the row `key` of that other source.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn source_actions(
     window: tauri::Window,
     sources: State<'_, Sources>,
@@ -585,11 +624,16 @@ pub fn source_actions(
     source_id: String,
     view: String,
     key: Option<String>,
+    owner: Option<String>,
 ) -> Result<Vec<ActionDto>, String> {
     main_window_only(&window)?;
     let info = sources.info(&source_id)?;
     let roots = projects.cwd_roots(info.project_id);
-    sources.actions(&source_id, &view, key.as_deref(), &tools.list(), &roots)
+    match (owner, key) {
+        (Some(owner), Some(key)) => sources.item_actions(&source_id, &view, &owner, &key, &tools.list(), &roots),
+        (Some(_), None) => Err("an item action needs the row's key".into()),
+        (None, key) => sources.actions(&source_id, &view, key.as_deref(), &tools.list(), &roots),
+    }
 }
 
 /// Run one action. Async: it may call the source, spawn a process and
@@ -611,12 +655,17 @@ pub async fn source_run_action(
     action_id: String,
     confirmed: bool,
     note: Option<String>,
+    owner: Option<String>,
 ) -> Result<ActionOutcome, String> {
     main_window_only(&window)?;
     let deps = deps_of(&registry, &tools, &settings, &projects, &records, &sources, app);
-    tauri::async_runtime::spawn_blocking(move || run_action(&deps, &source_id, &view, key.as_deref(), &action_id, confirmed, note.as_deref()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || match (owner, key) {
+        (Some(owner), Some(key)) => run_item_action(&deps, &source_id, &view, &owner, &key, &action_id, confirmed, note.as_deref()),
+        (Some(_), None) => Err("an item action needs the row's key".into()),
+        (None, key) => run_action(&deps, &source_id, &view, key.as_deref(), &action_id, confirmed, note.as_deref()),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// One job's record (as last polled or reported).

@@ -77,6 +77,20 @@ export interface WorkItem {
   badges?: Badge[];
   sections?: Section[];
   actions?: Action[];
+  /**
+   * Set: this entry ADDS TO the item `key` of the source whose manifest id
+   * is `source` (a workspace source adding its folder to a tracker's item).
+   * The owner's tracker fields win; this entry's folder, active, local
+   * status and branches win; badges, banners, sections, actions and PRs
+   * are added. Its title and url are shown only when the owner does not
+   * list the item.
+   */
+  ref?: { source: string; key: string } | null;
+  /** The item's branches, in the PRs' own terms: a PR whose source branch
+   *  is one of them (on the same forge and repo) joins the item. */
+  branches?: { forge: string; repo: string; branch: string }[];
+  /** Shown at the top of the item's panel and as a dot on its row. */
+  banners?: Banner[];
 }
 
 export interface WorkListResponse {
@@ -314,7 +328,14 @@ export interface Banner {
 /** Body of an endpoint action call. */
 export interface ActionRequest {
   id: string;
-  target: { view: string; key: string };
+  /**
+   * `source` and `item` are set on calls about a row another source owns:
+   * an item action, or an action of an entry that adds to another source's
+   * item. `source` is the owner's manifest id, `item` the owner's row as
+   * the app last received it (left out when the owner does not list it).
+   * Untrusted input to the receiving source.
+   */
+  target: { view: string; key: string | null; source?: string; item?: WorkItem | Pr };
   params?: Record<string, unknown>;
   note?: string;
   /** Set only after the user accepted the action's confirm text. A mutating call without it is refused. */
@@ -388,4 +409,8 @@ export interface Manifest {
   linkHosts: string[];
   /** Extra directories the source wants to launch in; the user approves them. */
   roots?: string[];
+  /** Actions offered on OTHER sources' rows (endpoint only; a mutating one
+   *  needs `confirm`, where `{key}`, `{title}` and `{source}` are filled by
+   *  the app). Part of what the user trusts. */
+  itemActions?: (Extract<Action, { kind: "endpoint" }> & { on: { view: "work" | "prs"; sources: string[] | "*" } })[];
 }

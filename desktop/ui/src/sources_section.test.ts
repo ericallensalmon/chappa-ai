@@ -67,6 +67,10 @@ function fakeApi(initial: SourcesListing) {
       listing = { ...listing, sources: listing.sources.filter((s) => s.id !== id) };
       return listing;
     }),
+    setSourceKeyMatch: vi.fn(async (id: string, enabled: boolean, pattern: string | null) => {
+      listing = { ...listing, sources: listing.sources.map((s) => (s.id === id ? { ...s, keyMatch: { enabled, pattern } } : s)) };
+      return listing;
+    }),
   };
   return api;
 }
@@ -201,6 +205,35 @@ describe("SourcesSection", () => {
     expect(api.setSourceViewHidden).toHaveBeenCalledWith("prs", false);
     // The row and its data are untouched by hiding.
     expect(rows(section)).toHaveLength(1);
+    section.dispose();
+  });
+
+  it("a trusted source serving Work has a key-match line: on by default, a pattern checked before it is kept", async () => {
+    const { api, section, store } = await mount({ sources: [source("a"), source("b", { views: [], trust: null }), source("c", { trusted: false })], hiddenViews: [] });
+    const line = (id: string) => rows(section).find((r) => r.dataset.sourceId === id)!.querySelector<HTMLElement>('[data-role="keyMatch"]');
+    expect(line("b")).toBeNull();
+    expect(line("c")).toBeNull();
+    const toggle = line("a")!.querySelector<HTMLInputElement>('[data-action="keyMatch"]')!;
+    const pattern = line("a")!.querySelector<HTMLInputElement>('[data-action="keyPattern"]')!;
+    expect([toggle.checked, pattern.value, pattern.placeholder, pattern.disabled]).toEqual([true, "", "[A-Z][A-Z0-9]+-\\d+", false]);
+    pattern.value = "([";
+    pattern.dispatchEvent(new Event("change"));
+    await FLUSH();
+    expect(api.setSourceKeyMatch).not.toHaveBeenCalled();
+    expect(line("a")!.querySelector('[data-role="keyPatternError"]')?.textContent).toMatch(/^not a usable pattern/);
+    pattern.value = "  [A-Z]+-\\d+ ";
+    pattern.dispatchEvent(new Event("change"));
+    await FLUSH();
+    expect(api.setSourceKeyMatch).toHaveBeenLastCalledWith("a", true, "[A-Z]+-\\d+");
+    expect(store.byId("a")?.keyMatch).toEqual({ enabled: true, pattern: "[A-Z]+-\\d+" });
+    // The list repainted with the stored choice; switching off keeps the pattern.
+    const again = line("a")!.querySelector<HTMLInputElement>('[data-action="keyMatch"]')!;
+    expect(line("a")!.querySelector<HTMLInputElement>('[data-action="keyPattern"]')!.value).toBe("[A-Z]+-\\d+");
+    again.checked = false;
+    again.dispatchEvent(new Event("change"));
+    await FLUSH();
+    expect(api.setSourceKeyMatch).toHaveBeenLastCalledWith("a", false, "[A-Z]+-\\d+");
+    expect(line("a")!.querySelector<HTMLInputElement>('[data-action="keyPattern"]')!.disabled).toBe(true);
     section.dispose();
   });
 

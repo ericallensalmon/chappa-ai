@@ -39,7 +39,7 @@ pub enum NoteRule {
     Required,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum SourceAction {
     Agent {
@@ -243,10 +243,14 @@ pub fn actions_in(value: &Value) -> (Vec<FoundAction>, Vec<(String, String)>) {
 /// request has neither, and its number repeats across repositories (two
 /// repos of one source both have a `#12`), so it is keyed by its whole
 /// identity, `forge:repo:number`, which is also what a view dedupes it by.
-/// A bare `number` is the last resort.
+/// A bare `number` is the last resort. A work entry that adds to another
+/// source's item and names no key of its own is that item's (`ref.key`).
 fn item_key(obj: &serde_json::Map<String, Value>) -> Option<String> {
     let text = |k: &str| obj.get(k).and_then(Value::as_str);
     if let Some(k) = text("key").or_else(|| text("id")) {
+        return Some(k.to_owned());
+    }
+    if let Some(k) = obj.get("ref").and_then(|r| r.get("key")).and_then(Value::as_str) {
         return Some(k.to_owned());
     }
     if let (Some(forge), Some(repo), Some(number)) = (text("forge"), text("repo"), text("number")) {
@@ -313,6 +317,95 @@ pub fn actions_for(value: &Value, key: Option<&str>) -> Vec<FoundAction> {
 /// The action `action_id` under `key`, if the payload has one.
 pub fn find_action(value: &Value, key: Option<&str>, action_id: &str) -> Option<FoundAction> {
     actions_for(value, key).into_iter().find(|f| f.action.id() == action_id)
+}
+
+/// Where a work entry that adds to another source's item points:
+/// `ref: {source, key}`, the owning source's manifest id and the item's key
+/// there. `None` for an entry the source owns itself.
+pub fn overlay_ref(item: &Value) -> Option<(&str, &str)> {
+    let r = item.get("ref")?;
+    let source = r.get("source")?.as_str().filter(|s| !s.trim().is_empty())?;
+    let key = r.get("key")?.as_str().filter(|s| !s.trim().is_empty())?;
+    Some((source, key))
+}
+
+/// The entries of a list payload.
+fn items(payload: &Value) -> &[Value] {
+    payload.get("items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// The first `items` entry of a work payload addressed by `key` (the key
+/// its actions are filed under, see [`actions_in`]).
+pub fn work_entry<'a>(payload: &'a Value, key: &str) -> Option<&'a Value> {
+    items(payload).iter().find(|item| item.as_object().and_then(item_key).as_deref() == Some(key))
+}
+
+/// The row a source owns under `key` in its `view` payload, exactly as it
+/// sent it: a work item that adds to nobody else's, or the pull request
+/// whose `forge:repo:number` is `key`.
+pub fn owned_row<'a>(payload: &'a Value, view: &str, key: &str) -> Option<&'a Value> {
+    items(payload).iter().find(|item| {
+        let Some(obj) = item.as_object() else { return false };
+        match view {
+            "work" => overlay_ref(item).is_none() && obj.get("key").and_then(Value::as_str) == Some(key),
+            "prs" => {
+                let text = |k: &str| obj.get(k).and_then(Value::as_str);
+                matches!((text("forge"), text("repo"), text("number")), (Some(f), Some(r), Some(n)) if pr_key(f, r, n) == key)
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Whether a work payload carries an entry adding to `key` of the source
+/// whose manifest id is `owner`.
+pub fn has_overlay(payload: &Value, owner: &str, key: &str) -> bool {
+    items(payload).iter().any(|item| overlay_ref(item) == Some((owner, key)))
+}
+
+/// How much of a row's title a filled-in confirm text carries.
+pub const CONFIRM_TITLE_MAX: usize = 80;
+
+/// A title as one line (control characters and runs of whitespace become
+/// one space), cut to `max` characters with a trailing `…` when longer.
+pub fn one_line_title(title: &str, max: usize) -> String {
+    let flat = title.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(max.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+/// An item action's confirm text with `{key}`, `{title}` and `{source}`
+/// filled from the row it runs on, in one pass: text a placeholder brings
+/// in is never read again, so a title cannot smuggle in another
+/// placeholder. The title is one line of at most [`CONFIRM_TITLE_MAX`]
+/// characters; an item without one reads "(no title)".
+pub fn fill_confirm(template: &str, key: &str, title: Option<&str>, source: &str) -> String {
+    let title = title.map(|t| one_line_title(t, CONFIRM_TITLE_MAX)).filter(|t| !t.is_empty()).unwrap_or_else(|| "(no title)".to_owned());
+    let mut out = String::with_capacity(template.len() + title.len());
+    let mut rest = template;
+    while let Some(at) = rest.find('{') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let filled = [("{key}", key), ("{title}", title.as_str()), ("{source}", source)]
+            .into_iter()
+            .find(|(slot, _)| tail.starts_with(slot));
+        match filled {
+            Some((slot, value)) => {
+                out.push_str(value);
+                rest = &tail[slot.len()..];
+            }
+            None => {
+                out.push('{');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What the verdict judges against: the configured agent tools, the cwd
@@ -620,6 +713,50 @@ mod tests {
     }
 
     #[test]
+    fn overlay_entries_are_found_by_key_and_owned_rows_never_are_overlays() {
+        let payload = json!({"items": [
+            {"ref": {"source": "tracker", "key": "ABC-1"}, "key": "ABC-1", "actions": [{"kind": "endpoint", "id": "archive", "label": "A", "mutates": false}]},
+            {"ref": {"source": "tracker", "key": "ABC-2"}, "actions": [{"kind": "endpoint", "id": "archive", "label": "A", "mutates": false}]},
+            {"key": "ABC-3", "title": "own"},
+            {"ref": {"source": "", "key": "ABC-4"}, "key": "ABC-4"}
+        ]});
+        assert_eq!(overlay_ref(&payload["items"][0]), Some(("tracker", "ABC-1")));
+        assert_eq!(overlay_ref(&payload["items"][2]), None);
+        assert_eq!(overlay_ref(&payload["items"][3]), None, "a ref without a source is no overlay");
+        // An overlay that names no key of its own is addressed by `ref.key`.
+        assert!(find_action(&payload, Some("ABC-2"), "archive").is_some());
+        assert_eq!(work_entry(&payload, "ABC-2").unwrap()["ref"]["key"], "ABC-2");
+        assert!(owned_row(&payload, "work", "ABC-1").is_none(), "an overlay is not the source's own row");
+        assert_eq!(owned_row(&payload, "work", "ABC-3").unwrap()["title"], "own");
+        assert!(has_overlay(&payload, "tracker", "ABC-1"));
+        assert!(!has_overlay(&payload, "tracker", "ABC-3"));
+        assert!(!has_overlay(&payload, "other", "ABC-1"));
+        let prs = json!({"items": [{"forge": "github", "repo": "owner/repo", "number": "#1", "title": "t"}]});
+        assert_eq!(owned_row(&prs, "prs", "github:owner/repo:#1").unwrap()["title"], "t");
+        assert!(owned_row(&prs, "prs", "github:owner/repo:#12").is_none());
+        assert!(owned_row(&prs, "environment", "x").is_none());
+    }
+
+    #[test]
+    fn confirm_texts_are_filled_in_one_pass_with_a_short_one_line_title() {
+        let t = "Create a workspace for {key} — {title} (from {source})";
+        assert_eq!(fill_confirm(t, "ABC-1", Some("Fix login"), "Tracker"), "Create a workspace for ABC-1 — Fix login (from Tracker)");
+        assert_eq!(fill_confirm(t, "ABC-1", None, "Tracker"), "Create a workspace for ABC-1 — (no title) (from Tracker)");
+        // A title cannot bring in another placeholder; unknown braces stay.
+        assert_eq!(fill_confirm("{title} / {key} {nope} {", "K", Some("{source}"), "S"), "{source} / K {nope} {");
+        // Line breaks and control characters flatten; exactly 80 stays, 81 is cut to 79 + an ellipsis.
+        assert_eq!(one_line_title("a\n\tb\u{7}  c", 80), "a b c");
+        let eighty = "x".repeat(80);
+        assert_eq!(one_line_title(&eighty, CONFIRM_TITLE_MAX), eighty);
+        let long = format!("{eighty}é");
+        let cut = one_line_title(&long, CONFIRM_TITLE_MAX);
+        assert_eq!(cut.chars().count(), 80);
+        assert!(cut.ends_with('…') && cut.starts_with(&"x".repeat(79)));
+        let filled = fill_confirm("{title}", "K", Some(&"é".repeat(200)), "S");
+        assert_eq!(filled.chars().count(), 80, "counted in characters, not bytes");
+    }
+
+    #[test]
     fn the_fixture_payloads_parse_with_their_actions() {
         for (name, text) in [
             ("work", include_str!("../../../sources/fixture/data/work.json")),
@@ -628,6 +765,7 @@ mod tests {
             ("environment", include_str!("../../../sources/fixture/data/environment.json")),
             ("panel", include_str!("../../../sources/fixture/data/panel.json")),
             ("panel-checks", include_str!("../../../sources/fixture/data/panel-checks.json")),
+            ("overlay work", include_str!("../../../sources/fixture/data-overlay/work.json")),
         ] {
             let value: Value = serde_json::from_str(text).unwrap();
             let (found, broken) = actions_in(&value);

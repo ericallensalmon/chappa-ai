@@ -59,6 +59,9 @@ export interface ActionTarget {
   view: string;
   /** The item's key; null for the view's (or page's) own actions. */
   key: string | null;
+  /** Set when the actions are `sourceId`'s item actions on the row `key`
+   *  of this OTHER source (a "Start work" on a tracker's row). */
+  owner?: string;
 }
 
 /** Where an attention item's title leads. */
