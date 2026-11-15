@@ -30,6 +30,13 @@
 //! Launches and endpoint calls are journaled under actor `source:<id>`
 //! (the manifest's `source.id`): on the launched row for agents and
 //! terminals, on the source's own process row for endpoint calls.
+//!
+//! Every endpoint call also tells the source who asked for it, in the
+//! `X-Chappa-Actor` header (`sources::CallActor`): `human:<OS user>` for
+//! the actions the person runs from the views. Only the webview's own
+//! commands run source actions today; no control route or MCP tool does,
+//! so no call is sent as `agent:<id>` yet ([`run_action_as`] takes the
+//! caller for when one does).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -53,7 +60,7 @@ use project_model::records::{new_record_id, JobRecord as ProjectJobRecord, Recor
 use crate::roots::{check_cwd, Root};
 use crate::settings::SettingsState;
 use crate::sources::actions::{action_verdict, resolve_tool, validate_env, NoteRule, SourceAction, VerdictContext};
-use crate::sources::{iso_utc, main_window_only, ActionDto, CallTarget, JobRecord, PromptPolicy, SourceInfo, Sources, SourcesListing};
+use crate::sources::{iso_utc, main_window_only, ActionDto, CallActor, CallTarget, JobRecord, PromptPolicy, SourceInfo, Sources, SourcesListing};
 
 /// A run's pane dump in the exit report is capped here, with a marker.
 pub const OUTPUT_CAP_BYTES: usize = 4 * 1024 * 1024;
@@ -126,7 +133,8 @@ fn roots_for(deps: &ActionDeps, info: &SourceInfo) -> Vec<Root> {
     deps.projects.cwd_roots(info.project_id)
 }
 
-/// Run `action_id` of `key` in `view` of the source `source_id`.
+/// Run `action_id` of `key` in `view` of the source `source_id`, for the
+/// person at the app.
 pub fn run_action(
     deps: &ActionDeps,
     source_id: &str,
@@ -136,8 +144,24 @@ pub fn run_action(
     confirmed: bool,
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
+    run_action_as(deps, &CallActor::human(), source_id, view, key, action_id, confirmed, note)
+}
+
+/// [`run_action`] on behalf of `caller` (sent to the source as its
+/// `X-Chappa-Actor`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_action_as(
+    deps: &ActionDeps,
+    caller: &CallActor,
+    source_id: &str,
+    view: &str,
+    key: Option<&str>,
+    action_id: &str,
+    confirmed: bool,
+    note: Option<&str>,
+) -> Result<ActionOutcome, String> {
     let (action, info, target) = deps.sources.action_for_call(source_id, view, key, action_id)?;
-    run_found(deps, source_id, view, key, action, info, target, confirmed, note)
+    run_found(deps, caller, source_id, view, key, action, info, target, confirmed, note)
 }
 
 /// Run the item action `action_id` that `source_id` offers on the `view`
@@ -155,12 +179,13 @@ pub fn run_item_action(
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
     let (action, info, target) = deps.sources.item_action(source_id, view, owner, key, action_id)?;
-    run_found(deps, source_id, view, Some(key), action, info, target, confirmed, note)
+    run_found(deps, &CallActor::human(), source_id, view, Some(key), action, info, target, confirmed, note)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_found(
     deps: &ActionDeps,
+    caller: &CallActor,
     source_id: &str,
     view: &str,
     key: Option<&str>,
@@ -207,10 +232,14 @@ fn run_found(
             if mutates && confirmed {
                 body["confirmed"] = Value::Bool(true);
             }
-            let reply = deps.sources.call_endpoint(source_id, &body)?;
+            let reply = deps.sources.call_endpoint(source_id, &body, caller)?;
             journal_endpoint(deps, &info, &actor, &format!("action `{id}` on {view}{} → {}", key.map(|k| format!("/{k}")).unwrap_or_default(), reply.status));
             match reply.status {
-                200 => Ok(ActionOutcome::Done { message: reply.body["message"].as_str().map(str::to_owned) }),
+                200 => {
+                    // What the source just did may show in its views now.
+                    deps.sources.refresh_soon(source_id);
+                    Ok(ActionOutcome::Done { message: reply.body["message"].as_str().map(str::to_owned) })
+                }
                 202 => {
                     let job_id = reply.body["jobId"]
                         .as_str()

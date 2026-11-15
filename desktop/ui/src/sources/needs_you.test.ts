@@ -23,6 +23,38 @@ const term = (key: string, over: Partial<TerminalAttention> = {}): TerminalAtten
 });
 
 describe("buildNeedsYou", () => {
+  it("data safety leads: a block and an agent inside it are bad, counted rows; nothing blocked adds nothing", () => {
+    const m = buildNeedsYou({
+      ...empty,
+      terminals: [term("term:2", { name: "claude", attention: "agent-waiting" })],
+      dataSafety: {
+        blocks: [
+          {
+            sourceId: "st",
+            sourceLabel: "Stack",
+            instance: "app/0",
+            state: "error",
+            current: false,
+            reason: "last known: the data-safety check could not be judged — see Environment, source unavailable",
+            folders: ["/srv/example"],
+            bound: null,
+            component: null,
+            ackActionId: null,
+          },
+        ],
+        agents: [{ termId: 4, name: "fixer", sourceId: "st", instance: "app/0", reason: "x", cwd: "/srv/example" }],
+        held: [],
+      },
+    });
+    expect(m.sections.map((s) => s.id)).toEqual(["data-safety", "terminals"]);
+    expect(m.sections[0].rows.map((r) => [r.title, r.detail])).toEqual([
+      ["Agents blocked on app/0", "last known: the data-safety check could not be judged — see Environment, source unavailable"],
+      ["fixer", "working next to unscanned/real data in app/0"],
+    ]);
+    expect(m.count).toBe(3);
+    expect(buildNeedsYou({ ...empty, dataSafety: { blocks: [], agents: [], held: [] } }).sections).toEqual([]);
+  });
+
   it("nothing in, nothing to show, a zero badge", () => {
     expect(buildNeedsYou(empty)).toMatchObject({ sections: [], count: 0, needsUpdate: [] });
   });

@@ -500,4 +500,51 @@ describe("WorkView with an item fed by two sources", () => {
     expect(v.selectedId).toBe("b|K-1");
     v.dispose();
   });
+  it("data safety: the covered item wears the bad badge, its panel a banner to Environment, its agent button the reason, disabled", async () => {
+    const reason = "agents blocked — data safety on app/0: db: 1 finding (card-number ×1) — acknowledge in Environment";
+    const agentHere: ipc.SourceActionDto = {
+      action: { kind: "agent", id: "agent-here", label: "Agent here", cwd: "/srv/example/abc-1", prompt: "Go", tool: null, title: null, env: {} },
+      verdict: { ...ok, enabled: false, reason },
+      needsPrompt: false,
+    };
+    const d = deps({ actions: vi.fn(async (_s: string, _v: string, key: string) => (key === "ABC-1" ? [agentHere, ...ABC1_ACTIONS] : [])) });
+    const v = new WorkView(d);
+    const block: ipc.DataSafetyBlockDto = {
+      sourceId: "st",
+      sourceLabel: "Stack",
+      instance: "app/0",
+      state: "not-clean",
+      current: true,
+      reason: "db: 1 finding (card-number ×1) — acknowledge in Environment",
+      folders: ["/srv/example/abc-1"],
+      bound: null,
+      component: "db",
+      ackActionId: "data-safety-ack",
+    };
+    v.update(input({ dataSafety: [block] }));
+    const chip = [...row(v, "ABC-1").querySelectorAll<HTMLElement>(".chappa-sv-chip")].find((c) => c.textContent === "agents blocked — data safety")!;
+    expect(chip).toBeTruthy();
+    expect(chip.dataset.tone).toBe("bad");
+    expect(chip.title).toBe(block.reason);
+    // Items outside the covered folder are not marked.
+    const marked = [...v.host.querySelectorAll<HTMLElement>(".chappa-work-row .chappa-sv-chip")].filter((c) => c.textContent === "agents blocked — data safety");
+    expect(marked.length).toBe(1);
+    row(v, "ABC-1").querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
+    await FLUSH();
+    await FLUSH();
+    const banner = detail(v).querySelector<HTMLElement>('.chappa-work-detail-safety .chappa-banner[data-banner="data-safety"]')!;
+    expect(banner.dataset.tone).toBe("bad");
+    expect(banner.querySelector(".chappa-banner-title")?.textContent).toBe("Agents are blocked here: the data on app/0 may be real");
+    expect(banner.textContent).toContain(block.reason);
+    banner.querySelector<HTMLButtonElement>(".chappa-work-safety-open")!.click();
+    expect(d.openView).toHaveBeenCalledWith("environment", "db");
+    const btn = [...detail(v).querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Agent here")!;
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe(reason);
+    // The block lifts: badge and banner go.
+    v.update(input({ dataSafety: [] }));
+    expect([...row(v, "ABC-1").querySelectorAll(".chappa-sv-chip")].some((c) => c.textContent === "agents blocked — data safety")).toBe(false);
+    expect(detail(v).querySelector(".chappa-work-detail-safety .chappa-banner")).toBeNull();
+    v.dispose();
+  });
 });

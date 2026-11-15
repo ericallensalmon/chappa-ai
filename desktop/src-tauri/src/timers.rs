@@ -1461,6 +1461,31 @@ impl Waker {
     }
 }
 
+/// Where a firing waits when its target may not be told anything now
+/// (an agent next to data that may be real). The registry is the app's:
+/// [`Registry::hold_reason`] / [`Registry::hold_delivery`].
+pub trait TimerHold: Send + Sync {
+    fn hold_reason(&self, process_id: u32) -> Option<String>;
+    fn hold(&self, process_id: u32, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize;
+}
+
+impl TimerHold for Registry {
+    fn hold_reason(&self, process_id: u32) -> Option<String> {
+        Registry::hold_reason(self, process_id as TermId)
+    }
+    fn hold(&self, process_id: u32, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+        self.hold_delivery(process_id as TermId, text, deliver)
+    }
+}
+
+/// Record a delivery's outcome on its firing.
+fn finish_job(store: &TimerStore, job: &Job, out: &Delivery) {
+    let state = if out.delivered { DeliveryState::Delivered } else { DeliveryState::Failed };
+    if let Err(err) = store.finish_firing(job.firing_row, state, out.detail.as_deref(), out.receipt.as_ref(), None) {
+        log::warn!("[timers] timer {} firing not recorded: {err}", job.timer_id);
+    }
+}
+
 /// What the delivery thread is handed.
 struct Job {
     timer_id: i64,
@@ -1485,6 +1510,8 @@ struct ServiceInner {
     probe: Arc<dyn OutputProbe>,
     waker: Arc<Waker>,
     jobs: Mutex<Option<mpsc::Sender<Job>>>,
+    /// Where a firing waits while its target is held (none: never held).
+    hold: Arc<Mutex<Option<Arc<dyn TimerHold>>>>,
     /// Knobs, read fresh on every use (the settings pane is live).
     knobs: Arc<dyn Fn() -> Knobs + Send + Sync>,
     running: bool,
@@ -1549,6 +1576,7 @@ impl Default for TimerService {
                 probe: Arc::new(NoProcesses),
                 waker: Arc::new(Waker::default()),
                 jobs: Mutex::new(None),
+                hold: Arc::default(),
                 knobs: Arc::new(Knobs::default),
                 running: false,
             }),
@@ -1586,6 +1614,7 @@ impl TimerService {
         knobs: Arc<dyn Fn() -> Knobs + Send + Sync>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
+        let hold: Arc<Mutex<Option<Arc<dyn TimerHold>>>> = Arc::default();
         let service = Self {
             inner: Arc::new(ServiceInner {
                 sched: Mutex::new(Scheduler::new(clock)),
@@ -1593,34 +1622,42 @@ impl TimerService {
                 probe,
                 waker: Arc::new(Waker::default()),
                 jobs: Mutex::new(Some(tx)),
+                hold: hold.clone(),
                 knobs,
                 running: true,
             }),
         };
         // The delivery thread. One thread, one queue: a firing whose target
         // never becomes ready blocks the NEXT delivery (bounded by
-        // delivery_timeout_ms) but can never stall the scheduler.
+        // delivery_timeout_ms) but can never stall the scheduler. A firing
+        // whose target is held waits in the target's held queue instead,
+        // still in flight (so an identical body coalesces with it), and is
+        // delivered and recorded when the hold lifts.
         let deliver_store = service.inner.store.clone();
         std::thread::spawn(move || {
             while let Ok(job) = rx.recv() {
-                let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
-                let state = if out.delivered {
-                    DeliveryState::Delivered
-                } else {
-                    DeliveryState::Failed
-                };
-                if let Err(err) = deliver_store.finish_firing(
-                    job.firing_row,
-                    state,
-                    out.detail.as_deref(),
-                    out.receipt.as_ref(),
-                    None,
-                ) {
-                    log::warn!("[timers] timer {} firing not recorded: {err}", job.timer_id);
+                let gate = hold.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(gate) = gate {
+                    if gate.hold_reason(job.process_id).is_some() {
+                        let (deliverer, store) = (deliverer.clone(), deliver_store.clone());
+                        let (process_id, body) = (job.process_id, job.body.clone());
+                        gate.hold(process_id, body, Box::new(move || {
+                            let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
+                            finish_job(&store, &job, &out);
+                        }));
+                        continue;
+                    }
                 }
+                let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
+                finish_job(&deliver_store, &job, &out);
             }
         });
         service
+    }
+
+    /// Hold firings for targets `hold` says must wait (once, at setup).
+    pub fn set_hold(&self, hold: Arc<dyn TimerHold>) {
+        *self.inner.hold.lock().unwrap_or_else(|e| e.into_inner()) = Some(hold);
     }
 
     /// Start the scheduler thread. Separate from [`TimerService::with_parts`]

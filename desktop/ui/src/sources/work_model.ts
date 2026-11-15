@@ -14,6 +14,7 @@
 // as absent, unknown fields are ignored, and a payload speaking another
 // contract version is left out with a needs-update banner.
 
+import type * as ipc from "../ipc";
 import {
   itemsOf,
   oneLine,
@@ -135,6 +136,9 @@ export interface WorkRow {
   ownerRef: { source: string; key: string } | null;
   /** Why the owner row is missing (also among the badges). */
   missingOwner?: Chip;
+  /** The data-safety block covering the row (set by the view from what
+   *  Rust enforces; absent or null when none does). */
+  dataSafety?: ipc.DataSafetyBlockDto | null;
   /** The source whose key-match rule applies (its keys are the row's). */
   keySourceId: string | null;
   /** The source the folder came from, when a source adding to the row set it. */

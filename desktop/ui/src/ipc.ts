@@ -1747,3 +1747,52 @@ export function attachSource(addr: string, tokenFile: string): Promise<SourcesLi
 export function detachSource(sourceId: string): Promise<SourcesListingDto> {
   return call("detach_source", { sourceId });
 }
+
+// ---- data safety --------------------------------------------------------------
+
+/** A stack source's data-safety block that keeps agents out, as Rust
+ *  enforces it (`data_safety.rs`). */
+export interface DataSafetyBlockDto {
+  /** The source's registry id. */
+  sourceId: string;
+  sourceLabel: string;
+  /** `<stack>/<slot>`. */
+  instance: string;
+  state: string;
+  /** False: the last block the source sent before it stopped answering. */
+  current: boolean;
+  /** What was found and where to deal with it ("db: 3 findings (…) —
+   *  acknowledge in Environment"), prefixed "last known:" when not current. */
+  reason: string;
+  /** The folders it covers. */
+  folders: string[];
+  /** The work item it is bound to: its owner's manifest id and key. */
+  bound: { source: string | null; key: string } | null;
+  /** The Environment component the first reason is about. */
+  component: string | null;
+  ackActionId: string | null;
+}
+
+/** A running agent inside a blocked folder. */
+export interface DataSafetyAgentDto {
+  termId: number;
+  name: string;
+  sourceId: string;
+  instance: string;
+  reason: string;
+  cwd: string;
+}
+
+/** `data_safety_state` and the `term://data-safety` broadcast. */
+export interface DataSafetyStateDto {
+  blocks: DataSafetyBlockDto[];
+  agents: DataSafetyAgentDto[];
+  /** Deliveries held per pane (panes with none left out). */
+  held: { termId: number; count: number }[];
+}
+
+export const DATA_SAFETY_EVENT = "term://data-safety";
+
+export function dataSafetyState(): Promise<DataSafetyStateDto> {
+  return call("data_safety_state");
+}

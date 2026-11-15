@@ -12,6 +12,13 @@
 // or a person can swap them while it runs. No packages; one line per
 // request on stderr.
 //
+// `CHAPPA_FIXTURE_DATA_SAFETY=1` adds a stack's data-safety block to the
+// Environment payload: `<dir>/data-safety.json` (re-read like the rest) is
+// the block, served until someone acknowledges it through its
+// `data-safety-ack` action (a confirmed call with a note, from a caller whose
+// `X-Chappa-Actor` header says `human:`; an agent is refused like a source
+// gate refuses one). The acknowledgement lasts until the file changes.
+//
 // `--data desktop/sources/fixture/data-overlay` runs a second source,
 // "Workspaces", that adds to the first one's work items (`ref: {source:
 // "fixture", key}`) and offers `itemActions` on its rows: run both to see
@@ -59,6 +66,46 @@ const data = (name) => JSON.parse(readFileSync(join(dataDir, `${name}.json`), "u
 const jobs = new Map();
 let jobCounter = 0;
 
+// The data-safety mode: the block from `data-safety.json`, and the
+// acknowledgement given for exactly that file's contents.
+const dataSafetyMode = process.env.CHAPPA_FIXTURE_DATA_SAFETY === "1";
+let ack = null; // { file: <the block's text when acknowledged>, by, note, atUtc }
+const blockText = () => readFileSync(join(dataDir, "data-safety.json"), "utf8");
+
+function environment() {
+  const env = data("environment");
+  if (!dataSafetyMode) return env;
+  const text = blockText();
+  const block = JSON.parse(text);
+  if (ack && ack.file === text) {
+    env.dataSafety = { ...block, state: "acknowledged", policy: null, blocksAgents: false, reasons: [], ack: { by: ack.by, note: ack.note, atUtc: ack.atUtc } };
+    return env;
+  }
+  env.dataSafety = block;
+  if (block.state === "not-clean") {
+    env.banners = [
+      ...(env.banners ?? []),
+      {
+        id: "data-safety",
+        tone: "bad",
+        title: `Agents are blocked on ${block.instance}: its data is not known to be scrubbed`,
+        lines: (block.reasons ?? []).map((r) => r.text),
+        actions: [{ kind: "endpoint", id: block.ackActionId, label: "Acknowledge findings", mutates: true, confirm: "Acknowledge the findings on this instance.", note: "required" }],
+      },
+    ];
+  }
+  return env;
+}
+
+function acknowledge(req, res, body) {
+  const actor = req.headers["x-chappa-actor"] ?? "";
+  if (body.confirmed !== true) return fail(res, 409, "confirmation-required", "A mutating action must be confirmed");
+  if (typeof body.note !== "string" || !body.note.trim()) return fail(res, 409, "note-required", "An acknowledgement needs a note");
+  if (!actor.startsWith("human:")) return fail(res, 409, "human-only", `Only a person may acknowledge; this call came from ${actor || "an unnamed caller"}`);
+  ack = { file: blockText(), by: actor, note: body.note.trim(), atUtc: new Date().toISOString().replace(/\.\d+Z$/, "Z") };
+  return send(res, 200, { message: `Acknowledged by ${actor}` });
+}
+
 function send(res, status, body) {
   const text = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
@@ -95,6 +142,7 @@ function startJob(spec, runsJobs) {
 
 async function handleAction(req, res) {
   const body = await readJson(req);
+  if (dataSafetyMode && body.id === "data-safety-ack") return acknowledge(req, res, body);
   const spec = data("actions")[body.id];
   if (!spec) return fail(res, 404, "unknown-action", `No action ${JSON.stringify(body.id)}`);
   if (spec.mutates && body.confirmed !== true) {
@@ -103,7 +151,11 @@ async function handleAction(req, res) {
   if (spec.job) return send(res, 202, startJob(spec, req.headers["x-chappa-runs-jobs"] === "1"));
   // `echo`: answer with what the call carried, so a test sees the exact
   // target (view, key, and for rows of other sources the owner and its row).
-  if (spec.echo) return send(res, spec.status, { message: JSON.stringify({ target: body.target ?? null, params: body.params ?? null, note: body.note ?? null }) });
+  // The caller's `X-Chappa-Actor` is echoed too, when it sent one.
+  if (spec.echo) {
+    const actor = req.headers["x-chappa-actor"];
+    return send(res, spec.status, { message: JSON.stringify({ target: body.target ?? null, params: body.params ?? null, note: body.note ?? null, ...(actor ? { actor } : {}) }) });
+  }
   return send(res, spec.status, spec.body ?? {});
 }
 
@@ -134,7 +186,7 @@ async function route(req, res, url) {
   }
   if (get && p === "/api/prs") return send(res, 200, data("prs"));
   if (get && p === "/api/attention") return send(res, 200, data("attention"));
-  if (get && p === "/api/env") return send(res, 200, data("environment"));
+  if (get && p === "/api/env") return send(res, 200, environment());
   if (get && p === "/api/workflows") return send(res, 200, data("workflows"));
   if (get && p === "/api/panel/validate") return send(res, 200, data("panel"));
   if (get && /^\/api\/panel\/[a-z0-9-]+$/.test(p)) {

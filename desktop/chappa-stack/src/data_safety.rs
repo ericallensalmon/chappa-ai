@@ -89,7 +89,28 @@
 //!
 //! When the definition cannot be read at all, the block is still sent,
 //! with `state: "error"`, `policy: null` and `blocksAgents: false`: the
-//! source cannot tell, and the app decides what an unreadable source means.
+//! source cannot tell, and the app decides what an unreadable source means
+//! (it blocks agents, failing closed).
+//!
+//! Three fields say where a block applies and why, so the app can keep
+//! agents out of the right folders and say what it is waiting for:
+//!
+//! ```json
+//!   "bound": { "source": "tracker", "key": "ABC-1",
+//!              "folders": ["/srv/example/.work/ABC-1", "/srv/example/.work/ABC-1/src/api-1a2b3c4d"] } | null,
+//!   "project": "/srv/example",
+//!   "reasons": [ { "component": "db", "text": "db: 3 findings (email-real-domain ×2, card-number ×1)" } ]
+//! ```
+//!
+//! - `bound` is the item the slot is bound to (`active.json`): its owner's
+//!   source and key (`source` is `null` when the item's record cannot be
+//!   read) and the absolute folders agents work in for it, the item folder
+//!   first, then each worktree. `null` when no item is active; the block
+//!   then covers `project`.
+//! - `project` is the stack project's folder, absolute.
+//! - `reasons` has one line per component with something to say (not
+//!   clean, cannot be judged, not checked), in definition order: the alert
+//!   text without the policy's effect.
 //!
 //! # Acknowledging
 //!
@@ -543,6 +564,42 @@ pub struct InstanceSafety {
 /// `<stack>/<slot>`, the wire's instance name.
 pub fn instance_name(stack: &str, slot: u32) -> String {
     format!("{stack}/{slot}")
+}
+
+/// A folder as the app compares it: absolute (against the current
+/// directory when the source was started with a relative project), with no
+/// Windows verbatim prefix added.
+fn absolute_text(path: &Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// The stack project's folder, as the block's `project` field: what a
+/// block covers when no item is active, since agents started in the stack
+/// project itself are as close to the data as anything.
+pub fn project_dir(dir: &Path) -> Value {
+    Value::String(absolute_text(dir))
+}
+
+/// The block's `bound` field: the item the slot is bound to (its owner's
+/// source and key, from `item.json`) and the folders agents would work in
+/// for it, the item folder first and then each worktree, absolute. `null`
+/// when no item is active. An item whose record cannot be read is still
+/// named, by its folder, with `source: null`: its folder is what matters.
+pub fn bound(loaded: &Loaded) -> Value {
+    let Some(item) = loaded.binding.item.as_deref() else {
+        return Value::Null;
+    };
+    let dir = stack_core::workspace::ItemRecord::dir(&loaded.work_dir(), item);
+    let (source, key) = match stack_core::workspace::ItemRecord::load(&dir) {
+        Ok(Some(rec)) => (Value::String(rec.item_ref.source), rec.item_ref.key),
+        _ => (Value::Null, item.to_string()),
+    };
+    let mut folders = vec![absolute_text(&dir)];
+    folders.extend(loaded.binding.worktrees.values().map(|w| absolute_text(w)));
+    json!({ "source": source, "key": key, "folders": folders })
 }
 
 /// The rules file's hash now (`None` when the stack names none).

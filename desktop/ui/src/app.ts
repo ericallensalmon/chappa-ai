@@ -80,6 +80,7 @@ import { NeedsYouView } from "./sources/needs_you_view";
 import { WorkView } from "./sources/work_view";
 import { buildEnvironmentModel, type EnvironmentModel } from "./sources/environment_model";
 import { EnvironmentView } from "./sources/environment_view";
+import { EMPTY_DATA_SAFETY, heldCount, heldText } from "./sources/data_safety";
 import type { SourceViewDeps } from "./sources/view_common";
 
 /** The process-status vocabulary. */
@@ -847,7 +848,21 @@ export interface AppOptions {
   /** What the source views call: judged actions, running one, opening a
    *  checked link. Defaults to the Tauri commands. */
   sourceActions?: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel">;
+  /** What data safety holds back (blocks in force, agents inside them,
+   *  held deliveries). Defaults to the Tauri command and its broadcast. */
+  dataSafety?: DataSafetyApi;
 }
+
+/** The data-safety seam: the state now, and its changes. */
+export interface DataSafetyApi {
+  state(): Promise<ipc.DataSafetyStateDto>;
+  listen(handler: (state: ipc.DataSafetyStateDto) => void): Promise<() => void>;
+}
+
+const tauriDataSafety: DataSafetyApi = {
+  state: ipc.dataSafetyState,
+  listen: (handler) => ipc.listenEvent<ipc.DataSafetyStateDto>(ipc.DATA_SAFETY_EVENT, handler),
+};
 
 /** The source views this build renders, in rail order. A later view joins
  *  by adding its name here and its page to `ensureSourceView`. */
@@ -1015,6 +1030,7 @@ const APP_CSS = `
    ring (accent, distinct from the amber heuristic badge), the transcript
    host (a column flex so the log scrolls and the box stays put). */
 .chappa-rail-transport{flex:none;color:#5ea6ff;font:10px ui-monospace,monospace;letter-spacing:.06em;border:1px solid #274a6b;border-radius:3px;padding:0 3px;line-height:14px;}
+.chappa-rail-held{flex:none;color:#f5b3ae;font:10px ui-monospace,monospace;border:1px solid #5c1f1c;border-radius:3px;padding:0 3px;line-height:14px;white-space:nowrap;}
 .chappa-rail-item.attention[data-attention="agent-waiting"]{box-shadow:inset 0 0 0 1px #5ea6ff;}
 /* Subagent nesting. A child row indents one dot-column per depth
    (the VALUE is the visual cap --chappa-sub-depth, min(depth,3); the model
@@ -1487,6 +1503,10 @@ export class App {
   private environmentModel: EnvironmentModel | null = null;
   /** The Needs you model as last built (the rail badge reads its count). */
   private needsYouModel: NeedsYouModel | null = null;
+  private readonly dataSafetyApi: DataSafetyApi;
+  /** What Rust enforces for data safety, as last sent. */
+  private dataSafety: ipc.DataSafetyStateDto = EMPTY_DATA_SAFETY;
+  private dataSafetySig = "";
   /** Seen-id baselines behind the sources' Needs you notifications. */
   private readonly baselines = new SeenBaselines();
   /** The sources the baselines know, so a source that left is forgotten. */
@@ -1604,6 +1624,7 @@ export class App {
     this.center = new NotifyCenter({ now: this.now });
     this.sources = opts.sources ?? sourcesStore;
     this.sourceActionsApi = opts.sourceActions ?? tauriSourceActions;
+    this.dataSafetyApi = opts.dataSafety ?? tauriDataSafety;
     this.viewsData = new SourceViewsData(this.sources, (change) => this.onSourceData(change));
     this.root = opts.root;
     this.root.textContent = "";
@@ -2355,6 +2376,29 @@ export class App {
     this.viewsData.start();
     void this.sources.load();
     void this.sources.listen();
+    void this.startDataSafety();
+  }
+
+  /** Follow what data safety holds back: the state now, then every change.
+   *  Without a backend (a test with no seam) it stays empty. */
+  private async startDataSafety(): Promise<void> {
+    try {
+      await this.dataSafetyApi.listen((s) => this.onDataSafety(s));
+      this.onDataSafety(await this.dataSafetyApi.state());
+    } catch {
+      // No data-safety backend: nothing is blocked as far as the views know.
+    }
+  }
+
+  /** A new data-safety state: the rail (held markers), Needs you and the
+   *  Work page repaint when it moved. */
+  private onDataSafety(state: ipc.DataSafetyStateDto): void {
+    const sig = JSON.stringify(state);
+    if (sig === this.dataSafetySig) return;
+    this.dataSafetySig = sig;
+    this.dataSafety = state;
+    this.renderRail();
+    this.renderSourceViews();
   }
 
   /** Boot the settings store and subscribe: a font change re-measures every
@@ -3928,6 +3972,16 @@ export class App {
         transport.textContent = "json";
         transport.title = "structured transport (machine-mode JSON, transcript view)";
         row.append(transport);
+      }
+      // Deliveries from MCP, the control surface and timers held back by
+      // data safety: how many wait, delivered once the block clears.
+      const held = heldCount(this.dataSafety, id);
+      if (held > 0) {
+        const marker = document.createElement("span");
+        marker.className = "chappa-rail-held";
+        marker.textContent = heldText(held);
+        marker.title = "Messages to this agent are held: the data next to its folder may be real. They are delivered once the block clears in Environment.";
+        row.append(marker);
       }
     }
     // The typed attention tier (agent-waiting, or a program reporting
@@ -6722,6 +6776,7 @@ export class App {
         versions: data.versions(),
         sources: data.current.sources,
         prRows: prs ? this.currentPrRows() : [],
+        dataSafety: this.dataSafety.blocks,
       });
     }
     if (this.environmentView?.active) {
@@ -6756,6 +6811,7 @@ export class App {
       attention: data.payloadsFor("attention"),
       environment: data.hidden("environment") ? [] : data.payloadsFor("environment"),
       needsUpdate: data.needsUpdate(),
+      dataSafety: this.dataSafety,
     });
     this.needsYouModel = model;
     this.renderRailViews();
@@ -6783,7 +6839,14 @@ export class App {
   /** A Needs you terminal row's click: the ACTIVE row's own activation. */
   private selectAttentionRow(key: string): void {
     const row = this.collectActiveRows().find((r) => activeRowKey(r) === key);
-    if (row) this.activateActiveRow(row);
+    if (row) {
+      this.activateActiveRow(row);
+      return;
+    }
+    // A row raised for another reason (an agent next to blocked data) may
+    // not be among the attention rows: go to its terminal directly.
+    const termId = /^term:(\d+)$/.exec(key)?.[1];
+    if (termId !== undefined && this.entries.has(Number(termId))) this.activate(Number(termId));
   }
 
   /**
@@ -7115,6 +7178,7 @@ export class App {
                 this.itemFavorite(item),
                 item.id === this.activeId,
                 depth,
+                heldCount(this.dataSafety, item.id),
               ].join("\u001f"),
         )
         .join("\u001e"),

@@ -385,16 +385,28 @@ fn a_clean_check_shows_the_marker_and_lifts_nothing_it_did_not_need_to() {
 #[test]
 fn the_wire_block_in_every_state() {
     let mut states = serde_json::Map::new();
+    // unscanned: db runs and has never been checked
+    let p = project("block-agents", "warn", "");
+    // The temp folder is masked wherever it shows (the project, and the
+    // paths an error reason names), and with it the separator after it.
+    let dir = p.dir.display().to_string();
     let mask = |mut v: Value| {
+        assert!(v["project"].is_string(), "{v}");
+        v["project"] = "<project>".into();
         if v["rulesHash"].is_string() {
             assert_eq!(v["rulesHash"], rules_hash());
             v["rulesHash"] = "<rules hash>".into();
         }
+        for r in v["reasons"].as_array_mut().unwrap() {
+            let text = r["text"]
+                .as_str()
+                .unwrap()
+                .replace(&dir, "<project>")
+                .replace("<project>\\", "<project>/");
+            r["text"] = text.into();
+        }
         v
     };
-
-    // unscanned: db runs and has never been checked
-    let p = project("block-agents", "warn", "");
     let f = world_at(running_cli(Ok(MARKER_OK), &clean_sample()));
     let src = source(f.world.clone(), &p.dir);
     states.insert("unscanned".into(), mask(env(&src)["dataSafety"].clone()));
@@ -426,7 +438,7 @@ fn the_wire_block_in_every_state() {
 
     // the definition cannot be read at all
     fs::write(p.dir.join("chappa.yml"), "stacks: [").unwrap();
-    states.insert("unreadable".into(), env(&src)["dataSafety"].clone());
+    states.insert("unreadable".into(), mask(env(&src)["dataSafety"].clone()));
 
     let got = Value::Object(states);
     let snap =
@@ -442,6 +454,85 @@ fn the_wire_block_in_every_state() {
         text, want,
         "the block moved; rerun with UPDATE_SNAPSHOTS=1 and review"
     );
+}
+
+/// `bound` names the slot's active item and the folders agents would work
+/// in for it (the item folder, then each worktree, absolute); with no
+/// active item it is null and `project` is what the block covers.
+#[test]
+fn the_block_names_the_bound_item_and_its_folders() {
+    let p = project("block-agents", "warn", "");
+    let f = world_at(running_cli(Ok(MARKER_OK), &dirty_sample(&[CARD_1])));
+    let src = source(f.world.clone(), &p.dir);
+    let ds = env(&src)["dataSafety"].clone();
+    assert_eq!(ds["bound"], Value::Null);
+    let project_dir = PathBuf::from(ds["project"].as_str().unwrap());
+    assert!(project_dir.is_absolute(), "{project_dir:?}");
+    assert_eq!(
+        fs::canonicalize(&project_dir).unwrap(),
+        fs::canonicalize(&p.dir).unwrap()
+    );
+    assert_eq!(
+        ds["reasons"],
+        json!([{ "component": "db", "text": "db has a data-safety check that has not run since it started" }])
+    );
+
+    let work = p.work();
+    let item = work.join("ABC-1");
+    fs::create_dir_all(item.join("src/api-1a2b3c4d")).unwrap();
+    fs::write(
+        item.join("item.json"),
+        json!({
+            "ref": { "source": "tracker", "key": "ABC-1" },
+            "key": "ABC-1",
+            "repos": { "api": { "branch": "task/ABC-1-fix", "path": "src/api-1a2b3c4d", "c8": "1a2b3c4d", "base": "main", "createdUtc": NOW } },
+            "createdUtc": NOW,
+            "updatedUtc": NOW,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        work.join("active.json"),
+        json!({ "slots": { "0": { "item": "ABC-1", "instance": "app-0", "sinceUtc": NOW } } })
+            .to_string(),
+    )
+    .unwrap();
+    check(&src, &f.world, &p.dir);
+    let ds = env(&src)["dataSafety"].clone();
+    assert_eq!(ds["blocksAgents"], true);
+    assert_eq!(
+        (ds["bound"]["source"].as_str(), ds["bound"]["key"].as_str()),
+        (Some("tracker"), Some("ABC-1"))
+    );
+    let folders: Vec<PathBuf> = ds["bound"]["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| PathBuf::from(f.as_str().unwrap()))
+        .collect();
+    assert_eq!(folders.len(), 2, "{ds}");
+    assert!(folders.iter().all(|f| f.is_absolute()), "{folders:?}");
+    assert_eq!(
+        fs::canonicalize(&folders[0]).unwrap(),
+        fs::canonicalize(&item).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(&folders[1]).unwrap(),
+        fs::canonicalize(item.join("src/api-1a2b3c4d")).unwrap()
+    );
+    assert_eq!(ds["reasons"][0]["component"], "db");
+    assert_eq!(
+        ds["reasons"],
+        json!([{ "component": "db", "text": "db: 2 findings (email-real-domain ×1, card-number ×1)" }])
+    );
+
+    // An item whose record is gone is still named, by its folder.
+    fs::remove_file(item.join("item.json")).unwrap();
+    let ds = env(&src)["dataSafety"].clone();
+    assert_eq!(ds["bound"]["source"], Value::Null);
+    assert_eq!(ds["bound"]["key"], "ABC-1");
+    assert_eq!(ds["bound"]["folders"].as_array().unwrap().len(), 1);
 }
 
 #[test]

@@ -4208,6 +4208,63 @@ describe("App agents", () => {
     panelDispose(app);
   });
 
+  it("data safety: an agent whose deliveries are held says how many on its row, and Needs you lists the block and the agent", async () => {
+    const { api } = stubApi();
+    const store = new AgentToolsStore(agentApi([dockerTool(3)]));
+    await store.load();
+    let push: ((s: ipc.DataSafetyStateDto) => void) | null = null;
+    const dataSafety = {
+      state: vi.fn(async (): Promise<ipc.DataSafetyStateDto> => ({ blocks: [], agents: [], held: [] })),
+      listen: vi.fn(async (h: (s: ipc.DataSafetyStateDto) => void) => {
+        push = h;
+        return () => {};
+      }),
+    };
+    const root = document.createElement("div");
+    const app = new App({ root, api, settings: stubSettings().store, agentTools: store, confirm: async () => true, dataSafety });
+    await app.mount();
+    await app.newShell();
+    await FLUSH();
+    expect(dataSafety.listen).toHaveBeenCalledTimes(1);
+    root.querySelector<HTMLButtonElement>(".chappa-new-agent")!.click();
+    root.querySelector<HTMLButtonElement>(".chappa-new-agent-option")!.click();
+    await FLUSH();
+    const agentRow = () => [...root.querySelectorAll<HTMLElement>(".chappa-rail-item")].find((r) => r.classList.contains("agent"))!;
+    const termId = Number([...phaseB(app).entries.entries()].find(([, e]) => e.agent)![0]);
+    expect(agentRow().querySelector(".chappa-rail-held")).toBeNull();
+    const badge = () => root.querySelector<HTMLElement>('.chappa-view-entry[data-view="attention"] .chappa-view-badge')?.textContent ?? "";
+    expect(badge()).toBe("");
+    push!({
+      blocks: [
+        {
+          sourceId: "st",
+          sourceLabel: "Stack",
+          instance: "app/0",
+          state: "not-clean",
+          current: true,
+          reason: "db: 1 finding (card-number ×1) — acknowledge in Environment",
+          folders: ["/srv/example/.work/ABC-1"],
+          bound: { source: "tracker", key: "ABC-1" },
+          component: "db",
+          ackActionId: "data-safety-ack",
+        },
+      ],
+      agents: [{ termId, name: "worker", sourceId: "st", instance: "app/0", reason: "x", cwd: "/srv/example/.work/ABC-1" }],
+      held: [{ termId, count: 2 }],
+    });
+    await FLUSH();
+    const held = agentRow().querySelector<HTMLElement>(".chappa-rail-held")!;
+    expect(held.textContent).toBe("held: 2 messages");
+    expect(held.title).toMatch(/held/);
+    expect(badge()).toBe("2");
+    // The block lifts: the marker and the rows go.
+    push!({ blocks: [], agents: [], held: [] });
+    await FLUSH();
+    expect(agentRow().querySelector(".chappa-rail-held")).toBeNull();
+    expect(badge()).toBe("");
+    panelDispose(app);
+  });
+
   it("an empty registry says so instead of offering nothing silently", async () => {
     const { root, app } = await mountedWithAgents([]);
     root.querySelector<HTMLButtonElement>(".chappa-new-agent")!.click();

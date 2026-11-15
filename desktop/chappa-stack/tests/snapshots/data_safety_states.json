@@ -7,6 +7,7 @@
     },
     "ackActionId": "data-safety-ack",
     "blocksAgents": false,
+    "bound": null,
     "findings": [
       {
         "column": "email",
@@ -31,6 +32,8 @@
       "version": "2026-11"
     },
     "policy": null,
+    "project": "<project>",
+    "reasons": [],
     "rulesHash": "<rules hash>",
     "state": "acknowledged",
     "unscanned": []
@@ -39,6 +42,7 @@
     "ack": null,
     "ackActionId": "data-safety-ack",
     "blocksAgents": false,
+    "bound": null,
     "findings": [],
     "instance": "app/0",
     "lastScanUtc": "2026-11-14T12:00:00Z",
@@ -48,6 +52,8 @@
       "version": "2026-11"
     },
     "policy": null,
+    "project": "<project>",
+    "reasons": [],
     "rulesHash": "<rules hash>",
     "state": "clean",
     "unscanned": []
@@ -56,11 +62,19 @@
     "ack": null,
     "ackActionId": "data-safety-ack",
     "blocksAgents": true,
+    "bound": null,
     "findings": [],
     "instance": "app/0",
     "lastScanUtc": "2026-11-14T12:00:00Z",
     "marker": null,
     "policy": "block-agents",
+    "project": "<project>",
+    "reasons": [
+      {
+        "component": "db",
+        "text": "db: the data-safety check could not be judged (the rules file cannot be used: <project>/stack/rules.yml: rule `broken`: a rule needs `pattern`, `validate`, or both)"
+      }
+    ],
     "rulesHash": null,
     "state": "error",
     "unscanned": []
@@ -69,6 +83,7 @@
     "ack": null,
     "ackActionId": "data-safety-ack",
     "blocksAgents": true,
+    "bound": null,
     "findings": [
       {
         "column": "email",
@@ -93,6 +108,13 @@
       "version": "2026-11"
     },
     "policy": "block-agents",
+    "project": "<project>",
+    "reasons": [
+      {
+        "component": "db",
+        "text": "db: 2 findings (email-real-domain ×1, card-number ×1)"
+      }
+    ],
     "rulesHash": "<rules hash>",
     "state": "not-clean",
     "unscanned": []
@@ -101,11 +123,19 @@
     "ack": null,
     "ackActionId": "data-safety-ack",
     "blocksAgents": false,
+    "bound": null,
     "findings": [],
     "instance": "unknown/0",
     "lastScanUtc": null,
     "marker": null,
     "policy": null,
+    "project": "<project>",
+    "reasons": [
+      {
+        "component": null,
+        "text": "the stack cannot be read: <project>/chappa.yml: did not find expected node content at line 2 column 1, while parsing a flow node"
+      }
+    ],
     "rulesHash": null,
     "state": "error",
     "unscanned": []
@@ -114,11 +144,19 @@
     "ack": null,
     "ackActionId": "data-safety-ack",
     "blocksAgents": false,
+    "bound": null,
     "findings": [],
     "instance": "app/0",
     "lastScanUtc": null,
     "marker": null,
     "policy": "warn",
+    "project": "<project>",
+    "reasons": [
+      {
+        "component": "db",
+        "text": "db has a data-safety check that has not run since it started"
+      }
+    ],
     "rulesHash": "<rules hash>",
     "state": "unscanned",
     "unscanned": [

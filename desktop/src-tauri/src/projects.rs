@@ -287,6 +287,20 @@ impl Projects {
         this
     }
 
+    /// The source registry these projects launch their sources into (and
+    /// whose data-safety blocks every agent spawn checks).
+    pub fn sources(&self) -> Sources {
+        self.inner.lock().map(|inner| inner.sources.clone()).unwrap_or_default()
+    }
+
+    /// Point a store-only projects state (tests, headless services) at a
+    /// source registry; the app's comes in through [`Projects::init`].
+    pub fn set_sources(&self, sources: Sources) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.sources = sources;
+        }
+    }
+
     /// Run `f` against the store under the projects lock. The records
     /// service reaches the per-project records through this; `f` must not
     /// call back into `Projects`.

@@ -15,11 +15,19 @@
 // sources offer on the row ("Start work") show there too, under theirs.
 // A row with banners carries a dot of their worst tone.
 //
+// A row a stack's data-safety block covers (its bound item, or any row whose
+// folder is inside a covered folder) wears an "agents blocked — data safety"
+// badge, and its detail opens with a banner that leads to Environment, where
+// the block is checked again or acknowledged. Its agent buttons are disabled
+// by Rust's own verdict, with the reason.
+//
 // Built like the other source pages: the app hands it the payloads on every
 // change, and rows are keyed and repainted only when their content changed,
 // so a poll that changed one item touches one row and focus survives.
 
+import type * as ipc from "../ipc";
 import { mountPageHeader } from "../page_header";
+import { blockedBanner, markDataSafety } from "./data_safety";
 import { formatAgo } from "../record_pane";
 import { LocalStatusBlock } from "./local_status";
 import type { ActionTarget } from "./needs_you";
@@ -60,6 +68,8 @@ export interface WorkViewInput {
   sources?: readonly MergeSource[];
   /** The PRs view's rows, joined to work rows by branch and key. */
   prRows?: readonly PrRow[];
+  /** The data-safety blocks in force (Rust's `data_safety_state`). */
+  dataSafety?: readonly ipc.DataSafetyBlockDto[];
 }
 
 /** Each source's key-match rule, by registry id (absent = the default). */
@@ -101,6 +111,8 @@ export const WORK_VIEW_CSS = `
 .chappa-work-dot[data-tone="bad"]{background:#f85149;}
 .chappa-work-dot[hidden]{display:none;}
 .chappa-work-detail-banners:empty{display:none;}
+.chappa-work-detail-safety:empty{display:none;}
+.chappa-work-safety-open{align-self:flex-start;margin-top:4px;border:1px solid #5c1f1c;border-radius:5px;background:#2a1110;color:#f5b3ae;font:12px system-ui,sans-serif;cursor:pointer;padding:2px 10px;}
 .chappa-work-detail-banners{margin-bottom:10px;}
 .chappa-work-from{margin:12px 0 6px;font:600 11px system-ui,sans-serif;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;}
 .chappa-work-from[hidden]{display:none;}
@@ -355,6 +367,7 @@ export class WorkView {
       prRows: input.prRows,
       keyMatch: keyMatchOf(input.sources),
     });
+    markDataSafety(model.all, input.dataSafety ?? []);
     this.model = model;
     this.frame.paintStatus(model.freshness, model.needsUpdate, this.deps.now());
     this.assignedBtn.setAttribute("aria-pressed", String(model.assignedOnly));
@@ -550,6 +563,9 @@ class WorkDetail {
   readonly el: HTMLElement;
   private readonly title: HTMLElement;
   private readonly banners: HTMLElement;
+  /** The data-safety banner, when a block covers the item. */
+  private readonly safety: HTMLElement;
+  private safetySig = "";
   private readonly fields: HTMLElement;
   /** The first source's name, shown when more than one feeds the item. */
   private readonly from: HTMLElement;
@@ -576,6 +592,8 @@ class WorkDetail {
     }).title;
     this.banners = document.createElement("div");
     this.banners.className = "chappa-work-detail-banners";
+    this.safety = document.createElement("div");
+    this.safety.className = "chappa-work-detail-safety";
     this.fields = document.createElement("div");
     this.fields.className = "chappa-work-fields";
     this.from = document.createElement("div");
@@ -586,7 +604,7 @@ class WorkDetail {
     this.sections = new SectionsBlock(deps);
     this.extras = document.createElement("div");
     this.extras.className = "chappa-work-extras";
-    this.el.append(head, this.banners, this.fields, this.from, this.actions.el, this.status.el, this.sections.el, this.extras);
+    this.el.append(head, this.safety, this.banners, this.fields, this.from, this.actions.el, this.status.el, this.sections.el, this.extras);
   }
 
   show(row: WorkRow, input: WorkViewInput): void {
@@ -598,6 +616,7 @@ class WorkDetail {
     const statusFrom = row.localStatusFrom ?? { sourceId: row.sourceId, sourceLabel: row.sourceLabel, key: row.key };
     const statusTarget: ActionTarget = { ...statusFrom, view: "work" };
     const moves = new Set((row.localStatus?.allowed ?? []).map((m) => m.id));
+    this.paintSafety(row.dataSafety ?? null);
     const ownIds = (c: WorkContribution): string[] => (c.sourceId === statusFrom.sourceId ? c.actionIds.filter((id) => !moves.has(id)) : c.actionIds);
     paintBanners(
       this.banners,
@@ -627,6 +646,40 @@ class WorkDetail {
     this.el.dataset.id = row.id;
     this.title.textContent = row.hasTitle ? `${row.key} ${row.title}` : row.key;
     this.paintFields(row, now);
+  }
+
+  /** The data-safety banner: why agents are kept out of this item and the
+   *  way to Environment, where the block is dealt with. */
+  private paintSafety(block: ipc.DataSafetyBlockDto | null): void {
+    const sig = JSON.stringify(block);
+    if (sig === this.safetySig) return;
+    this.safetySig = sig;
+    this.safety.textContent = "";
+    if (!block) return;
+    const { title, lines } = blockedBanner(block);
+    const el = document.createElement("div");
+    el.className = "chappa-banner";
+    el.dataset.tone = "bad";
+    el.dataset.banner = "data-safety";
+    const head = document.createElement("div");
+    head.className = "chappa-banner-title";
+    head.textContent = title;
+    el.appendChild(head);
+    for (const line of lines) {
+      const l = document.createElement("div");
+      l.className = "chappa-banner-line";
+      l.textContent = line;
+      el.appendChild(l);
+    }
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "chappa-work-safety-open";
+    open.textContent = "Open Environment";
+    open.addEventListener("click", () => {
+      if (!this.deps.openView("environment", block.component ?? "")) this.deps.say("The Environment view is not available.", "error");
+    });
+    el.appendChild(open);
+    this.safety.appendChild(el);
   }
 
   hide(): void {

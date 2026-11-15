@@ -1,0 +1,19 @@
+{
+  "instance": "app/0",
+  "state": "not-clean",
+  "policy": "block-agents",
+  "blocksAgents": true,
+  "lastScanUtc": "2026-11-14T12:00:00Z",
+  "rulesHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "marker": { "scrubbed": true, "version": "example-1" },
+  "findings": [
+    { "rule": "email-real-domain", "table": "customers", "column": "email", "count": 2, "severity": "bad" },
+    { "rule": "card-number", "table": "payments", "column": "card", "count": 1, "severity": "bad" }
+  ],
+  "unscanned": [],
+  "ack": null,
+  "ackActionId": "data-safety-ack",
+  "bound": { "source": "fixture", "key": "ABC-1", "folders": ["/srv/example/abc-1"] },
+  "project": "/srv/example",
+  "reasons": [{ "component": "db", "text": "db: 3 findings (email-real-domain ×2, card-number ×1)" }]
+}

@@ -58,11 +58,50 @@ pub use store::{KeyMatch, PromptPolicy};
 use store::{AttachedSource, SourceStore};
 
 use crate::agent_tools::AgentTool;
+use crate::data_safety::{self, active_block, parse_block, ActiveBlock, ENVIRONMENT_VIEW};
 use crate::roots::Root;
 
 /// Sent on every actions call: this app hosts a pane for a job's `run`
 /// block, so a source may hand the job's CLI back instead of running it.
 pub const RUNS_JOBS_HEADER: (&str, &str) = ("X-Chappa-Runs-Jobs", "1");
+/// Sent on every actions call: who asked for it. `human:<name>` for a call
+/// the person made in the app, `agent:<actor id>` for one an agent caused.
+/// A source may let only people make some moves (a workflow gate), and it
+/// records who acknowledged a finding.
+pub const ACTOR_HEADER: &str = "X-Chappa-Actor";
+/// The longest actor header value sent.
+pub const ACTOR_HEADER_CAP: usize = 80;
+
+/// Who caused a call to a source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallActor {
+    /// The person at the app, by their OS user name.
+    Human(String),
+    /// An agent, by its actor id.
+    Agent(String),
+}
+
+impl CallActor {
+    /// The person running the app: the OS user name (no setting).
+    pub fn human() -> Self {
+        let name = ["USERNAME", "USER", "LOGNAME"]
+            .iter()
+            .find_map(|v| std::env::var(v).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "unknown".to_owned());
+        CallActor::Human(name)
+    }
+
+    /// The header value: printable ASCII only (anything else becomes `_`),
+    /// at most [`ACTOR_HEADER_CAP`] characters.
+    pub fn header_value(&self) -> String {
+        let raw = match self {
+            CallActor::Human(name) => format!("human:{name}"),
+            CallActor::Agent(id) => format!("agent:{id}"),
+        };
+        raw.chars().map(|c| if (' '..='~').contains(&c) { c } else { '_' }).take(ACTOR_HEADER_CAP).collect()
+    }
+}
+
 /// How many finished jobs a source keeps in its log.
 pub const JOB_LOG_CAP: usize = 50;
 /// The view name a panel page's own actions are addressed by:
@@ -1107,10 +1146,11 @@ impl Sources {
             )
         };
         let ctx = VerdictContext { tools, roots, link_hosts: &hosts };
+        let blocks = self.data_safety_blocks();
         let mut out = Vec::new();
         let mut hide: Vec<String> = Vec::new();
         for f in found {
-            let verdict = action_verdict(&f.action, &ctx);
+            let verdict = data_safety_verdict(&f.action, action_verdict(&f.action, &ctx), &blocks);
             if verdict.hidden {
                 hide.push(f.action.id().to_owned());
                 continue;
@@ -1242,10 +1282,11 @@ impl Sources {
             (offered, info)
         };
         let ctx = VerdictContext { tools, roots, link_hosts: &info.link_hosts };
+        let blocks = self.data_safety_blocks();
         Ok(offered
             .into_iter()
             .map(|action| {
-                let verdict = action_verdict(&action, &ctx);
+                let verdict = data_safety_verdict(&action, action_verdict(&action, &ctx), &blocks);
                 ActionDto { action, verdict, needs_prompt: false }
             })
             .collect())
@@ -1295,13 +1336,14 @@ impl Sources {
         Ok((client, manifest))
     }
 
-    /// `POST {actions}` with the app's runs-jobs header. The status is the
-    /// outcome: 200 done, 202 started, 503 uncertain, anything else the
-    /// source's refusal.
-    pub fn call_endpoint(&self, source_id: &str, body: &Value) -> Result<PostReply, String> {
+    /// `POST {actions}` with the app's runs-jobs header and who asked
+    /// ([`ACTOR_HEADER`]). The status is the outcome: 200 done, 202
+    /// started, 503 uncertain, anything else the source's refusal.
+    pub fn call_endpoint(&self, source_id: &str, body: &Value, actor: &CallActor) -> Result<PostReply, String> {
         let (mut client, manifest) = self.client_for(source_id)?;
         let endpoint = manifest.actions.ok_or_else(|| "this source declares no `actions` endpoint".to_owned())?;
-        client.post(&endpoint, &[RUNS_JOBS_HEADER], body).map_err(|e| e.to_string())
+        let who = actor.header_value();
+        client.post(&endpoint, &[RUNS_JOBS_HEADER, (ACTOR_HEADER, who.as_str())], body).map_err(|e| e.to_string())
     }
 
     fn job_endpoint(manifest: &Manifest, job_id: &str) -> Result<Endpoint, String> {
@@ -1392,6 +1434,57 @@ impl Sources {
     pub fn is_shutting_down(&self) -> bool {
         self.lock().shutting_down
     }
+
+    /// Poll every view of `source_id` again now, not at its next interval:
+    /// an action the source just did may have changed what they show (an
+    /// acknowledgement that lifts a data-safety block should not wait out a
+    /// two-minute poll).
+    pub fn refresh_soon(&self, source_id: &str) {
+        {
+            let mut inner = self.lock();
+            if let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) {
+                for view in state.views.values_mut() {
+                    view.next_due_ms = 0;
+                }
+            }
+        }
+        self.notify();
+    }
+
+    // ---- data safety ------------------------------------------------------------
+
+    /// The data-safety blocks in force, one per source whose last
+    /// Environment payload carries a block that keeps agents out (see
+    /// [`crate::data_safety`]). The LAST payload counts while the source is
+    /// down, untrusted or failing its Environment poll: a block stays in
+    /// force until the source answers with one that lifts it, and says it
+    /// is the last known one meanwhile.
+    pub fn data_safety_blocks(&self) -> Vec<ActiveBlock> {
+        let inner = self.lock();
+        inner
+            .sources
+            .values()
+            .filter_map(|state| {
+                let view = state.views.get(ENVIRONMENT_VIEW)?;
+                let block = parse_block(view.payload.as_ref()?)?;
+                let current = state.trusted && state.status == SourceStatus::Up && view.last_error.is_none();
+                let info = Self::info_of(state);
+                active_block(&state.id, &info.label, &block, current, info.project_path.as_deref())
+            })
+            .collect()
+    }
+}
+
+/// An agent action whose folder data safety blocks is disabled with the
+/// reason: the launch would be refused anyway, and the button says so first.
+fn data_safety_verdict(action: &SourceAction, mut verdict: ActionVerdict, blocks: &[ActiveBlock]) -> ActionVerdict {
+    if let (SourceAction::Agent { .. }, true, Some(cwd)) = (action, verdict.enabled, verdict.cwd.as_ref()) {
+        if let Some(b) = data_safety::blocking(blocks, cwd) {
+            verdict.enabled = false;
+            verdict.reason = Some(format!("agents blocked — data safety on {}: {}", b.instance, b.reason));
+        }
+    }
+    verdict
 }
 
 enum RunEnd {
@@ -1842,5 +1935,149 @@ mod tests {
         assert_ne!(a.id, c.id);
         assert_eq!(a.id.len(), 16);
         assert!(a.id.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    /// A launched source with an Environment view whose cached payload is
+    /// `payload`, in `status`, trusted or not, its last poll failed or not.
+    fn put_environment(sources: &Sources, project: &Path, payload: Option<Value>, status: SourceStatus, trusted: bool, poll_error: Option<&str>) -> String {
+        let mut state = fresh_state(
+            "stack",
+            Origin::Launched {
+                project_id: 1,
+                project_path: project.to_path_buf(),
+                command: "stack".into(),
+                addr: "127.0.0.1:1".into(),
+                token: "t".into(),
+                term_id: None,
+            },
+        );
+        state.status = status;
+        state.trusted = trusted;
+        state.views.insert(
+            ENVIRONMENT_VIEW.into(),
+            ViewState {
+                endpoint: Endpoint::named_in_payload("/api/env").unwrap(),
+                poll: Duration::from_secs(120),
+                payload,
+                as_of_ms: None,
+                next_due_ms: 0,
+                refreshing: false,
+                failures: u32::from(poll_error.is_some()),
+                last_error: poll_error.map(str::to_owned),
+            },
+        );
+        let id = state.id.clone();
+        sources.lock().sources.insert("stack".into(), state);
+        id
+    }
+
+    #[test]
+    fn a_block_stays_in_force_while_its_source_cannot_answer_and_clears_when_it_says_so() {
+        use crate::delivery_hold::HoldGate;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("stack");
+        let inside = project.join(".work").join("ABC-1");
+        std::fs::create_dir_all(&inside).unwrap();
+        let payload = |state: &str, blocks: bool| {
+            json!({ "components": [], "dataSafety": {
+                "instance": "app/0", "state": state, "blocksAgents": blocks, "bound": null,
+                "project": project.display().to_string(),
+                "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }],
+            }})
+        };
+        let sources = Sources::default();
+        // Never sent a block: nothing is enforced.
+        put_environment(&sources, &project, None, SourceStatus::Up, true, None);
+        assert!(sources.data_safety_blocks().is_empty());
+        put_environment(&sources, &project, Some(json!({ "components": [] })), SourceStatus::Up, true, None);
+        assert!(sources.data_safety_blocks().is_empty(), "an older source sends no block");
+        assert_eq!(sources.hold_reason(&inside), None);
+        // Blocking, and answering.
+        put_environment(&sources, &project, Some(payload("not-clean", true)), SourceStatus::Up, true, None);
+        let blocks = sources.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].current);
+        assert_eq!(blocks[0].reason, "db: 1 finding (card-number ×1) — acknowledge in Environment");
+        assert!(sources.hold_reason(&inside).unwrap().starts_with("held until data safety on app/0 clears"));
+        assert!(crate::data_safety::check_launch(&sources, &inside).unwrap_err().starts_with(crate::data_safety::REFUSAL_LEAD));
+        assert!(crate::data_safety::check_launch(&sources, dir.path()).is_ok(), "outside the stack project");
+        // Down, untrusted, or failing its Environment poll: the last block stays, marked.
+        for (status, trusted, error) in [
+            (SourceStatus::Down, true, None),
+            (SourceStatus::NeedsReview, false, None),
+            (SourceStatus::Up, false, None),
+            (SourceStatus::Up, true, Some("HTTP 500")),
+        ] {
+            put_environment(&sources, &project, Some(payload("not-clean", true)), status, trusted, error);
+            let blocks = sources.data_safety_blocks();
+            assert_eq!(blocks.len(), 1, "{status:?} {trusted} {error:?}");
+            assert!(!blocks[0].current);
+            assert!(
+                blocks[0].reason.starts_with("last known: db: 1 finding") && blocks[0].reason.ends_with(", source unavailable"),
+                "{}",
+                blocks[0].reason
+            );
+            assert!(crate::data_safety::check_launch(&sources, &inside).is_err());
+        }
+        // A last block that did not block keeps nothing out.
+        put_environment(&sources, &project, Some(payload("clean", false)), SourceStatus::Down, true, None);
+        assert!(sources.data_safety_blocks().is_empty());
+        // An error blocks whatever it says, and recovery clears it.
+        put_environment(&sources, &project, Some(payload("error", false)), SourceStatus::Up, true, None);
+        assert_eq!(sources.data_safety_blocks().len(), 1);
+        put_environment(&sources, &project, Some(payload("acknowledged", false)), SourceStatus::Up, true, None);
+        assert!(sources.data_safety_blocks().is_empty());
+        assert_eq!(sources.hold_reason(&inside), None);
+        assert!(crate::data_safety::check_launch(&sources, &inside).is_ok());
+    }
+
+    #[test]
+    fn a_block_without_a_project_covers_the_folder_of_the_project_that_launched_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = Sources::default();
+        put_environment(&sources, dir.path(), Some(json!({ "dataSafety": { "instance": "app/0", "state": "error" } })), SourceStatus::Up, true, None);
+        let blocks = sources.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(crate::data_safety::covers(&blocks[0].covered, &dir.path().join("sub")));
+    }
+
+    #[test]
+    fn an_agent_action_inside_a_blocked_folder_is_disabled_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = Sources::default();
+        put_environment(
+            &sources,
+            dir.path(),
+            Some(json!({ "dataSafety": { "instance": "app/0", "state": "not-clean", "blocksAgents": true, "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }] } })),
+            SourceStatus::Up,
+            true,
+            None,
+        );
+        let blocks = sources.data_safety_blocks();
+        let agent = actions::parse_action(&json!({ "kind": "agent", "id": "a", "label": "Agent here", "cwd": "/x", "prompt": "go" })).unwrap();
+        let terminal = actions::parse_action(&json!({ "kind": "terminal", "id": "t", "label": "Terminal here", "cwd": "/x" })).unwrap();
+        let ok = |cwd: &Path| ActionVerdict { enabled: true, reason: None, hidden: false, cwd: Some(cwd.to_path_buf()), tool: Some((1, "claude".into())) };
+        let judged = data_safety_verdict(&agent, ok(dir.path()), &blocks);
+        assert!(!judged.enabled);
+        assert_eq!(
+            judged.reason.as_deref(),
+            Some("agents blocked — data safety on app/0: db: 1 finding (card-number ×1) — acknowledge in Environment")
+        );
+        assert!(data_safety_verdict(&terminal, ok(dir.path()), &blocks).enabled, "terminals are never blocked");
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(data_safety_verdict(&agent, ok(elsewhere.path()), &blocks).enabled);
+    }
+
+    #[test]
+    fn the_actor_header_names_a_person_or_an_agent_in_printable_ascii() {
+        assert_eq!(CallActor::Human("Alex".into()).header_value(), "human:Alex");
+        assert_eq!(CallActor::Agent("12".into()).header_value(), "agent:12");
+        assert_eq!(CallActor::Human("Jos\u{e9}\r\nX-Evil: 1".into()).header_value(), "human:Jos___X-Evil: 1");
+        let long = CallActor::Human("a".repeat(200)).header_value();
+        assert_eq!(long.len(), ACTOR_HEADER_CAP);
+        assert!(long.starts_with("human:aaa"));
+        let me = CallActor::human();
+        assert!(matches!(&me, CallActor::Human(n) if !n.is_empty()));
+        assert!(me.header_value().starts_with("human:"));
     }
 }

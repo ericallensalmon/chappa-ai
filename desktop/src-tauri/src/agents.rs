@@ -1822,6 +1822,14 @@ pub fn spawn_agent_with(
         None => project.as_ref().map(|(_, root)| root.clone()),
     };
     crate::sources::actions::validate_env(&req.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())?;
+    // No new agent next to data that may be real: a stack source's
+    // data-safety block covering the folder refuses every launch here (a
+    // source's agent action, the app's own spawn, the control surface and
+    // MCP, starting a stopped record, a resume), until the check is clean
+    // or acknowledged. Terminals are not agents and never come here.
+    if let Some(dir) = &cwd {
+        crate::data_safety::check_launch(&ctx.projects.sources(), dir)?;
+    }
     // Secrets in the folder the agent is about to read are looked for
     // BEFORE anything is spawned; a blocking finding is the error here.
     let scan_notice = match &cwd {

@@ -14,6 +14,7 @@
 //! a mock, so the pump is unit-testable without a Tauri runtime.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,7 @@ use term_core::actor::{
 use term_core::status::ProgramStatus;
 
 use crate::agent_json::JsonAgent;
+use crate::delivery_hold::{DeliveryHolds, HoldGate};
 use crate::event_ring::{EventRing, Sequenced};
 use term_core::frame::encode_frame;
 use term_core::pty::PtySpec;
@@ -555,6 +557,9 @@ struct Entry {
     /// What the program last reported about itself (`OSC 777;status`).
     /// Cleared at exit; a new run is a new entry, so it starts empty.
     program_status: Option<ProgramStatus>,
+    /// The folder the child was started in (`None` = the home directory):
+    /// what data safety judges an agent's deliveries by.
+    cwd: Option<PathBuf>,
 }
 
 struct Inner {
@@ -605,6 +610,9 @@ pub struct Registry {
     /// setup to the records service). `None` = nothing is recorded, which is
     /// what the harness and most tests want.
     run_recorder: Arc<Mutex<Option<Arc<dyn RunRecorder>>>>,
+    /// Deliveries from the control surface and timers held back from an
+    /// agent until it is safe to make them ([`crate::delivery_hold`]).
+    holds: DeliveryHolds,
 }
 
 impl Default for Registry {
@@ -625,7 +633,64 @@ impl Registry {
             json_agents: Arc::default(),
             closed_broadcast: Arc::new(Mutex::new(Arc::new(NullClosedBroadcast) as Arc<dyn ClosedBroadcast>)),
             run_recorder: Arc::default(),
+            holds: DeliveryHolds::default(),
         }
+    }
+
+    // ---- held deliveries --------------------------------------------------------
+
+    /// What decides whether deliveries to an agent wait (once, at setup:
+    /// the data-safety blocks).
+    pub fn set_hold_gate(&self, gate: Arc<dyn HoldGate>) {
+        self.holds.set_gate(gate);
+    }
+
+    /// The folder an AGENT entry was started in: `Some(None)` for an agent
+    /// started in the home directory, `None` when `id` is not a live entry.
+    /// Plain terminals answer `Some(None)`: what reaches them is never held.
+    fn agent_cwd(&self, id: TermId) -> Option<Option<PathBuf>> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = inner.entries.get(&id)?;
+        Some(if entry.agent.is_some() { entry.cwd.clone() } else { None })
+    }
+
+    /// Why a delivery from the control surface or a timer to `id` must wait
+    /// now, or `None` to deliver it. Only agents are ever held, and never
+    /// for what the person types (that does not come through here).
+    pub fn hold_reason(&self, id: TermId) -> Option<String> {
+        let cwd = self.agent_cwd(id)??;
+        self.holds.reason_for(id, Some(&cwd))
+    }
+
+    /// Queue a delivery for `id`, made by `deliver` once the hold lifts.
+    /// Answers how many are held for it now.
+    pub fn hold_delivery(&self, id: TermId, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+        self.holds.hold(id, text, deliver)
+    }
+
+    /// Make the held deliveries whose hold lifted, in order (the data-safety
+    /// watcher calls this every second). Answers how many were made.
+    pub fn release_held(&self) -> usize {
+        self.holds.release(&|id| self.agent_cwd(id))
+    }
+
+    /// How many deliveries are held per pane.
+    pub fn held_counts(&self) -> Vec<(TermId, usize)> {
+        self.holds.counts()
+    }
+
+    /// Every live agent with the folder it was started in (agents started in
+    /// the home directory are left out): `(id, name, cwd)`.
+    pub fn live_agent_cwds(&self) -> Vec<(TermId, String, PathBuf)> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(TermId, String, PathBuf)> = inner
+            .entries
+            .iter()
+            .filter(|(_, e)| e.agent.is_some() && e.handle.io().child_alive())
+            .filter_map(|(id, e)| Some((*id, e.name.clone(), e.cwd.clone()?)))
+            .collect();
+        out.sort_by_key(|(id, _, _)| *id);
+        out
     }
 
     /// Point the `term://closed` broadcast at the real app handle.
@@ -1007,6 +1072,7 @@ impl Registry {
             session: None,
             summary: None,
             program_status: None,
+            cwd: cfg.spec.cwd.clone(),
         };
         inner.entries.insert(id, entry);
         // Entry in place before the pump starts, so the pump can never race a

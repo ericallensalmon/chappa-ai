@@ -292,11 +292,11 @@ impl Source {
         );
         let loaded = match self.load() {
             Ok(l) => l,
-            Err(e) => return env_view::unavailable(&e, &now, &instance),
+            Err(e) => return env_view::unavailable(&e, &now, &instance, &self.config.dir),
         };
         match self.environment_of(&loaded, &now) {
             Ok(v) => v,
-            Err(e) => env_view::unavailable(&e, &now, &loaded_instance(&loaded)),
+            Err(e) => env_view::unavailable(&e, &now, &loaded_instance(&loaded), &loaded.dir),
         }
     }
 

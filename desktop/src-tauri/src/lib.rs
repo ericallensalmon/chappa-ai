@@ -9,8 +9,10 @@ pub mod control_http;
 pub mod coordination;
 pub mod coordination_http;
 pub mod crash;
+pub mod data_safety;
 #[cfg(debug_assertions)]
 pub mod debug_http;
+pub mod delivery_hold;
 pub mod open_path;
 pub mod projects;
 pub mod records;
@@ -133,6 +135,17 @@ pub fn run() {
                 settings.inner().clone(),
                 app.state::<Coordination>().inner().clone(),
             );
+            // Data safety: what MCP, the control surface and timers deliver
+            // to an agent next to data that may be real waits until the
+            // stack's block clears; the watcher releases it and tells the
+            // webview what is blocked.
+            {
+                let registry = app.state::<Registry>().inner().clone();
+                let sources = app.state::<Sources>().inner().clone();
+                registry.set_hold_gate(std::sync::Arc::new(sources.clone()));
+                timers.set_hold(std::sync::Arc::new(registry.clone()));
+                data_safety::spawn_watch(sources, registry, app.handle().clone());
+            }
             // The control surface (127.0.0.1:8324, bearer token) —
             // ALL builds; the chappa-ai-mcp stdio server talks to this.
             control_http::start(
@@ -284,6 +297,7 @@ pub fn run() {
         secret_scan::secret_scan_info,
         secret_scan::acknowledge_secret_findings,
         projects::set_project_secret_scan,
+        data_safety::data_safety_state,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -363,6 +377,7 @@ pub fn run() {
         secret_scan::secret_scan_info,
         secret_scan::acknowledge_secret_findings,
         projects::set_project_secret_scan,
+        data_safety::data_safety_state,
         workspace::list_workspace_commands,
         workspace::save_workspace_command,
         workspace::delete_workspace_command,

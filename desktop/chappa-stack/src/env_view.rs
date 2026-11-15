@@ -604,48 +604,76 @@ fn data_safety_facts(s: &InstanceSafety) -> Value {
 fn data_safety_alerts(s: &InstanceSafety) -> Vec<Value> {
     let mut out = Vec::new();
     for c in &s.components {
+        let Some((text, severity)) = component_problem(c) else {
+            continue;
+        };
         let effect = data_safety::policy_effect(c.policy)
             .map(|e| format!(" — {e}"))
             .unwrap_or_default();
-        let (text, severity) = match c.state {
-            SafetyState::NotClean => {
-                let why = c
-                    .entry
-                    .as_ref()
-                    .and_then(|e| e.verdict.as_ref())
-                    .map(|v| data_safety::problems(v, false).join("; "))
-                    .unwrap_or_else(|| "not clean".into());
-                (format!("{}: {why}{effect}", c.id), "bad")
-            }
-            SafetyState::Error => (
-                format!(
-                    "{}: the data-safety check could not be judged ({}){effect}",
-                    c.id,
-                    c.error.as_deref().unwrap_or("no verdict")
-                ),
-                "bad",
-            ),
-            SafetyState::Unscanned => {
-                let why = if c.has_check {
-                    "has a data-safety check that has not run since it started"
-                } else {
-                    "keeps data and has no data-safety check"
-                };
-                let severity = if c
-                    .policy
-                    .is_some_and(stack_core::safety::Policy::blocks_agents)
-                {
-                    "bad"
-                } else {
-                    "warn"
-                };
-                (format!("{} {why}{effect}", c.id), severity)
-            }
-            SafetyState::Clean | SafetyState::Acknowledged => continue,
-        };
-        out.push(json!({ "text": text, "severity": severity, "componentId": c.id }));
+        out.push(
+            json!({ "text": format!("{text}{effect}"), "severity": severity, "componentId": c.id }),
+        );
     }
     out
+}
+
+/// What one component's data safety has to say, without the policy's
+/// effect, and how loud: `None` for a clean or acknowledged component.
+fn component_problem(c: &data_safety::ComponentSafety) -> Option<(String, &'static str)> {
+    match c.state {
+        SafetyState::NotClean => {
+            let why = c
+                .entry
+                .as_ref()
+                .and_then(|e| e.verdict.as_ref())
+                .map(|v| data_safety::problems(v, false).join("; "))
+                .unwrap_or_else(|| "not clean".into());
+            Some((format!("{}: {why}", c.id), "bad"))
+        }
+        SafetyState::Error => Some((
+            format!(
+                "{}: the data-safety check could not be judged ({})",
+                c.id,
+                c.error.as_deref().unwrap_or("no verdict")
+            ),
+            "bad",
+        )),
+        SafetyState::Unscanned => {
+            let why = if c.has_check {
+                "has a data-safety check that has not run since it started"
+            } else {
+                "keeps data and has no data-safety check"
+            };
+            let severity = if c
+                .policy
+                .is_some_and(stack_core::safety::Policy::blocks_agents)
+            {
+                "bad"
+            } else {
+                "warn"
+            };
+            Some((format!("{} {why}", c.id), severity))
+        }
+        SafetyState::Clean | SafetyState::Acknowledged => None,
+    }
+}
+
+/// The `dataSafety` block: the instance's verdict plus where it applies
+/// (`bound`, `project`) and one reason line per component, so the app can
+/// keep agents out of exactly those folders and say why.
+fn data_safety_block(inp: &EnvInputs<'_>) -> Value {
+    let mut block = inp.safety.wire();
+    block["bound"] = data_safety::bound(inp.loaded);
+    block["project"] = data_safety::project_dir(&inp.loaded.dir);
+    block["reasons"] = inp
+        .safety
+        .components
+        .iter()
+        .filter_map(|c| {
+            component_problem(c).map(|(text, _)| json!({ "component": c.id, "text": text }))
+        })
+        .collect();
+    block
 }
 
 fn alerts(inp: &EnvInputs<'_>, components: &[Value]) -> Vec<Value> {
@@ -814,14 +842,14 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
         "facts": facts(inp),
         "alerts": alerts,
         "banners": banners(inp),
-        "dataSafety": inp.safety.wire(),
+        "dataSafety": data_safety_block(inp),
     })
 }
 
 /// A payload for a project whose definition cannot be loaded: no rows,
 /// one banner saying why, and a data-safety block that says it cannot
 /// tell (`instance` is `<stack>/<slot>` as configured).
-pub fn unavailable(reason: &str, now_utc: &str, instance: &str) -> Value {
+pub fn unavailable(reason: &str, now_utc: &str, instance: &str, project: &Path) -> Value {
     json!({
         "dataSafety": {
             "instance": instance,
@@ -835,6 +863,9 @@ pub fn unavailable(reason: &str, now_utc: &str, instance: &str) -> Value {
             "unscanned": [],
             "ack": null,
             "ackActionId": data_safety::ACK_ACTION_ID,
+            "bound": null,
+            "project": data_safety::project_dir(project),
+            "reasons": [{ "component": null, "text": format!("the stack cannot be read: {reason}") }],
         },
         "freshness": { "asOf": now_utc, "errors": [{ "source": "definition", "message": reason }] },
         "groups": [],

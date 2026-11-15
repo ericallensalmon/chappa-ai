@@ -1369,3 +1369,53 @@ fn plan_wait_is_the_idle_tick_or_the_exact_delay() {
     clock.set(1_000);
     assert_eq!(s.plan_wait(), Some(Duration::from_millis(89_000)));
 }
+
+/// Holds firings for the listed targets, like the data-safety hold does for
+/// an agent next to data that may be real; `release` makes the held ones.
+/// One held firing: target, body, and the call that delivers it.
+type HeldFiring = (u32, String, Box<dyn FnOnce() + Send>);
+
+#[derive(Default)]
+struct FakeHold {
+    blocked: Mutex<Vec<u32>>,
+    queued: Mutex<Vec<HeldFiring>>,
+}
+
+impl app_lib::timers::TimerHold for FakeHold {
+    fn hold_reason(&self, process_id: u32) -> Option<String> {
+        self.blocked.lock().unwrap().contains(&process_id).then(|| "held".to_owned())
+    }
+    fn hold(&self, process_id: u32, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+        let mut q = self.queued.lock().unwrap();
+        q.push((process_id, text, deliver));
+        q.len()
+    }
+}
+
+/// A firing whose target is held waits in the target's queue, still in
+/// flight (never recorded as failed), and is delivered and recorded once the
+/// hold lifts; a target that is not held gets its firing at once.
+#[test]
+fn a_held_target_gets_its_firing_when_the_hold_lifts() {
+    let (service, clock, probe, deliverer, _dir) = service(0);
+    probe.add(7, "agent", 0);
+    probe.add(8, "other", 0);
+    let hold = Arc::new(FakeHold::default());
+    hold.blocked.lock().unwrap().push(7);
+    service.set_hold(hold.clone());
+    let held = service.set("7", None, 7, "keep going".into(), 1_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
+    let free = service.set("7", None, 8, "free".into(), 1_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
+    clock.set(1_000);
+    service.tick_now();
+    wait_for(|| last_delivery(&service, free)["delivered"] == json!(true));
+    wait_for(|| hold.queued.lock().unwrap().len() == 1);
+    assert_eq!(deliverer.sent(), vec![(8, "free".to_owned())], "nothing reached the held target");
+    assert_ne!(last_delivery(&service, held)["delivered"], json!(true));
+    assert_ne!(last_delivery(&service, held)["delivered"], json!(false), "held is not failed");
+    let (target, text, deliver) = hold.queued.lock().unwrap().pop().unwrap();
+    assert_eq!((target, text.as_str()), (7, "keep going"));
+    hold.blocked.lock().unwrap().clear();
+    deliver();
+    wait_for(|| last_delivery(&service, held)["delivered"] == json!(true));
+    assert_eq!(deliverer.sent(), vec![(8, "free".to_owned()), (7, "keep going".to_owned())]);
+}

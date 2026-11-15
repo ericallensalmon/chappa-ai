@@ -910,7 +910,15 @@ impl Records {
                     _ => (Arc::new(NullSink), None),
                 };
                 let headless = on_notify.is_none();
-                let resp = spawn_agent_with(ctx, req, sink, on_notify).map_err(RecordError::Internal)?;
+                // A data-safety refusal is the record's state of affairs, not
+                // a fault: it answers like any other "not now".
+                let resp = spawn_agent_with(ctx, req, sink, on_notify).map_err(|e| {
+                    if crate::data_safety::is_refusal(&e) {
+                        RecordError::Unavailable(e)
+                    } else {
+                        RecordError::Internal(e)
+                    }
+                })?;
                 if headless {
                     if let Some(app) = deps.app.as_ref() {
                         emit_created(
@@ -1118,7 +1126,7 @@ impl Records {
         };
         let headless = on_notify.is_none();
         let resp = spawn_agent_with(ctx, req, sink, on_notify).map_err(|e| {
-            if e.contains("no resume command") {
+            if e.contains("no resume command") || crate::data_safety::is_refusal(&e) {
                 ResumeFailure::Unavailable { record_id: rid(), message: e }
             } else {
                 ResumeFailure::Internal { message: e }

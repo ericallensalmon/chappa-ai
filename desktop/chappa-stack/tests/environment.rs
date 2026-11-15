@@ -225,6 +225,7 @@ fn http() -> FakeHttp {
 
 fn mask(v: &mut Value) {
     v["freshness"]["asOf"] = "<now>".into();
+    v["dataSafety"]["project"] = "<project>".into();
     for c in v["components"].as_array_mut().unwrap() {
         if !c["uptime"].is_null() {
             c["uptime"] = "<uptime>".into();

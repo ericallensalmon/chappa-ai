@@ -239,7 +239,7 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         path: "/processes/{id}/input",
         fields: &["text", "submit?", "wait_ms?"],
-        description: "Write text to the pty in ONE atomic write (submit appends \\r to the same write). Returns a receipt {written, seq_before, seq_after, had_output_within_ms, wait_ms} off the byte counter. For a json-transport agent the text is delivered as ONE user message (claude: a stream-json user line on stdin; opencode: a `run -s <session>` continuation child) and the receipt is {written, transport: \"json\", delivered, reason?, waited_ms, seq_before, turn_started_seq?, wait_ms}: delivered=true means the CLI's next turn_started arrived within wait_ms (default 5000, max 20000); reason=timeout means written but not yet acknowledged, exited = no child to write to (or it died before its turn started: `exited: <why>`), busy = the previous opencode turn is still running. `wait_ms` is the effective wait. A json agent takes whole messages: `submit: false` or empty text is a 400, and a refused send (busy/exited/unsupported) is not journaled.",
+        description: "Write text to the pty in ONE atomic write (submit appends \\r to the same write). Returns a receipt {written, seq_before, seq_after, had_output_within_ms, wait_ms} off the byte counter. For a json-transport agent the text is delivered as ONE user message (claude: a stream-json user line on stdin; opencode: a `run -s <session>` continuation child) and the receipt is {written, transport: \"json\", delivered, reason?, waited_ms, seq_before, turn_started_seq?, wait_ms}: delivered=true means the CLI's next turn_started arrived within wait_ms (default 5000, max 20000); reason=timeout means written but not yet acknowledged, exited = no child to write to (or it died before its turn started: `exited: <why>`), busy = the previous opencode turn is still running. `wait_ms` is the effective wait. A json agent takes whole messages: `submit: false` or empty text is a 400, and a refused send (busy/exited/unsupported) is not journaled. Held: when the target is an agent working next to a database a stack source reports may hold real data (its data-safety block covers the agent's folder), nothing is written; the text is queued and the answer is {written: false, held: true, held_count, reason}. Queued messages are delivered in order once the block clears (clean check or acknowledgement); what the person types is never held.",
         handler: send_input,
     },
     Route {
@@ -253,7 +253,7 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         path: "/processes/{id}/bytes",
         fields: &["bytes", "wait_ms?"],
-        description: "Raw bytes ([u8]) to the pty, same receipt and journal treatment as /input. The escape hatch for control sequences.",
+        description: "Raw bytes ([u8]) to the pty, same receipt and journal treatment as /input. The escape hatch for control sequences. Held like /input while a data-safety block covers an agent's folder.",
         handler: send_bytes,
     },
     Route {
@@ -288,7 +288,7 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         path: "/agents",
         fields: &["agent_tool_id", "project_id?", "name?", "extra_args?", "prompt?", "working_dir?", "env?", "force?", "cols?", "rows?", "parent_process_id?", "close_on_exit?", "ephemeral?"],
-        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < `env` < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID; `env` names must be [A-Z_][A-Z0-9_]*); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `working_dir` starts the agent in a folder other than the project root; it must resolve inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else 400 with the reason. Before any spawn with a working directory the folder is scanned for secrets when Settings ▸ Security has it on (default: on when gitleaks is installed): under the block-agents policy a finding refuses the spawn with `secret-scan-blocked:` + JSON {projectRoot, cwd, findings: [{file, rule, line}], skipped} — never a value — until it is fixed or acknowledged; under warn it launches and notifies. `prompt`: a tool with a prompt_argv (claude and codex by default) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv), so it can never answer a startup question; otherwise it queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), is HELD while a known startup or permission question is on screen (folder trust, a new MCP server, an external CLAUDE.md, the bypass-permissions warning: delivered=false, reason=`held: waiting on <question>` when the cap passes), then ONE atomic write of text+\\r; prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
+        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < `env` < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID; `env` names must be [A-Z_][A-Z0-9_]*); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `working_dir` starts the agent in a folder other than the project root; it must resolve inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else 400 with the reason. Before any spawn with a working directory the folder is scanned for secrets when Settings ▸ Security has it on (default: on when gitleaks is installed): under the block-agents policy a finding refuses the spawn with `secret-scan-blocked:` + JSON {projectRoot, cwd, findings: [{file, rule, line}], skipped} — never a value — until it is fixed or acknowledged; under warn it launches and notifies. A folder covered by a stack source's data-safety block (its database may hold real data) refuses the spawn with the reason until the check is clean or acknowledged in Environment. `prompt`: a tool with a prompt_argv (claude and codex by default) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv), so it can never answer a startup question; otherwise it queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), is HELD while a known startup or permission question is on screen (folder trust, a new MCP server, an external CLAUDE.md, the bypass-permissions warning: delivered=false, reason=`held: waiting on <question>` when the cap passes), then ONE atomic write of text+\\r; prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
         handler: spawn_agent,
     },
     Route {
@@ -1317,12 +1317,21 @@ pub fn submit_payload(text: &str, submit: bool) -> Vec<u8> {
     bytes
 }
 
+/// A delivery to an agent that data safety holds: queued (in order behind
+/// any held before it) and made by `deliver` once the block clears. The
+/// answer says so; nothing was written and nothing is journaled yet.
+fn held(state: &ControlState, id: TermId, reason: String, text: &str, deliver: Box<dyn FnOnce() + Send>) -> Resp {
+    let count = state.registry.hold_delivery(id, text.to_owned(), deliver);
+    json(200, json!({"written": false, "held": true, "held_count": count, "reason": reason}))
+}
+
 fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Resp {
     let id = params.id.unwrap_or_default();
     let body: InputBody = match serde_json::from_str(body) {
         Ok(body) => body,
         Err(err) => return json(400, json!({"error": format!("bad body: {err}")})),
     };
+    let hold = state.registry.hold_reason(id);
     // A json-transport agent takes a user MESSAGE, not keystrokes
     // — `submit` is implied (an explicit false, or nothing to say, is a
     // caller error), the receipt is the next turn_started.
@@ -1336,6 +1345,15 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
         if body.text.trim().is_empty() {
             return json(400, json!({"error": "text is empty: a json-transport agent takes whole messages"}));
         }
+        if let Some(reason) = hold {
+            let registry = state.registry.clone();
+            let text = body.text.clone();
+            return held(state, id, reason, &body.text, Box::new(move || {
+                if let Err(e) = json_send_input(&registry, id, &text, None) {
+                    log::warn!("[control] a held message to {id} was not delivered: {e}");
+                }
+            }));
+        }
         return match json_send_input(&state.registry, id, &body.text, body.wait_ms) {
             Ok(receipt) => {
                 let mut value = serde_json::to_value(&receipt).unwrap_or_default();
@@ -1348,6 +1366,13 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
     }
     let submit = body.submit.unwrap_or(false);
     let payload = submit_payload(&body.text, submit);
+    if let Some(reason) = hold {
+        let registry = state.registry.clone();
+        let text = body.text.clone();
+        return held(state, id, reason, &body.text, Box::new(move || {
+            registry.write_journaled(id, &payload, text, submit);
+        }));
+    }
     deliver(state, id, &payload, body.text, submit, body.wait_ms)
 }
 
@@ -1374,6 +1399,13 @@ fn send_bytes(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
         return json(409, json!({"error": format!("process {id} is a json-transport agent: it takes messages via /input, not raw bytes")}));
     }
     let text = String::from_utf8_lossy(&body.bytes).into_owned();
+    if let Some(reason) = state.registry.hold_reason(id) {
+        let registry = state.registry.clone();
+        let (bytes, shown) = (body.bytes.clone(), text.clone());
+        return held(state, id, reason, &text, Box::new(move || {
+            registry.write_journaled(id, &bytes, shown, false);
+        }));
+    }
     deliver(state, id, &body.bytes, text, false, body.wait_ms)
 }
 
@@ -1515,7 +1547,7 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
             json(200, json!(resp))
         }
         Err(err) if err.starts_with("no such") => json(404, json!({"error": err})),
-        Err(err) if err.starts_with("refused") || err.contains("disabled") => {
+        Err(err) if err.starts_with("refused") || err.contains("disabled") || crate::data_safety::is_refusal(&err) => {
             json(409, json!({"error": err}))
         }
         Err(err) => json(500, json!({"error": format!("spawn failed: {err}")})),

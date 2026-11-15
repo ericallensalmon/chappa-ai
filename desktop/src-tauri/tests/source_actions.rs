@@ -32,7 +32,7 @@ use term_core::pty::PtySpec;
 use app_lib::settings::SettingsState;
 use app_lib::source_actions::{run_action, ActionDeps, ActionOutcome};
 use app_lib::sources::identity::{ADDR_ENV, TOKEN_ENV};
-use app_lib::sources::{PromptPolicy, SourceStatus, Sources, SourcesEmitter};
+use app_lib::sources::{CallActor, PromptPolicy, SourceStatus, Sources, SourcesEmitter};
 use project_model::projects::ProjectStore;
 use serde_json::Value;
 
@@ -244,7 +244,7 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     // A mutating action needs the confirm; the fixture refuses an
     // unconfirmed one too (defence in depth), which the client sees as 409.
     assert!(run("work", Some("ABC-1"), "approve", false, None).unwrap_err().contains("must be confirmed"));
-    let refused = deps.sources.call_endpoint(sid, &serde_json::json!({"id": "approve", "target": {"view": "work", "key": "ABC-1"}})).unwrap();
+    let refused = deps.sources.call_endpoint(sid, &serde_json::json!({"id": "approve", "target": {"view": "work", "key": "ABC-1"}}), &CallActor::human()).unwrap();
     assert_eq!(refused.status, 409);
     assert_eq!(run("work", Some("ABC-1"), "approve", true, Some("looks good")).unwrap(), ActionOutcome::Done { message: Some("Approved".into()) });
     // The call was journaled on the source's own row under its actor.

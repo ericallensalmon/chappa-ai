@@ -621,11 +621,19 @@
     "ack": null,
     "ackActionId": "data-safety-ack",
     "blocksAgents": false,
+    "bound": null,
     "findings": [],
     "instance": "env/0",
     "lastScanUtc": null,
     "marker": null,
     "policy": "warn",
+    "project": "<project>",
+    "reasons": [
+      {
+        "component": "db",
+        "text": "db keeps data and has no data-safety check"
+      }
+    ],
     "rulesHash": null,
     "state": "unscanned",
     "unscanned": [

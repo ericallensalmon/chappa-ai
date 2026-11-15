@@ -15,7 +15,10 @@
 //  - Environment components in a red state (unhealthy, crash loop, deployed
 //    but not running, a failed one-shot): something the user brought up is
 //    broken;
-//  - the attention items sources serve, grouped under their own headings.
+//  - the attention items sources serve, grouped under their own headings;
+//  - data safety, first: each stack whose data-safety block keeps agents out
+//    (it opens Environment, where the block is dealt with), and each running
+//    agent working inside a blocked folder (its deliveries are held).
 // The rail badge counts the rows that wait on a decision: agents waiting
 // and programs blocked, Work approvals, PRs, red components and source
 // attention. A
@@ -25,6 +28,7 @@
 
 import { attentionText, type CardAttention } from "../dashboard";
 import type * as ipc from "../ipc";
+import { dataSafetySection } from "./data_safety";
 import { buildEnvironmentModel, environmentNews } from "./environment_model";
 import {
   itemsOf,
@@ -118,6 +122,8 @@ export interface NeedsYouInput {
    *  or empty when the view is not in play). */
   environment?: ViewPayload[];
   needsUpdate?: NeedsUpdate[];
+  /** What Rust enforces for data safety (absent: nothing is blocked). */
+  dataSafety?: ipc.DataSafetyStateDto;
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
@@ -179,6 +185,10 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
     noteStale(p);
     return true;
   };
+
+  // Data safety leads: agents are being kept from data that may be real.
+  const safety = input.dataSafety ? dataSafetySection(input.dataSafety) : null;
+  if (safety) sections.push(safety);
 
   // Terminals and agents: waiting / blocked first, then bell rank, each in
   // the rail's own order.

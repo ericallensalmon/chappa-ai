@@ -246,3 +246,45 @@ test("an echoing action answers with exactly the target, params and note it was 
     assert.deepEqual(JSON.parse(later.body.message), { target: { view: "prs", key: "github:owner/repo:#1" }, params: null, note: null });
   } finally { ws.stop(); }
 });
+
+test("an echoing action also echoes the caller's actor header when it sent one", async () => {
+  const ws = await start(["--data", overlayDir]);
+  try {
+    const r = await ws.call("/api/actions", { method: "POST", body: { id: "review-later", target: { view: "prs", key: "github:owner/repo:#1" } }, headers: { "x-chappa-actor": "human:Alex" } });
+    assert.equal(JSON.parse(r.body.message).actor, "human:Alex");
+  } finally { ws.stop(); }
+});
+
+test("the data-safety mode serves the block until a person acknowledges it", async () => {
+  // The default fixture has no block at all.
+  assert.equal((await src.call("/api/env")).body.dataSafety, undefined);
+  const dir = mkdtempSync(join(tmpdir(), "fixture-ds-"));
+  cpSync(dataDir, dir, { recursive: true });
+  const ds = await start(["--data", dir], { CHAPPA_FIXTURE_DATA_SAFETY: "1" });
+  try {
+    const env = (await ds.call("/api/env")).body;
+    assert.equal(env.dataSafety.blocksAgents, true);
+    assert.deepEqual(env.dataSafety.bound, { source: "fixture", key: "ABC-1", folders: ["/srv/example/abc-1"] });
+    const banner = env.banners.find((b) => b.id === "data-safety");
+    assert.deepEqual(banner.actions.map((a) => [a.id, a.mutates, a.note]), [["data-safety-ack", true, "required"]]);
+    const ack = (headers, body) => ds.call("/api/actions", { method: "POST", body: { id: "data-safety-ack", target: { view: "environment", key: null }, ...body }, headers });
+    assert.equal((await ack({ "x-chappa-actor": "human:Alex" }, { note: "known rows" })).body.kind, "confirmation-required");
+    assert.equal((await ack({ "x-chappa-actor": "human:Alex" }, { confirmed: true })).body.kind, "note-required");
+    const agent = await ack({ "x-chappa-actor": "agent:7" }, { confirmed: true, note: "x" });
+    assert.equal(agent.status, 409);
+    assert.match(agent.body.message, /agent:7/);
+    assert.equal((await ack({}, { confirmed: true, note: "x" })).body.kind, "human-only", "no header is not a person");
+    const ok = await ack({ "x-chappa-actor": "human:Alex" }, { confirmed: true, note: "known rows" });
+    assert.equal(ok.status, 200);
+    const after = (await ds.call("/api/env")).body;
+    assert.equal(after.dataSafety.state, "acknowledged");
+    assert.equal(after.dataSafety.blocksAgents, false);
+    assert.equal(after.dataSafety.ack.by, "human:Alex");
+    assert.ok(!after.banners.some((b) => b.id === "data-safety"));
+    // A new verdict (the file changes) ends the acknowledgement.
+    const block = JSON.parse(readFileSync(join(dir, "data-safety.json"), "utf8"));
+    block.findings[0].count = 3;
+    writeFileSync(join(dir, "data-safety.json"), JSON.stringify(block));
+    assert.equal((await ds.call("/api/env")).body.dataSafety.blocksAgents, true);
+  } finally { ds.stop(); rmSync(dir, { recursive: true, force: true }); }
+});

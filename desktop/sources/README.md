@@ -164,8 +164,16 @@ Reply with one of:
   not have happened and never retries a mutating call itself.
 
 An endpoint action with `note: "required"` asks the user for a note
-before it is sent; the source refuses the call without one. The app may
-name who acted in an `X-Chappa-Actor` request header.
+before it is sent; the source refuses the call without one.
+
+Every actions call names who asked for it in an `X-Chappa-Actor` request
+header: `human:<OS user name>` for an action the person ran from the app,
+`agent:<actor id>` for one an agent caused (no agent can run a source
+action today, so every call is `human:` for now). The value is printable
+ASCII, at most 80 characters. A source that lets only people make some
+moves (a review gate, an acknowledgement) refuses a call whose header is
+missing or does not start with `human:`. The header is the app's word,
+not proof: it says who the app was acting for.
 
 ## One item, several sources
 
@@ -267,7 +275,11 @@ sends it always):
   ],
   "unscanned": [],
   "ack": null,
-  "ackActionId": "data-safety-ack"
+  "ackActionId": "data-safety-ack",
+  "bound": { "source": "tracker", "key": "ABC-1",
+             "folders": ["/srv/example/.work/ABC-1", "/srv/example/.work/ABC-1/src/api-1a2b3c4d"] },
+  "project": "/srv/example",
+  "reasons": [ { "component": "db", "text": "db: 2 findings (card-number ×2)" } ]
 }
 ```
 
@@ -283,10 +295,39 @@ sends it always):
 | `unscanned` | the components counted as unscanned |
 | `ack` | the acknowledgement in force: `{by, note, atUtc}`, or `null` |
 | `ackActionId` | the endpoint action that acknowledges. It is offered (on the data-safety banner and facts section, `key: null`, `mutates: true`, `note: "required"`, a `confirm` naming the findings) only while `state` is `not-clean`; it lasts until a check reports anything different |
+| `bound` | the work item the instance is bound to (the slot's active item): `source` and `key` of the row that owns it (`source` is `null` when the item's record cannot be read) and `folders`, the absolute folders agents work in for it: the item folder first, then each worktree. `null` when no item is active |
+| `project` | the stack project's folder, absolute. What the block covers when `bound` is `null`: agents started in the stack project itself are as close to the data as anything |
+| `reasons` | one line per component with something to say (not clean, cannot be judged, not checked), in definition order: `{component, text}`. The app shows them as the reason a launch is refused |
 
 When the source cannot read its definition at all, it still sends the
 block, with `state: "error"`, `policy: null` and `blocksAgents: false`:
-it cannot tell, and what that means is the app's decision.
+it cannot tell, and the app treats it as blocking (it fails closed).
+
+### What the app does with it
+
+- **Blocking**: `blocksAgents` is true, or `state` is `error` whatever
+  `blocksAgents` says. A source that sent a block and then goes down,
+  stops answering, fails its Environment poll or loses trust keeps its
+  last block in force (shown as "last known: …, source unavailable")
+  until it answers again. A source that never sends a block (an older
+  source, or one that runs no databases) enforces nothing.
+- **Where**: the folders in `bound`, or `project` when nothing is bound
+  (the launching project's folder when the block names none). A folder
+  and everything below it, compared after resolving `..` and symlinks,
+  ignoring case on Windows.
+- **New agents** whose working folder is covered are refused, whichever
+  way they start: a source's `agent` action (its button is disabled with
+  the reason first), the app's own launch, the control surface and MCP,
+  starting a stopped agent row again, and resuming one. Terminals are not
+  agents and are never refused.
+- **Running agents** in a covered folder are not stopped. Each gets a
+  Needs you entry, and what the control surface, MCP or a timer sends it
+  is held (queued, in order, "held: N messages" on its row) until the
+  block lifts, then delivered. What the person types is never held.
+- **Lifting it** is the source's: a clean check, or the `ackActionId`
+  action, which the app calls with `X-Chappa-Actor: human:<name>` so the
+  acknowledgement records who. The app polls the view again right after
+  an action answers `200`, so a lifted block clears at once.
 
 ## Run the fixture by hand
 
@@ -299,7 +340,10 @@ node desktop/sources/fixture/index.mjs
 Use `--data <dir>` to serve a different set of JSON files (copy
 `fixture/data/` and edit). Bodies are re-read on every request. Set
 `CHAPPA_FIXTURE_JOB_MS` to change how long a plain job takes to finish
-(default 3000). Then, from another shell, with the same token in
+(default 3000). `CHAPPA_FIXTURE_DATA_SAFETY=1` adds the data-safety block
+in `data-safety.json` to the Environment answer, with its acknowledge
+action (a person only, a note required), so the app's enforcement can be
+tried by hand. Then, from another shell, with the same token in
 `$TOKEN`:
 
 ```sh
