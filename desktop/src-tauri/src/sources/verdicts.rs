@@ -20,7 +20,19 @@
 //! - **At startup, before a source answers**, its record stands in for the
 //!   answer: a saved verdict that blocks is enforced and reads as the last
 //!   known one; a saved one that does not block allows.
-//! - **A source removed in Settings** takes its record with it.
+//! - **A source that is gone** takes its record with it: one detached in
+//!   Settings, or one whose project was removed from the app. A source
+//!   that merely failed to start or crashed keeps it (fail closed).
+//! - **A launched source no longer declared** in its project's
+//!   `chappa.yml` (`undeclared`) keeps its record, still enforced and
+//!   marked as removed, until the project's new content is trusted: only
+//!   then does the record go. Anything that can write the file could
+//!   otherwise lift a block by deleting a `source:` key.
+//! - **Stack sources are remembered** (`stackSources`): once a source's
+//!   trusted manifest says it is a stack (`stack:…` serving Environment),
+//!   that is kept, so on a later launch it blocks its folder from the first
+//!   instant, before its manifest arrives, until its first answer. Trusting
+//!   a changed manifest keeps the flag only if it is still a stack.
 //!
 //! The keys are the opaque registry ids (a hash of the trust key), which
 //! are the same on every run. A missing, unreadable or garbled file is an
@@ -62,10 +74,32 @@ impl SavedVerdict {
     }
 }
 
+/// A source whose trusted manifest said it is a stack: what its block
+/// before the manifest arrives is named after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RememberedStack {
+    pub manifest_id: String,
+    pub source_label: String,
+}
+
+/// A launched source whose `source:` command its project's `chappa.yml`
+/// stopped declaring, waiting for that content to be trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Undeclared {
+    pub project: PathBuf,
+    pub command: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileShape {
     #[serde(default)]
     verdicts: BTreeMap<String, SavedVerdict>,
+    #[serde(default, rename = "stackSources", skip_serializing_if = "BTreeMap::is_empty")]
+    stack_sources: BTreeMap<String, RememberedStack>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    undeclared: BTreeMap<String, Undeclared>,
 }
 
 #[derive(Debug)]
@@ -115,9 +149,66 @@ impl VerdictStore {
         self.save()
     }
 
-    /// Drop the record of a source that is gone from Settings.
+    /// Whether `source_id` is remembered as a stack source.
+    pub fn stack(&self, source_id: &str) -> Option<&RememberedStack> {
+        self.data.stack_sources.get(source_id)
+    }
+
+    /// Record what the trusted manifest of `source_id` says: `Some` = a
+    /// stack source, `None` = not one (the flag goes). Written only on a
+    /// change.
+    pub fn set_stack(&mut self, source_id: &str, stack: Option<RememberedStack>) -> Result<(), String> {
+        let changed = match stack {
+            Some(stack) => self.data.stack_sources.insert(source_id.to_owned(), stack.clone()).as_ref() != Some(&stack),
+            None => self.data.stack_sources.remove(source_id).is_some(),
+        };
+        if changed {
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// Whether `source_id` is waiting for its project's new content to be
+    /// trusted before its record goes.
+    pub fn undeclared(&self, source_id: &str) -> Option<&Undeclared> {
+        self.data.undeclared.get(source_id)
+    }
+
+    /// The sources of the project at `project` waiting that way.
+    pub fn undeclared_in(&self, project: &Path) -> Vec<(String, Undeclared)> {
+        self.data
+            .undeclared
+            .iter()
+            .filter(|(_, u)| u.project == project)
+            .map(|(id, u)| (id.clone(), u.clone()))
+            .collect()
+    }
+
+    /// Mark `source_id` as no longer declared (`Some`), or as declared again
+    /// (`None`). Written only on a change.
+    pub fn set_undeclared(&mut self, source_id: &str, undeclared: Option<Undeclared>) -> Result<(), String> {
+        let changed = match undeclared {
+            Some(u) => self.data.undeclared.insert(source_id.to_owned(), u.clone()).as_ref() != Some(&u),
+            None => self.data.undeclared.remove(source_id).is_some(),
+        };
+        if changed {
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// Whether anything is kept for `source_id`.
+    pub fn holds(&self, source_id: &str) -> bool {
+        self.data.verdicts.contains_key(source_id) || self.data.stack_sources.contains_key(source_id)
+    }
+
+    /// Drop everything kept for a source that is gone: its verdict, whether
+    /// it was a stack, and whether it waited to be dropped.
     pub fn remove(&mut self, source_id: &str) -> Result<(), String> {
-        if self.data.verdicts.remove(source_id).is_some() {
+        let verdict = self.data.verdicts.remove(source_id).is_some();
+        let stack = self.data.stack_sources.remove(source_id).is_some();
+        let undeclared = self.data.undeclared.remove(source_id).is_some();
+        if verdict || stack || undeclared {
             self.save()?;
         }
         Ok(())
@@ -179,6 +270,58 @@ mod tests {
         let reopened = VerdictStore::load(path);
         assert!(reopened.get("s1").is_none());
         assert!(reopened.get("s2").is_some());
+    }
+
+    #[test]
+    fn a_remembered_stack_source_is_kept_cleared_and_removed_with_its_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut store = VerdictStore::load(path.clone());
+        store.put("s1", verdict("clean", false, 1)).unwrap();
+        let without_flags = std::fs::read_to_string(&path).unwrap();
+        assert!(!without_flags.contains("stackSources"), "no empty map on disk: {without_flags}");
+        let stack = RememberedStack { manifest_id: "stack:app".into(), source_label: "Stack app".into() };
+        store.set_stack("s1", Some(stack.clone())).unwrap();
+        store.set_stack("s2", Some(stack.clone())).unwrap();
+        let reopened = VerdictStore::load(path.clone());
+        assert_eq!(reopened.stack("s1"), Some(&stack));
+        assert_eq!(reopened.stack("s2"), Some(&stack));
+        // The same flag again does not rewrite the file.
+        let before = std::fs::read_to_string(&path).unwrap();
+        store.set_stack("s1", Some(stack.clone())).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // Not a stack any more: cleared, the verdict stays.
+        store.set_stack("s2", None).unwrap();
+        assert!(VerdictStore::load(path.clone()).stack("s2").is_none());
+        // Removed: verdict and flag both go.
+        store.remove("s1").unwrap();
+        let reopened = VerdictStore::load(path.clone());
+        assert!(reopened.get("s1").is_none());
+        assert!(reopened.stack("s1").is_none());
+        // A file written before flags existed reads as having none.
+        std::fs::write(&path, without_flags).unwrap();
+        assert!(VerdictStore::load(path).stack("s1").is_none());
+    }
+
+    #[test]
+    fn an_undeclared_source_is_marked_listed_per_project_and_removed_with_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut store = VerdictStore::load(path.clone());
+        store.put("s1", verdict("not-clean", true, 1)).unwrap();
+        assert!(store.holds("s1") && !store.holds("s2"));
+        let mark = |project: &str, command: &str| Undeclared { project: PathBuf::from(project), command: command.into() };
+        store.set_undeclared("s1", Some(mark("/srv/a", "stack"))).unwrap();
+        store.set_undeclared("s3", Some(mark("/srv/b", "stack"))).unwrap();
+        let reopened = VerdictStore::load(path.clone());
+        assert_eq!(reopened.undeclared("s1"), Some(&mark("/srv/a", "stack")));
+        assert_eq!(reopened.undeclared_in(Path::new("/srv/a")), vec![("s1".to_owned(), mark("/srv/a", "stack"))]);
+        assert!(reopened.get("s1").is_some(), "the verdict stays while it waits");
+        store.set_undeclared("s3", None).unwrap();
+        assert!(VerdictStore::load(path.clone()).undeclared("s3").is_none());
+        store.remove("s1").unwrap();
+        let reopened = VerdictStore::load(path);
+        assert!(reopened.undeclared("s1").is_none() && reopened.get("s1").is_none());
     }
 
     #[test]

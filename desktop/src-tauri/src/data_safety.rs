@@ -180,13 +180,23 @@ impl WireBlock {
 /// show: what was found and where to deal with it, and, when the source is
 /// not answering, that this is the last thing it said.
 pub fn reason_text(block: &WireBlock, current: bool) -> String {
-    let next = if block.state == "not-clean" { "acknowledge in Environment" } else { "see Environment" };
-    let text = format!("{} — {next}", block.summary());
+    let text = what_and_where(block);
     if current {
         text
     } else {
         format!("last known: {text}, source unavailable")
     }
+}
+
+/// The reason of a kept block whose launched source the project's
+/// `chappa.yml` no longer declares: it stays until that content is trusted.
+pub fn removed_reason(block: &WireBlock) -> String {
+    format!("last known: {}, source removed — trust the new chappa.yml to lift", what_and_where(block))
+}
+
+fn what_and_where(block: &WireBlock) -> String {
+    let next = if block.state == "not-clean" { "acknowledge in Environment" } else { "see Environment" };
+    format!("{} — {next}", block.summary())
 }
 
 /// The `state` of the block a stack source is held to before its first

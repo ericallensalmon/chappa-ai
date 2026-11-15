@@ -1266,6 +1266,12 @@ pub fn remove_project(
     id: u32,
 ) -> Result<(), String> {
     let mut inner = projects.store()?;
+    // Removing a project is the user's own explicit act: what the app kept
+    // for its sources goes with it at once (open or not, a saved verdict
+    // would block its folder forever otherwise), including the records of
+    // sources an untrusted edit had already stopped declaring.
+    let mut root = inner.store.as_ref().unwrap().get(id).map(|p| p.path.clone());
+    let mut declared: Vec<(String, ProcessDef)> = inner.store.as_ref().unwrap().process_defs(id).into_iter().collect();
     if let Some(mut runtime) = inner.runtimes.remove(&id) {
         for (name, proc) in runtime.processes.iter_mut() {
             proc.generation += 1; // cancels any scheduled respawn
@@ -1275,8 +1281,16 @@ pub fn remove_project(
                 registry.close(term_id);
                 source_gone(&inner.sources, &runtime.root, name, &proc.def, "was stopped with its project");
             }
+            declared.push((name.clone(), proc.def.clone()));
         }
+        root = Some(runtime.root.clone());
         inner.notify_changed();
+    }
+    if let Some(root) = root {
+        for name in undeclared_sources(declared.iter().map(|(n, d)| (n.as_str(), d)), |_| false) {
+            inner.sources.forget_launched(&root, &name);
+        }
+        inner.sources.forget_project(&root);
     }
     // The project's records go with its row; their run history goes with
     // them (the one removal path every record takes).
@@ -1346,6 +1360,10 @@ pub fn open_project(
     // re-read fresh and previous statuses/watchers are discarded. Live
     // terminals are closed here — the reopen owns the project view, and
     // leaving them running would orphan the process (nothing references it).
+    let still_source = |name: &str| processes.get(name).is_some_and(|p| p.def.is_source());
+    let declared: Vec<String> = processes.iter().filter(|(_, p)| p.def.is_source()).map(|(n, _)| n.clone()).collect();
+    // No file at all is not content anyone trusted.
+    let content_trusted = project_file.exists() && !trust_pending;
     if let Some(mut old) = inner.runtimes.remove(&id) {
         for (name, proc) in old.processes.iter_mut() {
             proc.generation += 1;
@@ -1356,6 +1374,14 @@ pub fn open_project(
                 source_gone(&inner.sources, &old.root, name, &proc.def, "was stopped when the project reopened");
             }
         }
+        let gone = undeclared_sources(old.processes.iter().map(|(n, p)| (n.as_str(), &p.def)), still_source);
+        settle_undeclared(&inner.sources, &old.root, gone, content_trusted, &declared);
+    } else {
+        // First open this run: what the file declared when the app last
+        // saw it is the working copy in the store.
+        let before = inner.store.as_ref().unwrap().process_defs(id);
+        let gone = undeclared_sources(before.iter().map(|(n, d)| (n.as_str(), d)), still_source);
+        settle_undeclared(&inner.sources, &root, gone, content_trusted, &declared);
     }
 
     let trust_commands: Vec<String> = processes
@@ -1466,7 +1492,17 @@ pub fn confirm_project_trust(
             })?;
         let loaded = inner.runtimes.get(&id).map(|r| r.yml_hash.as_str());
         trust_answer_matches(shown.as_deref(), loaded, &hash)?;
-        inner.store.as_mut().unwrap().mark_trusted(id, hash)
+        inner.store.as_mut().unwrap().mark_trusted(id, hash.clone())?;
+        // The sources this content stopped declaring may let go of their
+        // kept records now; read the declared ones from exactly what was
+        // trusted.
+        if let Ok((yml, read)) = ProjectYml::load_result_with_hash(&root) {
+            if read == hash {
+                let declared: Vec<String> = yml.processes.iter().filter(|(_, d)| d.is_source()).map(|(n, _)| n.clone()).collect();
+                inner.sources.content_trusted(&root, &declared);
+            }
+        }
+        Ok(())
     } else {
         Ok(())
     }
@@ -1871,15 +1907,22 @@ fn after_own_write(
     id: u32,
     was_trusted: bool,
 ) {
+    trust_own_write(inner.store.as_mut().unwrap(), id, was_trusted);
+    reload_locked(inner, registry, app, projects, id);
+}
+
+/// The app's own write to a project whose content was trusted before is
+/// trusted too (the user made it in the app); one to an untrusted project
+/// stays untrusted, so the next reload still asks.
+fn trust_own_write(store: &mut ProjectStore, id: u32, was_trusted: bool) {
     if was_trusted {
-        let root = inner.store.as_ref().unwrap().get(id).map(|p| p.path.clone());
+        let root = store.get(id).map(|p| p.path.clone());
         if let Some(hash) =
             root.and_then(|r| hash::file_content_hash(&r.join(project_model::yml::CHAPPA_YML_NAME)))
         {
-            let _ = inner.store.as_mut().unwrap().mark_trusted(id, hash);
+            let _ = store.mark_trusted(id, hash);
         }
     }
-    reload_locked(inner, registry, app, projects, id);
 }
 
 /// A rename is a KEY MOVE in the process source, so it is a
@@ -1938,6 +1981,38 @@ fn stop_locked(inner: &mut Inner, registry: &Registry, app: &AppHandle, id: u32,
 fn source_gone(sources: &Sources, root: &Path, name: &str, def: &ProcessDef, reason: &str) {
     if def.is_source() {
         sources.process_gone(root, name, reason);
+    }
+}
+
+/// The `source:` commands among `before` that are no longer declared as
+/// sources: `still_source(name)` is false (the command is gone, or kept
+/// without the `source:` key). Each name once, in order.
+fn undeclared_sources<'a>(
+    before: impl IntoIterator<Item = (&'a str, &'a ProcessDef)>,
+    still_source: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut gone: Vec<String> = Vec::new();
+    for (name, def) in before {
+        if def.is_source() && !still_source(name) && !gone.iter().any(|g| g == name) {
+            gone.push(name.to_owned());
+        }
+    }
+    gone
+}
+
+/// After a change to the project at `root` that stopped declaring the
+/// launched sources `gone`: each leaves the registry, its kept record still
+/// in force ([`Sources::undeclare_launched`]). When the content now loaded
+/// is `trusted` (by hash, which includes the app's own writes to a project
+/// that was trusted before), the records of every source it does not
+/// declare go now ([`Sources::content_trusted`]; `declared` = its `source:`
+/// commands); otherwise they wait for the trust answer.
+fn settle_undeclared(sources: &Sources, root: &Path, gone: Vec<String>, trusted: bool, declared: &[String]) {
+    for name in gone {
+        sources.undeclare_launched(root, &name);
+    }
+    if trusted {
+        sources.content_trusted(root, declared);
     }
 }
 
@@ -2060,6 +2135,10 @@ fn reload_locked(
     let old_defs: IndexMap<String, ProcessDef> =
         old.iter().map(|(n, p)| (n.clone(), p.def.clone())).collect();
     let diff = writeback::diff_processes(&old_defs, &new_defs);
+    let undeclared = undeclared_sources(old_defs.iter().map(|(n, d)| (n.as_str(), d)), |name| {
+        new_defs.get(name).is_some_and(ProcessDef::is_source)
+    });
+    let declared: Vec<String> = new_defs.iter().filter(|(_, d)| d.is_source()).map(|(n, _)| n.clone()).collect();
 
     let mut processes = IndexMap::new();
     for (name, def) in new_defs {
@@ -2147,6 +2226,7 @@ fn reload_locked(
             source_gone(&inner.sources, &root, &name, &proc.def, "was removed from chappa.yml");
         }
     }
+    settle_undeclared(&inner.sources, &root, undeclared, trusted, &declared);
     let trust_commands = if trusted {
         Vec::new()
     } else {
@@ -2928,6 +3008,81 @@ mod tests {
         // is safe to confirm silently because trusting it runs nothing.
         processes.shift_remove("web");
         assert!(reload_trust_commands(&processes, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_source_command_removed_or_stripped_of_its_key_is_no_longer_declared() {
+        let before = ProjectYml::from_str(
+            "processes:\n  stack:\n    command: stack serve\n    source: {}\n  feed:\n    command: feed\n    source: {}\n  kept:\n    command: kept\n    source: {}\n  web:\n    command: npm run dev\n",
+        )
+        .unwrap()
+        .processes;
+        // `stack` left the file, `feed` lost its `source:` key, `kept` is
+        // still a source, `web` was never one.
+        let after = ProjectYml::from_str("processes:\n  feed:\n    command: feed\n  kept:\n    command: kept --verbose\n    source: {}\n")
+            .unwrap()
+            .processes;
+        let still = |name: &str| after.get(name).is_some_and(ProcessDef::is_source);
+        assert_eq!(undeclared_sources(before.iter().map(|(n, d)| (n.as_str(), d)), still), vec!["stack", "feed"]);
+        // A removed project declares nothing: every source goes, each once.
+        let twice = before.iter().chain(before.iter()).map(|(n, d)| (n.as_str(), d));
+        assert_eq!(undeclared_sources(twice, |_| false), vec!["stack", "feed", "kept"]);
+        // Nothing changed: nothing to forget.
+        let same = |name: &str| before.get(name).is_some_and(ProcessDef::is_source);
+        assert!(undeclared_sources(before.iter().map(|(n, d)| (n.as_str(), d)), same).is_empty());
+    }
+
+    #[test]
+    fn an_undeclared_source_lets_go_of_its_block_only_under_trusted_content() {
+        use crate::sources::store::{self as source_store, SourceStore};
+        use crate::sources::verdicts::{SavedVerdict, VerdictStore};
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let root = dir.path().join("project");
+        let inside = root.join("wt");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&inside).unwrap();
+        // A kept blocking verdict of the project's `stack` source.
+        let sources_file = config.join(source_store::FILE_NAME);
+        let id = crate::sources::source_id_of(&SourceStore::launched_key(&root, "stack"));
+        let block = crate::data_safety::parse_block(&serde_json::json!({ "dataSafety": {
+            "instance": "app/0", "state": "not-clean", "blocksAgents": true,
+            "project": root.display().to_string(),
+            "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }],
+        }}));
+        VerdictStore::beside(&sources_file)
+            .put(&id, SavedVerdict { block, source_label: "Stack app".into(), manifest_id: "stack:app".into(), fallback: Some(root.clone()), saved_ms: 1 })
+            .unwrap();
+        let start = || {
+            let sources = Sources::default();
+            sources.init_with(SourceStore::new(sources_file.clone()), Arc::new(crate::sources::NullEmitter));
+            sources
+        };
+        let sources = start();
+        // A reload of content nobody trusted that dropped the source: the
+        // block stays, across a restart too.
+        settle_undeclared(&sources, &root, vec!["stack".to_owned()], false, &[]);
+        assert!(crate::data_safety::check_launch(&sources, &inside).is_err());
+        let sources = start();
+        assert!(crate::data_safety::check_launch(&sources, &inside).is_err());
+        // The next load of trusted content (or the trust answer) lifts it.
+        settle_undeclared(&sources, &root, Vec::new(), true, &[]);
+        assert!(crate::data_safety::check_launch(&sources, &inside).is_ok());
+        assert!(VerdictStore::beside(&sources_file).get(&id).is_none());
+
+        // The app's own write is trusted content exactly when the project's
+        // content was trusted before it.
+        let yml = root.join(project_model::yml::CHAPPA_YML_NAME);
+        std::fs::write(&yml, "processes: {}\n").unwrap();
+        let mut store = ProjectStore::new(dir.path().join("projects.json"));
+        let pid = store.add(root.clone(), "app".into(), None).unwrap().id;
+        store.mark_trusted(pid, hash::file_content_hash(&yml).unwrap()).unwrap();
+        std::fs::write(&yml, "processes:\n  web:\n    command: npm run dev\n").unwrap();
+        trust_own_write(&mut store, pid, true);
+        assert!(store.is_trusted(pid, &hash::file_content_hash(&yml).unwrap()));
+        std::fs::write(&yml, "processes:\n  web:\n    command: npm start\n").unwrap();
+        trust_own_write(&mut store, pid, false);
+        assert!(!store.is_trusted(pid, &hash::file_content_hash(&yml).unwrap()));
     }
 
     #[test]

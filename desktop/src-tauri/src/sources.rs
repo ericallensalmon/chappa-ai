@@ -31,7 +31,13 @@
 //!   they changed, if its manifest asks for them;
 //! - **data-safety verdicts across restarts** ([`verdicts`]): every
 //!   Environment answer's `dataSafety` block is kept on disk, so a block
-//!   is in force from the moment the app starts, before the source is back.
+//!   is in force from the moment the app starts, before the source is back,
+//!   and a source once trusted as a stack blocks its folder from launch
+//!   until its first answer. A launched source whose project is removed is
+//!   forgotten with its record ([`Sources::forget_launched`]); one that
+//!   `chappa.yml` stops declaring keeps its record in force until the new
+//!   content is trusted ([`Sources::undeclare_launched`],
+//!   [`Sources::content_trusted`]).
 //!
 //! Everything HTTP happens here, in Rust. The webview gets the cached
 //! payloads and freshness through Tauri commands that accept only the main
@@ -65,7 +71,7 @@ use manifest::{backoff_delay, parse_manifest, trust_summary, Endpoint, Manifest,
 pub use store::{KeyMatch, PromptPolicy};
 use owner_updates::{pushes_after_poll, sent_key, OverlaySide, OwnerPush, PushQueue};
 use store::{AttachedSource, SourceStore};
-use verdicts::{SavedVerdict, VerdictStore};
+use verdicts::{RememberedStack, SavedVerdict, Undeclared, VerdictStore};
 
 use crate::agent_tools::AgentTool;
 use crate::data_safety::{self, active_block, parse_block, ActiveBlock, ENVIRONMENT_VIEW};
@@ -167,7 +173,7 @@ impl SourcesEmitter for AppSourcesEmitter {
     }
 }
 
-struct NullEmitter;
+pub(crate) struct NullEmitter;
 
 impl SourcesEmitter for NullEmitter {
     fn emit(&self, _: Value) {}
@@ -448,6 +454,13 @@ impl Sources {
                 view.failures = 0;
                 view.next_due_ms = 0;
             }
+            // Running again, so declared again: its record is an ordinary one.
+            let id = state.id.clone();
+            if let Some(verdicts) = inner.verdicts.as_mut() {
+                if let Err(e) = verdicts.set_undeclared(&id, None) {
+                    log::warn!("[data-safety] cannot update the record of {id}: {e}");
+                }
+            }
         }
         self.notify();
         self.emit_sources();
@@ -499,6 +512,90 @@ impl Sources {
         }
         self.notify();
         self.emit_sources();
+    }
+
+    /// A launched source whose project was removed from the app: its worker
+    /// ends, it leaves the listing, and what was kept for it goes (its saved
+    /// verdict and whether it was a stack), so a stack that is gone stops
+    /// blocking its folder. Its trust record stays: declaring the same
+    /// command again under the same manifest needs no new prompt. A source
+    /// that only failed or crashed is not forgotten ([`Sources::process_gone`]
+    /// keeps everything).
+    pub fn forget_launched(&self, project_path: &Path, command: &str) {
+        let key = SourceStore::launched_key(project_path, command);
+        let id = source_id_of(&key);
+        {
+            let mut inner = self.lock();
+            if let Some(mut state) = inner.sources.remove(&key) {
+                state.generation += 1;
+            }
+            if let Some(verdicts) = inner.verdicts.as_mut() {
+                if let Err(e) = verdicts.remove(&id) {
+                    log::warn!("[data-safety] cannot drop the record of {id}: {e}");
+                }
+            }
+        }
+        self.notify();
+        self.emit_sources();
+    }
+
+    /// A launched source whose `source:` command its project's `chappa.yml`
+    /// no longer declares (the command is gone, or kept without the key):
+    /// its worker ends and it leaves the listing, but what was kept for it
+    /// stays and its saved block stays in force, marked as removed, until the
+    /// project's new content is trusted ([`Sources::content_trusted`]). A
+    /// change nobody approved must not lift a data-safety block.
+    pub fn undeclare_launched(&self, project_path: &Path, command: &str) {
+        let key = SourceStore::launched_key(project_path, command);
+        let id = source_id_of(&key);
+        {
+            let mut inner = self.lock();
+            if let Some(mut state) = inner.sources.remove(&key) {
+                state.generation += 1;
+            }
+            if let Some(verdicts) = inner.verdicts.as_mut().filter(|v| v.holds(&id)) {
+                let mark = Undeclared { project: project_path.to_path_buf(), command: command.to_owned() };
+                if let Err(e) = verdicts.set_undeclared(&id, Some(mark)) {
+                    log::warn!("[data-safety] cannot mark {id} as removed: {e}");
+                }
+            }
+        }
+        self.notify();
+        self.emit_sources();
+    }
+
+    /// The project at `project_path` has trusted content now, whose
+    /// `source:` commands are `declared`: the records of its sources waiting
+    /// on that go, except for any the content declares again (those stay as
+    /// ordinary records).
+    pub fn content_trusted(&self, project_path: &Path, declared: &[String]) {
+        let changed = {
+            let mut inner = self.lock();
+            let Some(verdicts) = inner.verdicts.as_mut() else { return };
+            let waiting = verdicts.undeclared_in(project_path);
+            for (id, u) in &waiting {
+                let done = if declared.contains(&u.command) { verdicts.set_undeclared(id, None) } else { verdicts.remove(id) };
+                if let Err(e) = done {
+                    log::warn!("[data-safety] cannot update the record of {id}: {e}");
+                }
+            }
+            !waiting.is_empty()
+        };
+        if changed {
+            self.emit_sources();
+        }
+    }
+
+    /// The project at `project_path` was removed from the app: the records
+    /// of its sources that were waiting for trusted content go too.
+    pub fn forget_project(&self, project_path: &Path) {
+        let mut inner = self.lock();
+        let Some(verdicts) = inner.verdicts.as_mut() else { return };
+        for (id, _) in verdicts.undeclared_in(project_path) {
+            if let Err(e) = verdicts.remove(&id) {
+                log::warn!("[data-safety] cannot drop the record of {id}: {e}");
+            }
+        }
     }
 
     // ---- attached sources ------------------------------------------------------
@@ -614,6 +711,7 @@ impl Sources {
                 view.next_due_ms = 0;
                 view.failures = 0;
             }
+            remember_kind(&mut inner, &key);
         }
         self.notify();
         self.emit_sources();
@@ -864,6 +962,7 @@ impl Sources {
             state.trusted = trusted;
             state.last_error = None;
             state.status = if trusted { SourceStatus::Starting } else { SourceStatus::NeedsReview };
+            remember_kind(&mut inner, key);
         }
         self.emit_sources();
 
@@ -1647,12 +1746,15 @@ impl Sources {
     ///   allows;
     /// - a trusted stack source (manifest id `stack:…`) with no saved
     ///   verdict, a new one or one never heard from: its folder is blocked
-    ///   until its first answer;
+    ///   until its first answer; so is one remembered as a stack from an
+    ///   earlier trusted manifest, from its launch on, before (or without)
+    ///   a trusted manifest this run;
     /// - a saved verdict of a source not registered (yet) this run, last
     ///   known.
     pub fn data_safety_blocks(&self) -> Vec<ActiveBlock> {
         let inner = self.lock();
         let saved = |id: &str| inner.verdicts.as_ref().and_then(|v| v.get(id));
+        let remembered = |id: &str| inner.verdicts.as_ref().and_then(|v| v.stack(id));
         let mut out = Vec::new();
         for state in inner.sources.values() {
             let info = Self::info_of(state);
@@ -1669,34 +1771,46 @@ impl Sources {
                     let label = state.manifest.as_ref().map(|m| m.label.as_str()).unwrap_or(&v.source_label);
                     out.extend(saved_block(&state.id, label, v));
                 }
-                None => out.extend(Self::unheard_block(state, &info, fallback)),
+                None => out.extend(Self::unheard_block(state, &info, fallback, remembered(&state.id))),
             }
         }
         if let Some(store) = &inner.verdicts {
             for (id, v) in store.all() {
                 if !inner.sources.values().any(|s| &s.id == id) {
-                    out.extend(saved_block(id, &v.source_label, v));
+                    let block = saved_block(id, &v.source_label, v);
+                    out.extend(match (block, v.block.as_ref()) {
+                        (Some(mut b), Some(wire)) if store.undeclared(id).is_some() => {
+                            b.reason = data_safety::removed_reason(wire);
+                            Some(b)
+                        }
+                        (block, _) => block,
+                    });
                 }
             }
         }
         out
     }
 
-    /// A trusted stack source that has never sent a verdict (none saved, no
-    /// answer yet): its folder is kept from agents until it answers.
-    fn unheard_block(state: &SourceState, info: &SourceInfo, folder: Option<PathBuf>) -> Option<ActiveBlock> {
-        let manifest = state.manifest.as_ref()?;
-        if !state.trusted || !manifest.id.starts_with(STACK_SOURCE_PREFIX) || !manifest.views.contains_key(ENVIRONMENT_VIEW) {
-            return None;
-        }
+    /// A stack source that has never sent a verdict (none saved, no answer
+    /// yet): its folder is kept from agents until it answers. A stack is one
+    /// whose trusted manifest says so, or, before such a manifest is in
+    /// hand, one `remembered` as a stack from an earlier one.
+    fn unheard_block(state: &SourceState, info: &SourceInfo, folder: Option<PathBuf>, remembered: Option<&RememberedStack>) -> Option<ActiveBlock> {
+        let (manifest_id, label) = match state.manifest.as_ref() {
+            Some(manifest) if state.trusted && is_stack_manifest(manifest) => (manifest.id.as_str(), info.label.as_str()),
+            _ => {
+                let r = remembered?;
+                (r.manifest_id.as_str(), r.source_label.as_str())
+            }
+        };
         let folder = folder?;
         Some(ActiveBlock {
             source_id: state.id.clone(),
-            source_label: info.label.clone(),
-            instance: manifest.id[STACK_SOURCE_PREFIX.len()..].to_owned(),
+            source_label: label.to_owned(),
+            instance: manifest_id.strip_prefix(STACK_SOURCE_PREFIX).unwrap_or(manifest_id).to_owned(),
             state: data_safety::UNHEARD_STATE.to_owned(),
             current: false,
-            reason: data_safety::unheard_reason(&info.label),
+            reason: data_safety::unheard_reason(label),
             folders: vec![crate::roots::display(&folder)],
             bound: None,
             component: None,
@@ -1709,6 +1823,30 @@ impl Sources {
 /// The manifest id prefix of a stack source: one whose data safety is
 /// enforced from before its first answer.
 pub const STACK_SOURCE_PREFIX: &str = "stack:";
+
+/// A stack source: a `stack:…` manifest id serving the Environment view
+/// (one that serves none could never answer, so is never held to it).
+fn is_stack_manifest(manifest: &Manifest) -> bool {
+    manifest.id.starts_with(STACK_SOURCE_PREFIX) && manifest.views.contains_key(ENVIRONMENT_VIEW)
+}
+
+/// Keep what the source `key`'s manifest, now trusted, says about being a
+/// stack, for its next launch: set when it is one, cleared when it is not.
+/// A manifest that is not trusted changes nothing (fail closed).
+fn remember_kind(inner: &mut Inner, key: &str) {
+    let Some(state) = inner.sources.get(key) else { return };
+    let Some(manifest) = state.manifest.as_ref().filter(|_| state.trusted) else { return };
+    let stack = is_stack_manifest(manifest).then(|| RememberedStack {
+        manifest_id: manifest.id.clone(),
+        source_label: manifest.label.clone(),
+    });
+    let id = state.id.clone();
+    if let Some(store) = inner.verdicts.as_mut() {
+        if let Err(e) = store.set_stack(&id, stack) {
+            log::warn!("[data-safety] cannot keep whether {id} is a stack source: {e}");
+        }
+    }
+}
 
 /// A saved verdict in force, as the last known one.
 fn saved_block(id: &str, label: &str, v: &SavedVerdict) -> Option<ActiveBlock> {
@@ -1732,10 +1870,15 @@ enum RunEnd {
     Failed,
 }
 
+/// The opaque id of the source with trust key `key`: the same on every run.
+pub(crate) fn source_id_of(key: &str) -> String {
+    project_model::hash::content_hash(key.as_bytes())[..16].to_owned()
+}
+
 fn fresh_state(key: &str, origin: Origin) -> SourceState {
     SourceState {
         key: key.to_owned(),
-        id: project_model::hash::content_hash(key.as_bytes())[..16].to_owned(),
+        id: source_id_of(key),
         generation: 0,
         origin,
         status: SourceStatus::Starting,
@@ -2586,5 +2729,300 @@ mod tests {
         sources.lock().sources.get_mut("a-asks").unwrap().owner_sent.clear();
         assert!(!poll("Doing"));
         assert_eq!(queued(&sources), 1);
+    }
+
+    /// Launch the `source:` command `command` of `project` as projects.rs
+    /// does (fresh address and token, the launch folder set); the worker is
+    /// not started. Answers its trust key.
+    fn launch(sources: &Sources, project: &Path, command: &str) -> String {
+        sources.prepare_launch(1, project, command).unwrap();
+        sources.set_launch_folder(project, command, project.to_path_buf());
+        SourceStore::launched_key(project, command)
+    }
+
+    /// A manifest with id `id`; `environment` = it serves that view.
+    fn manifest_of(id: &str, label: &str, environment: bool) -> Manifest {
+        let views = if environment { json!({"environment": {"list": "/api/env"}}) } else { json!({"work": {"list": "/w"}}) };
+        parse_manifest(&json!({"contract": 1, "source": {"id": id, "label": label, "version": "1"}, "views": views})).unwrap()
+    }
+
+    /// The manifest arrives as the worker takes it: the views it names, its
+    /// trust summary, trusted when its hash is on record.
+    fn manifest_arrives(sources: &Sources, key: &str, manifest: Manifest) {
+        let mut inner = sources.lock();
+        let hash = manifest::trust_hash(&manifest);
+        let trusted = inner.store.as_ref().is_some_and(|s| s.is_trusted(key, &hash));
+        let state = inner.sources.get_mut(key).unwrap();
+        for (name, v) in &manifest.views {
+            state.views.entry(name.clone()).or_insert_with(|| ViewState {
+                endpoint: v.list.clone(),
+                poll: v.poll,
+                payload: None,
+                as_of_ms: None,
+                next_due_ms: 0,
+                refreshing: false,
+                failures: 0,
+                last_error: None,
+            });
+        }
+        state.trust = Some(trust_summary(&manifest));
+        state.manifest = Some(manifest);
+        state.trusted = trusted;
+        state.status = if trusted { SourceStatus::Starting } else { SourceStatus::NeedsReview };
+        remember_kind(&mut inner, key);
+    }
+
+    /// The user trusts what the dialog shows.
+    fn trust_shown(sources: &Sources, key: &str) {
+        let (id, hash) = {
+            let inner = sources.lock();
+            let state = &inner.sources[key];
+            (state.id.clone(), state.trust.as_ref().unwrap().hash.clone())
+        };
+        sources.trust_answer(&id, true, &hash).unwrap();
+    }
+
+    fn answer_as(sources: &Sources, key: &str, payload: Value) {
+        let generation = sources.lock().sources[key].generation;
+        assert!(!sources.apply_poll(key, generation, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(payload)), "not cancelled");
+    }
+
+    fn kept(config: &Path, key: &str) -> (bool, bool) {
+        let store = VerdictStore::beside(&config.join(store::FILE_NAME));
+        let id = source_id_of(key);
+        (store.get(&id).is_some(), store.stack(&id).is_some())
+    }
+
+    /// A config folder, a stack project folder and a folder inside it.
+    fn stack_dirs() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = dir.path().join("stack");
+        let inside = project.join(".work").join("ABC-1");
+        std::fs::create_dir_all(&inside).unwrap();
+        (dir, config, project, inside)
+    }
+
+    fn undeclared_mark(config: &Path, key: &str) -> bool {
+        VerdictStore::beside(&config.join(store::FILE_NAME)).undeclared(&source_id_of(key)).is_some()
+    }
+
+    #[test]
+    fn a_source_no_longer_declared_keeps_its_block_until_the_new_content_is_trusted() {
+        let (_dir, config, project, inside) = stack_dirs();
+        let first = started(&config);
+        let key = launch(&first, &project, "stack");
+        manifest_arrives(&first, &key, manifest_of("stack:app", "Stack app", true));
+        trust_shown(&first, &key);
+        answer_as(&first, &key, block_payload(&project, "not-clean", true));
+        assert!(crate::data_safety::check_launch(&first, &inside).is_err());
+
+        // Crashing or failing to start keeps everything: it still blocks.
+        first.process_gone(&project, "stack", "exited with code 1");
+        assert!(crate::data_safety::check_launch(&first, &inside).is_err());
+        first.prepare_launch(1, &project, "stack").unwrap();
+        first.launch_failed(&project, "stack", "no such program");
+        assert!(crate::data_safety::check_launch(&first, &inside).is_err());
+        assert_eq!(kept(&config, &key), (true, true));
+
+        // Its `source:` command is gone from chappa.yml, in content nobody
+        // trusted yet: it leaves the listing, its block stays, marked.
+        first.undeclare_launched(&project, "stack");
+        assert!(first.listing().sources.is_empty(), "it leaves the listing");
+        let blocks = first.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            blocks[0].reason.starts_with("last known: db: 1 finding")
+                && blocks[0].reason.ends_with(", source removed — trust the new chappa.yml to lift"),
+            "{}",
+            blocks[0].reason
+        );
+        assert!(crate::data_safety::check_launch(&first, &inside).is_err());
+        assert_eq!(kept(&config, &key), (true, true));
+        assert!(undeclared_mark(&config, &key));
+        // Across a restart too.
+        let restarted = started(&config);
+        assert!(restarted.data_safety_blocks()[0].reason.contains("source removed"));
+        // Trust for another project's content changes nothing.
+        restarted.content_trusted(&project.join("elsewhere"), &[]);
+        assert!(crate::data_safety::check_launch(&restarted, &inside).is_err());
+        // The new content is trusted: the record goes, the block lifts.
+        restarted.content_trusted(&project, &[]);
+        assert!(restarted.data_safety_blocks().is_empty());
+        assert!(crate::data_safety::check_launch(&restarted, &inside).is_ok());
+        assert_eq!(kept(&config, &key), (false, false));
+        assert!(!undeclared_mark(&config, &key));
+        assert!(started(&config).data_safety_blocks().is_empty(), "and it is not back after a restart");
+        // Its trust record stays: declared again, the same manifest is trusted.
+        let again = started(&config);
+        let key = launch(&again, &project, "stack");
+        manifest_arrives(&again, &key, manifest_of("stack:app", "Stack app", true));
+        assert!(again.lock().sources[&key].trusted);
+    }
+
+    #[test]
+    fn a_source_declared_again_before_the_trust_answer_keeps_an_ordinary_record() {
+        let (_dir, config, project, inside) = stack_dirs();
+        let first = started(&config);
+        let key = launch(&first, &project, "stack");
+        manifest_arrives(&first, &key, manifest_of("stack:app", "Stack app", true));
+        trust_shown(&first, &key);
+        answer_as(&first, &key, block_payload(&project, "not-clean", true));
+        // Removed, then the trusted content declares it again: the record
+        // stays (it is that source's last answer), no longer marked removed.
+        first.undeclare_launched(&project, "stack");
+        first.content_trusted(&project, &["stack".to_owned()]);
+        assert_eq!(kept(&config, &key), (true, true));
+        assert!(!undeclared_mark(&config, &key));
+        assert!(first.data_safety_blocks()[0].reason.ends_with(", source unavailable"));
+        // Removed, then launched again: the same.
+        first.undeclare_launched(&project, "stack");
+        assert!(undeclared_mark(&config, &key));
+        launch(&first, &project, "stack");
+        assert!(!undeclared_mark(&config, &key));
+        assert!(crate::data_safety::check_launch(&first, &inside).is_err());
+        // A source with nothing kept leaves no mark.
+        first.undeclare_launched(&project, "fresh");
+        assert!(!undeclared_mark(&config, &SourceStore::launched_key(&project, "fresh")));
+    }
+
+    #[test]
+    fn a_removed_project_drops_the_records_of_sources_not_running_this_run() {
+        let (_dir, config, project, inside) = stack_dirs();
+        let first = started(&config);
+        let key = launch(&first, &project, "stack");
+        manifest_arrives(&first, &key, manifest_of("stack:app", "Stack app", true));
+        trust_shown(&first, &key);
+        answer_as(&first, &key, block_payload(&project, "not-clean", true));
+        // Restart: the source is not launched, its saved block is in force.
+        let second = started(&config);
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        // The project is removed: nothing of it is enforced any more, even
+        // a source an untrusted edit had stopped declaring.
+        second.undeclare_launched(&project, "stack");
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        second.forget_project(&project);
+        assert!(second.data_safety_blocks().is_empty());
+        assert_eq!(kept(&config, &key), (false, false));
+        // Another source's record is not touched.
+        let third = started(&config);
+        let other = launch(&third, &project, "other");
+        manifest_arrives(&third, &other, manifest_of("stack:other", "Other", true));
+        trust_shown(&third, &other);
+        answer_as(&third, &other, block_payload(&project, "not-clean", true));
+        third.forget_launched(&project, "stack");
+        assert_eq!(kept(&config, &other), (true, true));
+        assert_eq!(third.data_safety_blocks().len(), 1);
+        // A running source of a removed project goes at once too.
+        third.forget_launched(&project, "other");
+        assert!(third.listing().sources.is_empty());
+        assert!(third.data_safety_blocks().is_empty());
+        assert_eq!(kept(&config, &other), (false, false));
+    }
+
+    #[test]
+    fn a_source_remembered_as_a_stack_blocks_from_its_launch_until_its_first_answer() {
+        let (_dir, config, project, inside) = stack_dirs();
+        // First run: trusted as a stack, then gone before it ever answered.
+        let first = started(&config);
+        let key = launch(&first, &project, "stack");
+        manifest_arrives(&first, &key, manifest_of("stack:app", "Stack app", true));
+        assert_eq!(kept(&config, &key), (false, false), "not trusted yet: nothing remembered");
+        trust_shown(&first, &key);
+        assert_eq!(kept(&config, &key), (false, true));
+        first.process_gone(&project, "stack", "exited with code 1");
+
+        // Next run: nothing is enforced before it is launched...
+        let second = started(&config);
+        assert!(second.data_safety_blocks().is_empty());
+        // ...and from its launch, before any manifest, its folder is held.
+        let key = launch(&second, &project, "stack");
+        assert!(second.lock().sources[&key].manifest.is_none());
+        let blocks = second.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            (blocks[0].state.as_str(), blocks[0].instance.as_str(), blocks[0].source_label.as_str()),
+            (crate::data_safety::UNHEARD_STATE, "app", "Stack app")
+        );
+        assert_eq!(blocks[0].reason, crate::data_safety::unheard_reason("Stack app"));
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        assert!(crate::data_safety::check_launch(&second, project.parent().unwrap()).is_ok(), "outside its folder");
+        // Its launch folder, when it names another, is what is covered.
+        let elsewhere = project.parent().unwrap().join("served");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        second.set_launch_folder(&project, "stack", elsewhere.clone());
+        assert!(crate::data_safety::check_launch(&second, &elsewhere).is_err());
+        second.set_launch_folder(&project, "stack", project.clone());
+        // A crash before the manifest keeps the hold.
+        second.process_gone(&project, "stack", "exited with code 1");
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        // Relaunched, the trusted manifest arrives: still held until it answers.
+        let key = launch(&second, &project, "stack");
+        manifest_arrives(&second, &key, manifest_of("stack:app", "Stack app", true));
+        assert!(second.lock().sources[&key].trusted);
+        assert!(crate::data_safety::check_launch(&second, &inside).is_err());
+        // The first answer replaces the hold.
+        answer_as(&second, &key, block_payload(&project, "clean", false));
+        assert!(second.data_safety_blocks().is_empty());
+        assert_eq!(kept(&config, &key), (true, true));
+
+        // And next time the saved clean verdict allows from the launch on.
+        let third = started(&config);
+        launch(&third, &project, "stack");
+        assert!(third.data_safety_blocks().is_empty());
+    }
+
+    #[test]
+    fn a_non_stack_source_is_never_remembered_and_re_trust_keeps_the_flag_only_for_a_stack() {
+        let (_dir, config, project, inside) = stack_dirs();
+        // Not a stack (another id, or a stack id serving no Environment).
+        let first = started(&config);
+        let key = launch(&first, &project, "tracker");
+        manifest_arrives(&first, &key, manifest_of("tracker", "Tracker", true));
+        trust_shown(&first, &key);
+        let plain = launch(&first, &project, "plain");
+        manifest_arrives(&first, &plain, manifest_of("stack:plain", "Plain", false));
+        trust_shown(&first, &plain);
+        assert!(first.data_safety_blocks().is_empty());
+        assert_eq!(kept(&config, &key), (false, false));
+        assert_eq!(kept(&config, &plain), (false, false));
+        let restarted = started(&config);
+        launch(&restarted, &project, "tracker");
+        launch(&restarted, &project, "plain");
+        assert!(restarted.data_safety_blocks().is_empty(), "a non-stack source never blocks");
+
+        // A stack, remembered.
+        let second = started(&config);
+        let key = launch(&second, &project, "stack");
+        manifest_arrives(&second, &key, manifest_of("stack:app", "Stack app", true));
+        trust_shown(&second, &key);
+        assert_eq!(kept(&config, &key), (false, true));
+        // Re-trusted under a changed manifest that is still a stack: kept,
+        // under its new name.
+        let third = started(&config);
+        let key = launch(&third, &project, "stack");
+        manifest_arrives(&third, &key, manifest_of("stack:app2", "Stack two", true));
+        assert!(!third.lock().sources[&key].trusted, "a changed hash asks again");
+        trust_shown(&third, &key);
+        let remembered = VerdictStore::beside(&config.join(store::FILE_NAME)).stack(&source_id_of(&key)).cloned().unwrap();
+        assert_eq!((remembered.manifest_id.as_str(), remembered.source_label.as_str()), ("stack:app2", "Stack two"));
+
+        // A changed manifest that is NOT a stack: until it is trusted the
+        // flag holds (and so does the block); trusting it clears both.
+        let fourth = started(&config);
+        let key = launch(&fourth, &project, "stack");
+        manifest_arrives(&fourth, &key, manifest_of("tracker", "Tracker", true));
+        assert_eq!(fourth.lock().sources[&key].status, SourceStatus::NeedsReview);
+        let blocks = fourth.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!((blocks[0].instance.as_str(), blocks[0].source_label.as_str()), ("app2", "Stack two"), "named after what was trusted");
+        assert!(crate::data_safety::check_launch(&fourth, &inside).is_err());
+        trust_shown(&fourth, &key);
+        assert!(fourth.data_safety_blocks().is_empty());
+        assert_eq!(kept(&config, &key), (false, false));
+        let fifth = started(&config);
+        launch(&fifth, &project, "stack");
+        assert!(fifth.data_safety_blocks().is_empty());
     }
 }

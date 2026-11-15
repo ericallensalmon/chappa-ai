@@ -358,8 +358,18 @@ it cannot tell, and the app treats it as blocking (it fails closed).
   starts with `stack:` and that has never answered (a new stack, or the
   first run of an app that did not keep answers yet) keeps agents out of
   the folder it was launched on (its `--project`, else its working
-  folder) until its first answer. Removing a source in Settings drops
-  what was kept for it.
+  folder) until its first answer. The app also remembers that a source's
+  trusted manifest said it is a stack, so on later launches that hold
+  starts the moment the command starts, before its manifest arrives;
+  trusting a changed manifest that is no longer a stack forgets it.
+  Detaching a source in Settings or removing its project drops what was
+  kept for it at once. Removing a launched source's command (or its
+  `source:` key) from `chappa.yml` stops it, but its kept block stays in
+  force ("last known: …, source removed — trust the new chappa.yml to
+  lift") until that content is trusted: the trust prompt is answered, or
+  the content is already trusted (an in-app edit of a trusted project).
+  Anything that can write the file could otherwise lift a block. A
+  source that only crashed or failed to start keeps its record.
 - **Where**: the folders in `bound`, or `project` when nothing is bound
   (the launching project's folder when the block names none). A folder
   and everything below it, compared after resolving `..` and symlinks,
