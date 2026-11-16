@@ -143,6 +143,21 @@ fn roots_for(deps: &ActionDeps, info: &SourceInfo) -> Vec<Root> {
     deps.projects.cwd_roots(info.project_id)
 }
 
+/// Why a call of `info`'s source is refused because it is a stack runner
+/// whose definition is not the trusted one: any call that `mutates`. Read
+/// calls (views, panels, links, non-mutating endpoints) are never refused
+/// for it.
+pub fn untrusted_stack_refusal(
+    projects: &Projects,
+    info: &SourceInfo,
+    mutates: bool,
+) -> Option<String> {
+    if !mutates {
+        return None;
+    }
+    projects.stack_refusal(info.project_id?, Some(info.command.as_deref()?))
+}
+
 /// Run `action_id` of `key` in `view` of the source `source_id`, for the
 /// person at the app.
 pub fn run_action(
@@ -353,6 +368,12 @@ fn run_found(
             }
             if mutates && confirm.is_none() {
                 return Err("a mutating action without a confirm text is not offered".into());
+            }
+            // A stack runner whose definition is not the trusted one is
+            // read-only: acknowledgements are changes too. The runner
+            // refuses as well; this keeps the call from being sent.
+            if let Some(why) = untrusted_stack_refusal(&deps.projects, &info, mutates) {
+                return Err(why);
             }
             if mutates && !confirmed {
                 return Err(format!(
@@ -1112,6 +1133,7 @@ mod tests {
             key: "k".into(),
             project_id: Some(1),
             project_path: Some(std::path::PathBuf::from("/p")),
+            command: Some("fixture".into()),
             term_id: None,
             link_hosts: vec![],
         };

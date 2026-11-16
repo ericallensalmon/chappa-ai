@@ -17,7 +17,11 @@
 //! - each listener serves at most [`MAX_CONNECTIONS`] connections at once;
 //!   more are closed on accept;
 //! - listeners start when the instance has something running and stop when
-//!   it has nothing (the set is reconciled on every status).
+//!   it has nothing (the set is reconciled on every status);
+//! - they are real listeners on an address other than loopback, so on
+//!   Windows the first one raises the Windows Firewall prompt, and container
+//!   traffic gets through only once it is allowed (the stack docs say so
+//!   where `relay:` is described).
 //!
 //! Plain std threads: one accept loop per listener (non-blocking, polled,
 //! so a stop takes effect within [`ACCEPT_POLL`]), two copy threads per

@@ -1636,6 +1636,35 @@ fn http_errors_surface_the_apps_message() {
     assert_eq!(server.requests().len(), before);
 }
 
+/// Launching an agent past a secret scan that did not finish is a person's
+/// choice in the app's own dialog. No tool offers it, and `spawn_agent`
+/// forwards only the fields it declares, so an argument naming it never
+/// reaches the app.
+#[test]
+fn no_tool_can_launch_an_agent_past_an_unfinished_scan() {
+    let listed = serde_json::to_string(&tools())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(!listed.contains("anyway"), "a tool mentions it");
+    let server = FakeControlServer::start();
+    let client = server.client();
+    let _ = call_tool(
+        &client,
+        "spawn_agent",
+        &json!({
+            "agent_tool_id": 3,
+            "launch_anyway": "a note",
+            "launchAnyway": "a note",
+            "record_id": "r1",
+            "resume": {"session_id": "s"},
+        }),
+    );
+    let sent = server.requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].path, "/agents");
+    assert_eq!(sent[0].body, json!({"agent_tool_id": 3}));
+}
+
 #[test]
 fn client_side_validation_never_hits_the_wire() {
     let server = FakeControlServer::start();

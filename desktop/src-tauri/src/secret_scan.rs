@@ -460,50 +460,6 @@ pub fn emit_notice(app: Option<&AppHandle>, term_id: u32, notice: &ScanNotice) {
     }
 }
 
-/// The event that warns about an agent settings file git would commit:
-/// `{term_id, projectRoot, files: [{path, ignoreLine, exposure, message}]}`.
-pub const AGENT_SETTINGS_EVENT: &str = "agent://agent-settings";
-
-/// The agent settings files in the project and in the agent's folder that
-/// git would commit (see [`stack_core::safety::agent_settings`]). Never
-/// blocks: the caller warns.
-pub fn agent_settings_warnings(
-    project_root: &Path,
-    cwd: &Path,
-) -> Vec<stack_core::safety::agent_settings::AgentSettingsFile> {
-    stack_core::safety::agent_settings::check(project_root, &[project_root, cwd])
-}
-
-/// Warn about each exposed settings file: a log line and the event the
-/// webview turns into a notification and a Needs you entry.
-pub fn emit_agent_settings(
-    app: Option<&AppHandle>,
-    term_id: u32,
-    project_root: &Path,
-    files: &[stack_core::safety::agent_settings::AgentSettingsFile],
-) {
-    if files.is_empty() {
-        return;
-    }
-    for f in files {
-        log::warn!("[agent-settings] {}", f.message());
-    }
-    if let Some(app) = app {
-        let files: Vec<serde_json::Value> = files
-            .iter()
-            .map(|f| {
-                serde_json::json!({
-                    "path": f.path.display().to_string(),
-                    "ignoreLine": f.ignore_line,
-                    "exposure": f.exposure,
-                    "message": f.message(),
-                })
-            })
-            .collect();
-        let _ = app.emit(AGENT_SETTINGS_EVENT, serde_json::json!({ "term_id": term_id, "projectRoot": project_root.display().to_string(), "files": files }));
-    }
-}
-
 /// The "Add to .gitignore" action: append `line` to the project's root
 /// `.gitignore` (created when missing, never a duplicate line). Only a line
 /// naming one of the known agent settings files is accepted.
@@ -549,10 +505,41 @@ pub fn secret_scan_info(settings: tauri::State<'_, crate::settings::SettingsStat
 }
 
 /// "Add to .gitignore" for an exposed agent settings file (confirmed in the
-/// webview first). Answers whether a line was added.
+/// webview first). Answers whether a line was added; the standing warnings
+/// are checked again right after, so a resolved one goes away for good.
 #[tauri::command]
-pub fn add_agent_settings_ignore(project_root: String, line: String) -> Result<bool, String> {
-    add_agent_settings_ignore_line(Path::new(&project_root), &line)
+pub fn add_agent_settings_ignore(
+    app: AppHandle,
+    projects: tauri::State<'_, crate::projects::Projects>,
+    project_root: String,
+    line: String,
+) -> Result<bool, String> {
+    let root = Path::new(&project_root);
+    let added = add_agent_settings_ignore_line(root, &line)?;
+    let warnings = projects.agent_settings();
+    let changed = warnings.revalidate();
+    crate::agent_settings::emit(
+        Some(&app),
+        &warnings,
+        None,
+        root,
+        &crate::agent_settings::Update {
+            new: Vec::new(),
+            changed,
+        },
+    );
+    Ok(added)
+}
+
+/// Every standing agent settings warning (they outlive a restart until
+/// resolved), for the webview's Needs you rows at boot.
+#[tauri::command]
+pub fn agent_settings_warnings(
+    projects: tauri::State<'_, crate::projects::Projects>,
+) -> serde_json::Value {
+    let all = projects.agent_settings().all();
+    let mut payload = crate::agent_settings::payload(None, Path::new(""), &[], &all);
+    payload["all"].take()
 }
 
 /// Acknowledge the findings of a refused launch into the project's
@@ -567,6 +554,12 @@ pub fn acknowledge_secret_findings(
     let (_, root) = projects
         .project_root(project_id)
         .ok_or_else(|| format!("no such project: {project_id}"))?;
+    // The baseline is the one the project's stack reads too: while its
+    // definition is not the trusted one, the stack is read-only from here
+    // as well.
+    if let Some(why) = projects.stack_refusal(project_id, None) {
+        return Err(why);
+    }
     acknowledge(
         &root,
         &findings,

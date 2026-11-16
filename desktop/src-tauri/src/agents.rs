@@ -2277,14 +2277,29 @@ pub fn spawn_agent_with(
         ctx.registry
             .record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
     }
-    // An agent settings file git would commit is a warning, never a block.
+    // An agent settings file git would commit is a warning, never a block:
+    // looked for now (the project, the agent's folder, the stack's
+    // worktrees) and again when the agent exits, since answering "don't ask
+    // again" during the run is what writes the file.
     if let (Some(dir), None) = (&cwd, tool.runtime.container()) {
         let project_root = project
             .as_ref()
-            .map(|(_, root)| root.as_path())
-            .unwrap_or(dir.as_path());
-        let files = crate::secret_scan::agent_settings_warnings(project_root, dir);
-        crate::secret_scan::emit_agent_settings(created_app.as_ref(), id, project_root, &files);
+            .map(|(_, root)| root.clone())
+            .unwrap_or_else(|| dir.clone());
+        ctx.projects
+            .check_agent_settings(Some(id), project_root.clone(), vec![dir.clone()]);
+        let projects = ctx.projects.clone();
+        let dir = dir.clone();
+        ctx.registry.set_exit_handler(
+            id,
+            Arc::new(move |term_id, _, _| {
+                projects.check_agent_settings(
+                    Some(term_id),
+                    project_root.clone(),
+                    vec![dir.clone()],
+                )
+            }),
+        );
     }
     if let Some(notice) = &scan_notice {
         // A launch past an unfinished scan is on the row's journal, under

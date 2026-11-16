@@ -147,6 +147,13 @@ pub const UNTRUSTED_KIND: &str = "untrusted-definition";
 /// What the Environment banner and every refusal say.
 pub const UNTRUSTED_TEXT: &str =
     "The stack definition changed since it was trusted; review it in the app.";
+/// What every refused call says while the definition is not the trusted
+/// one: actions and acknowledgements alike, and how to get out of it.
+pub const UNTRUSTED_REFUSAL: &str = "The stack definition is not the one trusted in the app, so this stack is read-only: no action or acknowledgement is taken until you review the project's trust prompt in the app and trust it again.";
+/// The `disabled` reason on every mutating action the view still lists
+/// while the definition is not the trusted one.
+pub const UNTRUSTED_DISABLED: &str =
+    "Read-only until the stack definition is trusted again in the app";
 /// What a job says when the definition changed after it was accepted.
 pub const UNTRUSTED_JOB: &str =
     "the stack definition changed after this job was accepted; nothing ran. Review it in the app.";
@@ -253,7 +260,7 @@ impl Source {
     fn load_trusted(&self) -> Result<Loaded, Reply> {
         let loaded = self.load().map_err(|e| error(409, "definition", e))?;
         if !self.is_trusted(&loaded) {
-            return Err(error(409, UNTRUSTED_KIND, UNTRUSTED_TEXT));
+            return Err(error(409, UNTRUSTED_KIND, UNTRUSTED_REFUSAL));
         }
         Ok(loaded)
     }
@@ -323,7 +330,10 @@ impl Source {
             ("GET", WORK_PATH) => self.work_view(),
             ("GET", reviews::REVIEWS_PATH) => self.reviews_view(),
             ("GET", ARCHIVED_PATH) => match self.load() {
-                Ok(l) => (200, workspaces::archived_panel(&l, &utc_now())),
+                Ok(l) => (
+                    200,
+                    self.read_only_unless_trusted(&l, workspaces::archived_panel(&l, &utc_now())),
+                ),
                 Err(e) => error(409, "definition", e),
             },
             ("POST", OWNER_PATH) => match serde_json::from_str::<Value>(body) {
@@ -517,6 +527,9 @@ impl Source {
         }
         v["secretScan"] = secrets.wire(loaded);
         if !trusted {
+            // Read-only: every action that would change something (the
+            // acknowledgements included) is still shown, disabled with why.
+            disable_mutating(&mut v, UNTRUSTED_DISABLED);
             if let Some(banners) = v.get_mut("banners").and_then(Value::as_array_mut) {
                 banners.insert(
                     0,
@@ -567,7 +580,17 @@ impl Source {
             facts: &facts,
             now_utc: &now,
         };
-        (200, workspaces::work_list(&inputs))
+        let list = workspaces::work_list(&inputs);
+        (200, self.read_only_unless_trusted(&loaded, list))
+    }
+
+    /// `view` as is under the trusted definition; otherwise with every
+    /// mutating action disabled (the calls are refused anyway).
+    fn read_only_unless_trusted(&self, loaded: &Loaded, mut view: Value) -> Value {
+        if !self.is_trusted(loaded) {
+            disable_mutating(&mut view, UNTRUSTED_DISABLED);
+        }
+        view
     }
 
     /// `GET /api/work/reviews`: the Review workspaces panel.
@@ -589,7 +612,8 @@ impl Source {
         } else {
             obs.as_ref()
         };
-        (200, reviews::panel(&self.world, &loaded, obs, &now))
+        let panel = reviews::panel(&self.world, &loaded, obs, &now);
+        (200, self.read_only_unless_trusted(&loaded, panel))
     }
 
     /// Look at the item workspaces with git now (the refresher calls this;
@@ -602,10 +626,12 @@ impl Source {
 
     /// `POST /api/work/owner`: under the same one-at-a-time lock as the
     /// actions, since both write `item.json`.
+    /// Refused, like every other change, while the definition is not the
+    /// trusted one.
     pub fn owner_update(&self, body: &Value) -> Reply {
         let _one_at_a_time = self.accepting.lock().unwrap_or_else(|p| p.into_inner());
-        match self.work_dir() {
-            Ok(w) => workspaces::owner_update(&w, body, &self.world.clock.now_utc()),
+        match self.load_trusted() {
+            Ok(l) => workspaces::owner_update(&l.work_dir(), body, &self.world.clock.now_utc()),
             Err(r) => r,
         }
     }
@@ -866,11 +892,7 @@ impl Source {
             Ok(i) => i,
             Err(e) => return error(500, "job", e),
         };
-        let argv = vec![
-            self.world.exe.display().to_string(),
-            "run-job".to_string(),
-            job_id.clone(),
-        ];
+        let argv = self.world.job_argv(&job_id);
         let title = match &chosen.key {
             Some(k) => format!("{} {k}: {}", loaded.stack_name, chosen.label.to_lowercase()),
             None => format!("{}: {}", loaded.stack_name, chosen.label.to_lowercase()),
@@ -1326,6 +1348,34 @@ impl Source {
             .unwrap_or_else(|p| p.into_inner())
             .stop_all();
         self.background.shutdown();
+    }
+}
+
+/// Mark every `mutates: true` action anywhere in `v` (items, components,
+/// sections, banners, the payload's own) as disabled with `why`. A
+/// `disabled` reason already there stays.
+pub fn disable_mutating(v: &mut Value, why: &str) {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::Array(actions)) = map.get_mut("actions") {
+                for a in actions.iter_mut() {
+                    if a.get("mutates").and_then(Value::as_bool) == Some(true)
+                        && a.get("disabled").is_none()
+                    {
+                        a["disabled"] = Value::String(why.to_string());
+                    }
+                }
+            }
+            for (_, child) in map.iter_mut() {
+                disable_mutating(child, why);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                disable_mutating(child, why);
+            }
+        }
+        _ => {}
     }
 }
 

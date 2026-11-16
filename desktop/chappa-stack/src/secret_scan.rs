@@ -22,9 +22,11 @@
 //! | every [`RESCAN_EVERY`] | the bound worktrees' files whose size or modification time changed since their last scan (and the commits, when HEAD moved) | on a background thread, never a request |
 //! | every [`FULL_RESCAN_SECS`] at most | everything above again, in full | the same thread |
 //!
-//! The scanner is gitleaks on `PATH` ([`GitleaksOnPath`]); without one, a
-//! stack that declares `secrets:` reads as `error` (see below) and one that
-//! does not reads as `unscanned`.
+//! The scanner is gitleaks on `PATH` ([`GitleaksOnPath`]), with the
+//! gitleaks config the app passes (`--gitleaks-config`, from its Settings)
+//! or the same built-in default the app uses; without one, a stack that
+//! declares `secrets:` reads as `error` (see below) and one that does not
+//! reads as `unscanned`.
 //!
 //! # Paths and the one baseline
 //!
@@ -143,13 +145,28 @@ pub trait ScannerSource {
     fn scanner(&self, work_dir: &Path) -> Option<SharedScanner>;
 }
 
-/// gitleaks on `PATH`, the default.
-pub struct GitleaksOnPath;
+/// gitleaks on `PATH`, the default, with the gitleaks config the app's
+/// Settings name (`serve --gitleaks-config`, passed on to every job), so the
+/// app's pre-agent scan and every scan here use the same rules. `None` is
+/// stack-core's [`DEFAULT_CONFIG`](stack_core::safety::secrets::gitleaks::DEFAULT_CONFIG),
+/// which the app uses too when nothing is set. A config file inside a
+/// scanned tree is never read either way.
+#[derive(Debug, Clone, Default)]
+pub struct GitleaksOnPath {
+    pub config: Option<PathBuf>,
+}
+
+impl GitleaksOnPath {
+    pub fn with_config(config: Option<PathBuf>) -> Self {
+        Self { config }
+    }
+}
 
 impl ScannerSource for GitleaksOnPath {
     fn scanner(&self, work_dir: &Path) -> Option<SharedScanner> {
         GitleaksScanner::detect(None, work_dir).map(|mut g| {
             g.timeout = SCAN_TIMEOUT;
+            g.config = self.config.clone();
             Arc::new(g) as SharedScanner
         })
     }

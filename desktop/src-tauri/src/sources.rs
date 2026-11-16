@@ -1383,6 +1383,8 @@ pub struct SourceInfo {
     pub key: String,
     pub project_id: Option<u32>,
     pub project_path: Option<PathBuf>,
+    /// The project command that launched it (launched sources).
+    pub command: Option<String>,
     pub term_id: Option<u32>,
     pub link_hosts: Vec<String>,
 }
@@ -1446,14 +1448,20 @@ impl Sources {
 
     fn info_of(state: &SourceState) -> SourceInfo {
         let manifest = state.manifest.as_ref();
-        let (project_id, project_path, term_id) = match &state.origin {
+        let (project_id, project_path, command, term_id) = match &state.origin {
             Origin::Launched {
                 project_id,
                 project_path,
+                command,
                 term_id,
                 ..
-            } => (Some(*project_id), Some(project_path.clone()), *term_id),
-            Origin::Attached { .. } => (None, None, None),
+            } => (
+                Some(*project_id),
+                Some(project_path.clone()),
+                Some(command.clone()),
+                *term_id,
+            ),
+            Origin::Attached { .. } => (None, None, None, None),
         };
         SourceInfo {
             id: state.id.clone(),
@@ -1466,6 +1474,7 @@ impl Sources {
             key: state.key.clone(),
             project_id,
             project_path,
+            command,
             term_id,
             link_hosts: manifest.map(|m| m.link_hosts.clone()).unwrap_or_default(),
         }

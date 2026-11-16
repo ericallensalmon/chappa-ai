@@ -163,6 +163,9 @@ struct Inner {
     /// from it at spawn and reports back when the process is gone. A clone
     /// of the managed state; locked only after this lock, never before.
     sources: Sources,
+    /// The standing agent settings warnings (their own mutex; never locked
+    /// while this one is held).
+    agent_settings: crate::agent_settings::AgentSettingsWarnings,
 }
 
 impl Default for Inner {
@@ -176,6 +179,7 @@ impl Default for Inner {
             shutting_down: false,
             ledger: RunLedger::default(),
             sources: Sources::default(),
+            agent_settings: Default::default(),
         }
     }
 }
@@ -281,6 +285,26 @@ impl Projects {
             guard.settings = settings;
             guard.ledger = RunLedger::new(coordination);
             guard.sources = sources;
+            guard.agent_settings = crate::agent_settings::AgentSettingsWarnings::at(
+                config_dir.join(crate::agent_settings::STORE_FILE),
+            );
+            // The warnings kept from the last run: drop the ones resolved
+            // while the app was closed, off the setup path.
+            let warnings = guard.agent_settings.clone();
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let changed = warnings.revalidate();
+                crate::agent_settings::emit(
+                    Some(&app),
+                    &warnings,
+                    None,
+                    Path::new(""),
+                    &crate::agent_settings::Update {
+                        new: Vec::new(),
+                        changed,
+                    },
+                );
+            });
             sweep_scan_scratch(
                 guard
                     .store
@@ -308,6 +332,58 @@ impl Projects {
             .lock()
             .map(|inner| inner.sources.clone())
             .unwrap_or_default()
+    }
+
+    /// The standing agent settings warnings.
+    pub fn agent_settings(&self) -> crate::agent_settings::AgentSettingsWarnings {
+        self.inner
+            .lock()
+            .map(|inner| inner.agent_settings.clone())
+            .unwrap_or_default()
+    }
+
+    /// Keep the agent settings warnings somewhere else (tests); the app's
+    /// come in through [`Projects::init`].
+    pub fn set_agent_settings(&self, warnings: crate::agent_settings::AgentSettingsWarnings) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.agent_settings = warnings;
+        }
+    }
+
+    /// Check for agent settings files git would commit in `project_root`,
+    /// `extra` (an agent's folder) and every worktree of the project's
+    /// stacks, and fold the result into the standing warnings. Runs git;
+    /// call it off the lock and off the UI thread.
+    pub fn check_agent_settings_now(
+        &self,
+        project_root: &Path,
+        extra: &[PathBuf],
+    ) -> crate::agent_settings::Update {
+        let folders = crate::agent_settings::folders_for(project_root, extra);
+        self.agent_settings().observe(project_root, &folders)
+    }
+
+    /// [`Projects::check_agent_settings_now`] on a thread of its own, then
+    /// the warning (log + event) for what changed. Never blocks the caller
+    /// and never blocks anything else: it only warns.
+    pub fn check_agent_settings(
+        &self,
+        term_id: Option<u32>,
+        project_root: PathBuf,
+        extra: Vec<PathBuf>,
+    ) {
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let update = this.check_agent_settings_now(&project_root, &extra);
+            let app = this.inner.lock().ok().and_then(|i| i.app.clone());
+            crate::agent_settings::emit(
+                app.as_ref(),
+                &this.agent_settings(),
+                term_id,
+                &project_root,
+                &update,
+            );
+        });
     }
 
     /// Point a store-only projects state (tests, headless services) at a
@@ -356,6 +432,45 @@ impl Projects {
     /// Tauri `State`.
     fn arc(&self) -> Arc<Mutex<Inner>> {
         self.inner.clone()
+    }
+
+    /// Start every live stack runner of every open project again. The
+    /// gitleaks config from Settings ▸ Security reaches a runner on its
+    /// command line, so a changed value takes effect with a new launch
+    /// (nothing else about the runner changes).
+    pub fn relaunch_stack_runners(&self, registry: &Registry, app: &AppHandle) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let arc = self.arc();
+        for (id, names) in live_stack_runners(&inner.runtimes) {
+            relaunch_locked(&mut inner, registry, app, arc.clone(), id, &names);
+        }
+    }
+
+    /// Why a call that changes something through the stack runner `command`
+    /// of project `id` (any of its runners when `None`) is refused: the
+    /// definition on disk is not the one the person trusted, so the stack
+    /// is read-only (acknowledgements included) until it is trusted again.
+    /// `None` lets the call through: no stack runner, or a trusted one.
+    pub fn stack_refusal(&self, id: u32, command: Option<&str>) -> Option<String> {
+        // Copied out under the lock; the definitions are read off it.
+        let (root, open) = {
+            let inner = self.inner.lock().ok()?;
+            let root = inner.store.as_ref()?.get(id)?.path.clone();
+            let open = inner
+                .runtimes
+                .get(&id)
+                .map(|rt| stack_runners_of(rt, command));
+            (root, open)
+        };
+        stack_refusal_of(&root, open.as_deref(), command, |hash| {
+            self.inner
+                .lock()
+                .ok()
+                .and_then(|i| i.store.as_ref().map(|s| s.is_trusted(id, hash)))
+                .unwrap_or(false)
+        })
     }
 
     fn store<'a>(&'a self) -> Result<std::sync::MutexGuard<'a, Inner>, ControlError> {
@@ -712,13 +827,15 @@ fn spawn_process(
     record: Option<RecordBinding>,
 ) -> Result<TermId, String> {
     // The stack runner learns which definition the person trusted on its
-    // command line; it runs nothing under any other.
+    // command line (it runs nothing under any other), and the gitleaks
+    // config from Settings, so its scans use the app's rules.
     let mut spec = if crate::stack_trust::is_stack_serve(&proc.def) {
         build_spec(
-            &crate::stack_trust::with_trusted_definition(
+            &crate::stack_trust::launch_def(
                 &proc.def,
                 proc.trusted_definition.as_deref(),
-            ),
+                &settings.secret_scan_config,
+            )?,
             &root,
             settings,
         )?
@@ -1545,6 +1662,11 @@ pub fn open_project(
     // Every process of this project just got a fresh (stopped, no term_id)
     // runtime — including any a `control_start` is currently waiting on.
     inner.notify_changed();
+    // An agent may have left a settings file git would commit while the
+    // project was closed (here or in a stack worktree): look on open.
+    if inner.app.is_some() {
+        projects.check_agent_settings(None, root.clone(), Vec::new());
+    }
     // The notification fields come off the STORED row (projects.json),
     // never the yml — "chappa.yml is NEVER touched for this".
     let overrides = inner
@@ -2336,18 +2458,82 @@ fn trust_stack_definitions(
         };
         let hash = s.runnable_hash();
         if proc.trusted_definition != hash {
-            let live = proc.term_id.is_some()
-                && matches!(
-                    proc.lifecycle.status(),
-                    ProcessStatus::Starting | ProcessStatus::Running
-                );
-            if live {
+            if is_live(proc) {
                 relaunch.push(s.name.clone());
             }
             proc.trusted_definition = hash;
         }
     }
     relaunch
+}
+
+/// Whether `proc` is running (or starting) in a terminal.
+fn is_live(proc: &ProcessRuntime) -> bool {
+    proc.term_id.is_some()
+        && matches!(
+            proc.lifecycle.status(),
+            ProcessStatus::Starting | ProcessStatus::Running
+        )
+}
+
+/// The live stack runners of every open project, by project, in a stable
+/// order.
+fn live_stack_runners(runtimes: &HashMap<u32, ProjectRuntime>) -> Vec<(u32, Vec<String>)> {
+    let mut out: Vec<(u32, Vec<String>)> = runtimes
+        .iter()
+        .map(|(id, rt)| {
+            let names = rt
+                .processes
+                .iter()
+                .filter(|(_, p)| crate::stack_trust::is_stack_serve(&p.def) && is_live(p))
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>();
+            (*id, names)
+        })
+        .filter(|(_, names)| !names.is_empty())
+        .collect();
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
+
+/// The stack runners of an open project (`command` alone when named), with
+/// the definition hash each was launched under.
+fn stack_runners_of(
+    rt: &ProjectRuntime,
+    command: Option<&str>,
+) -> Vec<(ProcessDef, Option<String>)> {
+    rt.processes
+        .iter()
+        .filter(|(n, p)| {
+            command.is_none_or(|c| c == n.as_str()) && crate::stack_trust::is_stack_serve(&p.def)
+        })
+        .map(|(_, p)| (p.def.clone(), p.trusted_definition.clone()))
+        .collect()
+}
+
+/// [`Projects::stack_refusal`] over what it copied out: an open project's
+/// runners are judged by the hash each was launched under; a project that
+/// is not open by its stored trust (`is_trusted`) against what is on disk.
+fn stack_refusal_of(
+    root: &Path,
+    open: Option<&[(ProcessDef, Option<String>)]>,
+    command: Option<&str>,
+    is_trusted: impl FnOnce(&str) -> bool,
+) -> Option<String> {
+    match open {
+        Some(runners) => runners
+            .iter()
+            .find_map(|(def, trusted)| crate::stack_trust::refusal(root, def, trusted.as_deref())),
+        None => {
+            let (yml, file_hash) = ProjectYml::load_result_with_hash(root).ok()?;
+            let stacks = crate::stack_trust::stack_sources(root, &yml.processes);
+            if !stacks.iter().any(|s| command.is_none_or(|c| c == s.name)) {
+                return None;
+            }
+            let hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks);
+            (!is_trusted(&hash)).then(|| crate::stack_trust::UNTRUSTED_REFUSAL.to_owned())
+        }
+    }
 }
 
 /// Start the named live processes again (a stack runner whose trusted
@@ -3666,6 +3852,121 @@ mod tests {
         let second = processes["stack"].trusted_definition.clone().unwrap();
         assert_ne!(first, second);
         assert_eq!(Some(second), stacks[0].runnable_hash());
+    }
+
+    /// A project with a stack runner, trusted as it is on disk now.
+    fn stack_project(dir: &Path) -> (ProjectStore, u32, PathBuf) {
+        let root = dir.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(project_model::yml::CHAPPA_YML_NAME),
+            "processes:\n  stack:\n    command: [chappa-stack, serve]\n    source: {}\n  web:\n    command: [node, web.js]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("chappa.stack.yml"), STACK_UP).unwrap();
+        let mut store = ProjectStore::new(dir.join("projects.json"));
+        let pid = store.add(root.clone(), "app".into(), None).unwrap().id;
+        store
+            .mark_trusted(pid, crate::stack_trust::trust_hash_on_disk(&root).unwrap())
+            .unwrap();
+        (store, pid, root)
+    }
+
+    const STACK_UP: &str = "stacks:\n  app:\n    components:\n      web:\n        driver: script\n        up: [node, scripts/up.js]\n";
+
+    fn runtime_of(root: &Path) -> ProjectRuntime {
+        let yml = ProjectYml::load_result(root).unwrap();
+        ProjectRuntime {
+            root: root.to_path_buf(),
+            yml_hash: String::new(),
+            processes: yml
+                .processes
+                .into_iter()
+                .map(|(n, d)| (n, fresh_runtime(root, d)))
+                .collect(),
+            load_error: None,
+            _yml_watcher: None,
+            worktrees: None,
+        }
+    }
+
+    #[test]
+    fn untrusted_means_read_only_whether_the_project_is_open_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, pid, root) = stack_project(dir.path());
+        let closed = |command: Option<&str>| {
+            stack_refusal_of(&root, None, command, |h| store.is_trusted(pid, h))
+        };
+        // Not open: the stored trust against the disk.
+        assert_eq!(closed(None), None);
+        std::fs::write(
+            root.join("chappa.stack.yml"),
+            STACK_UP.replace("up.js", "other.js"),
+        )
+        .unwrap();
+        let why = closed(None).unwrap();
+        assert!(why.contains("trust it again"), "{why}");
+        assert_eq!(closed(Some("stack")).as_deref(), Some(why.as_str()));
+        assert_eq!(
+            closed(Some("web")),
+            None,
+            "another command is not the stack"
+        );
+        // Open: each runner by the hash it was launched under.
+        let mut rt = runtime_of(&root);
+        let open = |rt: &ProjectRuntime| {
+            let runners = stack_runners_of(rt, Some("stack"));
+            stack_refusal_of(&root, Some(&runners), Some("stack"), |_| true)
+        };
+        assert!(open(&rt).is_some(), "launched with nothing trusted");
+        let yml = ProjectYml::load_result(&root).unwrap();
+        let stacks = crate::stack_trust::stack_sources(&root, &yml.processes);
+        trust_stack_definitions(&mut rt.processes, &stacks);
+        assert_eq!(open(&rt), None);
+        assert!(stack_runners_of(&rt, Some("web")).is_empty());
+        std::fs::write(
+            root.join("chappa.stack.yml"),
+            STACK_UP.replace("up.js", "third.js"),
+        )
+        .unwrap();
+        assert!(open(&rt).is_some(), "edited after it was trusted");
+    }
+
+    #[test]
+    fn a_new_gitleaks_config_in_settings_relaunches_the_live_stack_runners_only() {
+        let mut old = Settings::default();
+        let mut new = old.clone();
+        assert!(!crate::settings::gitleaks_config_changed(&old, &new));
+        new.secret_scan_config = r"C:\cfg\house.toml".into();
+        assert!(crate::settings::gitleaks_config_changed(&old, &new));
+        old.secret_scan_config = r" C:\cfg\house.toml ".into();
+        assert!(!crate::settings::gitleaks_config_changed(&old, &new));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, pid, root) = stack_project(dir.path());
+        let mut rt = runtime_of(&root);
+        for name in ["stack", "web"] {
+            let p = rt.processes.get_mut(name).unwrap();
+            p.term_id = Some(3);
+            p.lifecycle.on(ProcessEvent::Spawned, 1);
+        }
+        let mut runtimes = HashMap::new();
+        runtimes.insert(pid, rt);
+        assert_eq!(
+            live_stack_runners(&runtimes),
+            vec![(pid, vec!["stack".to_owned()])]
+        );
+        let stack = runtimes
+            .get_mut(&pid)
+            .unwrap()
+            .processes
+            .get_mut("stack")
+            .unwrap();
+        stack.term_id = None;
+        assert!(
+            live_stack_runners(&runtimes).is_empty(),
+            "a stopped runner stays stopped"
+        );
     }
 
     #[test]

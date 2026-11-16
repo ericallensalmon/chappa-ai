@@ -1162,12 +1162,28 @@ export interface AgentSettingsFileDto {
   message: string;
 }
 
-/** An `agent://agent-settings` payload: raised when an agent launches in a
- *  project whose agent settings files git would commit. Never a block. */
+/** One standing agent settings warning: kept by the app until the file is
+ *  ignored or gone, across restarts. */
+export interface AgentSettingsWarningDto {
+  projectRoot: string;
+  file: AgentSettingsFileDto;
+}
+
+/** An `agent://agent-settings` payload: a check (a project opened, an agent
+ *  launched or exited) found agent settings files git would commit, or a
+ *  warning was resolved. `files` are the ones new to this check (notify
+ *  about them); `all` is every standing warning. Never a block. */
 export interface AgentSettingsEvent {
-  term_id: number;
+  /** The agent the check ran for; null for a project open or a recheck. */
+  term_id: number | null;
   projectRoot: string;
   files: AgentSettingsFileDto[];
+  all: AgentSettingsWarningDto[];
+}
+
+/** Every standing agent settings warning (for the Needs you rows at boot). */
+export function agentSettingsWarnings(): Promise<AgentSettingsWarningDto[]> {
+  return call("agent_settings_warnings");
 }
 
 /** "Add to .gitignore": append the line to the project's root .gitignore

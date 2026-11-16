@@ -700,3 +700,32 @@ fn retention_keeps_the_younger_or_the_newest_whichever_keeps_more() {
         }
     );
 }
+
+/// `run-job` takes the gitleaks config the source was started with (the
+/// source puts it on every job's command line), and nothing else unknown.
+#[test]
+fn run_job_takes_the_gitleaks_config_on_its_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("house.toml");
+    fs::write(&config, "[extend]\nuseDefault = true\n").unwrap();
+    let run = |extra: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_chappa-stack"))
+            .args(["run-job", "no-such-job", "--project"])
+            .arg(tmp.path())
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--gitleaks-config", config.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("unexpected argument"), "{stderr}");
+    assert_eq!(out.status.code(), Some(EXIT_REFUSED));
+    // The job, not the arguments, is what it refused.
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("defines no stack"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = run(&["--no-such-flag", "x"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected argument"));
+}

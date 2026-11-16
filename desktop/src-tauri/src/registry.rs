@@ -789,6 +789,17 @@ impl Registry {
         Ok(id)
     }
 
+    /// Call `handler` when this terminal's child exits (in place of any
+    /// handler it had). For an agent, which is created without one: the
+    /// spawn path sets it right after creating the row.
+    pub fn set_exit_handler(&self, id: TermId, handler: ExitHandler) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.on_exit = Some(handler);
+            }
+        }
+    }
+
     /// Seed the live row's session (a spawn that resumes a saved id knows
     /// it before the child prints anything). Not reported to the recorder:
     /// the caller wrote it into the run it began.

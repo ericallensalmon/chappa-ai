@@ -73,7 +73,7 @@ import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, visibleViews, type Rai
 import { buildPrsModel, prsNeedingYou, type PrRow, type PrsModel } from "./sources/prs_model";
 import { buildWorkModel, type WorkModel } from "./sources/work_model";
 import { keyMatchOf } from "./sources/work_view";
-import { SeenBaselines, buildNeedsYou, pollResult, type AgentSettingsWarning, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
+import { SeenBaselines, buildNeedsYou, pollResult, standingAgentSettings, type AgentSettingsWarning, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
 import { SourceViewsData, type DataView } from "./sources/views_data";
 import { PrsView } from "./sources/prs_view";
 import { NeedsYouView } from "./sources/needs_you_view";
@@ -3147,6 +3147,11 @@ export class App {
     // say (findings under the warn policy, or a scan that did not finish).
     on<ipc.SecretScanNoticeEvent>("agent://secret-scan", (p) => this.applySecretScanNotice(p));
     on<ipc.AgentSettingsEvent>("agent://agent-settings", (p) => this.applyAgentSettings(p));
+    // The warnings the app kept from before this start (until resolved).
+    void ipc
+      .agentSettingsWarnings()
+      .then((all) => this.setStandingAgentSettings(all))
+      .catch(() => undefined);
     // A json-transport agent's typed events.
     on<ipc.AgentEventEvent>("agent://event", (p) => this.applyAgentEvent(p));
     // Tauri intercepts OS drag-drop before the webview sees it; the drop
@@ -4422,27 +4427,31 @@ export class App {
     return response;
   }
 
-  /** `agent://agent-settings` — an agent launched where an agent settings
-   *  file can be committed: a notification and a Needs you entry per file
-   *  (with "Add to .gitignore" when the file is not tracked). Never a block. */
+  /** `agent://agent-settings` — a check (a project opened, an agent launched
+   *  or exited) found agent settings files that can be committed, or one was
+   *  resolved: a notification per new file and the Needs you entries from
+   *  the app's standing list (with "Add to .gitignore" when the file is not
+   *  tracked). Never a block. */
   private applyAgentSettings(p: ipc.AgentSettingsEvent): void {
-    const entry = this.entries.get(p.term_id);
+    const entry = p.term_id === null ? undefined : this.entries.get(p.term_id);
     for (const file of p.files) {
       this.center.record({
-        termId: p.term_id,
+        termId: p.term_id ?? 0,
         projectId: entry?.agent?.projectId ?? null,
         processName: entry?.name ?? null,
         kind: "notify",
         title: file.exposure === "tracked" ? "An agent settings file is committed" : "An agent settings file can be committed",
         body: file.message,
       });
-      const warning: AgentSettingsWarning = { projectRoot: p.projectRoot, file };
-      const line = file.ignoreLine;
-      if (file.exposure === "not-ignored" && line) {
-        warning.addToGitignore = () => void this.addAgentSettingsIgnore(p.projectRoot, file.path, line);
-      }
-      this.agentSettings.set(file.path, warning);
     }
+    this.setStandingAgentSettings(p.all);
+  }
+
+  /** Replace the Needs you agent settings rows with the app's standing list. */
+  private setStandingAgentSettings(all: ipc.AgentSettingsWarningDto[]): void {
+    const next = standingAgentSettings(all, (root, path, line) => void this.addAgentSettingsIgnore(root, path, line));
+    this.agentSettings.clear();
+    for (const [path, w] of next) this.agentSettings.set(path, w);
     this.renderNeedsYou();
   }
 

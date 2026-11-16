@@ -75,7 +75,9 @@ pub fn get_settings(settings: State<'_, SettingsState>) -> Result<Settings, Stri
 /// something else here.
 #[tauri::command]
 pub fn set_settings(
+    app: tauri::AppHandle,
     registry: State<'_, Registry>,
+    projects: State<'_, crate::projects::Projects>,
     state: State<'_, SettingsState>,
     settings: Settings,
 ) -> Result<Settings, String> {
@@ -106,5 +108,18 @@ pub fn set_settings(
             handle.set_wheel_speed(stored.scroll_wheel_speed);
         }
     }
+    // The stack runners take the gitleaks config on their command line: a
+    // new value starts each live one again, so its next scan already uses
+    // the same rules as the app's pre-agent scan. Off the settings lock
+    // (projects → settings is the only order those two locks are taken in).
+    if gitleaks_config_changed(&old, &stored) {
+        projects.relaunch_stack_runners(&registry, &app);
+    }
     Ok(stored)
+}
+
+/// Whether the change from `old` to `new` moves the gitleaks config the
+/// stack runners are launched with.
+pub fn gitleaks_config_changed(old: &Settings, new: &Settings) -> bool {
+    old.secret_scan_config.trim() != new.secret_scan_config.trim()
 }

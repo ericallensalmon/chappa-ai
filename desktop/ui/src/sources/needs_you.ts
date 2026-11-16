@@ -139,6 +139,26 @@ export interface AgentSettingsWarning {
   addToGitignore?: () => void;
 }
 
+/** The standing warnings as the app keeps them, by file path, each with
+ *  "Add to .gitignore" when the file is not tracked and inside its project
+ *  (`add` runs the confirm-gated action). Replaces whatever was listed:
+ *  the app's list is the one truth, so a resolved warning goes away. */
+export function standingAgentSettings(
+  all: ipc.AgentSettingsWarningDto[],
+  add: (projectRoot: string, path: string, line: string) => void,
+): Map<string, AgentSettingsWarning> {
+  const out = new Map<string, AgentSettingsWarning>();
+  for (const w of all) {
+    const warning: AgentSettingsWarning = { projectRoot: w.projectRoot, file: w.file };
+    const line = w.file.ignoreLine;
+    if (w.file.exposure === "not-ignored" && line) {
+      warning.addToGitignore = () => add(w.projectRoot, w.file.path, line);
+    }
+    out.set(w.file.path, warning);
+  }
+  return out;
+}
+
 /** The section for agent settings files git would commit. A tracked file
  *  is `bad` and has no action: it must come out of the index and its
  *  secrets be rotated, which is not automated. */

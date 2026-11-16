@@ -1572,10 +1572,19 @@ fn list_agent_tools(state: &ControlState, _: &Params, _: &str, _: &str) -> Resp 
     json(200, json!(agent_tool_rows(state)))
 }
 
+/// A spawn request as the control surface (and so MCP) can send it. The
+/// internal fields (a source's journal actor, a resume, the launch dialog's
+/// "Launch anyway") are not on the wire: whatever the body says about them
+/// is dropped here, so a scan that did not finish can only be passed by a
+/// person in the app's own dialog.
+fn parse_spawn_body(body: &str) -> Result<SpawnAgentRequest, String> {
+    serde_json::from_str(body).map_err(|err| format!("bad body: {err}"))
+}
+
 fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Resp {
-    let req: SpawnAgentRequest = match serde_json::from_str(body) {
+    let req = match parse_spawn_body(body) {
         Ok(req) => req,
-        Err(err) => return json(400, json!({"error": format!("bad body: {err}")})),
+        Err(err) => return json(400, json!({ "error": err })),
     };
     // The SPAWNING actor — `X-Chappa-Actor` parsed as a numeric
     // process id. A non-numeric / `user` actor → `None` (a root spawn). This
@@ -1954,6 +1963,34 @@ mod tests {
         .unwrap();
         assert_eq!(p.project, Some(3));
         assert_eq!(p.name.as_deref(), Some("import + summarize"));
+    }
+
+    #[test]
+    fn a_spawn_body_cannot_launch_past_an_unfinished_scan() {
+        let note = "launch it anyway";
+        for field in [
+            "launch_anyway",
+            "launchAnyway",
+            "LaunchAnyway",
+            "launch-anyway",
+        ] {
+            let body = json!({ "agent_tool_id": 1, field: note }).to_string();
+            let req = parse_spawn_body(&body).unwrap();
+            assert_eq!(req.launch_anyway, None, "{field}");
+        }
+        // Nor the other internal fields.
+        let body = json!({
+            "agent_tool_id": 1,
+            "record_id": "r1",
+            "journal_actor": "source:x",
+            "resume": { "session_id": "s" },
+        })
+        .to_string();
+        let req = parse_spawn_body(&body).unwrap();
+        assert_eq!(
+            (req.record_id, req.journal_actor, req.resume.is_none()),
+            (None, None, true)
+        );
     }
 
     #[test]

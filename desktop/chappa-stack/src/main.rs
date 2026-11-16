@@ -9,13 +9,13 @@ use std::time::Duration;
 use chappa_stack::identity::{Token, ADDR_ENV, TOKEN_ENV};
 use chappa_stack::project::ProjectConfig;
 use chappa_stack::server::{self, DefinitionPin, Source};
-use chappa_stack::world::World;
+use chappa_stack::world::{World, GITLEAKS_CONFIG_ARG};
 
 const USAGE: &str = "usage:
   chappa-stack serve [--project <dir>] [--stack <name>] [--slot <n>] [--channel <name>]
-                     [--trusted-definition <hash>|none]
+                     [--trusted-definition <hash>|none] [--gitleaks-config <file>]
                      [--addr <loopback:port> --token-file <file>]
-  chappa-stack run-job <job id> [--project <dir>]
+  chappa-stack run-job <job id> [--project <dir>] [--gitleaks-config <file>]
   chappa-stack follow <file>
 
 serve: launched by the app as a `source:` command, it reads CHAPPA_SOURCE_ADDR
@@ -26,7 +26,12 @@ does not exist. The project is the working folder unless --project names one.
 --trusted-definition is the stack definition hash the person trusted in the
 app (`none` when nothing was): scripts, hooks, scans and jobs run only while
 the definition still has it. Launched by the app without it, nothing runs;
-attached without it, the definition as read at startup is the trusted one.";
+attached without it, the definition as read at startup is the trusted one.
+
+--gitleaks-config is the gitleaks config the app's Settings name: every
+secret scan (worktrees, commits, build contexts, env files) uses it, and
+every job is started with it. Without it the built-in default is used, the
+same one the app uses. A config file inside a scanned folder is never read.";
 
 /// What the app put in this process's environment, taken out of it before
 /// anything else runs, so no child of this process can inherit the token.
@@ -98,6 +103,15 @@ fn project_dir(args: &mut Args) -> Result<PathBuf, String> {
     }
 }
 
+/// `--gitleaks-config <file>`: an empty value is no config.
+fn gitleaks_config(args: &mut Args) -> Result<Option<PathBuf>, String> {
+    Ok(args
+        .take(GITLEAKS_CONFIG_ARG)?
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from))
+}
+
 fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     let mut config = ProjectConfig::new(project_dir(args)?);
     config.stack = args.take("--stack")?;
@@ -115,6 +129,7 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
         .take("--trusted-definition")?
         .map(|t| DefinitionPin::parse(&t))
         .transpose()?;
+    let gitleaks_config = gitleaks_config(args)?;
     args.done()?;
     let (addr, token, attached) = match addr_flag {
         Some(addr) => {
@@ -146,7 +161,7 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     // Launched: the proof covers the address string the app chose. Attached:
     // the address actually bound (a `:0` request becomes a real port).
     let proof_addr = if attached { bound.to_string() } else { addr };
-    let world = World::real();
+    let world = World::real().with_gitleaks_config(gitleaks_config);
     let source = Source::new(world.clone(), config, token, proof_addr.clone());
     if pin == DefinitionPin::Nothing {
         eprintln!("chappa-stack: no trusted stack definition; read-only until it is trusted");
@@ -214,8 +229,9 @@ fn run_job(args: &mut Args) -> Result<u8, String> {
     }
     let id = args.rest.remove(0);
     let dir = project_dir(args)?;
+    let gitleaks_config = gitleaks_config(args)?;
     args.done()?;
-    let world = World::real();
+    let world = World::real().with_gitleaks_config(gitleaks_config);
     let mut stdout = std::io::stdout();
     let code = chappa_stack::runjob::run_job(&world, &dir, &id, &mut stdout);
     Ok(code.clamp(0, 255) as u8)

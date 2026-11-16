@@ -22,6 +22,10 @@ use stack_core::trust::{definition_trust, DefinitionTrust, UNTRUSTED};
 
 /// The argument the runner takes the trusted hash in.
 pub const TRUSTED_DEFINITION_ARG: &str = "--trusted-definition";
+/// The argument the runner takes the gitleaks config from Settings ▸
+/// Security in, so its scans and the app's pre-agent scan use one set of
+/// rules. A path the person chose; never one from a scanned tree.
+pub const GITLEAKS_CONFIG_ARG: &str = "--gitleaks-config";
 
 /// The words of a command as it is written (a shell line split on spaces).
 fn words(def: &ProcessDef) -> Vec<String> {
@@ -188,6 +192,77 @@ pub fn with_trusted_definition(def: &ProcessDef, hash: Option<&str>) -> ProcessD
     out
 }
 
+/// What a call that would change something through a stack runner gets
+/// while its definition is not the trusted one: acknowledgements are
+/// refused like every action, and the way out is to trust it again.
+pub const UNTRUSTED_REFUSAL: &str = "The stack definition is not the one trusted in this app (it changed, or it was never trusted), so the stack is read-only: no action or acknowledgement is taken until you review the project's trust prompt and trust it again.";
+
+/// The refusal for the stack runner `def` of the project at `root` when
+/// the definition it serves does not hash to `trusted` (the hash it was
+/// launched with). `None` when it does, or when the folder defines no
+/// stack (nothing to protect).
+pub fn refusal(root: &Path, def: &ProcessDef, trusted: Option<&str>) -> Option<String> {
+    let now = match definition_trust(&served_folder(root, def)) {
+        Ok(None) => return None,
+        Ok(Some(t)) => Some(t.hash),
+        Err(_) => None,
+    };
+    match (now, trusted) {
+        (Some(now), Some(trusted)) if now == trusted => None,
+        _ => Some(UNTRUSTED_REFUSAL.to_owned()),
+    }
+}
+
+/// `def` with the gitleaks config from Settings ▸ Security on its command
+/// line (`config` trimmed; empty = nothing added, and the runner uses the
+/// built-in default the app uses too). A list command takes the path as one
+/// word. A shell line gets it quoted, which is only done for paths made of
+/// characters every shell leaves alone inside quotes; anything else is
+/// refused rather than passed in a form some shell would expand.
+pub fn with_gitleaks_config(def: &ProcessDef, config: &str) -> Result<ProcessDef, String> {
+    let config = config.trim();
+    if config.is_empty() {
+        return Ok(def.clone());
+    }
+    let mut out = def.clone();
+    out.command = match &def.command {
+        CommandLine::Argv(w) => {
+            let mut w = w.clone();
+            w.push(GITLEAKS_CONFIG_ARG.into());
+            w.push(config.into());
+            CommandLine::Argv(w)
+        }
+        CommandLine::Shell(line) => {
+            let plain = config
+                .chars()
+                .all(|c| c.is_alphanumeric() || " /\\:._-+~,@()[]{}=#".contains(c));
+            if !plain {
+                return Err(format!(
+                    "the gitleaks config path in Settings ▸ Security ({config}) holds characters a shell would read; write this command as a list (`command: [...]`) or move the file"
+                ));
+            }
+            let quote = if cfg!(windows) { '"' } else { '\'' };
+            CommandLine::Shell(format!(
+                "{line} {GITLEAKS_CONFIG_ARG} {quote}{config}{quote}"
+            ))
+        }
+    };
+    Ok(out)
+}
+
+/// The stack runner `def` as it is launched: the gitleaks config from
+/// Settings, then the trusted definition hash (always the last two words).
+pub fn launch_def(
+    def: &ProcessDef,
+    trusted: Option<&str>,
+    gitleaks_config: &str,
+) -> Result<ProcessDef, String> {
+    Ok(with_trusted_definition(
+        &with_gitleaks_config(def, gitleaks_config)?,
+        trusted,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +374,95 @@ mod tests {
             none.command,
             CommandLine::Shell("chappa-stack serve --trusted-definition none".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn shell(line: &str) -> ProcessDef {
+        ProcessDef {
+            command: CommandLine::Shell(line.into()),
+            ..ProcessDef::default()
+        }
+    }
+
+    #[test]
+    fn the_settings_gitleaks_config_goes_on_the_runner_command_line() {
+        let argv = ProcessDef {
+            command: CommandLine::Argv(vec!["chappa-stack".into(), "serve".into()]),
+            ..ProcessDef::default()
+        };
+        let hash = "ab".repeat(32);
+        let path = r"C:\cfg dir\house rules.toml";
+        let launched = launch_def(&argv, Some(&hash), &format!("  {path} ")).unwrap();
+        assert_eq!(
+            launched.command,
+            CommandLine::Argv(vec![
+                "chappa-stack".into(),
+                "serve".into(),
+                GITLEAKS_CONFIG_ARG.into(),
+                path.into(),
+                TRUSTED_DEFINITION_ARG.into(),
+                hash.clone(),
+            ])
+        );
+        // Nothing set: nothing added (the runner uses the shared default).
+        assert_eq!(
+            launch_def(&argv, None, "  ").unwrap().command,
+            with_trusted_definition(&argv, None).command
+        );
+        // A shell line gets it quoted for the platform's shell.
+        let q = if cfg!(windows) { '"' } else { '\'' };
+        assert_eq!(
+            launch_def(&shell("chappa-stack serve"), None, path)
+                .unwrap()
+                .command,
+            CommandLine::Shell(format!(
+                "chappa-stack serve {GITLEAKS_CONFIG_ARG} {q}{path}{q} {TRUSTED_DEFINITION_ARG} none"
+            ))
+        );
+        // A path a shell would expand is refused, never passed.
+        for bad in [
+            r"C:\%USERPROFILE%\x.toml",
+            "/tmp/$HOME/x.toml",
+            "/a/'b'.toml",
+        ] {
+            let err = launch_def(&shell("chappa-stack serve"), None, bad).unwrap_err();
+            assert!(err.contains("as a list"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_definition_other_than_the_trusted_one_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let def = ProcessDef {
+            command: CommandLine::Argv(vec!["chappa-stack".into(), "serve".into()]),
+            source: Some(Default::default()),
+            ..ProcessDef::default()
+        };
+        // No stack in the folder: nothing to protect.
+        assert_eq!(refusal(root, &def, None), None);
+        std::fs::write(
+            root.join("chappa.stack.yml"),
+            "stacks:\n  app:\n    components:\n      web:\n        driver: script\n        up: [node, up.js]\n",
+        )
+        .unwrap();
+        let hash = definition_trust(root).unwrap().unwrap().hash;
+        assert_eq!(refusal(root, &def, Some(&hash)), None);
+        // Never trusted, or changed since.
+        assert_eq!(
+            refusal(root, &def, None).as_deref(),
+            Some(UNTRUSTED_REFUSAL)
+        );
+        std::fs::write(
+            root.join("chappa.stack.yml"),
+            "stacks:\n  app:\n    components:\n      web:\n        driver: script\n        up: [node, other.js]\n",
+        )
+        .unwrap();
+        let why = refusal(root, &def, Some(&hash)).unwrap();
+        assert!(why.contains("trust it again"), "{why}");
     }
 }

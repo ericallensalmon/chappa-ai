@@ -1,6 +1,7 @@
 use tauri::{Manager, RunEvent};
 
 pub mod agent_json;
+pub mod agent_settings;
 pub mod agent_tools;
 pub mod agents;
 mod commands;
@@ -314,6 +315,7 @@ pub fn run() {
         secret_scan::secret_scan_info,
         secret_scan::acknowledge_secret_findings,
         secret_scan::add_agent_settings_ignore,
+        secret_scan::agent_settings_warnings,
         projects::set_project_secret_scan,
         data_safety::data_safety_state,
     ]);
@@ -395,6 +397,7 @@ pub fn run() {
         secret_scan::secret_scan_info,
         secret_scan::acknowledge_secret_findings,
         secret_scan::add_agent_settings_ignore,
+        secret_scan::agent_settings_warnings,
         projects::set_project_secret_scan,
         data_safety::data_safety_state,
         workspace::list_workspace_commands,

@@ -171,6 +171,7 @@ pub fn fakes(cli: FakeCli, http: FakeHttp) -> Fakes {
         scripts: cli.clone(),
         running_scripts: Arc::new(chappa_stack::world::RunningScripts::default()),
         secrets: Arc::new(chappa_stack::secret_scan::NoScanner),
+        gitleaks_config: None,
     };
     Fakes {
         cli,

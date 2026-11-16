@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UNCHANGED, commandDialog, type CommandForm } from "./dialog";
 import * as ipc from "./ipc";
-import { agentSettingsSection, buildNeedsYou } from "./sources/needs_you";
+import { agentSettingsSection, buildNeedsYou, standingAgentSettings } from "./sources/needs_you";
 import { SECRET_SCAN_CONFIG_MAX_CHARS, clampConfigPath } from "./settings";
 
 const q = <T extends Element>(sel: string): T => document.querySelector<T>(sel)!;
@@ -106,6 +106,28 @@ describe("agent settings files in Needs you", () => {
     const model = buildNeedsYou({ terminals: [], work: [], prs: null, attention: [], agentSettings: [{ projectRoot: "/p", file: file("tracked") }] });
     expect(model.sections.map((s) => s.id)).toContain("agent-settings");
     expect(model.count).toBe(1);
+  });
+
+  it("lists the app's standing warnings, one row per file, with the action wired", () => {
+    const add = vi.fn();
+    const outside = { ...file("not-ignored"), path: "/elsewhere/.claude/settings.local.json", ignoreLine: null };
+    const rows = standingAgentSettings(
+      [
+        { projectRoot: "/p", file: file("not-ignored") },
+        { projectRoot: "/p", file: file("tracked") },
+        { projectRoot: "/p", file: outside },
+        // The same file again (another trigger found it): one row.
+        { projectRoot: "/p", file: file("not-ignored") },
+      ],
+      add,
+    );
+    expect([...rows.keys()]).toEqual([file("not-ignored").path, file("tracked").path, outside.path]);
+    rows.get(file("not-ignored").path)!.addToGitignore!();
+    expect(add).toHaveBeenCalledWith("/p", file("not-ignored").path, "/.claude/settings.local.json");
+    expect(rows.get(file("tracked").path)!.addToGitignore).toBeUndefined();
+    expect(rows.get(outside.path)!.addToGitignore).toBeUndefined();
+    // A resolved warning is simply no longer in the app's list.
+    expect(standingAgentSettings([], add).size).toBe(0);
   });
 });
 

@@ -56,6 +56,35 @@ loopback on the host and to each engine's gateway inside its containers
 127.0.0.1 dev.example.test
 ```
 
+### When containers can only reach the host's gateway: `relay:`
+
+Some engines (Windows containers under docker, behind NAT) reach the host
+only at their gateway address, not at host loopback, so they cannot get
+to ports another engine published on `127.0.0.1`. A stack names those
+engines under `relay:`, next to `hostname:`:
+
+```yaml
+stacks:
+  local:
+    hostname: dev.example.test
+    relay:
+      engines: [docker]
+```
+
+While the instance has something running, the stack runner then listens
+on that engine's gateway address, once per published port, and forwards
+each connection to `127.0.0.1:<same port>`. It never listens on `0.0.0.0`.
+
+**Windows Firewall.** The relay is a real listener on an address other
+than loopback, so the first time it starts, Windows Firewall asks whether
+to allow `chappa-stack` on the network. Choose **Allow** (private
+networks are enough: the gateway is a virtual adapter on this machine).
+Without it the containers' connections to the relay are dropped and the
+components that use it cannot reach the host. The stack runner's other
+checks (whether a port is free) only bind a socket without listening, so
+they never raise this prompt. This example does not use `relay:` (`api`
+reaches the database through `{host}`), so it never asks.
+
 ## Validation
 
 The definition validates without errors or warnings.

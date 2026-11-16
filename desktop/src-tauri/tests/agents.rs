@@ -1623,3 +1623,115 @@ fn a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing() {
     );
     registry.close(id);
 }
+
+/// An agent that writes its CLI settings file while it runs (what a
+/// "don't ask again" answer does) and then exits: the check when it exits
+/// finds the file git would commit, and the warning is kept.
+#[test]
+fn an_agent_settings_file_written_during_a_run_is_found_when_the_agent_exits() {
+    let git_ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !git_ok {
+        eprintln!("git not on PATH; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // A per-user global ignore rule would hide the file from git.
+    std::env::set_var("GIT_CONFIG_GLOBAL", dir.path().join("no-global-config"));
+    std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    std::env::set_var("XDG_CONFIG_HOME", dir.path().join("no-xdg"));
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    let mut store = project_model::projects::ProjectStore::new(dir.path().join("projects.json"));
+    let pid = store.add(root.clone(), "app".into(), None).unwrap().id;
+    store.set_secret_scan(pid, Some(false)).unwrap();
+    let projects = Projects::with_store(store);
+    let tools = AgentToolsState::with_path(dir.path().join("agent_tools.json"));
+    // Waits a moment (the launch check has looked by then), writes the
+    // file, exits.
+    #[cfg(windows)]
+    let (program, args) = (
+        "cmd".to_string(),
+        vec![
+            "/C".to_string(),
+            r"ping -n 3 127.0.0.1 >nul & mkdir .claude & echo {}> .claude\settings.local.json"
+                .to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (program, args) = (
+        "sh".to_string(),
+        vec![
+            "-c".to_string(),
+            "sleep 2; mkdir -p .claude; echo '{}' > .claude/settings.local.json".to_string(),
+        ],
+    );
+    let tool = tools
+        .upsert(AgentTool {
+            id: 0,
+            name: "writes settings".into(),
+            tool_type: ToolType::Custom,
+            program,
+            args,
+            model: None,
+            runtime: Runtime::Host,
+            env: Default::default(),
+            enabled: true,
+            max_busy: None,
+            transport: Default::default(),
+            resume_argv: Vec::new(),
+            prompt_argv: Vec::new(),
+            session_capture: Default::default(),
+            hooks_opt_out: false,
+        })
+        .unwrap();
+    let registry = Registry::with_docker(FakeDocker::new());
+    let settings = SettingsState::default();
+    let records = app_lib::records::Records::default();
+    let resp = app_lib::agents::spawn_agent_headless(
+        SpawnContext {
+            registry: &registry,
+            tools: &tools,
+            settings: &settings,
+            projects: &projects,
+            records: &records,
+            actor: None,
+        },
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            project_id: Some(pid),
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .expect("spawn");
+    let file = root.join(".claude").join("settings.local.json");
+    // Nothing yet: the file does not exist while the agent waits.
+    assert!(projects.agent_settings().all().is_empty());
+    let warnings = wait_until(|| {
+        let all = projects.agent_settings().all();
+        (!all.is_empty()).then_some(all)
+    });
+    assert!(file.is_file());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0]
+            .file
+            .path
+            .ends_with(".claude/settings.local.json"),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        warnings[0].file.ignore_line.as_deref(),
+        Some("/.claude/settings.local.json")
+    );
+    registry.close(resp.process_id);
+}

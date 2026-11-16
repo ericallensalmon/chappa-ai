@@ -772,7 +772,7 @@ fn a_build_context_that_cannot_be_scanned_fails_the_build_only_under_block_build
 
 #[test]
 fn real_gitleaks_finds_an_ignored_env_and_a_token_committed_then_deleted() {
-    let Some(scanner) = GitleaksOnPath.scanner(&std::env::temp_dir()) else {
+    let Some(scanner) = GitleaksOnPath::default().scanner(&std::env::temp_dir()) else {
         eprintln!("skipped: gitleaks is not on PATH");
         return;
     };
@@ -780,7 +780,7 @@ fn real_gitleaks_finds_an_ignored_env_and_a_token_committed_then_deleted() {
     let Some(mut s) = setup("block-agents", true) else {
         return;
     };
-    s.f.world.secrets = Arc::new(GitleaksOnPath);
+    s.f.world.secrets = Arc::new(GitleaksOnPath::default());
     s.src = source(s.f.world.clone(), &s.p.dir);
     // Assembled at run time so no source file holds a token-shaped string.
     let token = format!("ghp_{}", "A1b2C3d4".repeat(5));
@@ -814,6 +814,89 @@ fn real_gitleaks_finds_an_ignored_env_and_a_token_committed_then_deleted() {
     assert!(!stored.contains(&token));
 }
 
+/// A rule only the person's own gitleaks config has: a house marker.
+const HOUSE_CONFIG: &str = r#"title = "house rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "house-marker"
+description = "a house deploy marker"
+regex = '''HOUSEMARK-[0-9A-Z]{12}'''
+"#;
+
+/// An allow-everything config someone left in the scanned tree.
+const ALLOW_ALL: &str = "title = \"allow all\"\n[allowlist]\npaths = ['''.*''']\n";
+
+fn rules_of(block: &Value) -> Vec<String> {
+    block["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["rule"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn real_gitleaks_scans_with_the_settings_config_and_never_one_from_the_tree() {
+    if GitleaksOnPath::default()
+        .scanner(&std::env::temp_dir())
+        .is_none()
+    {
+        eprintln!("skipped: gitleaks is not on PATH");
+        return;
+    }
+    let Some(mut s) = setup("block-agents", true) else {
+        return;
+    };
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = config_dir.path().join("house.toml");
+    fs::write(&config, HOUSE_CONFIG).unwrap();
+    // Assembled at run time so no source line holds the marker.
+    let marker = format!("HOUSEMARK-{}", "7Q4W9X2K8M3N");
+    fs::write(s.wt().join("deploy.txt"), format!("marker {marker}\n")).unwrap();
+    // A config and an ignore file planted in the tree that would hide it.
+    fs::write(s.wt().join(".gitleaks.toml"), ALLOW_ALL).unwrap();
+    fs::write(
+        s.wt().join(".gitleaksignore"),
+        "deploy.txt:house-marker:1\n",
+    )
+    .unwrap();
+
+    // The built-in default (what the app uses with nothing set): no such rule.
+    s.f.world = s.f.world.clone().with_gitleaks_config(None);
+    s.src = source(s.f.world.clone(), &s.p.dir);
+    s.open_item();
+    let b = s.block();
+    assert!(!rules_of(&b).contains(&"house-marker".to_string()), "{b}");
+
+    // The Settings config, as `serve --gitleaks-config` hands it over.
+    s.f.world = s.f.world.clone().with_gitleaks_config(Some(config.clone()));
+    s.src = source(s.f.world.clone(), &s.p.dir);
+    let log = s.open_item();
+    let b = s.block();
+    assert!(
+        b["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule"] == "house-marker" && f["file"] == format!("{WT}/deploy.txt")),
+        "{b} {log:?}"
+    );
+    assert_eq!(b["blocksAgents"], true, "{b}");
+    assert!(!b.to_string().contains(&marker));
+    // Every job the source starts carries the same config on.
+    let argv = s.f.world.job_argv("job-1");
+    assert_eq!(
+        argv[argv.len() - 2..],
+        [
+            chappa_stack::world::GITLEAKS_CONFIG_ARG.to_string(),
+            config.display().to_string()
+        ]
+    );
+}
+
 #[test]
 fn a_store_that_cannot_be_read_keeps_agents_out_of_the_bound_worktree() {
     let Some(s) = setup("warn", false) else {
@@ -829,4 +912,84 @@ fn a_store_that_cannot_be_read_keeps_agents_out_of_the_bound_worktree() {
         "{b}"
     );
     assert!(ScanStore::load(&s.p.work(), "app-0").is_err());
+}
+
+/// Every `mutates: true` action anywhere in a payload.
+fn mutating_actions(v: &Value, out: &mut Vec<Value>) {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::Array(actions)) = map.get("actions") {
+                out.extend(actions.iter().filter(|a| a["mutates"] == true).cloned());
+            }
+            for child in map.values() {
+                mutating_actions(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                mutating_actions(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn while_the_definition_is_untrusted_acknowledgements_are_refused_like_every_action() {
+    use chappa_stack::server::{
+        DefinitionPin, UNTRUSTED_DISABLED, UNTRUSTED_KIND, UNTRUSTED_REFUSAL,
+    };
+    let Some(s) = setup("block-agents", false) else {
+        return;
+    };
+    fs::write(s.wt().join(".env"), "TOKEN=PLANTED\n").unwrap();
+    s.open_item();
+    let action = ack_action(&s.env());
+    assert!(action.get("disabled").is_none(), "{action}");
+
+    // Nothing trusted (or the definition changed since): read-only.
+    s.src.set_definition_pin(DefinitionPin::Nothing);
+    let env = s.env();
+    // The read-only view still says what the scan found.
+    assert_eq!(env["secretScan"]["blocksAgents"], true, "{env}");
+    assert_eq!(env["banners"][0]["id"], UNTRUSTED_KIND);
+    let mut mutating = Vec::new();
+    mutating_actions(&env, &mut mutating);
+    assert!(
+        mutating
+            .iter()
+            .any(|a| a["id"] == secret_scan::ACK_ACTION_ID),
+        "{env}"
+    );
+    for a in &mutating {
+        assert_eq!(a["disabled"], UNTRUSTED_DISABLED, "{a}");
+    }
+    // The secret-scan acknowledgement is refused, nothing is written.
+    let (code, body) = ack(&s.src, &action, "a note", true, Some("human:alex"));
+    assert_eq!((code, body["kind"].as_str()), (409, Some(UNTRUSTED_KIND)));
+    assert_eq!(body["message"], UNTRUSTED_REFUSAL);
+    assert!(UNTRUSTED_REFUSAL.contains("trust it again"));
+    assert!(!Baseline::path(&s.p.dir.join(".work")).exists());
+    // The data-safety acknowledgement and the other changes too.
+    for (path, body) in [
+        (
+            "/api/actions",
+            json!({"id": "data-safety-ack", "target": {"view": "environment", "key": null}, "confirmed": true, "note": "a note"}),
+        ),
+        (
+            "/api/actions",
+            json!({"id": "data-safety-check", "target": {"view": "environment", "key": "api"}, "confirmed": true}),
+        ),
+        ("/api/work/owner", json!({"source": "tracker", "items": []})),
+    ] {
+        let (code, reply) = post(&s.src, path, &body, true);
+        assert_eq!(
+            (code, reply["kind"].as_str()),
+            (409, Some(UNTRUSTED_KIND)),
+            "{path} {body}: {reply}"
+        );
+    }
+    // The other read-only views keep answering.
+    assert_eq!(get(&s.src, "/api/work").0, 200);
+    assert_eq!(get(&s.src, "/chappa/v1/manifest").0, 200);
 }

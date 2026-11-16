@@ -20,6 +20,9 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 # The stack definition trust hash; the app and the runner compute it alike.
 sha2 = "0.10"
+# The port probe binds without listening, so it never raises a firewall
+# prompt; std has no bind-only socket.
+socket2 = "0.6"
 thiserror = "1"
 
 [dev-dependencies]

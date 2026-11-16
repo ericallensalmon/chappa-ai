@@ -66,7 +66,15 @@ pub struct World {
     pub running_scripts: Shared<RunningScripts>,
     /// The secret scanner: gitleaks on `PATH` for real, a fake in tests.
     pub secrets: Shared<dyn crate::secret_scan::ScannerSource + Send + Sync>,
+    /// The gitleaks config the app's Settings name, when they name one. The
+    /// real scanner uses it, and every job is started with it
+    /// ([`World::job_argv`]) so a job's scans use the same rules.
+    pub gitleaks_config: Option<PathBuf>,
 }
+
+/// The argument that carries [`World::gitleaks_config`] on `serve` and
+/// `run-job`.
+pub const GITLEAKS_CONFIG_ARG: &str = "--gitleaks-config";
 
 /// The default for [`World::settle`].
 pub const PROCESS_SETTLE: Duration = Duration::from_millis(1500);
@@ -98,8 +106,34 @@ impl World {
             settle: PROCESS_SETTLE,
             clock: Arc::new(SystemClock),
             hook_retry: HOOK_RETRY,
-            secrets: Arc::new(crate::secret_scan::GitleaksOnPath),
+            secrets: Arc::new(crate::secret_scan::GitleaksOnPath::default()),
+            gitleaks_config: None,
         }
+    }
+
+    /// The real world scanning with `config` (the app's Settings value) in
+    /// place of the built-in default.
+    pub fn with_gitleaks_config(mut self, config: Option<PathBuf>) -> World {
+        self.secrets = Arc::new(crate::secret_scan::GitleaksOnPath::with_config(
+            config.clone(),
+        ));
+        self.gitleaks_config = config;
+        self
+    }
+
+    /// `run-job <id>` as this executable runs it, carrying the gitleaks
+    /// config on, so a job scans with the rules the source was started with.
+    pub fn job_argv(&self, job_id: &str) -> Vec<String> {
+        let mut argv = vec![
+            self.exe.display().to_string(),
+            "run-job".to_string(),
+            job_id.to_string(),
+        ];
+        if let Some(c) = &self.gitleaks_config {
+            argv.push(GITLEAKS_CONFIG_ARG.to_string());
+            argv.push(c.display().to_string());
+        }
+        argv
     }
 }
 
@@ -865,8 +899,7 @@ impl JobSpawner for DetachedSpawner {
     fn spawn(&self, world: &World, project_dir: &Path, job_id: &str) -> Result<(), String> {
         let mut cmd = Command::new(&world.exe);
         stack_core::child_env::scrub(&mut cmd);
-        cmd.arg("run-job")
-            .arg(job_id)
+        cmd.args(&world.job_argv(job_id)[1..])
             .current_dir(project_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

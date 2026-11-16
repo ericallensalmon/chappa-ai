@@ -22,7 +22,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{engine_invocation, CliError, EngineCli, Invocation};
@@ -323,13 +322,40 @@ pub trait PortProbe {
 
 /// Binds the port on every address to find out. Both the wildcard and
 /// loopback must bind, because a listener on either blocks the publish.
+///
+/// It binds a plain TCP socket and never calls `listen()`: listening on the
+/// wildcard address is what makes Windows Firewall ask whether to allow the
+/// program, and a check that only wants to know whether a port is taken must
+/// not raise that prompt. A bind error of any kind ("address in use",
+/// "access denied" for a reserved range) reads as taken, and the socket is
+/// closed before the next bind, so the probe never holds the port.
+///
+/// `SO_REUSEADDR` is deliberately left off (std's `TcpListener::bind` turns
+/// it on everywhere but Windows): on BSD-derived systems it lets a bind to a
+/// specific address succeed beside a live wildcard listener, so a taken port
+/// could read as free. Without it a port in `TIME_WAIT` may read as taken
+/// for a minute, which errs on the safe side.
 #[derive(Debug, Clone, Default)]
 pub struct StdPortProbe;
 
+impl StdPortProbe {
+    /// Whether `addr` binds, without listening; the socket is dropped (and
+    /// the port released) before this returns.
+    fn binds(addr: std::net::SocketAddr) -> bool {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let Ok(socket) = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
+        else {
+            return false;
+        };
+        socket.bind(&addr.into()).is_ok()
+    }
+}
+
 impl PortProbe for StdPortProbe {
     fn is_free(&self, port: u16) -> bool {
-        TcpListener::bind(("0.0.0.0", port)).is_ok()
-            && TcpListener::bind(("127.0.0.1", port)).is_ok()
+        use std::net::{Ipv4Addr, SocketAddr};
+        Self::binds(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
+            && Self::binds(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
     }
 }
 
@@ -709,6 +735,7 @@ mod tests {
     use crate::definition::StacksDocument;
     use crate::driver::{checks_for, resolve, run_checks};
     use crate::intent::ComponentIntent;
+    use std::net::TcpListener;
 
     fn stack() -> StackDef {
         let text = r#"
@@ -973,12 +1000,25 @@ stacks:
     }
 
     #[test]
-    fn std_port_probe_sees_a_real_listener() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(!StdPortProbe.is_free(port));
-        drop(listener);
-        assert!(StdPortProbe.is_free(port));
+    fn std_port_probe_sees_a_real_listener_on_either_address_and_never_keeps_the_port() {
+        // A listener on loopback, then one on the wildcard address: taken.
+        for host in ["127.0.0.1", "0.0.0.0"] {
+            let listener = TcpListener::bind((host, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert!(!StdPortProbe.is_free(port), "{host}:{port} is listened on");
+            drop(listener);
+            assert!(StdPortProbe.is_free(port), "{host}:{port} was let go");
+            // The probe let go of it too: a real listener binds both
+            // addresses right after it, twice over.
+            for _ in 0..2 {
+                assert!(StdPortProbe.is_free(port));
+                let a = TcpListener::bind(("0.0.0.0", port));
+                assert!(a.is_ok(), "0.0.0.0:{port} after the probe: {a:?}");
+                drop(a);
+                let b = TcpListener::bind(("127.0.0.1", port));
+                assert!(b.is_ok(), "127.0.0.1:{port} after the probe: {b:?}");
+            }
+        }
     }
 
     #[test]

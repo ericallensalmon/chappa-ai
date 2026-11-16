@@ -601,6 +601,11 @@ impl fmt::Display for ContainerOs {
     }
 }
 
+/// `relay:`: the stack runner listens on each named engine's gateway
+/// address and forwards to host loopback. That is a real listener on an
+/// address other than loopback, so on Windows the first start raises the
+/// Windows Firewall prompt, which needs Allow for container traffic to get
+/// through (see the local example's README).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayDef {

@@ -640,6 +640,25 @@ fn control_api_doc_is_in_sync() {
     );
 }
 
+/// Passing an agent launch past a secret scan that did not finish takes a
+/// person's note in the app's own launch dialog. Nothing on the control
+/// surface (and so nothing MCP's tools are built on) can ask for it: no
+/// route, field, description or line of the API doc names it.
+#[test]
+fn no_route_can_launch_past_an_unfinished_scan() {
+    for route in ROUTES {
+        let text = format!(
+            "{} {} {:?} {}",
+            route.method, route.path, route.fields, route.description
+        )
+        .to_ascii_lowercase();
+        assert!(!text.contains("anyway"), "{text}");
+    }
+    assert!(!control_http::render_api_doc()
+        .to_ascii_lowercase()
+        .contains("anyway"));
+}
+
 // ---- instance identity --------------------------------------------------------
 
 /// Bind an ephemeral port, publish its endpoint file into `dir` exactly as
