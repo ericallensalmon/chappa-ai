@@ -130,6 +130,12 @@ describe("labels", () => {
     expect(offering).not.toContain("each time one changes");
     // Being sent other sources' rows is part of it too.
     expect(trustMessage(s, { ...s.trust!, ownerUpdates: true })).toContain("It is sent the rows of other sources' items it adds to, each time one changes.");
+    // An any-port entry says what it covers.
+    const anyPort = trustMessage(s, { ...s.trust!, linkHosts: ["dev.example.test:*", "localhost:*", "dev.example.test:14001"] });
+    expect(anyPort).toContain("    any port on dev.example.test\n");
+    expect(anyPort).toContain("    any port on localhost\n");
+    expect(anyPort).toContain("    dev.example.test:14001\n");
+    expect(anyPort).not.toContain(":*");
     const bare = trustMessage(s, { ...s.trust!, linkHosts: [], roots: [], views: [] });
     expect(bare.match(/\(none\)/g)).toHaveLength(3);
   });

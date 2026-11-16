@@ -81,8 +81,8 @@ use crate::provenance::{
     prebuilt_staleness, worktree_staleness, GitError, GitFacts, LabelMap, Provenance, Staleness,
 };
 use crate::script::{
-    self, NoScriptOutputs, PlanPreview, ScriptBinding, ScriptError, ScriptOutputs, ScriptReport,
-    ScriptRun, ScriptRuns, ScriptVerb, ScriptView,
+    self, AlertTone, NoScriptOutputs, PlanPreview, ReportedAlert, ScriptBinding, ScriptError,
+    ScriptOutputs, ScriptReport, ScriptRun, ScriptRuns, ScriptVerb, ScriptView,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -201,6 +201,14 @@ pub struct ComponentReport {
     /// A script component's rows, facts and alerts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<ScriptView>,
+}
+
+/// A script component's confirm for one verb, and whether the plan
+/// preview it would show is still being worked out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptConfirm {
+    pub text: String,
+    pub pending: bool,
 }
 
 /// The outside world a runner talks to: swap every one for a fake in tests.
@@ -336,9 +344,13 @@ impl<'a> StackRunner<'a> {
             .components
             .get(component)
             .is_some_and(|d| script::has(d, ScriptVerb::Status));
+        let mut slow = None;
         let report = if has_status {
             match self.script_run(inst, cache, component, ScriptVerb::Status, &[]) {
-                Ok(run) => self.scripts.status(&run),
+                Ok(run) => {
+                    slow = self.scripts.slow(&run);
+                    self.scripts.status(&run)
+                }
                 Err(e) => Some(ScriptReport::Failed {
                     reason: e.to_string(),
                 }),
@@ -346,14 +358,25 @@ impl<'a> StackRunner<'a> {
         } else {
             None
         };
-        script::view(
+        let mut view = script::view(
             component,
             c.kind,
             c.desired,
             has_status,
             report.as_ref(),
             runs.components.get(component),
-        )
+        );
+        if let Some(took) = slow {
+            let secs = took.as_secs();
+            view.slow_secs = Some(secs);
+            view.alerts.push(ReportedAlert {
+                tone: AlertTone::Warn,
+                text: format!(
+                    "{component}: status is slow; a script of this stack has been running for {secs} s, so the last known state is shown"
+                ),
+            });
+        }
+        view
     }
 
     /// The confirm of running `verb` of a script component: the plan
@@ -365,6 +388,19 @@ impl<'a> StackRunner<'a> {
         component: &str,
         verb: ScriptVerb,
     ) -> String {
+        self.script_confirm_of(inst, obs, component, verb).text
+    }
+
+    /// [`StackRunner::script_confirm`], and whether the plan script's
+    /// preview it would show has not arrived yet (the action is then
+    /// offered disabled until it has).
+    pub fn script_confirm_of(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        component: &str,
+        verb: ScriptVerb,
+    ) -> ScriptConfirm {
         let def = self.stack.components.get(component);
         let label = def
             .and_then(|d| d.label.clone())
@@ -386,7 +422,10 @@ impl<'a> StackRunner<'a> {
             },
             _ => None,
         };
-        script::confirm(&label, verb, run.as_ref(), with_plan, preview.as_ref())
+        ScriptConfirm {
+            pending: with_plan && run.is_ok() && preview.is_none(),
+            text: script::confirm(&label, verb, run.as_ref(), with_plan, preview.as_ref()),
+        }
     }
 
     /// Refuse a plan whose scripts cannot be resolved now (a placeholder

@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use serde::Serialize;
+use project_model::link_hosts::{any_port_host, check_any_port_host};
 use serde_json::Value;
 
 use super::actions::{parse_action, NoteRule, SourceAction};
@@ -364,13 +365,22 @@ pub fn validate_endpoint_path(path: &str) -> Result<(), String> {
 }
 
 /// A link host is a bare host name (optionally `:port`): no scheme, no
-/// path, no wildcard. The later link enforcement compares hosts exactly.
+/// path. The one wildcard is a whole port, `host:*` (any port on that
+/// host), and only on a host that names one party (see
+/// [`project_model::link_hosts`]). The later link enforcement compares
+/// hosts exactly.
 fn validate_link_host(host: &str) -> Result<(), String> {
-    if host.contains("://") || host.contains('/') || host.contains('*') {
-        return Err("must be a bare host name, no scheme, path or wildcard".into());
+    if host.contains("://") || host.contains('/') {
+        return Err("must be a bare host name, no scheme or path".into());
     }
     if host.bytes().any(|b| b <= b' ' || b == 0x7f) {
         return Err("contains whitespace or control characters".into());
+    }
+    if let Some(bare) = any_port_host(host) {
+        return check_any_port_host(&bare);
+    }
+    if host.contains('*') {
+        return Err("the only wildcard allowed is a whole port (`host:*`), never part of the host".into());
     }
     Ok(())
 }
@@ -726,6 +736,43 @@ mod tests {
         assert!(with("*.github.com").is_err());
     }
 
+    /// `host:*` is any port on one named host; every other wildcard, and a
+    /// port wildcard on something that is not one party's host, refuses the
+    /// manifest with the reason.
+    #[test]
+    fn link_hosts_take_a_port_wildcard_on_a_named_host_only() {
+        let with = |host: &str| {
+            parse_manifest(&json!({
+                "contract": 1, "source": {"id": "x", "label": "X", "version": "1"},
+                "linkHosts": [host]
+            }))
+        };
+        for ok in ["localhost:*", "127.0.0.1:*", "[::1]:*", "192.0.2.7:*", "dev.example.test:*", "example.com:*", "Dev.Example.Test:*"] {
+            assert!(with(ok).is_ok(), "{ok} must be accepted: {:?}", with(ok).err());
+        }
+        let refused = [
+            ("*", "only wildcard"),
+            ("*:*", "bare `*`"),
+            (":*", "needs a host"),
+            ("*.example.com:*", "only the port"),
+            ("dev.*.example.com:*", "only the port"),
+            ("*.example.com", "only wildcard"),
+            ("example.com:8*", "only wildcard"),
+            ("com:*", "single label"),
+            ("test:*", "single label"),
+            ("devbox:*", "single label"),
+            ("co.uk:*", "public suffix"),
+            ("github.io:*", "public suffix"),
+            ("::1:*", "brackets"),
+        ];
+        for (bad, why) in refused {
+            match with(bad) {
+                Err(ManifestError::Invalid(msg)) => assert!(msg.contains(why), "{bad:?}: {msg}"),
+                other => panic!("{bad:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn only_loopback_ip_literals_are_accepted_as_source_addresses() {
         assert!(parse_loopback_addr("127.0.0.1:5000").is_ok());
@@ -774,6 +821,11 @@ mod tests {
         let mut host = m.clone();
         host.link_hosts.push("evil.example".into());
         assert_ne!(trust_hash(&host), hash);
+        // An entry that gains a port wildcard is a different approval.
+        let mut any_port = m.clone();
+        any_port.link_hosts = vec!["dev.example.test:*".into(), "registry.example".into()];
+        assert_ne!(trust_hash(&any_port), hash);
+        assert!(canonical_trust_json(&any_port).contains(r#""linkHosts":["dev.example.test:*","registry.example"]"#));
         let mut root = m.clone();
         root.roots.push("/".into());
         assert_ne!(trust_hash(&root), hash);

@@ -360,6 +360,16 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     assert_eq!(env_own.iter().map(|a| a.action.id()).collect::<Vec<_>>(), ["check-images"]);
     assert!(deps.sources.actions(sid, "environment", Some("stale-images"), &deps.tools.list(), &roots).unwrap().is_empty(), "a banner id is not a key");
 
+    // An endpoint the source sent `disabled`: listed disabled with its
+    // reason, and refused before anything is sent (no call is journaled).
+    let web = deps.sources.actions(sid, "environment", Some("web"), &deps.tools.list(), &roots).unwrap();
+    let deploy = web.iter().find(|a| a.action.id() == "deploy-web").unwrap();
+    assert!(!deploy.verdict.enabled && !deploy.verdict.hidden, "{:?}", deploy.verdict);
+    assert_eq!(deploy.verdict.reason.as_deref(), Some("Its build is still running"));
+    assert_eq!(run("environment", Some("web"), "deploy-web", true, None).unwrap_err(), "Its build is still running");
+    let journal = deps.registry.input_journal(st.source_row).unwrap();
+    assert!(!journal.iter().any(|r| r.text.contains("deploy-web")), "a disabled action reached the source: {journal:?}");
+
     // A terminal action: the argv in the checked folder, journaled.
     let ActionOutcome::Launched { term_id, what } = run("work", Some("ABC-1"), "terminal-here", false, None).unwrap() else { panic!() };
     assert_eq!(what, "terminal");

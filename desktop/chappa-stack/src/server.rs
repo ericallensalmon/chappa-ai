@@ -6,7 +6,7 @@
 //! | `GET /chappa/v1/identity?challenge=<64 hex>` | none (that is its point) | `{proof}` |
 //! | `GET /chappa/v1/manifest` | bearer | the manifest |
 //! | `GET /api/environment` | bearer | the Environment payload |
-//! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement, `409` unconfirmed / no longer offered / stale plan / note missing, `404` unknown target |
+//! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement, `409` unconfirmed / no longer offered / stale plan / plan preview still pending / note missing, `404` unknown target |
 //! | `GET /api/work` | bearer | the Work view: one overlay per item workspace (see [`crate::workspaces`]) |
 //! | `GET /api/work/archived` | bearer | the Archived panel |
 //! | `GET /api/work/reviews` | bearer | the Review workspaces panel (see [`crate::reviews`]) |
@@ -685,6 +685,15 @@ impl Source {
                 format!("`{id}` is not offered for {what} now (the stack changed, or there is nothing to do); look again"),
             );
         };
+        // Offered disabled while a plan preview is pending: nobody has seen
+        // what it would run, so it is not accepted (the app refuses it too).
+        if let Some(why) = &chosen.disabled {
+            return error(
+                409,
+                "plan-pending",
+                format!("{why}; look again once the view shows it"),
+            );
+        }
         if !confirmed {
             return error(
                 409,
@@ -919,6 +928,7 @@ impl Source {
                 components,
                 trigger: data_safety::Trigger::Manual.as_str().to_string(),
             },
+            disabled: None,
         };
         self.start_job(loaded, inst, obs, &chosen, false, caller, now)
     }
@@ -987,6 +997,7 @@ impl Source {
                 components: due.clone(),
                 trigger: data_safety::Trigger::Every.as_str().to_string(),
             },
+            disabled: None,
         };
         let (status, body) = self.start_job(
             &loaded,

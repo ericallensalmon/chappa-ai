@@ -305,6 +305,9 @@ export type Action =
        *  under its name (replacing a fixed param of that name), checked by
        *  the app against the declaration before the call. */
       inputs?: EndpointInput[];
+      /** Set: offered but not accepted now; drawn disabled with this as its
+       *  tooltip, and the app refuses a call. Trimmed, at most 200 chars. */
+      disabled?: string;
     }
   | { kind: "link"; id: string; label: string; url: string }
   /** Opens a drill-in page served by the source's endpoint. */
@@ -409,7 +412,8 @@ export interface Manifest {
   actions?: string;
   /** Job status path with an {id} placeholder. */
   jobs?: string;
-  /** Hosts links may open on; the user approves this list. */
+  /** Hosts links may open on; the user approves this list. `host:*` is
+   *  any port on that host. */
   linkHosts: string[];
   /** Extra directories the source wants to launch in; the user approves them. */
   roots?: string[];

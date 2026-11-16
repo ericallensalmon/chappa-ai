@@ -22,5 +22,6 @@
     "status": 503,
     "body": { "kind": "uncertain", "message": "The deploy service did not answer in time", "detail": "The request may or may not have been applied" }
   },
+  "deploy-web": { "mutates": true, "status": 200, "body": { "message": "Deployed" } },
   "unsafe": { "mutates": true, "status": 200, "body": { "message": "Done" } }
 }

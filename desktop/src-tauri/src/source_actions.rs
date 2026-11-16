@@ -238,7 +238,12 @@ fn run_found(
             Ok(ActionOutcome::Opened { url })
         }
         SourceAction::Panel { endpoint, .. } => Ok(ActionOutcome::Panel { payload: deps.sources.panel(source_id, &endpoint)? }),
-        SourceAction::Endpoint { id, label: action_label, mutates, confirm, params, note: rule, inputs } => {
+        SourceAction::Endpoint { id, label: action_label, mutates, confirm, params, note: rule, inputs, disabled } => {
+            // The verdict above refuses it already; said again here, next to
+            // the call, so no later change to the verdict can send it.
+            if let Some(why) = disabled {
+                return Err(why);
+            }
             if mutates && confirm.is_none() {
                 return Err("a mutating action without a confirm text is not offered".into());
             }

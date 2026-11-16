@@ -167,10 +167,11 @@ describe("EnvironmentView", () => {
     const v = new EnvironmentView(d);
     v.update(input());
     await FLUSH();
-    // The view's own (its banner's), then api and seed; the rest never ask.
+    // The view's own (its banner's), then api, web and seed; the rest never ask.
     expect(actions.mock.calls.map((c) => (c as unknown[]).slice(0, 3))).toEqual([
       ["fx", "environment", null],
       ["fx", "environment", "api"],
+      ["fx", "environment", "web"],
       ["fx", "environment", "seed"],
     ]);
     const btn = row(v, "fx|api")!.querySelector<HTMLButtonElement>(".chappa-sv-action")!;
@@ -178,6 +179,33 @@ describe("EnvironmentView", () => {
     btn.click();
     await FLUSH();
     expect(d.run).toHaveBeenCalledWith("fx", "environment", "api", "ping", false, null);
+    v.dispose();
+  });
+
+  it("an endpoint the source sent disabled is a disabled button with the reason as its tooltip", async () => {
+    const reason = "Its build is still running";
+    const actions = vi.fn(async (_s: string, _v: string, key: string | null): Promise<ipc.SourceActionDto[]> =>
+      key === "web"
+        ? [
+            {
+              action: { kind: "endpoint", id: "deploy-web", label: "Deploy", mutates: true, confirm: "Deploy web?", params: null, note: null, disabled: reason },
+              verdict: { ...ok, enabled: false, reason },
+              needsPrompt: false,
+            },
+          ]
+        : [],
+    );
+    const d = deps({ actions });
+    const v = new EnvironmentView(d);
+    v.update(input());
+    await FLUSH();
+    const btn = row(v, "fx|web")!.querySelector<HTMLButtonElement>('.chappa-sv-action[data-action="deploy-web"]')!;
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe(reason);
+    expect(btn.textContent).toBe("Deploy");
+    btn.click();
+    await FLUSH();
+    expect(d.run).not.toHaveBeenCalled();
     v.dispose();
   });
 

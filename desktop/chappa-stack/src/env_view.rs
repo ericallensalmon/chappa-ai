@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use project_model::link_hosts as link_host_rules;
 use stack_core::checks::{format_mb, EngineFacts};
 use stack_core::compose::{parse_utc, uptime_text};
 use stack_core::definition::{ComponentKind, Mode, Severity};
@@ -200,12 +201,29 @@ fn is_own_link(loaded: &Loaded, url: &str) -> bool {
 }
 
 /// The hosts the stack's links point at: its hostname (or loopback when it
-/// has none), with each port in use. Nothing else is declared, so the
-/// trust dialog lists only the stack's own names.
+/// has none). Nothing else is declared, so the trust dialog lists only the
+/// stack's own names.
+///
+/// Each own host is declared as `<host>:*` (any port), because a status
+/// script reports services on ports the definition never names, and a
+/// per-port list would also ask for trust again whenever an output moves.
+/// A host the app would not accept a port wildcard on (a single-label
+/// name) is declared per port instead, one entry per output in use.
 pub fn link_hosts(loaded: &Loaded, inst: &ResolvedInstance) -> Vec<String> {
     let ctx = inst.host_context();
-    let own = own_hosts(loaded);
+    let mut own = own_hosts(loaded);
     let mut out: BTreeSet<String> = BTreeSet::new();
+    own.retain(|h| {
+        let any = link_host_rules::check_any_port_host(h).is_ok();
+        if any {
+            out.insert(format!(
+                "{}{}",
+                h.to_ascii_lowercase(),
+                link_host_rules::ANY_PORT
+            ));
+        }
+        !any
+    });
     for c in inst.components.values() {
         for template in c.outputs.values() {
             let Ok(url) = placeholders::resolve(template, &ctx) else {
@@ -377,8 +395,16 @@ fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> V
         if !hint.is_empty() {
             c["hint"] = hint.join("; ").into();
         }
-        if let Some(b) = &badge_for {
-            c["badges"] = json!([b]);
+        let mut badges: Vec<Value> = badge_for.iter().cloned().collect();
+        if let Some(secs) = view.slow_secs {
+            badges.push(badge(
+                "status is slow",
+                "warn",
+                Some(format!("A script of this stack has been running for {secs} s, longer than a status refresh; this is the last known state.")),
+            ));
+        }
+        if !badges.is_empty() {
+            c["badges"] = badges.into();
         }
         let mut actions = verbs.clone();
         actions.extend(link_actions);

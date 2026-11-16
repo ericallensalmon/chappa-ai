@@ -1954,6 +1954,7 @@ pub(crate) fn job(id: &str, key: &str, label: &str, confirm: String, work: JobWo
             label: label.to_string(),
             confirm,
             work,
+            disabled: None,
         }),
         mutates: true,
     }

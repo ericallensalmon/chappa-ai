@@ -1898,6 +1898,7 @@ pub fn accept(
                         skip_in_volume: false,
                     },
                 },
+                disabled: None,
             }),
             mutates,
         };
@@ -2077,6 +2078,7 @@ pub fn down_volumes_action(
             save: None,
             remove_volumes: true,
         },
+        disabled: None,
     })
 }
 

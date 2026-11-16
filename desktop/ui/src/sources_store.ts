@@ -112,6 +112,12 @@ export function originLabel(source: Source): string {
   return `attached · ${o.addr}`;
 }
 
+/** One `linkHosts` entry as the trust dialog says it: `host:*` is "any
+ *  port on host", anything else is shown as declared. */
+export function linkHostText(entry: string): string {
+  return entry.endsWith(":*") ? `any port on ${entry.slice(0, -2).toLowerCase()}` : entry;
+}
+
 /**
  * The trust dialog's text: what the source is, what it asks to be allowed
  * to do, and the hash the answer covers. The same shape as the project
@@ -122,7 +128,7 @@ export function trustMessage(source: Source, trust: SourceTrust): string {
   lines.push("Views it serves:");
   lines.push(...(trust.views.length ? trust.views.map((v) => `    ${isRailView(v) ? VIEW_LABELS[v] : v}`) : ["    (none)"]));
   lines.push("", "Hosts its links may open:");
-  lines.push(...(trust.linkHosts.length ? trust.linkHosts.map((h) => `    ${h}`) : ["    (none)"]));
+  lines.push(...(trust.linkHosts.length ? trust.linkHosts.map((h) => `    ${linkHostText(h)}`) : ["    (none)"]));
   lines.push("", "Extra folders it asks to launch in:");
   lines.push(...(trust.roots.length ? trust.roots.map((r) => `    ${r}`) : ["    (none)"]));
   const offered = trust.itemActions ?? [];

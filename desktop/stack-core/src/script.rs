@@ -137,7 +137,9 @@
 //! prints (at most 2 KB, control characters removed) under the line "Run
 //! the `<verb>` script for <component>". Without `plan`, the confirm is that
 //! line and the resolved argv. A plan that fails says so, and the verb is
-//! still offered.
+//! still offered. While a plan has not answered yet the verb is offered
+//! disabled ([`PLAN_PENDING`]), so nobody confirms a run they were not
+//! shown.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -560,6 +562,12 @@ impl ScriptRun {
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// The instance the run belongs to (`CHAPPA_STACK_INSTANCE` in its
+    /// environment), which is what its host serialises script runs by.
+    pub fn instance(&self) -> Option<&str> {
+        self.env.get("CHAPPA_STACK_INSTANCE").map(String::as_str)
     }
 
     /// Stable identity of exactly this run (argv, folder, environment,
@@ -1013,6 +1021,11 @@ pub struct ScriptView {
     pub facts: Vec<ReportedFact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alerts: Vec<ReportedAlert>,
+    /// Seconds the instance's current script run has taken, when that is
+    /// longer than a status refresh: the rows are the last known state,
+    /// not a fresh one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_secs: Option<u64>,
 }
 
 /// How loud a state is when several rows stand for one component: the
@@ -1163,6 +1176,7 @@ pub fn view(
         }],
         facts: Vec::new(),
         alerts: Vec::new(),
+        slow_secs: None,
     };
     let (assumed, why) = assumed_state(kind, desired, last);
     if !has_status {
@@ -1227,6 +1241,7 @@ pub fn view(
                     .collect(),
                 facts: status.facts.clone(),
                 alerts: status.alerts.clone(),
+                slow_secs: None,
             }
         }
     }
@@ -1296,6 +1311,11 @@ pub fn run_plan(cli: &dyn EngineCli, run: &ScriptRun) -> PlanPreview {
     }
 }
 
+/// Why an action whose plan preview has not arrived is disabled, and what
+/// its confirm says meanwhile: the action cannot be accepted until the
+/// preview is there, so nobody confirms a script run blind.
+pub const PLAN_PENDING: &str = "Its plan is still being worked out";
+
 /// "Run the `up` script for api": the line every script confirm starts with.
 pub fn confirm_line(component: &str, verb: ScriptVerb) -> String {
     format!("Run the `{verb}` script for {component}")
@@ -1324,12 +1344,10 @@ pub fn confirm(
             format!("{line}. Its plan printed nothing.")
         }
         Some(PlanPreview::Ready { text }) => format!("{line}.\n{text}"),
-        Some(PlanPreview::Failed { reason }) => format!(
-            "{line}. Its plan script failed ({reason}), so what it will do is not shown."
-        ),
-        None => format!(
-            "{line}. Its plan is still being worked out; look again in a moment to see what it will do."
-        ),
+        Some(PlanPreview::Failed { reason }) => {
+            format!("{line}. Its plan script failed ({reason}), so what it will do is not shown.")
+        }
+        None => format!("{line}. {PLAN_PENDING}."),
     }
 }
 
@@ -1341,6 +1359,12 @@ pub fn confirm(
 pub trait ScriptOutputs {
     fn status(&self, run: &ScriptRun) -> Option<ScriptReport>;
     fn plan(&self, run: &ScriptRun) -> Option<PlanPreview>;
+    /// How long the script run in flight for `run`'s instance has taken,
+    /// when it is past the status refresh interval (its status is then
+    /// older than usual). `None` for hosts that run scripts in place.
+    fn slow(&self, _run: &ScriptRun) -> Option<Duration> {
+        None
+    }
 }
 
 /// Nothing is known: every status is pending and no plan has answered.

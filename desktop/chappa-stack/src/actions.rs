@@ -41,7 +41,7 @@ use stack_core::cli::engine_argv;
 use stack_core::definition::{DriverKind, Mode};
 use stack_core::driver::ResolvedInstance;
 use stack_core::planner::{Change, Plan, Selection, Step, Verb};
-use stack_core::runner::{Observation, StackRunner};
+use stack_core::runner::{Observation, ScriptConfirm, StackRunner};
 use stack_core::script::{self, ScriptVerb};
 
 use crate::records::JobWork;
@@ -55,18 +55,26 @@ pub struct Offered {
     pub label: String,
     pub confirm: String,
     pub work: JobWork,
+    /// Why the action is offered but cannot be accepted yet (a script's
+    /// plan preview still being worked out); the app draws it disabled with
+    /// this as its tooltip, and a call to it is refused.
+    pub disabled: Option<String>,
 }
 
 impl Offered {
     pub fn to_json(&self, fingerprint: &str) -> Value {
-        json!({
+        let mut v = json!({
             "kind": "endpoint",
             "id": self.id,
             "label": self.label,
             "mutates": true,
             "confirm": self.confirm,
             "params": { "fingerprint": self.fingerprint_for(fingerprint) },
-        })
+        });
+        if let Some(why) = &self.disabled {
+            v["disabled"] = why.clone().into();
+        }
+        v
     }
 
     /// The fingerprint a call must bring back, given the state's: the
@@ -83,18 +91,19 @@ impl Offered {
     }
 }
 
-/// The paragraph each script step of `plan` adds to its confirm.
+/// The paragraph each script step of `plan` adds to its confirm, each with
+/// whether its plan preview is still pending.
 pub fn script_lines(
     runner: &StackRunner<'_>,
     inst: &ResolvedInstance,
     obs: &Observation,
     plan: &Plan,
-) -> Vec<String> {
+) -> Vec<ScriptConfirm> {
     plan.steps
         .iter()
         .filter_map(|s| match s {
             Step::Script { component, verb } => {
-                Some(runner.script_confirm(inst, obs, component, *verb))
+                Some(runner.script_confirm_of(inst, obs, component, *verb))
             }
             _ => None,
         })
@@ -145,6 +154,15 @@ pub fn confirm_text(plan: &Plan) -> String {
     text
 }
 
+/// Why an action is disabled while any of its scripts' plan previews has
+/// not arrived: accepting it would run something nobody has been shown.
+fn pending_reason(scripts: &[ScriptConfirm]) -> Option<String> {
+    scripts
+        .iter()
+        .any(|s| s.pending)
+        .then(|| script::PLAN_PENDING.to_string())
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -178,6 +196,7 @@ fn planned(
         return None;
     }
     let scripts = script_lines(runner, inst, obs, &plan);
+    let disabled = pending_reason(&scripts);
     Some(Offered {
         id: id.to_string(),
         key: key.map(str::to_string),
@@ -202,7 +221,7 @@ fn planned(
             let mut text = confirm_text(&shown);
             for s in scripts {
                 text.push_str("\n\n");
-                text.push_str(&s);
+                text.push_str(&s.text);
             }
             text
         },
@@ -212,6 +231,7 @@ fn planned(
             save: None,
             remove_volumes: false,
         },
+        disabled,
     })
 }
 
@@ -285,6 +305,7 @@ pub fn stack_actions(
                 engines.join(", ")
             ),
             work: JobWork::Gc,
+            disabled: None,
         });
     }
     out
@@ -357,6 +378,7 @@ pub fn component_actions(
             work: JobWork::Restart {
                 component: component.to_string(),
             },
+            disabled: None,
         });
     }
     if matches!(current, Some(Mode::Prebuilt | Mode::Source))
@@ -432,7 +454,13 @@ fn script_actions(
         let Ok(plan) = runner.plan(obs, &change) else {
             continue;
         };
-        let mut confirm = script_lines(runner, inst, obs, &plan).join("\n\n");
+        let scripts = script_lines(runner, inst, obs, &plan);
+        let disabled = pending_reason(&scripts);
+        let mut confirm = scripts
+            .into_iter()
+            .map(|s| s.text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
         for note in &plan.notes {
             confirm.push(' ');
             confirm.push_str(&capitalize(note));
@@ -448,6 +476,7 @@ fn script_actions(
                 save: None,
                 remove_volumes: false,
             },
+            disabled,
         });
     }
     out

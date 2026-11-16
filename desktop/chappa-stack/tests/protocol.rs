@@ -159,8 +159,15 @@ fn app_accepts(m: &Value) -> Result<(), String> {
         .unwrap_or_default()
     {
         let h = h.as_str().ok_or("linkHosts entry")?;
-        if h.trim().is_empty() || h.contains("://") || h.contains('/') || h.contains('*') {
+        if h.trim().is_empty() || h.contains("://") || h.contains('/') {
             return Err(format!("linkHosts {h}"));
+        }
+        // The one wildcard is a whole port, on a host that may carry it.
+        match project_model::link_hosts::any_port_host(h) {
+            Some(host) => project_model::link_hosts::check_any_port_host(&host)
+                .map_err(|e| format!("linkHosts {h}: {e}"))?,
+            None if h.contains('*') => return Err(format!("linkHosts {h}")),
+            None => {}
         }
     }
     Ok(())
@@ -185,9 +192,9 @@ fn the_manifest_is_one_the_app_accepts_and_links_only_the_stack_hostname() {
         .iter()
         .map(|h| h.as_str().unwrap())
         .collect();
-    // api and web publish http URLs on the stack hostname; db's URL is
-    // postgres://, not a link.
-    assert_eq!(hosts, ["dev.example.test:14001", "dev.example.test:14002"]);
+    // The stack hostname on any port: api and web publish http URLs there,
+    // and a status script may report more on ports nobody declared.
+    assert_eq!(hosts, ["dev.example.test:*"]);
     // The restated rules do refuse what the app refuses.
     assert!(app_accepts(&json!({"contract": 2})).is_err());
     let mut bad = m.clone();
@@ -196,6 +203,43 @@ fn the_manifest_is_one_the_app_accepts_and_links_only_the_stack_hostname() {
     bad = m.clone();
     bad["linkHosts"] = json!(["*.example.test"]);
     assert!(app_accepts(&bad).is_err());
+    bad["linkHosts"] = json!(["test:*"]);
+    assert!(app_accepts(&bad).is_err());
+}
+
+fn link_hosts_of(yml: &str) -> Vec<String> {
+    let p = Project::with(yml, &[]);
+    let f = fakes(FakeCli::new(), FakeHttp::default());
+    let src = source(f.world.clone(), &p.dir);
+    let (_, m) = get(&src, "/chappa/v1/manifest");
+    app_accepts(&m).unwrap();
+    m["linkHosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Without a hostname the stack links to this machine on any port; a
+/// hostname the app takes no port wildcard on (one label) keeps one entry
+/// per output port, so the manifest stays one the app accepts.
+#[test]
+fn link_hosts_take_any_port_where_the_app_allows_it_and_ports_elsewhere() {
+    let script = |hostname: &str| {
+        format!("stacks:\n  app:\n{hostname}    components:\n      app:\n        driver: script\n        up: [node, up.js]\n        ports: 2\n        outputs: {{ url: \"http://{{hostname}}:{{port:app:1}}\" }}\n")
+    };
+    assert_eq!(link_hosts_of(&script("")), ["127.0.0.1:*", "localhost:*"]);
+    assert_eq!(
+        link_hosts_of(&script("    hostname: dev.example.test\n")),
+        ["dev.example.test:*"]
+    );
+    let single = link_hosts_of(&script("    hostname: devbox\n"));
+    assert_eq!(single.len(), 1, "{single:?}");
+    assert!(
+        single[0].starts_with("devbox:") && !single[0].ends_with(":*"),
+        "{single:?}"
+    );
 }
 
 fn http(stream: &mut TcpStream, reader: &mut BufReader<TcpStream>, req: &str) -> (u16, Value) {

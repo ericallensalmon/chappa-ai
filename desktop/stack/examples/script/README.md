@@ -100,10 +100,12 @@ What the script has to provide:
   `state` is one of `up`, `starting`, `unhealthy`, `crashloop`,
   `stopped-problem`, `stopped-idle`, `oneshot-ok`, `oneshot-failed`,
   `not-deployed`. Links show only when they point at the stack's own host
-  name (or loopback when the stack has none).
+  name (or loopback when the stack has none), on any port.
 - **A plan form** (optional): the `plan` argv is run with the verb
   appended (`… -Verb up`) and should print, without changing anything, what
-  that verb would do; the first 20 lines become the confirm.
+  that verb would do; the first 20 lines become the confirm. Until it has
+  answered, the verb's button is disabled ("Its plan is still being worked
+  out") and enables itself on a later poll.
 - **Batch files** (`.cmd`, `.bat`) run through `cmd /C`, and no argument
   may then contain `& | < > ^ % "`.
 

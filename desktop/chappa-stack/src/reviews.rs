@@ -784,6 +784,7 @@ pub fn accept(
                         save: if up { save_before(loaded) } else { None },
                     },
                 },
+                disabled: None,
             }),
             mutates: true,
         };
@@ -829,6 +830,7 @@ pub fn accept(
                 work: JobWork::Review {
                     op: ReviewOp::Remove { name: rec.name },
                 },
+                disabled: None,
             }),
             mutates: true,
         };
@@ -872,6 +874,7 @@ pub fn accept(
                 save: save_before(loaded),
                 remove_volumes: false,
             },
+            disabled: None,
         }),
         mutates: true,
     }

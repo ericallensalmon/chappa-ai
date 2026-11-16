@@ -1539,7 +1539,7 @@ impl Sources {
             .iter()
             .filter(|a| a.offered_on(view, &owner_manifest.id))
             .map(|a| match &a.action {
-                SourceAction::Endpoint { id, label, mutates, confirm, params, note, inputs } => SourceAction::Endpoint {
+                SourceAction::Endpoint { id, label, mutates, confirm, params, note, inputs, disabled } => SourceAction::Endpoint {
                     id: id.clone(),
                     label: label.clone(),
                     mutates: *mutates,
@@ -1547,6 +1547,7 @@ impl Sources {
                     params: params.clone(),
                     note: *note,
                     inputs: inputs.clone(),
+                    disabled: disabled.clone(),
                 },
                 other => other.clone(),
             })

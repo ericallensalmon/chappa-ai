@@ -1145,7 +1145,7 @@ fn the_manifest_offers_start_work_on_every_work_row_or_the_listed_sources() {
             "ownerUpdates": "/api/work/owner",
             "actions": "/api/actions",
             "jobs": "/api/jobs/{id}",
-            "linkHosts": [],
+            "linkHosts": ["127.0.0.1:*", "localhost:*"],
         })
     );
     let narrowed = YML.replace("    work:\n", "    work:\n      sources: [tracker]\n");

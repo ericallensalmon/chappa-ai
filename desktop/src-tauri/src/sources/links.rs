@@ -13,6 +13,11 @@
 //! not `dev.example.test`); the scheme's default port may be left out on
 //! either side.
 //!
+//! **Any port.** The one wildcard is a whole port: `dev.example.test:*`
+//! matches that exact host on every port, the default one included (a
+//! local stack reports services on ports nobody declared in advance). The
+//! host part is still exact, and the scheme rules below apply unchanged.
+//!
 //! **Plain http.** A local dev server (a stack the user runs, a preview
 //! build) answers on `http://<name>:<port>`, and those links are useless if
 //! they never open. `http` is accepted only when, on top of the host rule
@@ -35,6 +40,8 @@
 //! full check.
 
 use std::net::{IpAddr, ToSocketAddrs};
+
+use project_model::link_hosts::any_port_host;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -175,7 +182,10 @@ fn parse_and_match(url: &str, trusted_link_hosts: &[String]) -> Result<Parsed, S
         Some(p) if p != default_port => format!("{host}:{p}"),
         _ => host.clone(),
     };
-    let trusted = trusted_link_hosts.iter().any(|h| host_key(h, default_port) == shown);
+    let trusted = trusted_link_hosts.iter().any(|h| match any_port_host(h) {
+        Some(any) => any == host,
+        None => host_key(h, default_port) == shown,
+    });
     if !trusted {
         return Err(format!(
             "`{shown}` is not one of the hosts this source may link to ({}); hosts match exactly, not by subdomain",
@@ -453,6 +463,37 @@ mod tests {
         assert!(ok.plain_http);
         assert!(source_link_shape_check("http://192.0.2.7/", &trusted).unwrap_err().contains(PLAIN_HTTP_RULE));
         assert!(source_link_shape_check("file:///x", &trusted).is_err());
+    }
+
+    /// `host:*` opens that host on any port (and on the default one), never
+    /// another host or a subdomain, and the scheme rules stay as they are:
+    /// https anywhere it matches, plain http only on this machine.
+    #[test]
+    fn an_any_port_entry_matches_its_host_on_every_port_and_nothing_else() {
+        let trusted = hosts(&["dev.example.test:*", "localhost:*", "[::1]:*", "192.0.2.7:*"]);
+        let r = never();
+        let check = |url: &str| source_link_check_with(url, &trusted, &r);
+        assert_eq!(check("https://dev.example.test:14001/api").unwrap().host, "dev.example.test:14001");
+        assert_eq!(check("https://DEV.example.test:9/").unwrap().host, "dev.example.test:9");
+        assert_eq!(check("https://dev.example.test/").unwrap().host, "dev.example.test", "the default port too");
+        assert_eq!(check("http://localhost:5173/").unwrap().host, "localhost:5173");
+        assert_eq!(check("http://localhost/").unwrap().host, "localhost");
+        assert_eq!(check("http://[::1]:3000/").unwrap().host, "[::1]:3000");
+        assert!(r.asked.borrow().is_empty());
+        // Other hosts and subdomains are not covered.
+        assert!(check("https://api.dev.example.test:14001/").unwrap_err().contains("not one of the hosts"));
+        assert!(check("https://example.test:14001/").unwrap_err().contains("not one of the hosts"));
+        assert!(check("http://127.0.0.1:5173/").unwrap_err().contains("not one of the hosts"), "localhost:* is not 127.0.0.1");
+        // The scheme rules are unchanged.
+        assert!(check("ftp://dev.example.test:21/").unwrap_err().contains("`ftp:`"));
+        assert!(check("http://192.0.2.7:8080/").unwrap_err().contains(PLAIN_HTTP_RULE));
+        assert!(check("https://192.0.2.7:8080/").is_ok());
+        assert!(check("https://me@dev.example.test:1/").unwrap_err().contains("credentials"));
+        // A plain-http name still needs every address to be loopback.
+        let here = Fake::answering(Ok(vec![V4_HERE]));
+        assert!(source_link_check_with("http://dev.example.test:14009/", &trusted, &here).unwrap().plain_http);
+        let away = Fake::answering(Ok(vec![AWAY]));
+        assert!(source_link_check_with("http://dev.example.test:14009/", &trusted, &away).unwrap_err().contains(PLAIN_HTTP_RULE));
     }
 
     /// The system resolver answers for an IP literal (no network needed).

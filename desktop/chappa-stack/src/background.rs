@@ -1,5 +1,4 @@
-//! What status shows but must not wait for, refreshed on a thread of its
-//! own.
+//! What status shows but must not wait for, refreshed off the request path.
 //!
 //! - **Channel digests** for the `newer prebuilt` badge: a registry round
 //!   trip (`manifest inspect`) can take over ten seconds per image, so the
@@ -20,15 +19,42 @@
 //! - **Periodic work** registered with [`Background::add_periodic`]: the
 //!   source's `every:` data-safety schedule looks here for due checks.
 //!
+//! **Two kinds of thread.** Digests, facts and periodic work run on one
+//! refresher thread. Scripts run on their own fixed pool of
+//! [`SCRIPT_WORKERS`] threads, so a status script near its time limit never
+//! holds up a digest or a fact, and a stack with many script components
+//! cannot use more than the pool:
+//!
+//! - **One run per instance.** A stack instance has one script in flight at
+//!   most, status and plan sharing that slot: a team's scripts of one stack
+//!   read (and often lock) the same state, so running two of them side by
+//!   side races them against each other and doubles the load on one stack
+//!   while others wait. The cost, a slow plan delaying its stack's status,
+//!   is what the "status is slow" note says.
+//! - **Skipped, not queued.** A periodic refresh whose instance is still
+//!   busy when its turn comes skips that turn and waits for the next one; a
+//!   queue would only replay stale turns back to back once the slow run
+//!   ends. A first answer, and the answer wanted again after a job, is
+//!   different: someone is waiting for it, so it waits for the slot.
+//! - **Staggered turns.** Each run's periodic turns sit on its own grid,
+//!   offset by a phase taken from a hash of the run (and a seed), so many
+//!   stacks refreshed every ten seconds do not all start their scripts in
+//!   the same second ([`phase`], [`next_turn`]).
+//! - **Slow runs show.** A run in flight longer than the status interval
+//!   marks the instance's rows with a "status is slow" note while they keep
+//!   their last known state ([`ScriptOutputs::slow`]). Its own time limit
+//!   still ends it (and every process it started).
+//!
 //! Status registers what it wants on every call ([`Background::want_digest`],
-//! [`Background::want_engine`]); the refresher picks it up within
-//! [`TICK`]. Nothing here blocks a reader for longer than a lock held
-//! around a map lookup.
+//! [`Background::want_engine`]); the threads pick it up within [`TICK`].
+//! Nothing here blocks a reader for longer than a lock held around a map
+//! lookup.
 
 use indexmap::IndexMap;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,6 +81,31 @@ pub const SCRIPT_STATUS_TTL: Duration = Duration::from_secs(10);
 pub const SCRIPT_PLAN_TTL: Duration = Duration::from_secs(60);
 /// A script answer nobody asked for this long is forgotten.
 pub const SCRIPT_IDLE: Duration = Duration::from_secs(10 * 60);
+/// The threads status and plan scripts run on.
+pub const SCRIPT_WORKERS: usize = 4;
+/// How long shutdown waits for a script worker to finish its run before
+/// leaving it behind (its run's own time limit still ends the script).
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// How often each kind of answer is asked again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Intervals {
+    pub digest: Duration,
+    pub facts: Duration,
+    pub status: Duration,
+    pub plan: Duration,
+}
+
+impl Default for Intervals {
+    fn default() -> Self {
+        Intervals {
+            digest: DIGEST_TTL,
+            facts: FACTS_TTL,
+            status: SCRIPT_STATUS_TTL,
+            plan: SCRIPT_PLAN_TTL,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 enum ScriptAnswer {
@@ -67,8 +118,13 @@ struct ScriptEntry {
     run: ScriptRun,
     plan: bool,
     answer: Option<ScriptAnswer>,
-    fetched: Option<Instant>,
     asked: Instant,
+    /// When its next periodic turn is; `None` = wanted now (never answered,
+    /// or asked again after a job).
+    due: Option<Instant>,
+    running: bool,
+    /// Asked again while it was running: wanted now once it ends.
+    reask: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +147,18 @@ struct Caches {
     digests: HashMap<(String, String), DigestEntry>,
     facts: IndexMap<String, FactsEntry>,
     scripts: HashMap<String, ScriptEntry>,
+    /// Instance slot → when its run in flight started.
+    busy: HashMap<String, Instant>,
+}
+
+/// One script run handed to a worker: run it, then hand it back with
+/// [`Background::finish_script`].
+#[derive(Debug, Clone)]
+pub struct ScriptJob {
+    key: String,
+    slot: String,
+    pub run: ScriptRun,
+    pub plan: bool,
 }
 
 /// Work the refresher does on every pass, after the caches. It must not
@@ -99,40 +167,144 @@ pub trait Periodic {
     fn tick(&self);
 }
 
-/// The shared caches and the refresher that fills them.
+/// The shared caches and the threads that fill them.
 pub struct Background {
     caches: Mutex<Caches>,
     periodic: Mutex<Vec<Weak<dyn Periodic + Send + Sync>>>,
     wake: Condvar,
     stop: AtomicBool,
-    digest_ttl: Duration,
-    facts_ttl: Duration,
+    intervals: Intervals,
+    /// Where the turn grids start.
+    epoch: Instant,
+    seed: u64,
+}
+
+/// The threads [`Background::start`] started.
+pub struct Workers {
+    refresher: thread::JoinHandle<()>,
+    scripts: Vec<thread::JoinHandle<()>>,
+}
+
+impl Workers {
+    /// Wait for the refresher, and for each script worker up to
+    /// [`SHUTDOWN_GRACE`]; one still inside a script is left behind (the
+    /// process is ending, and the script's time limit stops it).
+    pub fn join(self) -> thread::Result<()> {
+        self.join_within(SHUTDOWN_GRACE)
+    }
+
+    /// [`Workers::join`] with another grace.
+    pub fn join_within(self, grace: Duration) -> thread::Result<()> {
+        let refreshed = self.refresher.join();
+        let deadline = Instant::now() + grace;
+        for h in self.scripts {
+            while !h.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            if h.is_finished() {
+                h.join()?;
+            }
+        }
+        refreshed
+    }
+
+    /// How many script workers are still running.
+    pub fn script_workers_alive(&self) -> usize {
+        self.scripts.iter().filter(|h| !h.is_finished()).count()
+    }
+}
+
+/// Where a run's periodic turns sit within its interval: a stable offset in
+/// `[0, interval)` from a hash of the seed and the run's key, so the turns
+/// of many runs spread across the interval instead of falling together.
+pub fn phase(seed: u64, key: &str, interval: Duration) -> Duration {
+    let ms = interval.as_millis().max(1) as u64;
+    let mut h = Sha256::new();
+    h.update(seed.to_le_bytes());
+    h.update(key.as_bytes());
+    let d = h.finalize();
+    let n = u64::from_le_bytes(d[..8].try_into().expect("eight bytes"));
+    Duration::from_millis(n % ms)
+}
+
+/// The next turn on the grid `phase + k × interval` (times since the
+/// epoch) that is at least half an interval after `after`, the end of the
+/// last run: the period stays the interval on average, a run's turns stay
+/// on its own phase, and a turn missed while it ran is not made up.
+pub fn next_turn(phase: Duration, interval: Duration, after: Duration) -> Duration {
+    let interval = interval.max(Duration::from_millis(1));
+    let earliest = after + interval / 2;
+    if earliest <= phase {
+        return phase;
+    }
+    let since = (earliest - phase).as_nanos();
+    let step = interval.as_nanos();
+    let k = since.div_ceil(step);
+    phase + Duration::from_nanos((k * step) as u64)
+}
+
+/// The slot a run occupies: its instance, or the run itself when it names
+/// none.
+fn slot_of(run: &ScriptRun) -> String {
+    match run.instance() {
+        Some(i) => format!("instance:{i}"),
+        None => format!("run:{}", run.key()),
+    }
 }
 
 impl Background {
     pub fn new() -> Arc<Background> {
-        Self::with_ttls(DIGEST_TTL, FACTS_TTL)
+        Self::with_intervals(Intervals::default(), 0)
     }
 
     pub fn with_ttls(digest_ttl: Duration, facts_ttl: Duration) -> Arc<Background> {
+        Self::with_intervals(
+            Intervals {
+                digest: digest_ttl,
+                facts: facts_ttl,
+                ..Intervals::default()
+            },
+            0,
+        )
+    }
+
+    /// Every interval chosen, and the seed the turn phases are hashed with.
+    pub fn with_intervals(intervals: Intervals, seed: u64) -> Arc<Background> {
         Arc::new(Background {
             caches: Mutex::new(Caches::default()),
             periodic: Mutex::new(Vec::new()),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
-            digest_ttl,
-            facts_ttl,
+            intervals,
+            epoch: Instant::now(),
+            seed,
         })
     }
 
-    fn caches(&self) -> std::sync::MutexGuard<'_, Caches> {
+    fn caches(&self) -> MutexGuard<'_, Caches> {
         self.caches.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Start the refresher thread; it ends after [`Background::shutdown`].
-    pub fn start(self: &Arc<Self>, world: World) -> thread::JoinHandle<()> {
+    /// Where the turn grids start (for a caller that drives the scheduler
+    /// with its own clock).
+    pub fn epoch(&self) -> Instant {
+        self.epoch
+    }
+
+    /// Start the refresher and the script workers; they end after
+    /// [`Background::shutdown`].
+    pub fn start(self: &Arc<Self>, world: World) -> Workers {
         let me = self.clone();
-        thread::spawn(move || me.run(&world))
+        let w = world.clone();
+        let refresher = thread::spawn(move || me.run(&w));
+        let scripts = (0..SCRIPT_WORKERS)
+            .map(|_| {
+                let me = self.clone();
+                let w = world.clone();
+                thread::spawn(move || me.work(&w))
+            })
+            .collect();
+        Workers { refresher, scripts }
     }
 
     pub fn shutdown(&self) {
@@ -140,65 +312,174 @@ impl Background {
         self.wake.notify_all();
     }
 
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
     fn run(&self, world: &World) {
-        while !self.stop.load(Ordering::SeqCst) {
-            self.refresh_once(world);
+        while !self.stopped() {
+            self.refresh_caches(world);
             let guard = self.caches();
+            if self.stopped() {
+                break;
+            }
             let _ = self.wake.wait_timeout(guard, TICK);
         }
     }
 
-    /// One pass: ask for every entry that is missing or past its TTL. The
-    /// questions are asked with no lock held.
+    /// One script worker: take the next due run, run it, hand it back.
+    fn work(&self, world: &World) {
+        while !self.stopped() {
+            match self.next_script(Instant::now()) {
+                Some(job) => {
+                    let answer = Self::answer(world, &job);
+                    self.finish_script(job, answer, Instant::now());
+                }
+                None => {
+                    let guard = self.caches();
+                    if self.stopped() {
+                        break;
+                    }
+                    let _ = self.wake.wait_timeout(guard, TICK);
+                }
+            }
+        }
+    }
+
+    fn answer(world: &World, job: &ScriptJob) -> ScriptAnswer {
+        if job.plan {
+            ScriptAnswer::Plan(run_plan(&*world.cli, &job.run))
+        } else {
+            ScriptAnswer::Status(run_status(&*world.cli, &job.run))
+        }
+    }
+
+    fn interval_of(&self, plan: bool) -> Duration {
+        if plan {
+            self.intervals.plan
+        } else {
+            self.intervals.status
+        }
+    }
+
+    /// The script run due at `now` whose instance is free, marked running;
+    /// `None` when there is nothing to do. A periodic turn that is due while
+    /// its instance is busy is skipped to its next turn here.
+    pub fn next_script(&self, now: Instant) -> Option<ScriptJob> {
+        let mut c = self.caches();
+        c.scripts
+            .retain(|_, e| e.running || now.saturating_duration_since(e.asked) < SCRIPT_IDLE);
+        let since = |t: Instant| t.saturating_duration_since(self.epoch);
+        let mut skips: Vec<(String, Instant)> = Vec::new();
+        let mut best: Option<(bool, Instant, String)> = None;
+        for (key, e) in &c.scripts {
+            if e.running {
+                continue;
+            }
+            let wanted_now = e.due.is_none();
+            if e.due.is_some_and(|d| d > now) {
+                continue;
+            }
+            if c.busy.contains_key(&slot_of(&e.run)) {
+                if !wanted_now {
+                    let interval = self.interval_of(e.plan);
+                    let ph = phase(self.seed, key, interval);
+                    let next = self.epoch + next_turn(ph, interval, since(now));
+                    skips.push((key.clone(), next));
+                }
+                continue;
+            }
+            // Wanted-now first (oldest ask first), then the earliest turn.
+            let order = (!wanted_now, e.due.unwrap_or(e.asked), key.clone());
+            if best.as_ref().is_none_or(|b| order < *b) {
+                best = Some(order);
+            }
+        }
+        for (key, next) in skips {
+            if let Some(e) = c.scripts.get_mut(&key) {
+                e.due = Some(next);
+            }
+        }
+        let (_, _, key) = best?;
+        let e = c.scripts.get_mut(&key)?;
+        e.running = true;
+        let job = ScriptJob {
+            slot: slot_of(&e.run),
+            key,
+            run: e.run.clone(),
+            plan: e.plan,
+        };
+        c.busy.insert(job.slot.clone(), now);
+        Some(job)
+    }
+
+    /// Store what `job` answered (ending at `now`), free its instance and
+    /// set its next turn.
+    fn finish_script(&self, job: ScriptJob, answer: ScriptAnswer, now: Instant) {
+        let mut c = self.caches();
+        c.busy.remove(&job.slot);
+        let interval = self.interval_of(job.plan);
+        let ph = phase(self.seed, &job.key, interval);
+        let next = self.epoch + next_turn(ph, interval, now.saturating_duration_since(self.epoch));
+        if let Some(e) = c.scripts.get_mut(&job.key) {
+            e.answer = Some(answer);
+            e.running = false;
+            e.due = if std::mem::take(&mut e.reask) {
+                None
+            } else {
+                Some(next)
+            };
+        }
+        drop(c);
+        self.wake.notify_all();
+    }
+
+    /// Hand back `job` with the status report or plan preview it produced
+    /// (for a caller that runs scripts itself).
+    pub fn finish_status(&self, job: ScriptJob, report: ScriptReport, now: Instant) {
+        self.finish_script(job, ScriptAnswer::Status(report), now);
+    }
+
+    pub fn finish_plan(&self, job: ScriptJob, preview: PlanPreview, now: Instant) {
+        self.finish_script(job, ScriptAnswer::Plan(preview), now);
+    }
+
+    /// One pass on the calling thread: every script due now (one instance
+    /// after another), then digests, facts and periodic work. What a host
+    /// without the threads, and a test, calls.
     pub fn refresh_once(&self, world: &World) {
+        while let Some(job) = self.next_script(Instant::now()) {
+            if self.stopped() {
+                return;
+            }
+            let answer = Self::answer(world, &job);
+            self.finish_script(job, answer, Instant::now());
+        }
+        self.refresh_caches(world);
+    }
+
+    /// Digests, facts and periodic work: ask for every entry that is
+    /// missing or past its TTL, with no lock held.
+    fn refresh_caches(&self, world: &World) {
         let now = Instant::now();
-        let (digests, engines, scripts) = {
-            let mut c = self.caches();
-            c.scripts
-                .retain(|_, e| now.saturating_duration_since(e.asked) < SCRIPT_IDLE);
-            let scripts: Vec<(String, ScriptEntry)> = c
-                .scripts
-                .iter()
-                .filter(|(_, e)| {
-                    let ttl = if e.plan {
-                        SCRIPT_PLAN_TTL
-                    } else {
-                        SCRIPT_STATUS_TTL
-                    };
-                    e.fetched.is_none_or(|t| now - t >= ttl)
-                })
-                .map(|(k, e)| (k.clone(), e.clone()))
-                .collect();
+        let (digests, engines) = {
+            let c = self.caches();
             let digests: Vec<((String, String), DigestEntry)> = c
                 .digests
                 .iter()
-                .filter(|(_, e)| e.fetched.is_none_or(|t| now - t >= self.digest_ttl))
+                .filter(|(_, e)| e.fetched.is_none_or(|t| now - t >= self.intervals.digest))
                 .map(|(k, e)| (k.clone(), e.clone()))
                 .collect();
             let engines: Vec<FactsEntry> = c
                 .facts
                 .values()
-                .filter(|e| e.fetched.is_none_or(|t| now - t >= self.facts_ttl))
+                .filter(|e| e.fetched.is_none_or(|t| now - t >= self.intervals.facts))
                 .cloned()
                 .collect();
-            (digests, engines, scripts)
+            (digests, engines)
         };
-        for (key, entry) in scripts {
-            if self.stop.load(Ordering::SeqCst) {
-                return;
-            }
-            let answer = if entry.plan {
-                ScriptAnswer::Plan(run_plan(&*world.cli, &entry.run))
-            } else {
-                ScriptAnswer::Status(run_status(&*world.cli, &entry.run))
-            };
-            if let Some(e) = self.caches().scripts.get_mut(&key) {
-                e.answer = Some(answer);
-                e.fetched = Some(Instant::now());
-            }
-        }
         for (key, entry) in digests {
-            if self.stop.load(Ordering::SeqCst) {
+            if self.stopped() {
                 return;
             }
             let digest =
@@ -209,7 +490,7 @@ impl Background {
             }
         }
         for entry in engines {
-            if self.stop.load(Ordering::SeqCst) {
+            if self.stopped() {
                 return;
             }
             let facts = engine_facts(&*world.cli, &entry.engine);
@@ -224,7 +505,7 @@ impl Background {
             list.iter().filter_map(Weak::upgrade).collect()
         };
         for t in tasks {
-            if self.stop.load(Ordering::SeqCst) {
+            if self.stopped() {
                 return;
             }
             t.tick();
@@ -290,7 +571,11 @@ impl Background {
             e.fetched = None;
         }
         for e in c.scripts.values_mut() {
-            e.fetched = None;
+            if e.running {
+                e.reask = true;
+            } else {
+                e.due = None;
+            }
         }
         drop(c);
         self.wake.notify_all();
@@ -312,8 +597,10 @@ impl Background {
                         run: run.clone(),
                         plan,
                         answer: None,
-                        fetched: None,
                         asked: Instant::now(),
+                        due: None,
+                        running: false,
+                        reask: false,
                     },
                 );
                 drop(c);
@@ -321,6 +608,13 @@ impl Background {
                 None
             }
         }
+    }
+
+    /// [`ScriptOutputs::slow`] at `now`.
+    pub fn slow_at(&self, run: &ScriptRun, now: Instant) -> Option<Duration> {
+        let started = *self.caches().busy.get(&slot_of(run))?;
+        let took = now.saturating_duration_since(started);
+        (took > self.intervals.status).then_some(took)
     }
 }
 
@@ -338,6 +632,10 @@ impl ScriptOutputs for Background {
             ScriptAnswer::Plan(p) => Some(p),
             ScriptAnswer::Status(_) => None,
         }
+    }
+
+    fn slow(&self, run: &ScriptRun) -> Option<Duration> {
+        self.slow_at(run, Instant::now())
     }
 }
 
@@ -361,5 +659,56 @@ impl PrebuiltDigests for Background {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phases_are_stable_per_seed_and_spread_across_the_interval() {
+        let ttl = Duration::from_secs(10);
+        let keys: Vec<String> = (0..40).map(|i| format!("status:run-{i}")).collect();
+        let phases: Vec<Duration> = keys.iter().map(|k| phase(7, k, ttl)).collect();
+        assert_eq!(
+            phases,
+            keys.iter().map(|k| phase(7, k, ttl)).collect::<Vec<_>>(),
+            "the same seed gives the same phases"
+        );
+        assert!(phases.iter().all(|p| *p < ttl));
+        // Forty runs land in at least six of the ten one-second buckets,
+        // and no second holds more than a third of them.
+        let mut buckets = [0usize; 10];
+        for p in &phases {
+            buckets[p.as_secs() as usize] += 1;
+        }
+        assert!(
+            buckets.iter().filter(|b| **b > 0).count() >= 6,
+            "{buckets:?}"
+        );
+        assert!(buckets.iter().all(|b| *b <= 40 / 3), "{buckets:?}");
+        assert_ne!(
+            phases,
+            keys.iter().map(|k| phase(8, k, ttl)).collect::<Vec<_>>(),
+            "another seed moves them"
+        );
+    }
+
+    #[test]
+    fn the_next_turn_stays_on_the_grid_and_never_makes_up_a_missed_one() {
+        let s = Duration::from_secs;
+        let ms = Duration::from_millis;
+        let ttl = s(10);
+        // Before the first grid point: the phase itself.
+        assert_eq!(next_turn(s(7), ttl, s(0)), s(7));
+        // A quick run that ended just after its turn at 17 s: the next is 27 s.
+        assert_eq!(next_turn(s(7), ttl, s(17) + ms(20)), s(27));
+        // A run that took 25 s from its turn at 17 s: the turns at 27 s and
+        // 37 s are gone, the next is 47 s (at least half an interval on).
+        assert_eq!(next_turn(s(7), ttl, s(42)), s(47));
+        assert_eq!(next_turn(s(7), ttl, s(43)), s(57));
+        // Exactly on the boundary counts.
+        assert_eq!(next_turn(s(7), ttl, s(22)), s(27));
     }
 }

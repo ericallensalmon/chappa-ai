@@ -14,7 +14,9 @@
 //!   It may carry `inputs` ([`EndpointInput`]: a choice, several choices,
 //!   free text or a number) that the confirm dialog asks for; their values
 //!   are checked here against what was declared ([`check_input_values`])
-//!   and merged into `params` before the call;
+//!   and merged into `params` before the call. One that carries
+//!   `disabled: "<reason>"` is drawn disabled with the reason and refused
+//!   when called (the source is still working something out);
 //! - `link`: opens `https://` on a trusted host, or plain `http://` when that
 //!   trusted host is this machine (`links.rs`);
 //! - `panel`: a drill-in page fetched from a path the payload named.
@@ -74,6 +76,10 @@ pub enum SourceAction {
         /// What the confirm dialog asks for, in order.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         inputs: Vec<EndpointInput>,
+        /// Why the source offers it but will not take it now; the button's
+        /// tooltip, and a call is refused before anything is sent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled: Option<String>,
     },
     Link {
         id: String,
@@ -385,6 +391,25 @@ fn optional_text(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Opti
     }
 }
 
+/// The longest `disabled` reason kept, in characters.
+pub const DISABLED_REASON_MAX: usize = 200;
+
+/// An endpoint's `disabled` reason: a string, control characters dropped,
+/// trimmed, at most [`DISABLED_REASON_MAX`] characters; empty means not
+/// disabled.
+fn disabled_reason(obj: &serde_json::Map<String, Value>) -> Result<Option<String>, String> {
+    match obj.get("disabled") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let clean: String = s.chars().filter(|c| !c.is_control()).collect();
+            let clean: String = clean.trim().chars().take(DISABLED_REASON_MAX).collect();
+            let clean = clean.trim_end().to_owned();
+            Ok(Some(clean).filter(|s| !s.is_empty()))
+        }
+        Some(_) => Err("`disabled` must be a string (the reason)".into()),
+    }
+}
+
 fn env_of(obj: &serde_json::Map<String, Value>) -> Result<BTreeMap<String, String>, String> {
     let mut env = BTreeMap::new();
     match obj.get("env") {
@@ -441,7 +466,16 @@ pub fn parse_action(value: &Value) -> Result<SourceAction, String> {
                 Some(p @ Value::Object(_)) => Some(p.clone()),
                 Some(_) => return Err("`params` must be an object".into()),
             };
-            Ok(SourceAction::Endpoint { id, label, mutates, confirm: optional_text(obj, "confirm")?, params, note, inputs: parse_inputs(obj)? })
+            Ok(SourceAction::Endpoint {
+                id,
+                label,
+                mutates,
+                confirm: optional_text(obj, "confirm")?,
+                params,
+                note,
+                inputs: parse_inputs(obj)?,
+                disabled: disabled_reason(obj)?,
+            })
         }
         "link" => Ok(SourceAction::Link { id, label, url: text(obj, "url")? }),
         "panel" => Ok(SourceAction::Panel { id, label, endpoint: text(obj, "endpoint")? }),
@@ -738,6 +772,7 @@ pub fn action_verdict(action: &SourceAction, ctx: &VerdictContext<'_>) -> Action
             cwd: None,
             tool: None,
         },
+        SourceAction::Endpoint { disabled: Some(why), .. } => ActionVerdict::disabled(why.clone()),
         SourceAction::Endpoint { .. } => ActionVerdict::ok(),
         // Listing never waits on a name lookup; opening does the full check.
         SourceAction::Link { url, .. } => match source_link_shape_check(url, ctx.link_hosts) {
@@ -884,6 +919,29 @@ mod tests {
         assert!(!serde_json::to_string(&plain).unwrap().contains("inputs"));
     }
 
+    /// `disabled` is a reason string: trimmed, control characters dropped,
+    /// capped; empty is not disabled, and any other type refuses the action.
+    #[test]
+    fn disabled_reasons_are_cleaned_and_capped() {
+        let parse = |disabled: Value| parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false, "disabled": disabled}));
+        let reason = |disabled: Value| match parse(disabled).unwrap() {
+            SourceAction::Endpoint { disabled, .. } => disabled,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(reason(json!("  Still working\n it out \u{7}")).as_deref(), Some("Still working it out"));
+        assert_eq!(reason(json!("   ")), None);
+        assert_eq!(reason(json!("")), None);
+        assert_eq!(reason(Value::Null), None);
+        let long = reason(json!("é".repeat(500))).unwrap();
+        assert_eq!(long.chars().count(), DISABLED_REASON_MAX);
+        for bad in [json!(true), json!(1), json!(["x"]), json!({"why": "x"})] {
+            assert!(parse(bad.clone()).unwrap_err().contains("`disabled`"), "{bad}");
+        }
+        // Not sent back when absent, so the webview's shape is unchanged.
+        let plain = serde_json::to_value(parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false})).unwrap()).unwrap();
+        assert!(plain.get("disabled").is_none(), "{plain}");
+    }
+
     #[test]
     fn env_names_follow_the_identifier_rule() {
         let ok: BTreeMap<String, String> = [("CHAPPA_STACK_SLOT", "1"), ("_X", ""), ("A9", "z")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
@@ -1008,13 +1066,21 @@ mod tests {
         let term = SourceAction::Terminal { id: "t".into(), label: "T".into(), cwd: inside.clone(), command: vec![], env: bad_env };
         assert!(action_verdict(&term, &ctx).reason.unwrap().contains("env name"));
 
-        let hidden = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: None, params: None, note: None, inputs: vec![] };
+        let hidden = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: None, params: None, note: None, inputs: vec![], disabled: None };
         let v = action_verdict(&hidden, &ctx);
         assert!(v.hidden && !v.enabled);
-        let shown = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: Some("Sure?".into()), params: None, note: None, inputs: vec![] };
+        let shown = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: Some("Sure?".into()), params: None, note: None, inputs: vec![], disabled: None };
         assert!(action_verdict(&shown, &ctx).enabled);
-        let read_only = SourceAction::Endpoint { id: "p".into(), label: "P".into(), mutates: false, confirm: None, params: None, note: None, inputs: vec![] };
+        let read_only = SourceAction::Endpoint { id: "p".into(), label: "P".into(), mutates: false, confirm: None, params: None, note: None, inputs: vec![], disabled: None };
         assert!(action_verdict(&read_only, &ctx).enabled, "a non-mutating action needs no confirm");
+        // A source's own `disabled` disables it with the reason; a hidden
+        // one stays hidden.
+        let waiting = parse_action(&json!({"kind": "endpoint", "id": "up", "label": "Up", "mutates": true, "confirm": "Run up?", "disabled": "Its plan is still being worked out"})).unwrap();
+        let v = action_verdict(&waiting, &ctx);
+        assert!(!v.enabled && !v.hidden, "{v:?}");
+        assert_eq!(v.reason.as_deref(), Some("Its plan is still being worked out"));
+        let both = parse_action(&json!({"kind": "endpoint", "id": "u", "label": "U", "mutates": true, "disabled": "later"})).unwrap();
+        assert!(action_verdict(&both, &ctx).hidden);
 
         let link = |url: &str| SourceAction::Link { id: "l".into(), label: "L".into(), url: url.into() };
         assert!(action_verdict(&link("https://github.com/x"), &ctx).enabled);

@@ -1644,6 +1644,8 @@ export type SourceActionShape =
       note: "optional" | "required" | null;
       /** What the confirm dialog asks for (absent when nothing). */
       inputs?: EndpointInputDto[];
+      /** Why the source will not take it now (absent when it will). */
+      disabled?: string;
     }
   | { kind: "link"; id: string; label: string; url: string }
   | { kind: "panel"; id: string; label: string; endpoint: string };

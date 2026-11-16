@@ -36,7 +36,8 @@
       "id": "web", "group": "app", "label": "Web", "state": "starting",
       "uptime": "20s", "restarts": 0,
       "source": { "mode": "source", "ref": "main", "commit": null },
-      "probe": { "url": "https://dev.example.test/", "rule": "web", "up": false, "status": null }
+      "probe": { "url": "https://dev.example.test/", "rule": "web", "up": false, "status": null },
+      "actions": [{ "kind": "endpoint", "id": "deploy-web", "label": "Deploy", "mutates": true, "confirm": "Deploy web?", "disabled": "Its build is still running" }]
     },
     {
       "id": "db", "group": "data", "label": "Database", "state": "unhealthy",

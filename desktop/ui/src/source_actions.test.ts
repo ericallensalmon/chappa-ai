@@ -53,6 +53,18 @@ describe("actionButtonState", () => {
     // A blank label falls back to the id so the button is never empty.
     expect(actionButtonState(entry({ ...agent, label: "  " })).label).toBe("agent-here");
   });
+
+  it("draws an endpoint the source sent disabled as disabled, its reason the tooltip", () => {
+    const waiting = { kind: "endpoint" as const, id: "up", label: "Up", mutates: true, confirm: "Run the `up` script for app.", params: null, note: null, disabled: "Its plan is still being worked out" };
+    // How Rust judges it: disabled with the source's reason.
+    const judged = actionButtonState(entry(waiting, { enabled: false, reason: "Its plan is still being worked out" }));
+    expect(judged).toEqual({ label: "Up", disabled: true, title: "Its plan is still being worked out", hidden: false, asksFirst: false });
+    // Even a verdict that says enabled cannot draw it live.
+    expect(actionButtonState(entry(waiting))).toEqual(judged);
+    // Without the field it is the ordinary asks-first button.
+    const live = { kind: "endpoint" as const, id: "up", label: "Up", mutates: true, confirm: "Run it?", params: null, note: null };
+    expect(actionButtonState(entry(live)).disabled).toBe(false);
+  });
 });
 
 describe("endpoint questions and the agent prompt message", () => {

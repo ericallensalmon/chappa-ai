@@ -102,6 +102,16 @@ and launch in; the user approves them (shown with the view list) and
 the approval covers exactly what was shown, so changing them asks again.
 An untrusted source is not polled.
 
+A `linkHosts` entry is a host, optionally with a port, matched exactly
+(`github.com` does not cover `api.github.com`). `host:*` means any port on
+that host, the default one included; the trust dialog shows it as "any
+port on host". It is accepted only on a host that names one party: this
+machine (`localhost`, `127.0.0.1`, `[::1]`), an IP literal, or a name of
+two or more labels that is not a public suffix (`dev.example.test:*` is
+fine, `test:*`, `co.uk:*` and `devbox:*` are not). Any other `*`, a bare
+`*` included, makes the manifest unusable. Links still need `https`, or
+plain `http` to this machine.
+
 Every list response is `{ "freshness": {...}, "items": [...] }` plus
 view-specific fields (`banners`, or for the environment `groups`,
 `components`, `summary`, `facts`, `alerts`, `dataSafety`). Unknown fields are ignored.
@@ -165,6 +175,13 @@ Reply with one of:
 
 An endpoint action with `note: "required"` asks the user for a note
 before it is sent; the source refuses the call without one.
+
+An endpoint action with `disabled: "<reason>"` is drawn disabled, the
+reason as its tooltip, and the app refuses a call to it without sending
+anything; send it without the field once it can run (the next poll
+enables the button). The reason is trimmed, control characters are
+dropped and it is cut at 200 characters; any value but a string makes the
+action unusable. Refuse such a call yourself too.
 
 An endpoint action can ask for values in its dialog with `inputs`:
 

@@ -346,18 +346,46 @@ fn confirms_come_from_the_plan_script_and_a_changed_preview_refuses_the_call() {
     let up = action(&row(&e, "app")["actions"], "up").unwrap().clone();
     assert_eq!(
         up["confirm"],
-        "Run the `up` script for app. Its plan is still being worked out; look again in a moment to see what it will do."
+        "Run the `up` script for app. Its plan is still being worked out."
     );
+    // Offered, but disabled until the preview is in: nobody confirms a
+    // script run blind, and the source refuses the call meanwhile.
+    assert_eq!(up["disabled"], "Its plan is still being worked out");
+    let stack_up = action(&stack_actions(&e), "up").unwrap().clone();
+    assert_eq!(stack_up["disabled"], "Its plan is still being worked out");
+    let (status, body) = act(&src, "up", Some("app"), &up["params"]);
+    assert_eq!(
+        (status, body["kind"].as_str()),
+        (409, Some("plan-pending")),
+        "{body}"
+    );
+    let (status, body) = act(&src, "up", None, &stack_up["params"]);
+    assert_eq!(
+        (status, body["kind"].as_str()),
+        (409, Some("plan-pending")),
+        "{body}"
+    );
+    // Once the preview lands the next look enables it.
     let e = look(&src, &f.world);
+    assert!(action(&stack_actions(&e), "up")
+        .unwrap()
+        .get("disabled")
+        .is_none());
     let app = row(&e, "app");
     let up = action(&app["actions"], "up").unwrap().clone();
     assert_eq!(
         up["confirm"],
         "Run the `up` script for app.\napi: start\nweb: start"
     );
+    assert!(up.get("disabled").is_none(), "{up}");
+    let stop = action(&app["actions"], "stop").unwrap();
     assert_eq!(
-        action(&app["actions"], "stop").unwrap()["confirm"],
+        stop["confirm"],
         "Run the `stop` script for app. Its plan script failed (it exited with code 2), so what it will do is not shown."
+    );
+    assert!(
+        stop.get("disabled").is_none(),
+        "a failed plan is shown, not waited for"
     );
     // The confirm shown is what the fingerprint stands for: a preview that
     // changed since refuses the call with the new one.
@@ -385,9 +413,11 @@ fn confirms_come_from_the_plan_script_and_a_changed_preview_refuses_the_call() {
     let f = fakes(FakeCli::new(), FakeHttp::default());
     let src = source(f.world.clone(), &p.dir);
     let e = env(&src);
-    assert_eq!(
-        action(&row(&e, "app")["actions"], "up").unwrap()["confirm"],
-        "Run the `up` script for app: node up.js."
+    let up = action(&row(&e, "app")["actions"], "up").unwrap();
+    assert_eq!(up["confirm"], "Run the `up` script for app: node up.js.");
+    assert!(
+        up.get("disabled").is_none(),
+        "without a plan script nothing is pending"
     );
 }
 

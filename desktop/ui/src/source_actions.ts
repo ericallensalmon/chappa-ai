@@ -49,6 +49,11 @@ export function actionButtonState(entry: ipc.SourceActionDto): ActionButtonState
   if (!verdict.enabled) {
     return { label, disabled: true, title: verdict.reason ?? "not available", hidden: false, asksFirst: false };
   }
+  // Rust's verdict already carries a source's own `disabled`; read here
+  // too so the button can never be drawn live while the source refuses it.
+  if (action.kind === "endpoint" && action.disabled) {
+    return { label, disabled: true, title: action.disabled, hidden: false, asksFirst: false };
+  }
   let title = KIND_TITLES[action.kind];
   if (action.kind === "agent" && verdict.tool) title = `Launch ${verdict.tool[1]} in ${verdict.cwd ?? action.cwd}`;
   if (action.kind === "terminal") title = `Open a terminal in ${verdict.cwd ?? action.cwd}`;

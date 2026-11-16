@@ -15,6 +15,7 @@
 pub mod atomic;
 pub mod backoff;
 pub mod hash;
+pub mod link_hosts;
 pub mod native;
 pub mod projects;
 pub mod records;
