@@ -389,8 +389,11 @@ impl EngineCli for ScriptCli {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        stack_core::child_env::scrub(&mut cmd);
         for (k, v) in &inv.env {
-            cmd.env(k, v);
+            if !stack_core::child_env::SCRUBBED.contains(&k.as_str()) {
+                cmd.env(k, v);
+            }
         }
         if let Some(cwd) = &inv.cwd {
             cmd.current_dir(cwd);
@@ -470,7 +473,7 @@ fn kill_tree(pid: u32) {
         c.args(["-KILL", &format!("-{pid}")]);
         c
     };
-    let _ = cmd
+    let _ = stack_core::child_env::scrub(&mut cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -488,7 +491,7 @@ fn run_child(
 ) -> Result<i32, String> {
     let mut cmd = command_in(&run.argv, Some(&run.cwd))?;
     cmd.current_dir(&run.cwd)
-        .envs(&run.env)
+        .envs(child_env(&run.env))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -598,12 +601,22 @@ impl StepExec for CliSteps {
     }
 }
 
+/// A run block's env without the variables no child may get (the
+/// source's token and address; see [`stack_core::child_env`]).
+fn child_env(env: &indexmap::IndexMap<String, String>) -> Vec<(&String, &String)> {
+    env.iter()
+        .filter(|(k, _)| !stack_core::child_env::SCRUBBED.contains(&k.as_str()))
+        .collect()
+}
+
 /// A [`Command`] for argv. On Windows a bare program name is looked up on
 /// `PATH` with the usual extensions, because `npm` or `npx` are `.cmd`
 /// scripts that `CreateProcess` will not find by name; a script runs
 /// through `cmd /C`, and then no argument may carry a character `cmd`
-/// would interpret. A PowerShell file is refused: it only runs through an
-/// interpreter the argv names.
+/// would interpret (the same rule a pane's batch spawn uses,
+/// [`term_core::pty::batch_unsafe_char`]). A PowerShell file is refused: it
+/// only runs through an interpreter the argv names. The command never
+/// passes the source's token or address on.
 pub fn command_for(argv: &[String]) -> Result<Command, String> {
     command_in(argv, None)
 }
@@ -611,6 +624,12 @@ pub fn command_for(argv: &[String]) -> Result<Command, String> {
 /// [`command_for`] for a command that runs in `cwd`: a relative program
 /// path with a folder in it is taken from there.
 pub fn command_in(argv: &[String], cwd: Option<&Path>) -> Result<Command, String> {
+    let mut cmd = command_unscrubbed(argv, cwd)?;
+    stack_core::child_env::scrub(&mut cmd);
+    Ok(cmd)
+}
+
+fn command_unscrubbed(argv: &[String], cwd: Option<&Path>) -> Result<Command, String> {
     let program = argv.first().ok_or("the command is empty")?;
     if stack_core::script::needs_interpreter(argv) {
         return Err(format!(
@@ -636,12 +655,13 @@ pub fn command_in(argv: &[String], cwd: Option<&Path>) -> Result<Command, String
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             if ext == "cmd" || ext == "bat" {
-                if let Some(bad) = argv[1..]
+                if let Some((bad, c)) = argv[1..]
                     .iter()
-                    .find(|a| a.chars().any(|c| "&|<>^%\"\r\n".contains(c)))
+                    .find_map(|a| term_core::pty::batch_unsafe_char(a).map(|c| (a, c)))
                 {
                     return Err(format!(
-                        "`{program}` is a batch script and argument `{bad}` has a character the command shell would interpret"
+                        "`{program}` is a batch script and argument `{}` has {c:?}, a character the command shell would interpret",
+                        stack_core::credentials::mask_text(bad).escape_debug()
                     ));
                 }
                 let mut cmd = Command::new("cmd");
@@ -705,7 +725,7 @@ impl ProcessHost for OsProcesses {
         let err = file.try_clone().map_err(|e| e.to_string())?;
         let mut cmd = command_for(&run.argv)?;
         cmd.current_dir(&run.cwd)
-            .envs(&run.env)
+            .envs(child_env(&run.env))
             .stdin(Stdio::null())
             .stdout(file)
             .stderr(err);
@@ -765,7 +785,7 @@ fn spawn_detached(mut cmd: Command) -> io::Result<Child> {
 }
 
 fn quiet(program: &str, args: &[&str]) -> Option<std::process::Output> {
-    Command::new(program)
+    stack_core::child_env::scrub(&mut Command::new(program))
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -844,6 +864,7 @@ pub struct DetachedSpawner;
 impl JobSpawner for DetachedSpawner {
     fn spawn(&self, world: &World, project_dir: &Path, job_id: &str) -> Result<(), String> {
         let mut cmd = Command::new(&world.exe);
+        stack_core::child_env::scrub(&mut cmd);
         cmd.arg("run-job")
             .arg(job_id)
             .current_dir(project_dir)
@@ -1006,5 +1027,101 @@ mod tests {
             e.contains("character the command shell would interpret"),
             "{e}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_file_refuses_delayed_expansion_and_control_characters_like_a_pane() {
+        for bad in ["!VAR!", "a\u{7}b", "tab\u{1b}x", "line\nbreak", "100%"] {
+            let e = command_in(
+                &argv(&["scripts\\stop.cmd", bad]),
+                Some(Path::new("C:\\code\\x")),
+            )
+            .unwrap_err();
+            assert!(
+                e.contains("character the command shell would interpret"),
+                "{bad:?}: {e}"
+            );
+        }
+        command_in(
+            &argv(&["scripts\\stop.cmd", "with\ttab", "Bash(git:*)"]),
+            Some(Path::new("C:\\code\\x")),
+        )
+        .unwrap();
+    }
+
+    fn plant_source_variables() {
+        for name in stack_core::child_env::SCRUBBED {
+            std::env::set_var(name, "planted-for-the-test");
+        }
+    }
+
+    fn run_block(dir: &Path) -> RunBlock {
+        let mut env = indexmap::IndexMap::new();
+        env.insert("KEPT_FOR_THE_CHILD".to_string(), "1".to_string());
+        env.insert(
+            stack_core::child_env::SOURCE_TOKEN_ENV.to_string(),
+            "named-by-a-run-block".to_string(),
+        );
+        RunBlock {
+            argv: stack_core::child_env::env_printer(),
+            cwd: dir.to_path_buf(),
+            env,
+            title: None,
+        }
+    }
+
+    fn sees_nothing_scrubbed(text: &str) {
+        assert_eq!(
+            stack_core::child_env::names_a_scrubbed_variable(text),
+            None,
+            "{text}"
+        );
+        assert!(text.contains("KEPT_FOR_THE_CHILD=1"), "{text}");
+    }
+
+    #[test]
+    fn job_steps_and_status_scripts_never_see_the_source_variables() {
+        plant_source_variables();
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_block(dir.path());
+        for tree in [false, true] {
+            let mut lines = Vec::new();
+            run_child(
+                &run,
+                Duration::from_secs(20),
+                &mut |l| lines.push(l.to_string()),
+                tree,
+            )
+            .unwrap();
+            sees_nothing_scrubbed(&lines.join("\n"));
+        }
+        let scripts = ScriptCli {
+            running: Arc::new(RunningScripts::default()),
+        };
+        let mut inv = Invocation::from_argv(&run.argv).cwd(dir.path());
+        for (k, v) in &run.env {
+            inv = inv.env(k, v);
+        }
+        let out = scripts.run(&inv).unwrap();
+        sees_nothing_scrubbed(&out.stdout);
+    }
+
+    #[test]
+    fn process_components_never_see_the_source_variables() {
+        plant_source_variables();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("logs/env.log");
+        let pid = OsProcesses.spawn(&run_block(dir.path()), &log).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut text = String::new();
+        while Instant::now() < deadline {
+            text = std::fs::read_to_string(&log).unwrap_or_default();
+            if text.contains("KEPT_FOR_THE_CHILD") && !pid_alive(pid) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        sees_nothing_scrubbed(&text);
     }
 }

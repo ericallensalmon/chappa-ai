@@ -287,8 +287,13 @@ impl EngineCli for CliRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Never the source's token or address, even when the invocation
+        // names them: what an engine CLI or hook runs is not ours.
+        crate::child_env::scrub(&mut cmd);
         for (k, v) in &inv.env {
-            cmd.env(k, v);
+            if !crate::child_env::SCRUBBED.contains(&k.as_str()) {
+                cmd.env(k, v);
+            }
         }
         if let Some(cwd) = &inv.cwd {
             cmd.current_dir(cwd);
@@ -616,5 +621,28 @@ mod tests {
         let slow = CliRunner.run(&Invocation::new(program, args).timeout(Duration::from_secs(1)));
         assert!(matches!(slow, Err(CliError::Timeout { seconds: 1, .. })));
         assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[test]
+    fn the_real_runner_never_passes_the_source_variables_on() {
+        for name in crate::child_env::SCRUBBED {
+            std::env::set_var(name, "planted-for-the-test");
+        }
+        let argv = crate::child_env::env_printer();
+        let inv = Invocation::from_argv(&argv)
+            .env(crate::child_env::SOURCE_TOKEN_ENV, "named-by-the-caller")
+            .env("KEPT_FOR_THE_CHILD", "1");
+        let out = CliRunner.run(&inv).unwrap();
+        assert_eq!(
+            crate::child_env::names_a_scrubbed_variable(&out.stdout),
+            None,
+            "{}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.contains("KEPT_FOR_THE_CHILD=1"),
+            "{}",
+            out.stdout
+        );
     }
 }

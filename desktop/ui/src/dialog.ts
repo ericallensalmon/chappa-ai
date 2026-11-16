@@ -462,7 +462,14 @@ export interface CommandForm {
   autoRestart: boolean;
   restartWhenChanged: string[];
   env: Array<[string, string]>;
+  /** Fields shown masked because they hold what looks like a credential
+   *  (`command`, `env.<KEY>`). Each is read-only with a Replace field;
+   *  left empty, the answer carries `UNCHANGED` and the stored value stays. */
+  masked?: string[];
 }
+
+/** Sent for a masked field the person did not replace (matches `ipc.UNCHANGED`). */
+export const UNCHANGED = "\u0001chappa:unchanged";
 
 export interface CommandDialogOptions {
   /** Dialog heading. Defaults to "Edit command" when `initial` is set, else
@@ -524,8 +531,21 @@ export function commandDialog(
       return box;
     };
 
+    const masked = new Set(initial?.masked ?? []);
+    /** A masked value stays read-only; the field after it replaces it. */
+    const lockMasked = (input: HTMLInputElement): void => {
+      input.readOnly = true;
+      input.classList.add("chappa-cmd-masked");
+      input.title = "Looks like a credential written inline; shown masked. Type a new value below to replace it.";
+      input.style.opacity = "0.7";
+    };
     const nameInput = field("NAME", "chappa-cmd-name", initial?.name ?? "", "e.g. dev server");
     const commandInput = field("COMMAND", "chappa-cmd-command", initial?.command ?? "", "npm run dev");
+    const commandMasked = masked.has("command");
+    const commandReplace = commandMasked
+      ? field("REPLACE COMMAND", "chappa-cmd-command-replace", "", "leave empty to keep the current command")
+      : null;
+    if (commandMasked) lockMasked(commandInput);
     const workdirInput = field(
       "WORKING DIRECTORY",
       "chappa-cmd-workdir",
@@ -552,7 +572,7 @@ export function commandDialog(
     envLabel.textContent = "ENV";
     const envRows = document.createElement("div");
     envRows.className = "chappa-cmd-env";
-    const addEnvRow = (key: string, value: string): void => {
+    const addEnvRow = (key: string, value: string, isMasked = false): void => {
       const row = document.createElement("div");
       row.className = "chappa-cmd-env-row";
       row.style.cssText = ENV_ROW_CSS;
@@ -578,10 +598,22 @@ export function commandDialog(
       rm.style.cssText = SMALL_BTN_CSS;
       rm.addEventListener("click", () => row.remove());
       row.append(k, v, rm);
+      if (isMasked) {
+        lockMasked(v);
+        k.readOnly = true;
+        row.classList.add("chappa-cmd-env-masked");
+        const replace = document.createElement("input");
+        replace.type = "text";
+        replace.className = "chappa-cmd-env-replace";
+        replace.spellcheck = false;
+        replace.placeholder = "replace";
+        replace.style.cssText = INPUT_CSS + "margin:0;flex:1 1 40%;";
+        row.insertBefore(replace, rm);
+      }
       envRows.appendChild(row);
       return;
     };
-    for (const [k, v] of initial?.env ?? []) addEnvRow(k, v);
+    for (const [k, v] of initial?.env ?? []) addEnvRow(k, v, masked.has(`env.${k}`));
     const envAdd = document.createElement("button");
     envAdd.type = "button";
     envAdd.className = "chappa-cmd-env-add";
@@ -600,12 +632,23 @@ export function commandDialog(
       const env: Array<[string, string]> = [];
       for (const row of envRows.querySelectorAll<HTMLElement>(".chappa-cmd-env-row")) {
         const k = row.querySelector<HTMLInputElement>(".chappa-cmd-env-key")!.value.trim();
-        const v = row.querySelector<HTMLInputElement>(".chappa-cmd-env-value")!.value;
+        const replace = row.querySelector<HTMLInputElement>(".chappa-cmd-env-replace");
+        // A masked value never goes back as its mask: kept, or replaced.
+        const v = replace
+          ? replace.value === ""
+            ? UNCHANGED
+            : replace.value
+          : row.querySelector<HTMLInputElement>(".chappa-cmd-env-value")!.value;
         if (k !== "") env.push([k, v]);
       }
+      const command = commandReplace
+        ? commandReplace.value.trim() === ""
+          ? UNCHANGED
+          : commandReplace.value.trim()
+        : commandInput.value.trim();
       return {
         name: nameInput.value.trim(),
-        command: commandInput.value.trim(),
+        command,
         workingDir: workdirInput.value.trim(),
         autoStart: autoStart.checked,
         autoRestart: autoRestart.checked,

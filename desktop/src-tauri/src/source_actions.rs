@@ -433,7 +433,7 @@ fn spawn_terminal_row(
     let launch = format!(
         "launch {} {} in {}",
         spec.command,
-        spec.args.iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
+        stack_core::credentials::mask_argv(&spec.args).iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
         crate::roots::display(cwd)
     );
     deps.registry.record_input_as(id, 0, launch, false, Some(actor), Some("launch"));

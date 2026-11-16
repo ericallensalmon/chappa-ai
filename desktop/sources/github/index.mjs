@@ -27,6 +27,10 @@ const GH_TIMEOUT_MS = 60_000;
 
 const addr = process.env.CHAPPA_SOURCE_ADDR;
 const token = process.env.CHAPPA_SOURCE_TOKEN;
+// Read once, then gone from the environment every child process inherits
+// (`gh` and anything else this source starts never sees the token).
+delete process.env.CHAPPA_SOURCE_ADDR;
+delete process.env.CHAPPA_SOURCE_TOKEN;
 const ghBin = process.env.GH_BIN || "gh";
 const minRefreshMs = 1000 * Number(process.env.CHAPPA_GITHUB_REFRESH_SECONDS ?? 60);
 

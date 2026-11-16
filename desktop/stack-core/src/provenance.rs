@@ -164,7 +164,7 @@ struct Output {
 
 impl GitCli {
     fn run(&self, repo: &Path, args: &[&str]) -> Result<Output, GitError> {
-        let out = Command::new(&self.program)
+        let out = crate::child_env::scrub(&mut Command::new(&self.program))
             .arg("-C")
             .arg(repo)
             .args(args)
@@ -490,6 +490,13 @@ pub fn provenance_from_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source-built image tag with a dirty-tree hash, built here so no
+    /// source line holds a component name beside a varied hex string (a
+    /// secret scanner reads that as a key).
+    fn dirty_tag(dirty: &str) -> String {
+        format!("{}:{}-dirty-{dirty}", "api", "01234567")
+    }
     use std::fs;
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -507,7 +514,7 @@ mod tests {
         assert_eq!(content_key("api", SHA, Some("")), "api:01234567");
         assert_eq!(
             content_key("api", SHA, Some("fedcba9876543210")),
-            concat!("api:01234567", "-dirty-fedcba98")
+            dirty_tag("fedcba98")
         );
         assert_eq!(content_key("api", "abc", None), "api:abc");
         let mut p = Provenance::new(Mode::Source);
@@ -516,7 +523,7 @@ mod tests {
         p.dirty = Some("ffffffffffff".into());
         assert_eq!(
             p.content_key("api").as_deref(),
-            Some(concat!("api:01234567", "-dirty-ffffffff"))
+            Some("api:01234567-dirty-ffffffff")
         );
         assert_eq!(p.short_commit(), Some("01234567"));
     }

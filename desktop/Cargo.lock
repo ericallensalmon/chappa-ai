@@ -622,6 +622,7 @@ dependencies = [
  "sha2",
  "stack-core",
  "tempfile",
+ "term-core",
  "tiny_http",
 ]
 
@@ -3932,6 +3933,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
 ]

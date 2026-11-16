@@ -43,6 +43,10 @@ function arg(name, fallback) {
 
 const addr = process.env.CHAPPA_SOURCE_ADDR;
 const token = process.env.CHAPPA_SOURCE_TOKEN;
+// Read once, then gone from the environment every child process inherits
+// (`gh` and anything else this source starts never sees the token).
+delete process.env.CHAPPA_SOURCE_ADDR;
+delete process.env.CHAPPA_SOURCE_TOKEN;
 const dataDir = resolve(arg("--data", join(here, "data")));
 // How long a job without a `run` block takes to finish by itself.
 const jobMs = Number(process.env.CHAPPA_FIXTURE_JOB_MS ?? 3000);

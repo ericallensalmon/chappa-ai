@@ -1112,6 +1112,7 @@ fn job_records_a_saved_state_refers_to_are_never_pruned() {
             log: JobRecord::log_path(&work, id),
             result: JobRecord::result_path(&work, id),
             work: JobWork::Gc,
+            trusted_definition: None,
             report: None,
             error: None,
             actor: None,

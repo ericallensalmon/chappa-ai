@@ -18,6 +18,9 @@ path = "src/main.rs"
 [dependencies]
 stack-core = { path = "../stack-core" }
 project-model = { path = "../project-model" }
+# The batch-file argument rule panes use, so a job and a pane refuse the same
+# characters (already built for project-model).
+term-core = { path = "../term-core" }
 tiny_http = "0.12"
 # The identity proof the app checks before it sends the token.
 hmac = "0.12"

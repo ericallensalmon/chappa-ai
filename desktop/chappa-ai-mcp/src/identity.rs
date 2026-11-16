@@ -78,7 +78,9 @@ pub fn identity_proof(token: &str, challenge: &str, addr: &str, nonce: &str) -> 
 /// Whether `s` is a well-formed challenge (exactly [`CHALLENGE_BYTES`] as
 /// lowercase hex). The app refuses anything else.
 pub fn is_valid_challenge(s: &str) -> bool {
-    s.len() == CHALLENGE_BYTES * 2 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == CHALLENGE_BYTES * 2
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// What the endpoint file says about the running app.
@@ -107,10 +109,21 @@ pub fn read_endpoint_file(path: &Path) -> Result<Endpoint, ToolError> {
             path.display()
         ))
     })?;
-    let bad = |why: &str| ToolError::Untrusted(format!("endpoint file {} is unusable: {why}", path.display()));
+    let bad = |why: &str| {
+        ToolError::Untrusted(format!(
+            "endpoint file {} is unusable: {why}",
+            path.display()
+        ))
+    };
     let value: Value = serde_json::from_str(&text).map_err(|_| bad("not JSON"))?;
-    let addr = value["addr"].as_str().ok_or_else(|| bad("no addr"))?.to_owned();
-    let nonce = value["nonce"].as_str().ok_or_else(|| bad("no nonce"))?.to_owned();
+    let addr = value["addr"]
+        .as_str()
+        .ok_or_else(|| bad("no addr"))?
+        .to_owned();
+    let nonce = value["nonce"]
+        .as_str()
+        .ok_or_else(|| bad("no nonce"))?
+        .to_owned();
     let parsed: SocketAddr = addr.parse().map_err(|_| bad("addr is not ip:port"))?;
     // The app only ever binds loopback; anything else in the file was not
     // written by it.
@@ -120,7 +133,11 @@ pub fn read_endpoint_file(path: &Path) -> Result<Endpoint, ToolError> {
     if nonce.is_empty() {
         return Err(bad("empty nonce"));
     }
-    Ok(Endpoint { addr, nonce, pid: value["pid"].as_u64() })
+    Ok(Endpoint {
+        addr,
+        nonce,
+        pid: value["pid"].as_u64(),
+    })
 }
 
 /// A fresh challenge from the OS RNG. An RNG failure is an error, never a
@@ -128,7 +145,8 @@ pub fn read_endpoint_file(path: &Path) -> Result<Endpoint, ToolError> {
 /// answers from the real app ahead of time and replay them later).
 pub fn new_challenge() -> Result<String, ToolError> {
     let mut bytes = [0u8; CHALLENGE_BYTES];
-    getrandom::fill(&mut bytes).map_err(|e| ToolError::Untrusted(format!("no randomness for the challenge: {e}")))?;
+    getrandom::fill(&mut bytes)
+        .map_err(|e| ToolError::Untrusted(format!("no randomness for the challenge: {e}")))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -166,7 +184,9 @@ pub fn verify_connection(
         .write_all(req.as_bytes())
         .map_err(|e| ToolError::Unreachable(format!("{where_}: {e}")))?;
     let (status, body) = read_one_reply(stream).map_err(|why| {
-        ToolError::Untrusted(format!("the program at {where_} did not answer the identity check ({why})"))
+        ToolError::Untrusted(format!(
+            "the program at {where_} did not answer the identity check ({why})"
+        ))
     })?;
     if status != 200 {
         return Err(ToolError::Untrusted(format!(
@@ -174,8 +194,11 @@ pub fn verify_connection(
              chappa-ai holds the port, or the app is older than this server (update the app)"
         )));
     }
-    let value: Value = serde_json::from_slice(&body)
-        .map_err(|_| ToolError::Untrusted(format!("the program at {where_} sent a malformed identity answer")))?;
+    let value: Value = serde_json::from_slice(&body).map_err(|_| {
+        ToolError::Untrusted(format!(
+            "the program at {where_} sent a malformed identity answer"
+        ))
+    })?;
     let field = |k: &str| value[k].as_str().unwrap_or("").to_owned();
     let (addr, nonce, proof) = (field("addr"), field("nonce"), field("proof"));
     let want = identity_proof(token, &challenge, &addr, &nonce);
@@ -200,7 +223,11 @@ pub fn verify_connection(
 /// Connect to the endpoint file's address and verify it — the app's own
 /// check, on a failed bind, of whether an existing endpoint file belongs to a
 /// live instance (keep it) or a dead run (remove it). Never sends the token.
-pub fn probe_endpoint(endpoint_file: &Path, token: &str, connect_timeout: Duration) -> Result<Endpoint, ToolError> {
+pub fn probe_endpoint(
+    endpoint_file: &Path,
+    token: &str,
+    connect_timeout: Duration,
+) -> Result<Endpoint, ToolError> {
     let ep = read_endpoint_file(endpoint_file)?;
     let addr: SocketAddr = ep
         .addr
@@ -219,7 +246,8 @@ pub fn probe_endpoint(endpoint_file: &Path, token: &str, connect_timeout: Durati
 /// app is talking, and the connection is not used for the token.
 fn read_one_reply(stream: &mut TcpStream) -> Result<(u16, Vec<u8>), String> {
     let mut buffered = Vec::new();
-    let reply = crate::http::read_response(stream, &mut buffered, MAX_IDENTITY_REPLY).map_err(|e| e.to_string())?;
+    let reply = crate::http::read_response(stream, &mut buffered, MAX_IDENTITY_REPLY)
+        .map_err(|e| e.to_string())?;
     if !buffered.is_empty() {
         return Err("unexpected bytes after the reply".into());
     }
@@ -244,7 +272,10 @@ mod tests {
         assert_ne!(base, identity_proof("tok", "c", "127.0.0.1:2", "n"));
         assert_ne!(base, identity_proof("tok", "c", "127.0.0.1:1", "m"));
         // The separators keep field boundaries unambiguous.
-        assert_ne!(identity_proof("tok", "ab", "c", "n"), identity_proof("tok", "a", "bc", "n"));
+        assert_ne!(
+            identity_proof("tok", "ab", "c", "n"),
+            identity_proof("tok", "a", "bc", "n")
+        );
     }
 
     #[test]
@@ -263,14 +294,30 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(ENDPOINT_FILE);
         std::fs::write(&path, r#"{"addr":"10.0.0.5:8324","nonce":"n"}"#).unwrap();
-        assert!(matches!(read_endpoint_file(&path), Err(ToolError::Untrusted(_))));
+        assert!(matches!(
+            read_endpoint_file(&path),
+            Err(ToolError::Untrusted(_))
+        ));
         std::fs::write(&path, "garbage").unwrap();
-        assert!(matches!(read_endpoint_file(&path), Err(ToolError::Untrusted(_))));
+        assert!(matches!(
+            read_endpoint_file(&path),
+            Err(ToolError::Untrusted(_))
+        ));
         std::fs::write(&path, r#"{"addr":"127.0.0.1:8324","nonce":"n","pid":7}"#).unwrap();
         let ep = read_endpoint_file(&path).unwrap();
-        assert_eq!(ep, Endpoint { addr: "127.0.0.1:8324".into(), nonce: "n".into(), pid: Some(7) });
+        assert_eq!(
+            ep,
+            Endpoint {
+                addr: "127.0.0.1:8324".into(),
+                nonce: "n".into(),
+                pid: Some(7)
+            }
+        );
         std::fs::remove_file(&path).unwrap();
-        assert!(matches!(read_endpoint_file(&path), Err(ToolError::Unreachable(_))));
+        assert!(matches!(
+            read_endpoint_file(&path),
+            Err(ToolError::Unreachable(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

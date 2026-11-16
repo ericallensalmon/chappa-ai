@@ -365,6 +365,11 @@ pub fn check_input_values(inputs: &[EndpointInput], values: Option<&Value>, para
 /// name) is refused with the offending name.
 pub fn validate_env(env: &BTreeMap<String, String>) -> Result<(), String> {
     for name in env.keys() {
+        // A source's own address and token are never handed on: no pane,
+        // job or agent a source starts gets them from the app.
+        if stack_core::child_env::SCRUBBED.contains(&name.as_str()) {
+            return Err(format!("env name `{name}` is reserved"));
+        }
         let mut chars = name.chars();
         let head_ok = chars.next().is_some_and(|c| c.is_ascii_uppercase() || c == '_');
         if !head_ok || !chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {

@@ -491,8 +491,18 @@ fn stub_gitleaks_is_found_on_a_temp_path_and_its_report_is_stripped() {
     assert!(!args.contains("--baseline-path"), "{args}");
     let cwd = fs::read_to_string(bin.join("cwd.txt")).unwrap();
     assert!(cwd.contains("stage"), "runs from the staging dir: {cwd}");
-    let leftovers: Vec<_> = fs::read_dir(&work).unwrap().collect();
+    assert!(args.contains("--config"), "an explicit config: {args}");
+    let leftovers: Vec<_> = fs::read_dir(&work)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name() != crate::workdir::IGNORE_FILE)
+        .collect();
     assert!(leftovers.is_empty(), "staging and report removed");
+    assert_eq!(
+        fs::read_to_string(work.join(crate::workdir::IGNORE_FILE)).unwrap(),
+        "*\n",
+        "the work folder ignores itself"
+    );
 }
 
 #[test]
@@ -509,6 +519,10 @@ fn stub_gitleaks_failures_are_errors_not_clean_scans() {
     assert!(err.to_string().contains("exit Some(1)"), "{err}");
 
     // exit 0 with an error on stderr: gitleaks does this for a bad range
+    if !git_available() {
+        return;
+    }
+    git(&root, &["init", "-q"]);
     let noisy = script(
         dir.path(),
         "noisy",
@@ -761,7 +775,10 @@ fn real_gitleaks_flags_an_ignored_env_file_and_the_baseline_silences_it() {
     assert_eq!(report.scanned_files, 1);
     assert_eq!(report.findings, [src("github-pat", ".env", 1)]);
     assert!(
-        fs::read_dir(&work).unwrap().next().is_none(),
+        fs::read_dir(&work)
+            .unwrap()
+            .flatten()
+            .all(|e| e.file_name() == crate::workdir::IGNORE_FILE),
         "work dir left clean"
     );
 }
@@ -884,4 +901,210 @@ fn real_gitleaks_over_env_files_and_build_contexts() {
     let unignored = run(false);
     assert_eq!(unignored.findings.len(), 1, "{unignored:?}");
     assert_eq!(file_of(&unignored.findings[0]), "deploy/prod.env");
+}
+
+/// An allow-everything gitleaks config, as a cloned repository could ship.
+const ALLOW_ALL: &str = "[allowlist]\npaths = ['''.*''']\n";
+
+#[test]
+fn real_gitleaks_ignores_config_and_ignore_files_shipped_in_the_scanned_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let Some(scanner) = real_gitleaks(&work) else {
+        return;
+    };
+    let repo = leaky_repo(dir.path());
+    write(&repo, ".gitleaks.toml", ALLOW_ALL);
+    write(&repo, ".gitleaksignore", ".env:github-pat:1\n");
+    write(
+        &repo,
+        "src/.gitleaksignore",
+        ".env:github-pat:1\n../.env:github-pat:1\n",
+    );
+    // gitleaks' own config variables point at the allow-all file too.
+    let allow = dir.path().join("allow.toml");
+    fs::write(&allow, ALLOW_ALL).unwrap();
+    std::env::set_var("GITLEAKS_CONFIG", &allow);
+    for linked in [true, false] {
+        let mut s = scanner.clone();
+        s.stage_with_links = linked;
+        let report = scan(
+            &s,
+            &ScanTarget::WorkingTree {
+                root: repo.clone(),
+                excludes: vec![],
+            },
+            &ListLimits::default(),
+            &Baseline::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.findings,
+            [src("github-pat", ".env", 1)],
+            "staged with links: {linked}"
+        );
+    }
+    // Git mode: a committed ignore file listing the finding changes nothing.
+    git(&repo, &["checkout", "-q", "-b", "item"]);
+    let token = planted_token();
+    write(&repo, "cfg.txt", &format!("token: {token}\n"));
+    git(&repo, &["add", "cfg.txt"]);
+    git(&repo, &["commit", "-q", "-m", "add config"]);
+    let sha = git(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+    write(
+        &repo,
+        ".gitleaksignore",
+        &format!("{sha}:cfg.txt:github-pat:1\n"),
+    );
+    git(&repo, &["add", ".gitleaksignore", ".gitleaks.toml"]);
+    git(&repo, &["commit", "-q", "-m", "ignore it"]);
+    let base = git(&repo, &["rev-parse", "HEAD~2"]).trim().to_string();
+    let commits = scan(
+        &scanner,
+        &ScanTarget::CommitsAhead {
+            root: repo.clone(),
+            base,
+        },
+        &ListLimits::default(),
+        &Baseline::default(),
+    )
+    .unwrap();
+    assert!(
+        commits.findings.iter().any(|f| file_of(f) == "cfg.txt"),
+        "{commits:?}"
+    );
+    std::env::remove_var("GITLEAKS_CONFIG");
+    // An ignore file inside the git folder would be read: the scan refuses.
+    write(&repo.join(".git"), ".gitleaksignore", "x\n");
+    assert!(scanner.scan_commits(&repo, "HEAD~1..HEAD").is_err());
+}
+
+#[test]
+fn real_gitleaks_default_config_catches_inline_credentials_in_agent_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let Some(scanner) = real_gitleaks(&work) else {
+        return;
+    };
+    // Assembled at run time: no source line holds a credential.
+    let pw = ["Zq", "84", "hk", "Lw"].concat();
+    // Flags and header names too, so this file itself stays clean for the
+    // repository's own scan.
+    let (h, u, user, auth) = (
+        "-H",
+        ["-", "u"].concat(),
+        ["--", "user"].concat(),
+        ["Author", "ization"].concat(),
+    );
+    let flagged = [
+        format!("Bash(PGPASSWORD={pw} psql -h db -U app)"),
+        format!("Bash(export GH_TOKEN={pw})"),
+        format!("Bash(APP_SECRET={pw} node a.js)"),
+        format!("Bash(OPENAI_API_KEY={pw} node a.js)"),
+        format!("Bash(curl {h} \\\"{auth}: Bearer {pw}\\\" https://api.example.test)"),
+        format!("Bash(curl {h} \\\"{auth}: Basic {pw}\\\" https://api.example.test)"),
+        format!("Bash(curl {u} admin:{pw} https://x.example.test)"),
+        format!("Bash(curl {user} admin:{pw} https://x.example.test)"),
+        format!("Bash(mysql -u root -p{pw} app)"),
+        format!("Bash(mysql --password={pw} app)"),
+        format!("Bash(psql postgresql://app:{pw}@db:5432/app)"),
+    ];
+    let quiet = [
+        "Bash(PGPASSWORD=$PGPASSWORD psql)",
+        "Bash(PGPASSWORD=${PGPASSWORD} psql)",
+        "Bash(PGPASSWORD=%PGPASSWORD% psql)",
+        "Bash(PGPASSWORD=<password> psql)",
+        "Bash(PGPASSWORD=xxx psql)",
+        "Bash(PGPASSWORD=changeme psql)",
+        "Bash(PGPASSWORD= psql)",
+        "Bash(curl -u admin:$PASS https://x.example.test)",
+        "Bash(psql postgresql://app:${DB_PASS}@db/app)",
+        "Bash(curl -H \\\"Authorization: Bearer $TOKEN\\\" https://x.example.test)",
+        "Bash(npm run dev)",
+    ];
+    let mut lines = vec![
+        "{".to_string(),
+        "  \"permissions\": {".into(),
+        "    \"allow\": [".into(),
+    ];
+    let first = lines.len() as u32 + 1;
+    let entries: Vec<String> = flagged
+        .iter()
+        .cloned()
+        .chain(quiet.iter().map(|s| s.to_string()))
+        .collect();
+    for (i, e) in entries.iter().enumerate() {
+        let comma = if i + 1 < entries.len() { "," } else { "" };
+        lines.push(format!("      \"{e}\"{comma}"));
+    }
+    lines.extend(["    ]".to_string(), "  }".into(), "}".into()]);
+    let root = dir.path().join("project");
+    write(
+        &root,
+        ".claude/settings.local.json",
+        &(lines.join("\n") + "\n"),
+    );
+    let report = scan(
+        &scanner,
+        &ScanTarget::WorkingTree {
+            root: root.clone(),
+            excludes: vec![],
+        },
+        &no_git(),
+        &Baseline::default(),
+    )
+    .unwrap();
+    let hit: std::collections::BTreeSet<u32> = report
+        .findings
+        .iter()
+        .filter_map(|f| match &f.location {
+            crate::safety::Location::Source { line, .. } => *line,
+            _ => None,
+        })
+        .collect();
+    for (i, e) in flagged.iter().enumerate() {
+        assert!(
+            hit.contains(&(first + i as u32)),
+            "not flagged: {e} ({report:?})"
+        );
+    }
+    for (i, e) in quiet.iter().enumerate() {
+        let line = first + (flagged.len() + i) as u32;
+        assert!(
+            !hit.contains(&line),
+            "flagged a placeholder: {e} ({report:?})"
+        );
+    }
+    let shown = format!("{report:?} {}", serde_json::to_string(&report).unwrap());
+    assert!(!shown.contains(&pw), "{shown}");
+}
+
+#[test]
+fn nothing_a_scan_leaves_in_the_work_folder_shows_up_in_git_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = leaky_repo(dir.path());
+    let dot_work = repo.join(".work");
+    let Some(scanner) = real_gitleaks(&dot_work) else {
+        return;
+    };
+    let target = ScanTarget::WorkingTree {
+        root: repo.clone(),
+        excludes: vec![],
+    };
+    let report = scan(
+        &scanner,
+        &target,
+        &ListLimits::default(),
+        &Baseline::default(),
+    )
+    .unwrap();
+    let mut baseline = Baseline::load(&dot_work).unwrap();
+    baseline.acknowledge(&report.findings, "me", "fixture", "2026-01-01T00:00:00Z");
+    baseline.save(&dot_work).unwrap();
+    // A crash leaves scratch behind; it is still ignored.
+    fs::create_dir_all(dot_work.join("secret-scan-1-2-3/stage")).unwrap();
+    write(&dot_work, "secret-scan-1-2-3/stage/.env", "x\n");
+    let status = git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+    assert!(!status.contains(".work"), "{status}");
+    assert!(Baseline::path(&dot_work).is_file());
 }

@@ -62,6 +62,12 @@ describe("SecuritySection", () => {
     program.dispatchEvent(new Event("change"));
     await Promise.resolve();
     expect(sets.at(-1)!.secretScanProgram).toBe("C:\\tools\\gitleaks.exe");
+    const config = section.element.querySelector<HTMLInputElement>('[data-setting="secretScanConfig"]')!;
+    expect(config.value).toBe("");
+    config.value = "  C:\\cfg\\gitleaks.toml ";
+    config.dispatchEvent(new Event("change"));
+    await Promise.resolve();
+    expect(sets.at(-1)!.secretScanConfig).toBe("C:\\cfg\\gitleaks.toml");
     // The store's value flows back into the controls.
     expect(s.get().secretScanBeforeAgents).toBe(false);
     expect(sw.value).toBe("off");

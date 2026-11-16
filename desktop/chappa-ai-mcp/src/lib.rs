@@ -219,12 +219,13 @@ impl Client {
                 return Ok((cached, true));
             }
         }
-        let fresh = match &self.token {
-            TokenSource::Literal(t) => t.clone(),
-            TokenSource::File(path) => std::fs::read_to_string(path)
-                .map(|s| s.trim().to_owned())
-                .map_err(|e| ToolError::Token(format!("{}: {e}", path.display())))?,
-        };
+        let fresh =
+            match &self.token {
+                TokenSource::Literal(t) => t.clone(),
+                TokenSource::File(path) => std::fs::read_to_string(path)
+                    .map(|s| s.trim().to_owned())
+                    .map_err(|e| ToolError::Token(format!("{}: {e}", path.display())))?,
+            };
         if let Ok(mut cache) = self.cached.lock() {
             *cache = Some(fresh.clone());
         }
@@ -239,7 +240,12 @@ impl Client {
     /// install, deleted file) since we read it, so the file is re-read once
     /// and the request retried: the one place staleness can bite. A rejection
     /// of a freshly-read token is a real error and is returned.
-    pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, ToolError> {
+    pub fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, ToolError> {
         let (token, from_cache) = self.token(false)?;
         let first = self.send(method, path, body, &token);
         let rejected = matches!(first, Ok((401, _)) | Err(ToolError::Untrusted(_)));
@@ -265,13 +271,15 @@ impl Client {
                 Ok((addr, ep.addr.clone(), String::new(), Some(ep)))
             }
             Target::Url(url) => {
-                let (host, port, prefix) =
-                    parse_http_url(url).ok_or_else(|| ToolError::Invalid(format!("bad control url: {url}")))?;
+                let (host, port, prefix) = parse_http_url(url)
+                    .ok_or_else(|| ToolError::Invalid(format!("bad control url: {url}")))?;
                 let addr = (host.as_str(), port)
                     .to_socket_addrs()
                     .map_err(|e| ToolError::Unreachable(e.to_string()))?
                     .next()
-                    .ok_or_else(|| ToolError::Unreachable(format!("{host}:{port} did not resolve")))?;
+                    .ok_or_else(|| {
+                        ToolError::Unreachable(format!("{host}:{port} did not resolve"))
+                    })?;
                 Ok((addr, format!("{host}:{port}"), prefix, None))
             }
         }
@@ -342,7 +350,10 @@ fn outcome(status: u16, value: Value) -> Result<Value, ToolError> {
         Value::Object(map) if map.len() > 1 && map.get("error").is_some_and(Value::is_string) => {
             let word = map["error"].as_str().unwrap_or("");
             let human = map.get("message").and_then(Value::as_str).unwrap_or("");
-            format!("{word}: {human} {}", cap_text(&serde_json::to_string(&value).unwrap_or_default()))
+            format!(
+                "{word}: {human} {}",
+                cap_text(&serde_json::to_string(&value).unwrap_or_default())
+            )
         }
         _ => value["error"]
             .as_str()
@@ -414,7 +425,9 @@ pub fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -444,8 +457,10 @@ fn annotations(read_only: bool, destructive: bool, idempotent: bool) -> Value {
 /// The tool table (`tools/list`). Snapshot-tested in tests/mcp.rs.
 pub fn tools() -> Vec<Value> {
     let id = json!({"type": "integer", "minimum": 0, "description": "Terminal/process id from list_processes or spawn_terminal."});
-    let project_id = json!({"type": "integer", "minimum": 0, "description": "Project id from list_projects."});
-    let name = json!({"type": "string", "description": "project process name (as shown by get_project)."});
+    let project_id =
+        json!({"type": "integer", "minimum": 0, "description": "Project id from list_projects."});
+    let name =
+        json!({"type": "string", "description": "project process name (as shown by get_project)."});
     let wait = |what: &str, default: u64, max: u64| {
         json!({"type": "integer", "minimum": 0, "maximum": max,
                "description": format!("{what} (default {default}, max {max}).")})
@@ -1148,7 +1163,11 @@ fn pick(args: &Value, keys: &[&str]) -> Value {
 
 /// Translate one tool call into exactly ONE control request.
 pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, ToolError> {
-    let args = if args.is_null() { &Value::Object(Default::default()) } else { args };
+    let args = if args.is_null() {
+        &Value::Object(Default::default())
+    } else {
+        args
+    };
     match name {
         "list_processes" => client.request("GET", "/processes", None),
         "get_process_status" => {
@@ -1164,7 +1183,11 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
             if let Some(offset) = opt_u64(args, "offset")? {
                 query.push(format!("offset={offset}"));
             }
-            let qs = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+            let qs = if query.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", query.join("&"))
+            };
             client.request("GET", &format!("/processes/{id}/output{qs}"), None)
         }
         "get_input_journal" => {
@@ -1181,18 +1204,37 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
         "get_agent_events" => {
             let id = req_u64(args, "id")?;
             let since = args.get("since").and_then(Value::as_u64).unwrap_or(0);
-            client.request("GET", &format!("/processes/{id}/agent_events?since={since}"), None)
+            client.request(
+                "GET",
+                &format!("/processes/{id}/agent_events?since={since}"),
+                None,
+            )
         }
         "spawn_agent" => {
             let tool = req_u64(args, "agent_tool_id")?;
             if let Some(a) = args.get("extra_args") {
                 if !a.is_null() && !a.as_array().is_some_and(|a| a.iter().all(Value::is_string)) {
-                    return Err(ToolError::Invalid("`extra_args` must be an array of strings".into()));
+                    return Err(ToolError::Invalid(
+                        "`extra_args` must be an array of strings".into(),
+                    ));
                 }
             }
             let mut body = pick(
                 args,
-                &["project_id", "name", "extra_args", "prompt", "working_dir", "env", "force", "cols", "rows", "parent_process_id", "close_on_exit", "ephemeral"],
+                &[
+                    "project_id",
+                    "name",
+                    "extra_args",
+                    "prompt",
+                    "working_dir",
+                    "env",
+                    "force",
+                    "cols",
+                    "rows",
+                    "parent_process_id",
+                    "close_on_exit",
+                    "ephemeral",
+                ],
             );
             body["agent_tool_id"] = json!(tool);
             client.request("POST", "/agents", Some(&body))
@@ -1200,10 +1242,15 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
         "spawn_terminal" => {
             if let Some(a) = args.get("args") {
                 if !a.is_null() && !a.is_array() {
-                    return Err(ToolError::Invalid("`args` must be an array of strings".into()));
+                    return Err(ToolError::Invalid(
+                        "`args` must be an array of strings".into(),
+                    ));
                 }
             }
-            let body = pick(args, &["command", "args", "cwd", "name", "cols", "rows", "env"]);
+            let body = pick(
+                args,
+                &["command", "args", "cwd", "name", "cols", "rows", "env"],
+            );
             client.request("POST", "/processes", Some(&body))
         }
         "send_input" => {
@@ -1217,12 +1264,13 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
         }
         "send_bytes" => {
             let id = req_u64(args, "id")?;
-            let bytes = args
-                .get("bytes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| ToolError::Invalid("`bytes` is required and must be an array".into()))?;
+            let bytes = args.get("bytes").and_then(Value::as_array).ok_or_else(|| {
+                ToolError::Invalid("`bytes` is required and must be an array".into())
+            })?;
             if bytes.iter().any(|b| !b.as_u64().is_some_and(|v| v <= 255)) {
-                return Err(ToolError::Invalid("`bytes` values must be integers 0..=255".into()));
+                return Err(ToolError::Invalid(
+                    "`bytes` values must be integers 0..=255".into(),
+                ));
             }
             let mut body = pick(args, &["wait_ms"]);
             body["bytes"] = Value::Array(bytes.clone());
@@ -1235,7 +1283,10 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
             let body = pick(args, &["wait_ms"]);
             client.request(
                 "POST",
-                &format!("/projects/{project}/processes/{}/{action}", encode_segment(&pname)),
+                &format!(
+                    "/projects/{project}/processes/{}/{action}",
+                    encode_segment(&pname)
+                ),
                 Some(&body),
             )
         }
@@ -1245,17 +1296,29 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
                 Some(limit) => format!("?limit={limit}"),
                 None => String::new(),
             };
-            client.request("GET", &format!("/records/{}/runs{qs}", encode_segment(&record_id)), None)
+            client.request(
+                "GET",
+                &format!("/records/{}/runs{qs}", encode_segment(&record_id)),
+                None,
+            )
         }
         "start_record" => {
             let record_id = record_id_arg(args)?;
             let body = pick(args, &["wait_ms"]);
-            client.request("POST", &format!("/records/{}/start", encode_segment(&record_id)), Some(&body))
+            client.request(
+                "POST",
+                &format!("/records/{}/start", encode_segment(&record_id)),
+                Some(&body),
+            )
         }
         "resume_agent" => {
             let record_id = record_id_arg(args)?;
             let body = pick(args, &["session_id"]);
-            client.request("POST", &format!("/records/{}/resume", encode_segment(&record_id)), Some(&body))
+            client.request(
+                "POST",
+                &format!("/records/{}/resume", encode_segment(&record_id)),
+                Some(&body),
+            )
         }
         "set_session" => {
             let session_id = arg_str(args, "session_id")?;
@@ -1263,7 +1326,11 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
                 return Err(ToolError::Invalid("`session_id` must not be empty".into()));
             }
             let process_id = own_process(client, args, "set_session")?;
-            client.request("POST", &format!("/processes/{process_id}/session"), Some(&json!({"session_id": session_id})))
+            client.request(
+                "POST",
+                &format!("/processes/{process_id}/session"),
+                Some(&json!({"session_id": session_id})),
+            )
         }
         "set_summary" => {
             let text = arg_str(args, "text")?;
@@ -1271,27 +1338,45 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
                 return Err(ToolError::Invalid("`text` must not be empty".into()));
             }
             let process_id = own_process(client, args, "set_summary")?;
-            client.request("POST", &format!("/processes/{process_id}/summary"), Some(&json!({"text": text})))
+            client.request(
+                "POST",
+                &format!("/processes/{process_id}/summary"),
+                Some(&json!({"text": text})),
+            )
         }
         "remove_record" => {
             let record_id = record_id_arg(args)?;
-            let confirm = args.get("confirm").and_then(Value::as_bool).unwrap_or(false);
+            let confirm = args
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if !confirm {
                 return Err(ToolError::Invalid(
                     "remove_record requires confirm=true (it deletes the record and its run history; no undo)".into(),
                 ));
             }
-            client.request("POST", &format!("/records/{}/remove", encode_segment(&record_id)), Some(&json!({"confirm": true})))
+            client.request(
+                "POST",
+                &format!("/records/{}/remove", encode_segment(&record_id)),
+                Some(&json!({"confirm": true})),
+            )
         }
         "close_terminal" => {
             let id = req_u64(args, "id")?;
-            let confirm = args.get("confirm").and_then(Value::as_bool).unwrap_or(false);
+            let confirm = args
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if !confirm {
                 return Err(ToolError::Invalid(
                     "close_terminal requires confirm=true (it kills the child; no undo)".into(),
                 ));
             }
-            client.request("POST", &format!("/processes/{id}/close"), Some(&json!({"confirm": true})))
+            client.request(
+                "POST",
+                &format!("/processes/{id}/close"),
+                Some(&json!({"confirm": true})),
+            )
         }
         other if other.starts_with("timer_") => call_timer_tool(client, other, args),
         other => call_coordination_tool(client, other, args),
@@ -1311,7 +1396,15 @@ fn call_timer_tool(client: &Client, name: &str, args: &Value) -> Result<Value, T
             let body = scoped(
                 client,
                 args,
-                &["delay_ms", "body", "delivery_process_id", "loop", "repeat_every_ms", "name", "project_id"],
+                &[
+                    "delay_ms",
+                    "body",
+                    "delivery_process_id",
+                    "loop",
+                    "repeat_every_ms",
+                    "name",
+                    "project_id",
+                ],
             )?;
             client.request("POST", "/timers", Some(&body))
         }
@@ -1319,23 +1412,46 @@ fn call_timer_tool(client: &Client, name: &str, args: &Value) -> Result<Value, T
             let processes = args
                 .get("processes")
                 .and_then(Value::as_array)
-                .ok_or_else(|| ToolError::Invalid("`processes` is required and must be an array".into()))?;
+                .ok_or_else(|| {
+                    ToolError::Invalid("`processes` is required and must be an array".into())
+                })?;
             if processes.is_empty() {
                 return Err(ToolError::Invalid("`processes` must not be empty".into()));
             }
             req_u64(args, "max_wait_ms")?;
             arg_str(args, "body")?;
-            let route = if name.ends_with("_any") { "idle_any" } else { "idle_all" };
+            let route = if name.ends_with("_any") {
+                "idle_any"
+            } else {
+                "idle_all"
+            };
             let body = scoped(
                 client,
                 args,
-                &["processes", "max_wait_ms", "body", "delivery_process_id", "idle_ms", "confirm_ms", "rearm", "name", "project_id"],
+                &[
+                    "processes",
+                    "max_wait_ms",
+                    "body",
+                    "delivery_process_id",
+                    "idle_ms",
+                    "confirm_ms",
+                    "rearm",
+                    "name",
+                    "project_id",
+                ],
             )?;
             client.request("POST", &format!("/timers/{route}"), Some(&body))
         }
         "timer_list" => {
-            let scoped = scoped(client, args, &["include_fired", "all", "limit", "offset", "project_id"])?;
-            let qs = query_string(&scoped, &["include_fired", "all", "limit", "offset", "project_id"]);
+            let scoped = scoped(
+                client,
+                args,
+                &["include_fired", "all", "limit", "offset", "project_id"],
+            )?;
+            let qs = query_string(
+                &scoped,
+                &["include_fired", "all", "limit", "offset", "project_id"],
+            );
             client.request("GET", &format!("/timers{qs}"), None)
         }
         "timer_cancel" | "timer_pause" | "timer_resume" => {
@@ -1352,7 +1468,9 @@ fn encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1369,7 +1487,11 @@ fn query_string(args: &Value, keys: &[&str]) -> String {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(items)) => items
                 .iter()
-                .map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string())
+                })
                 .collect::<Vec<_>>()
                 .join(","),
             Some(other) => other.to_string(),
@@ -1417,7 +1539,9 @@ fn require_confirm(args: &Value, tool: &str) -> Result<(), ToolError> {
     if args.get("confirm").and_then(Value::as_bool) == Some(true) {
         Ok(())
     } else {
-        Err(ToolError::Invalid(format!("{tool} requires confirm=true (no undo)")))
+        Err(ToolError::Invalid(format!(
+            "{tool} requires confirm=true (no undo)"
+        )))
     }
 }
 
@@ -1436,7 +1560,10 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
                             "scratchpad_write with scratchpad_id (overwrite) requires expected_revision — read the pad first".into(),
                         ));
                     }
-                    let body = pick(args, &["name", "content", "tags", "expected_revision", MODE]);
+                    let body = pick(
+                        args,
+                        &["name", "content", "tags", "expected_revision", MODE],
+                    );
                     client.request("POST", &format!("/scratchpads/{id}"), Some(&body))
                 }
                 None => {
@@ -1451,9 +1578,23 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
             client.request("GET", &format!("/scratchpads/{id}{qs}"), None)
         }
         "scratchpad_list" => {
-            let mut scoped = scoped(client, args, &["query", "tags", "include_archived", "offset", "limit"])?;
+            let mut scoped = scoped(
+                client,
+                args,
+                &["query", "tags", "include_archived", "offset", "limit"],
+            )?;
             global_marker(&mut scoped);
-            let qs = query_string(&scoped, &["project_id", "query", "tags", "include_archived", "offset", "limit"]);
+            let qs = query_string(
+                &scoped,
+                &[
+                    "project_id",
+                    "query",
+                    "tags",
+                    "include_archived",
+                    "offset",
+                    "limit",
+                ],
+            );
             client.request("GET", &format!("/scratchpads{qs}"), None)
         }
         "scratchpad_find" => {
@@ -1462,7 +1603,10 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
             if query.trim().is_empty() {
                 return Err(ToolError::Invalid("`query` must not be empty".into()));
             }
-            let qs = query_string(args, &["query", "case_sensitive", "limit", "context_lines", "scope"]);
+            let qs = query_string(
+                args,
+                &["query", "case_sensitive", "limit", "context_lines", "scope"],
+            );
             client.request("GET", &format!("/scratchpads/{id}/find{qs}"), None)
         }
         "scratchpad_tail" => {
@@ -1481,12 +1625,18 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
             arg_str(args, "heading")?;
             arg_str(args, "content")?;
             let body = pick(args, &["heading", "content", "expected_revision", MODE]);
-            client.request("POST", &format!("/scratchpads/{id}/append_section"), Some(&body))
+            client.request(
+                "POST",
+                &format!("/scratchpads/{id}/append_section"),
+                Some(&body),
+            )
         }
         "scratchpad_edit" => {
             let id = req_u64(args, "scratchpad_id")?;
             if !args.get("target").is_some_and(Value::is_object) {
-                return Err(ToolError::Invalid("`target` is required and must be an object".into()));
+                return Err(ToolError::Invalid(
+                    "`target` is required and must be an object".into(),
+                ));
             }
             arg_str(args, "content")?;
             req_u64(args, "expected_revision")?;
@@ -1503,12 +1653,22 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
         "scratchpad_add_tags" | "scratchpad_remove_tags" => {
             let id = req_u64(args, "scratchpad_id")?;
             if !args.get("tags").is_some_and(Value::is_array) {
-                return Err(ToolError::Invalid("`tags` is required and must be an array of strings".into()));
+                return Err(ToolError::Invalid(
+                    "`tags` is required and must be an array of strings".into(),
+                ));
             }
             req_u64(args, "expected_revision")?;
-            let action = if name == "scratchpad_add_tags" { "add" } else { "remove" };
+            let action = if name == "scratchpad_add_tags" {
+                "add"
+            } else {
+                "remove"
+            };
             let body = pick(args, &["tags", "expected_revision", MODE]);
-            client.request("POST", &format!("/scratchpads/{id}/tags/{action}"), Some(&body))
+            client.request(
+                "POST",
+                &format!("/scratchpads/{id}/tags/{action}"),
+                Some(&body),
+            )
         }
         "scratchpad_tags_list" => {
             let mut scoped = scoped(client, args, &[])?;
@@ -1520,7 +1680,11 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
             let id = req_u64(args, "scratchpad_id")?;
             req_u64(args, "expected_revision")?;
             require_confirm(args, name)?;
-            let action = if name == "scratchpad_clear" { "clear" } else { "delete" };
+            let action = if name == "scratchpad_clear" {
+                "clear"
+            } else {
+                "delete"
+            };
             let mut body = pick(args, &["expected_revision", MODE]);
             body["confirm"] = json!(true);
             client.request("POST", &format!("/scratchpads/{id}/{action}"), Some(&body))
@@ -1533,7 +1697,11 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
         "scratchpad_transfer" => {
             let id = req_u64(args, "scratchpad_id")?;
             let target = match args.get("target_project_id") {
-                None => return Err(ToolError::Invalid("`target_project_id` is required (null = global)".into())),
+                None => {
+                    return Err(ToolError::Invalid(
+                        "`target_project_id` is required (null = global)".into(),
+                    ))
+                }
                 Some(Value::Null) => Value::Null,
                 Some(_) => json!(req_u64(args, "target_project_id")?),
             };
@@ -1553,8 +1721,36 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
             client.request("POST", "/todos", Some(&body))
         }
         "todo_list" => {
-            let scoped = scoped(client, args, &["status", "completed", "is_blocked", "priority", "query", "tags", "sort", "offset", "limit"])?;
-            let qs = query_string(&scoped, &["project_id", "status", "completed", "is_blocked", "priority", "query", "tags", "sort", "offset", "limit"]);
+            let scoped = scoped(
+                client,
+                args,
+                &[
+                    "status",
+                    "completed",
+                    "is_blocked",
+                    "priority",
+                    "query",
+                    "tags",
+                    "sort",
+                    "offset",
+                    "limit",
+                ],
+            )?;
+            let qs = query_string(
+                &scoped,
+                &[
+                    "project_id",
+                    "status",
+                    "completed",
+                    "is_blocked",
+                    "priority",
+                    "query",
+                    "tags",
+                    "sort",
+                    "offset",
+                    "limit",
+                ],
+            );
             client.request("GET", &format!("/todos{qs}"), None)
         }
         "todo_get" => {
@@ -1564,13 +1760,28 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
         }
         "todo_update" => {
             let id = req_u64(args, "todo_id")?;
-            let body = pick(args, &["title", "body", "priority", "status", "tags", "expected_revision", MODE]);
+            let body = pick(
+                args,
+                &[
+                    "title",
+                    "body",
+                    "priority",
+                    "status",
+                    "tags",
+                    "expected_revision",
+                    MODE,
+                ],
+            );
             client.request("POST", &format!("/todos/{id}"), Some(&body))
         }
         "todo_add_tag" | "todo_remove_tag" => {
             let id = req_u64(args, "todo_id")?;
             arg_str(args, "tag")?;
-            let action = if name == "todo_add_tag" { "add" } else { "remove" };
+            let action = if name == "todo_add_tag" {
+                "add"
+            } else {
+                "remove"
+            };
             let body = pick(args, &["tag", MODE]);
             client.request("POST", &format!("/todos/{id}/tags/{action}"), Some(&body))
         }
@@ -1580,21 +1791,33 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
             if body.get("blocker_ids").is_none() {
                 body["blocker_ids"] = json!([]);
             } else if !body["blocker_ids"].is_array() {
-                return Err(ToolError::Invalid("`blocker_ids` must be an array of integers".into()));
+                return Err(ToolError::Invalid(
+                    "`blocker_ids` must be an array of integers".into(),
+                ));
             }
             client.request("POST", &format!("/todos/{id}/blockers/set"), Some(&body))
         }
         "todo_add_blocker" | "todo_remove_blocker" => {
             let id = req_u64(args, "todo_id")?;
             req_u64(args, "blocker_id")?;
-            let action = if name == "todo_add_blocker" { "add" } else { "remove" };
+            let action = if name == "todo_add_blocker" {
+                "add"
+            } else {
+                "remove"
+            };
             let body = pick(args, &["blocker_id", MODE]);
-            client.request("POST", &format!("/todos/{id}/blockers/{action}"), Some(&body))
+            client.request(
+                "POST",
+                &format!("/todos/{id}/blockers/{action}"),
+                Some(&body),
+            )
         }
         "todo_complete" => {
             let id = req_u64(args, "todo_id")?;
             if !args.get("completed").is_some_and(Value::is_boolean) {
-                return Err(ToolError::Invalid("`completed` is required and must be a boolean".into()));
+                return Err(ToolError::Invalid(
+                    "`completed` is required and must be a boolean".into(),
+                ));
             }
             let body = pick(args, &["completed", "release_lock", MODE]);
             client.request("POST", &format!("/todos/{id}/complete"), Some(&body))
@@ -1624,7 +1847,11 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
         "todo_comment_delete" => {
             let id = req_u64(args, "comment_id")?;
             require_confirm(args, name)?;
-            client.request("POST", &format!("/todo_comments/{id}/delete"), Some(&json!({"confirm": true})))
+            client.request(
+                "POST",
+                &format!("/todo_comments/{id}/delete"),
+                Some(&json!({"confirm": true})),
+            )
         }
         "todo_comment_list" => {
             let id = req_u64(args, "todo_id")?;
@@ -1645,7 +1872,11 @@ fn call_coordination_tool(client: &Client, name: &str, args: &Value) -> Result<V
         "todo_delete" => {
             let id = req_u64(args, "todo_id")?;
             require_confirm(args, name)?;
-            client.request("POST", &format!("/todos/{id}/delete"), Some(&json!({"confirm": true})))
+            client.request(
+                "POST",
+                &format!("/todos/{id}/delete"),
+                Some(&json!({"confirm": true})),
+            )
         }
         other => Err(ToolError::Invalid(format!("unknown tool `{other}`"))),
     }
@@ -1670,7 +1901,9 @@ fn tool_result(outcome: Result<Value, ToolError>) -> Value {
             let text = serde_json::to_string_pretty(&value).unwrap_or_default();
             json!({"content": [{"type": "text", "text": text}], "isError": false})
         }
-        Err(err) => json!({"content": [{"type": "text", "text": err.to_string()}], "isError": true}),
+        Err(err) => {
+            json!({"content": [{"type": "text", "text": err.to_string()}], "isError": true})
+        }
     }
 }
 
@@ -1731,7 +1964,11 @@ pub fn serve_stdio(client: &Client) {
         }
         let reply = match serde_json::from_str::<Value>(trimmed) {
             Ok(msg) => handle_message(client, &msg),
-            Err(err) => Some(rpc_error(&Value::Null, -32700, format!("parse error: {err}"))),
+            Err(err) => Some(rpc_error(
+                &Value::Null,
+                -32700,
+                format!("parse error: {err}"),
+            )),
         };
         if let Some(reply) = reply {
             let mut out = stdout.lock();
@@ -1755,11 +1992,18 @@ mod tests {
         let big = "é".repeat(ERROR_TEXT_CAP);
         let capped = cap_text(&big);
         assert!(capped.len() < big.len());
-        assert!(capped.contains("[truncated"), "{}", &capped[capped.len() - 40..]);
+        assert!(
+            capped.contains("[truncated"),
+            "{}",
+            &capped[capped.len() - 40..]
+        );
         let err = outcome(409, json!({"error": "revision_conflict", "message": "m", "current_revision": 3, "current_content": big})).unwrap_err();
         let text = err.to_string();
         assert!(text.len() < ERROR_TEXT_CAP + 200, "{}", text.len());
-        assert!(text.starts_with("409") || text.contains("revision_conflict"), "{text}");
+        assert!(
+            text.starts_with("409") || text.contains("revision_conflict"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1782,9 +2026,16 @@ mod tests {
     fn a_url_path_prefix_is_prepended_to_route_paths() {
         let (_, _, prefix) = parse_http_url("http://host:8324/chappa/").unwrap();
         assert_eq!(prefix, "/chappa");
-        assert_eq!(format!("{prefix}/processes/1/output"), "/chappa/processes/1/output");
+        assert_eq!(
+            format!("{prefix}/processes/1/output"),
+            "/chappa/processes/1/output"
+        );
         let (_, _, none) = parse_http_url("http://host:8324").unwrap();
-        assert_eq!(format!("{none}/processes"), "/processes", "no prefix = unchanged");
+        assert_eq!(
+            format!("{none}/processes"),
+            "/processes",
+            "no prefix = unchanged"
+        );
     }
 
     /// A control-surface error body reaches `outcome` as parsed JSON; a
@@ -1799,7 +2050,10 @@ mod tests {
         let reply = read(b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{\"error\":\"nope\"}");
         assert_eq!(
             outcome(reply.status, reply.json().unwrap()).unwrap_err(),
-            ToolError::Http { status: 404, message: "nope".into() }
+            ToolError::Http {
+                status: 404,
+                message: "nope".into()
+            }
         );
         let reply = read(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot json");
         assert_eq!(reply.status, 200);
@@ -1810,7 +2064,10 @@ mod tests {
 
     #[test]
     fn segment_encoding_keeps_spaces_and_plus_safe() {
-        assert_eq!(encode_segment("import + summarize on open"), "import%20%2B%20summarize%20on%20open");
+        assert_eq!(
+            encode_segment("import + summarize on open"),
+            "import%20%2B%20summarize%20on%20open"
+        );
         assert_eq!(encode_segment("chappa-ai_tui.v2~x"), "chappa-ai_tui.v2~x");
     }
 }

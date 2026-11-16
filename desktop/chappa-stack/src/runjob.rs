@@ -211,6 +211,11 @@ fn execute(
 ) -> Result<(), Failure> {
     let mut loaded = Loaded::load(project_dir, Some(&rec.stack), rec.slot)
         .map_err(|e| (EXIT_REFUSED, format!("cannot load the stack: {e}")))?;
+    if let Some(trusted) = &rec.trusted_definition {
+        if loaded.definition_hash.as_ref() != Some(trusted) {
+            return Err((EXIT_REFUSED, crate::server::UNTRUSTED_JOB.to_string()));
+        }
+    }
     if let JobWork::Workspace { op } = &rec.work {
         if let WorkspaceOp::Archive {
             save: Some(spec), ..

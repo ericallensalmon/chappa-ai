@@ -72,6 +72,7 @@ export class SecuritySection {
   private readonly switchHint: HTMLDivElement;
   private readonly policySelect: HTMLSelectElement;
   private readonly programInput: HTMLInputElement;
+  private readonly configInput: HTMLInputElement;
   private info: ipc.ScannerInfoDto | null = null;
   private unsubscribe: (() => void) | null = null;
 
@@ -144,6 +145,24 @@ export class SecuritySection {
       settingsRow("gitleaks executable", this.programInput, "Empty uses the gitleaks found on PATH."),
     );
 
+    this.configInput = document.createElement("input");
+    this.configInput.type = "text";
+    this.configInput.spellcheck = false;
+    this.configInput.placeholder = "the app's own rules";
+    this.configInput.style.cssText = `${INPUT_CSS}width:260px;`;
+    this.configInput.dataset.setting = "secretScanConfig";
+    this.configInput.addEventListener("change", () => {
+      void this.settings.update({ secretScanConfig: this.configInput.value.trim() });
+    });
+    section.card.appendChild(
+      settingsRow(
+        "gitleaks config",
+        this.configInput,
+        "Empty uses gitleaks' default rules plus rules for passwords, tokens and keys written inline in commands. " +
+          "A .gitleaks.toml or .gitleaksignore inside a scanned folder is never used.",
+      ),
+    );
+
     this.element.appendChild(section.element);
     this.sync(this.settings.get());
   }
@@ -185,6 +204,7 @@ export class SecuritySection {
     this.switchSelect.value = switchOf(s.secretScanBeforeAgents);
     this.policySelect.value = s.secretScanPolicy;
     if (document.activeElement !== this.programInput) this.programInput.value = s.secretScanProgram;
+    if (document.activeElement !== this.configInput) this.configInput.value = s.secretScanConfig;
     this.switchHint.textContent = switchHint(s.secretScanBeforeAgents, this.info);
   }
 }

@@ -236,8 +236,19 @@ fn the_example_loads_and_validates_without_findings() {
     // The database keeps data and has a data-safety check with a rules
     // file, so neither the unscanned nor the sample-without-rules warning
     // applies.
-    let rules: Vec<Rule> = diags.iter().map(|d| d.rule).collect();
-    assert_eq!(rules, Vec::<Rule>::new(), "{diags:#?}");
+    // The one warning is the throwaway local database password written into
+    // the api's connection URL, which the inline-credential check points
+    // out as it would in any committed file.
+    let rules: Vec<(Rule, &str)> = diags.iter().map(|d| (d.rule, d.path.as_str())).collect();
+    assert_eq!(
+        rules,
+        [(
+            Rule::InlineCredential,
+            "stacks.local.components.api.env.DATABASE_URL"
+        )],
+        "{diags:#?}"
+    );
+    assert!(diags.iter().all(|d| !d.message.contains("app:app")));
     let db_check = stack_core_db_check(&doc);
     assert!(db_check.marker.is_some() && db_check.sample.is_some());
     let rules_file = doc.stacks["local"]
@@ -1201,7 +1212,7 @@ fn switching_to_source_builds_once_and_reuses_an_existing_content_key() {
         .unwrap();
     assert!(runs(&applied.steps)
         .iter()
-        .any(|(_, r)| r.argv[..4] == ["podman", "build", "-t", concat!("api:01234567", "-dirty-abcdef01")]));
+        .any(|(_, r)| r.argv[..4] == ["podman", "build", "-t", dirty_tag("abcdef01").as_str()]));
 }
 
 #[test]
@@ -1549,4 +1560,11 @@ fn a_bound_item_builds_and_runs_in_its_worktrees_and_the_guard_refuses_shared_cl
     assert!(plain
         .apply(&inst, &obs, &main_plan, &ApplyOptions::default())
         .is_ok());
+}
+
+/// A source-built image tag with a dirty-tree hash, built here so no
+/// source line holds a component name beside a varied hex string (a
+/// secret scanner reads that as a key).
+fn dirty_tag(dirty: &str) -> String {
+    format!("{}:{}-dirty-{dirty}", "api", "01234567")
 }

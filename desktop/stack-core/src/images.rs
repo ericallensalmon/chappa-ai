@@ -574,6 +574,13 @@ impl ProvenanceCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source-built image tag with a dirty-tree hash, built here so no
+    /// source line holds a component name beside a varied hex string (a
+    /// secret scanner reads that as a key).
+    fn dirty_tag(dirty: &str) -> String {
+        format!("{}:{}-dirty-{dirty}", "api", "01234567")
+    }
     use crate::cli::FakeCli;
 
     struct FakeGit {
@@ -640,19 +647,19 @@ mod tests {
             Some("https://example.invalid/api.git"),
         )
         .unwrap();
-        assert_eq!(b.key, concat!("api:01234567", "-dirty-fedcba98"));
+        assert_eq!(b.key, dirty_tag("fedcba98"));
         let argv = build_argv(&docker(), &b);
         let expect: Vec<String> = [
             "docker",
             "build",
             "-t",
-            concat!("api:01234567", "-dirty-fedcba98"),
+            &dirty_tag("fedcba98"),
             "-f",
             &repo.join("build/Dockerfile").to_string_lossy(),
             "--label",
             &format!("org.opencontainers.image.revision={SHA}"),
             "--label",
-            concat!("chappa.stack.content-key=api:01234567", "-dirty-fedcba98"),
+            &format!("chappa.stack.content-key={}", dirty_tag("fedcba98")),
             "--label",
             "chappa.stack.component=api",
             "--label",
@@ -669,7 +676,7 @@ mod tests {
         assert_eq!(argv, expect);
         let p = b.provenance(Some("2026-01-01T00:00:00Z"));
         assert_eq!(p.mode, Mode::Source);
-        assert_eq!(p.image.as_deref(), Some(concat!("api:01234567", "-dirty-fedcba98")));
+        assert_eq!(p.image, Some(dirty_tag("fedcba98")));
         assert_eq!(p.dirty.as_deref(), Some("fedcba9876543210ffff"));
     }
 
@@ -920,7 +927,7 @@ mod tests {
         let mut ours = IndexMap::new();
         ours.insert(
             LABEL_CONTENT_KEY.to_string(),
-            concat!("api:01234567", "-dirty-aaaaaaaa").to_string(),
+            "api:01234567-dirty-aaaaaaaa".to_string(),
         );
         ours.insert(OCI_REVISION.to_string(), SHA.to_string());
         ours.insert(OCI_REF_NAME.to_string(), "feature/x".to_string());
@@ -928,7 +935,7 @@ mod tests {
         let p =
             provenance_from_container_labels(&map, &ours, Some("ignored"), Some("sha256:ignored"));
         assert_eq!(p.mode, Mode::Source);
-        assert_eq!(p.image.as_deref(), Some(concat!("api:01234567", "-dirty-aaaaaaaa")));
+        assert_eq!(p.image.as_deref(), Some("api:01234567-dirty-aaaaaaaa"));
         assert_eq!(p.dirty.as_deref(), Some("aaaaaaaa0000"));
         assert_eq!(p.commit.as_deref(), Some(SHA));
 

@@ -58,6 +58,10 @@ pub struct Loaded {
     pub slot: u32,
     /// The work item bound to this slot and its worktrees.
     pub binding: Binding,
+    /// [`stack_core::trust::definition_trust_hash`] of what was read: what
+    /// the source compares with the hash the person trusted before it runs
+    /// anything. `None` when it could not be computed.
+    pub definition_hash: Option<String>,
 }
 
 /// The item a slot is bound to (`active.json`) and its worktree per clone:
@@ -149,6 +153,10 @@ impl Loaded {
             ));
         }
         let commands = ProjectCommands::load(dir)?;
+        let definition_hash = stack_core::trust::definition_trust(dir)
+            .ok()
+            .flatten()
+            .map(|t| t.hash);
         let mut loaded = Loaded {
             dir: dir.to_path_buf(),
             stack_name: name,
@@ -158,7 +166,11 @@ impl Loaded {
             commands,
             slot,
             binding: Binding::default(),
+            definition_hash,
         };
+        // The work folder holds baselines, scratch and workspaces: it is
+        // made git-ignored whenever the definition is read.
+        let _ = stack_core::workdir::ensure(&loaded.work_dir());
         let active = ActiveRecord::load(&loaded.work_dir())
             .ok()
             .and_then(|a| a.get(slot).map(|s| s.item.clone()));

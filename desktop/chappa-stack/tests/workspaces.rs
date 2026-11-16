@@ -332,7 +332,13 @@ fn start_work_creates_the_folder_and_worktrees_for_pr_branches_only() {
         (400, Some("bad-item")),
         "{body}"
     );
-    assert!(!ws.p.work().exists() || fs::read_dir(ws.p.work()).unwrap().next().is_none());
+    assert!(
+        !ws.p.work().exists()
+            || fs::read_dir(ws.p.work())
+                .unwrap()
+                .flatten()
+                .all(|e| e.file_name() == ".gitignore")
+    );
 
     let (status, body) = post(
         &ws.src,

@@ -9,6 +9,7 @@
 //   GH_STUB_DELAY_MS=n        wait before answering
 //   GH_STUB_LOG=<file>        append the fixture name of every call
 //   GH_STUB_TOTAL=name:n      report n matches for that search (a capped search)
+//   GH_STUB_ENV_LOG=<file>    append which CHAPPA_SOURCE_* variables it was given
 //
 // In fixture files the string "__DAYS_AGO_<n>__" becomes the ISO time n
 // days before now, so "recently merged" stays recent whenever tests run.
@@ -46,6 +47,10 @@ const name =
   q.includes("author:@me") ? "mine-open" : "unknown";
 
 if (process.env.GH_STUB_LOG) appendFileSync(process.env.GH_STUB_LOG, `${name}\n`);
+if (process.env.GH_STUB_ENV_LOG) {
+  const seen = Object.keys(process.env).filter((k) => k.toUpperCase().startsWith("CHAPPA_SOURCE_"));
+  appendFileSync(process.env.GH_STUB_ENV_LOG, `seen:${seen.join(",")}\n`);
+}
 
 const answer = () => {
   if ((process.env.GH_STUB_FAIL ?? "").split(",").includes(name)) {

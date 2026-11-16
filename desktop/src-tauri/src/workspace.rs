@@ -570,7 +570,10 @@ fn dtos(inner: &WsInner) -> Vec<WorkspaceCommandDto> {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceCommandDto {
     pub name: String,
+    /// Secrets masked, as on project rows.
     pub command: String,
+    /// The masked fields; the editor sends `UNCHANGED` for the ones it keeps.
+    pub masked: Vec<String>,
     pub status: &'static str,
     pub auto_start: bool,
     pub auto_restart: bool,
@@ -589,7 +592,8 @@ impl WorkspaceCommandDto {
     fn from_proc(name: &str, p: &WsProc, record: Option<&project_model::projects::ProcessOverride>) -> Self {
         Self {
             name: name.to_owned(),
-            command: p.def.command.display(),
+            command: crate::projects::shown_command(&p.def.command),
+            masked: crate::projects::masked_fields(&p.def),
             status: p.lifecycle.status().as_str(),
             auto_start: p.def.auto_start,
             auto_restart: p.def.auto_restart,
@@ -597,7 +601,7 @@ impl WorkspaceCommandDto {
             term_id: p.term_id,
             exit_code: p.exit_code,
             working_dir: p.def.working_dir.as_ref().map(|d| d.display().to_string()),
-            env: p.def.env.clone(),
+            env: p.def.env.iter().map(|(k, v)| (k.clone(), stack_core::credentials::mask_env(k, v))).collect(),
             record_id: record.and_then(|r| r.record_id.clone()),
             last_run: record.and_then(|r| r.last_run.as_ref().map(Run::head)),
         }
@@ -631,7 +635,11 @@ pub fn save_workspace_command(
             .clone()
             .ok_or_else(|| "workspace store not initialized".to_owned())?
     };
-    let (name, ws_def) = def.into_def();
+    let (name, mut ws_def) = def.into_def();
+    // A masked value the editor kept comes back as a marker: the stored
+    // original goes back in before anything is written.
+    let existing = original_name.as_deref().and_then(|old| workspace.lock().ok()?.procs.get(old).map(|p| p.def.clone()));
+    crate::projects::resolve_unchanged(&mut ws_def, existing.as_ref())?;
     store.save_command(original_name.as_deref(), &name, ws_def)?;
     let mut inner = workspace.lock()?;
     rebuild(&mut inner, &registry, &app, workspace.arc());

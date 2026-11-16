@@ -168,6 +168,12 @@ pub trait Periodic {
     fn tick(&self);
 }
 
+/// Whether status and plan scripts may run now: a source answers no while
+/// its definition is not the one the person trusted.
+pub trait ScriptGate {
+    fn scripts_allowed(&self) -> bool;
+}
+
 /// The shared caches and the threads that fill them.
 pub struct Background {
     caches: Mutex<Caches>,
@@ -180,6 +186,8 @@ pub struct Background {
     seed: u64,
     /// The scripts the started workers have in flight, ended on shutdown.
     running: Mutex<Option<Arc<RunningScripts>>>,
+    /// Asked before every script run; none = always allowed.
+    gate: Mutex<Option<Weak<dyn ScriptGate + Send + Sync>>>,
 }
 
 /// The threads [`Background::start`] started.
@@ -282,7 +290,21 @@ impl Background {
             epoch: Instant::now(),
             seed,
             running: Mutex::new(None),
+            gate: Mutex::new(None),
         })
+    }
+
+    /// Ask `gate` before every script run (held weakly).
+    pub fn set_gate(&self, gate: Weak<dyn ScriptGate + Send + Sync>) {
+        *self.gate.lock().unwrap_or_else(|p| p.into_inner()) = Some(gate);
+    }
+
+    fn scripts_allowed(&self) -> bool {
+        let gate = self.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        match gate {
+            None => true,
+            Some(w) => w.upgrade().is_none_or(|g| g.scripts_allowed()),
+        }
     }
 
     fn caches(&self) -> MutexGuard<'_, Caches> {
@@ -389,6 +411,20 @@ impl Background {
     /// `None` when there is nothing to do. A periodic turn that is due while
     /// its instance is busy is skipped to its next turn here.
     pub fn next_script(&self, now: Instant) -> Option<ScriptJob> {
+        let job = self.pick_script(now)?;
+        if self.scripts_allowed() {
+            return Some(job);
+        }
+        // Not allowed now: hand it back untouched, to be asked again.
+        let mut c = self.caches();
+        c.busy.remove(&job.slot);
+        if let Some(e) = c.scripts.get_mut(&job.key) {
+            e.running = false;
+        }
+        None
+    }
+
+    fn pick_script(&self, now: Instant) -> Option<ScriptJob> {
         let mut c = self.caches();
         c.scripts
             .retain(|_, e| e.running || now.saturating_duration_since(e.asked) < SCRIPT_IDLE);

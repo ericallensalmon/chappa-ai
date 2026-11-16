@@ -139,6 +139,9 @@ pub fn detect_scanner(settings: &Settings, project_root: &Path) -> Option<Gitlea
     let configured = Some(settings.secret_scan_program.trim()).filter(|p| !p.is_empty()).map(Path::new);
     GitleaksScanner::detect(configured, project_root.join(WORK_DIR)).map(|mut g| {
         g.timeout = SCAN_TIMEOUT;
+        // The person's own config from Settings, never one from the tree;
+        // without it the scanner writes the app's config for each run.
+        g.config = Some(settings.secret_scan_config.trim()).filter(|p| !p.is_empty()).map(PathBuf::from);
         g
     })
 }
@@ -350,6 +353,53 @@ pub fn emit_notice(app: Option<&AppHandle>, term_id: u32, notice: &ScanNotice) {
     }
 }
 
+/// The event that warns about an agent settings file git would commit:
+/// `{term_id, projectRoot, files: [{path, ignoreLine, exposure, message}]}`.
+pub const AGENT_SETTINGS_EVENT: &str = "agent://agent-settings";
+
+/// The agent settings files in the project and in the agent's folder that
+/// git would commit (see [`stack_core::safety::agent_settings`]). Never
+/// blocks: the caller warns.
+pub fn agent_settings_warnings(project_root: &Path, cwd: &Path) -> Vec<stack_core::safety::agent_settings::AgentSettingsFile> {
+    stack_core::safety::agent_settings::check(project_root, &[project_root, cwd])
+}
+
+/// Warn about each exposed settings file: a log line and the event the
+/// webview turns into a notification and a Needs you entry.
+pub fn emit_agent_settings(app: Option<&AppHandle>, term_id: u32, project_root: &Path, files: &[stack_core::safety::agent_settings::AgentSettingsFile]) {
+    if files.is_empty() {
+        return;
+    }
+    for f in files {
+        log::warn!("[agent-settings] {}", f.message());
+    }
+    if let Some(app) = app {
+        let files: Vec<serde_json::Value> = files
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": f.path.display().to_string(),
+                    "ignoreLine": f.ignore_line,
+                    "exposure": f.exposure,
+                    "message": f.message(),
+                })
+            })
+            .collect();
+        let _ = app.emit(AGENT_SETTINGS_EVENT, serde_json::json!({ "term_id": term_id, "projectRoot": project_root.display().to_string(), "files": files }));
+    }
+}
+
+/// The "Add to .gitignore" action: append `line` to the project's root
+/// `.gitignore` (created when missing, never a duplicate line). Only a line
+/// naming one of the known agent settings files is accepted.
+pub fn add_agent_settings_ignore_line(project_root: &Path, line: &str) -> Result<bool, String> {
+    let known = stack_core::safety::agent_settings::AGENT_SETTINGS_FILES.iter().any(|f| line.trim().ends_with(&format!("/{f}")));
+    if !known {
+        return Err(format!("`{line}` does not name an agent settings file"));
+    }
+    stack_core::safety::agent_settings::add_to_gitignore(project_root, line).map_err(|e| format!("cannot update .gitignore: {e}"))
+}
+
 /// What the Security tab shows: whether a scanner was found and where.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -374,6 +424,13 @@ pub fn scanner_info(settings: &Settings) -> ScannerInfo {
 #[tauri::command]
 pub fn secret_scan_info(settings: tauri::State<'_, crate::settings::SettingsState>) -> ScannerInfo {
     scanner_info(&settings.snapshot())
+}
+
+/// "Add to .gitignore" for an exposed agent settings file (confirmed in the
+/// webview first). Answers whether a line was added.
+#[tauri::command]
+pub fn add_agent_settings_ignore(project_root: String, line: String) -> Result<bool, String> {
+    add_agent_settings_ignore_line(Path::new(&project_root), &line)
 }
 
 /// Acknowledge the findings of a refused launch into the project's
@@ -622,11 +679,25 @@ mod tests {
         std::fs::write(root.join(".env"), format!("GITHUB_TOKEN={token}\n")).unwrap();
         let outcome = evaluate(&scanner, SecretScanPolicy::BlockAgents, &root, &root, &ListLimits::default());
         let GateOutcome::Blocked(block) = outcome else { panic!("{outcome:?}") };
-        assert_eq!(block.findings.len(), 1, "{block:?}");
-        assert_eq!(block.findings[0].file, ".env");
+        // The token's own rule, and the app config's rule for a credential
+        // assigned inline: both on the one line of `.env`.
+        let rules: Vec<&str> = block.findings.iter().map(|f| f.rule.as_str()).collect();
+        assert_eq!(rules, ["github-pat", "inline-credential-assignment"], "{block:?}");
+        assert!(block.findings.iter().all(|f| f.file == ".env"));
         assert!(!block_error(&block).contains(&token));
         acknowledge(&root, &block.findings, "user", "test").unwrap();
         assert!(matches!(evaluate(&scanner, SecretScanPolicy::BlockAgents, &root, &root, &ListLimits::default()), GateOutcome::Clean { .. }));
         assert!(!std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap().contains(&token));
+    }
+
+    #[test]
+    fn the_ignore_action_only_takes_agent_settings_lines_and_never_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(add_agent_settings_ignore_line(tmp.path(), "/.claude/settings.local.json"), Ok(true));
+        assert_eq!(add_agent_settings_ignore_line(tmp.path(), "/.claude/settings.local.json"), Ok(false));
+        assert_eq!(add_agent_settings_ignore_line(tmp.path(), "/sub/.claude/settings.local.json"), Ok(true));
+        assert!(add_agent_settings_ignore_line(tmp.path(), "/src/main.rs").is_err());
+        let text = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(text, "/.claude/settings.local.json\n/sub/.claude/settings.local.json\n");
     }
 }

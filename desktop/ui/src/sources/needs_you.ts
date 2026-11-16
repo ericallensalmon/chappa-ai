@@ -95,6 +95,8 @@ export interface NeedsYouRow {
   /** Terminal rows: the rail key a click selects. */
   terminalKey?: string;
   opens: Opens;
+  /** An app-side action (not a source's), drawn as one button. */
+  local?: { label: string; run: () => void };
 }
 
 export interface NeedsYouSection {
@@ -125,6 +127,44 @@ export interface NeedsYouInput {
   needsUpdate?: NeedsUpdate[];
   /** What Rust enforces for data safety (absent: nothing is blocked). */
   dataSafety?: ipc.DataSafetyStateDto;
+  /** Agent settings files git would commit, with the app's own action. */
+  agentSettings?: AgentSettingsWarning[];
+}
+
+/** One agent settings file warning as Needs you lists it. */
+export interface AgentSettingsWarning {
+  projectRoot: string;
+  file: ipc.AgentSettingsFileDto;
+  /** "Add to .gitignore" (absent for a tracked file, which needs a person). */
+  addToGitignore?: () => void;
+}
+
+/** The section for agent settings files git would commit. A tracked file
+ *  is `bad` and has no action: it must come out of the index and its
+ *  secrets be rotated, which is not automated. */
+export function agentSettingsSection(warnings: AgentSettingsWarning[]): NeedsYouSection | null {
+  if (!warnings.length) return null;
+  return {
+    id: "agent-settings",
+    title: "Agent settings files",
+    rows: warnings.map((w) => {
+      const tracked = w.file.exposure === "tracked";
+      return {
+        id: `agent-settings:${w.file.path}`,
+        kind: "attention",
+        title: w.file.path,
+        detail: w.file.message,
+        tone: tracked ? "bad" : "warn",
+        folded: false,
+        counted: true,
+        sourceId: null,
+        sourceLabel: null,
+        actions: [],
+        opens: null,
+        ...(!tracked && w.addToGitignore ? { local: { label: "Add to .gitignore", run: w.addToGitignore } } : {}),
+      };
+    }),
+  };
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
@@ -190,6 +230,8 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
   // Data safety leads: agents are being kept from data that may be real.
   const safety = input.dataSafety ? dataSafetySection(input.dataSafety) : null;
   if (safety) sections.push(safety);
+  const settingsFiles = agentSettingsSection(input.agentSettings ?? []);
+  if (settingsFiles) sections.push(settingsFiles);
 
   // Terminals and agents: waiting / blocked first, then bell rank, each in
   // the rail's own order.

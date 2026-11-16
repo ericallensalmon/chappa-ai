@@ -454,7 +454,8 @@ impl AgentTool {
         }
         words.push(self.program.clone());
         words.extend(self.args.iter().cloned());
-        words.iter().map(|w| quote_word(w)).collect::<Vec<_>>().join(" ")
+        // Shown to people: a credential written into the tool's args is masked.
+        stack_core::credentials::mask_argv(&words).iter().map(|w| quote_word(w)).collect::<Vec<_>>().join(" ")
     }
 
     /// Prune what the lenient parse let through and clamp the limits (0 = no

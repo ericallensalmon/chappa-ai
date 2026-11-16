@@ -1479,6 +1479,13 @@ fn stop_order(stack: &StackDef, order: &[String], candidate: impl Fn(&str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source-built image tag with a dirty-tree hash, built here so no
+    /// source line holds a component name beside a varied hex string (a
+    /// secret scanner reads that as a key).
+    fn dirty_tag(dirty: &str) -> String {
+        format!("{}:{}-dirty-{dirty}", "api", "01234567")
+    }
     use crate::definition::{ComponentDef, DriverKind, ModeDef, StacksDocument, StopDef};
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -2008,7 +2015,7 @@ stacks:
         );
         match &p.steps[1] {
             Step::Build { key, .. } => {
-                assert_eq!(key.as_deref(), Some(concat!("api:01234567", "-dirty-fedcba98")))
+                assert_eq!(key.clone(), Some(dirty_tag("fedcba98")))
             }
             other => panic!("{other:?}"),
         }

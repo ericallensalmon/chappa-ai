@@ -608,6 +608,7 @@ fn record(id: &str, created: &str, status: JobStatus) -> JobRecord {
         log: JobRecord::log_path(&work, id),
         result: JobRecord::result_path(&work, id),
         work: JobWork::Gc,
+        trusted_definition: None,
         report: None,
         error: None,
         actor: None,

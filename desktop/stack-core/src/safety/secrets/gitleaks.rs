@@ -23,10 +23,25 @@
 //! a normal result and any other non-zero exit is a failure. gitleaks logs
 //! some failures (an unknown revision in git mode, for one) and still exits
 //! 0, so it runs at `--log-level error` and anything it writes to stderr
-//! fails the scan rather than passing it as clean. `--config` is passed when
-//! one is configured or the root holds a `.gitleaks.toml`, the root's
-//! `.gitleaksignore` is honoured (`--gitleaks-ignore-path <root>`), and a
-//! configured gitleaks baseline is passed as `--baseline-path`.
+//! fails the scan rather than passing it as clean.
+//!
+//! **Nothing in the scanned tree configures the scan.** A cloned repository
+//! or an agent could otherwise ship an allow-everything `.gitleaks.toml` or
+//! a `.gitleaksignore` and blind it. So every run passes an explicit
+//! `--config`: the caller's ([`GitleaksScanner::config`], from the user's
+//! settings) or [`DEFAULT_CONFIG`] written into the run's scratch directory,
+//! which extends gitleaks' defaults with rules for credentials written
+//! inline in commands and settings files. `--gitleaks-ignore-path` names an
+//! empty scratch directory, and gitleaks' config variables are removed from
+//! its environment ([`crate::child_env`]). gitleaks 8.30 also reads a
+//! `.gitleaksignore` from the folder it scans (measured, whatever
+//! `--gitleaks-ignore-path` says): a listed `.gitleaksignore` at the top of
+//! the tree is therefore never staged but scanned on its own, and git mode
+//! scans the repository's git folder (`git rev-parse --absolute-git-dir`)
+//! from the scratch directory rather than the working tree, refusing a git
+//! folder that holds a `.gitleaksignore`. Nested `.gitleaksignore` files are
+//! not read by gitleaks (measured). A gitleaks baseline is passed as
+//! `--baseline-path` only when the caller names one.
 
 use super::process;
 use super::report;
@@ -47,6 +62,13 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const REPORT_CAP: u64 = 64 * 1024 * 1024;
 /// Most stderr quoted in an error.
 const STDERR_QUOTE: usize = 800;
+/// The config every run uses unless the caller names one: gitleaks'
+/// default rules plus rules for credentials written inline (env-style
+/// assignments, Authorization headers, `-u user:pass`, `mysql -p…`,
+/// URLs with a password), with placeholders allowed.
+pub const DEFAULT_CONFIG: &str = include_str!("default-config.toml");
+/// gitleaks reads this file from the folder it scans.
+const IGNORE_FILE: &str = ".gitleaksignore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitleaksScanner {
@@ -55,11 +77,12 @@ pub struct GitleaksScanner {
     /// scanned tree unless it is under `.work`, which listing always skips.
     pub work_dir: PathBuf,
     pub timeout: Duration,
-    /// A gitleaks config file. `None` uses the root's `.gitleaks.toml` when
-    /// present, otherwise gitleaks' built-in rules.
+    /// A gitleaks config file the user chose (never one from a scanned
+    /// tree). `None` uses [`DEFAULT_CONFIG`].
     pub config: Option<PathBuf>,
-    /// A baseline in gitleaks' own report format (one the user keeps for
-    /// gitleaks itself), passed as `--baseline-path` when the file exists.
+    /// A baseline in gitleaks' own report format that the user keeps for
+    /// gitleaks itself, named in their settings (never taken from a
+    /// scanned tree), passed as `--baseline-path` when the file exists.
     pub baseline_path: Option<PathBuf>,
     /// Stage the list with hard links and scan it in one run (the default).
     /// Off scans each file in its own run: slower, but needs no links.
@@ -96,7 +119,7 @@ impl GitleaksScanner {
     /// `gitleaks version`, trimmed.
     pub fn version(&self) -> Result<String, SafetyError> {
         let ran = process::run(
-            Command::new(&self.program).arg("version"),
+            crate::child_env::scrub(&mut Command::new(&self.program)).arg("version"),
             "gitleaks version",
             Duration::from_secs(20),
             4096,
@@ -110,24 +133,47 @@ impl GitleaksScanner {
         Ok(String::from_utf8_lossy(&ran.stdout).trim().to_string())
     }
 
-    fn common_args(&self, cmd: &mut Command, root: &Path, report: &Path) {
+    /// The flags every run shares. `scratch` holds the config written for
+    /// this run and the empty ignore directory.
+    fn common_args(&self, cmd: &mut Command, scratch: &Scratch, report: &Path) {
         cmd.args(["--redact", "--no-banner", "--no-color"])
             .args(["--log-level", "error"])
             .args(["--report-format", "json", "--report-path"])
             .arg(report)
             .args(["--exit-code", &LEAK_EXIT_CODE.to_string()])
             .arg("--gitleaks-ignore-path")
-            .arg(root);
-        let config = self.config.clone().or_else(|| {
-            let c = root.join(".gitleaks.toml");
-            c.is_file().then_some(c)
-        });
-        if let Some(c) = config {
-            cmd.arg("--config").arg(c);
-        }
+            .arg(&scratch.ignore_dir)
+            .arg("--config")
+            .arg(&scratch.config);
         if let Some(b) = self.baseline_path.as_ref().filter(|b| b.is_file()) {
             cmd.arg("--baseline-path").arg(b);
         }
+        crate::child_env::scrub(cmd);
+    }
+
+    /// A scratch directory for one scan: the config file and an empty
+    /// directory for `--gitleaks-ignore-path`.
+    fn scratch(&self) -> Result<Scratch, SafetyError> {
+        let dir = ScratchDir::new(&self.work_dir, "secret-scan")?;
+        let io = |path: &Path, e: std::io::Error| SafetyError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        };
+        let ignore_dir = dir.path.join("ignore");
+        fs::create_dir_all(&ignore_dir).map_err(|e| io(&ignore_dir, e))?;
+        let config = match &self.config {
+            Some(c) => c.clone(),
+            None => {
+                let c = dir.path.join("gitleaks.toml");
+                fs::write(&c, DEFAULT_CONFIG).map_err(|e| io(&c, e))?;
+                c
+            }
+        };
+        Ok(Scratch {
+            dir,
+            ignore_dir,
+            config,
+        })
     }
 
     /// Run one gitleaks command and parse its report. `report_root` makes
@@ -164,7 +210,15 @@ impl GitleaksScanner {
     }
 }
 
-/// A fresh directory under the work directory, removed on drop.
+/// One scan's scratch: see [`GitleaksScanner::scratch`].
+struct Scratch {
+    dir: ScratchDir,
+    ignore_dir: PathBuf,
+    config: PathBuf,
+}
+
+/// A fresh directory under the work directory, removed on drop. The work
+/// directory is made git-ignored first ([`crate::workdir::ensure`]).
 pub(crate) struct ScratchDir {
     pub path: PathBuf,
 }
@@ -182,6 +236,10 @@ impl ScratchDir {
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let path = work_dir.join(name);
+        crate::workdir::ensure(work_dir).map_err(|e| SafetyError::Io {
+            path: work_dir.to_path_buf(),
+            message: e.to_string(),
+        })?;
         fs::create_dir_all(&path).map_err(|e| SafetyError::Io {
             path: path.clone(),
             message: e.to_string(),
@@ -201,13 +259,17 @@ impl SecretScanner for GitleaksScanner {
         if files.is_empty() {
             return Ok(Vec::new());
         }
-        let scratch = ScratchDir::new(&self.work_dir, "secret-scan")?;
-        let stage = scratch.path.join("stage");
+        let scratch = self.scratch()?;
+        let stage = scratch.dir.path.join("stage");
         let mut staged = 0usize;
         let mut alone = Vec::new();
         for f in files {
             let dst = stage.join(f);
-            let linked = self.stage_with_links
+            // gitleaks would read a staged top-level ignore file as its own.
+            let ignore_file = f.components().count() == 1
+                && f.to_string_lossy().eq_ignore_ascii_case(IGNORE_FILE);
+            let linked = !ignore_file
+                && self.stage_with_links
                 && dst
                     .parent()
                     .map(|p| fs::create_dir_all(p).is_ok())
@@ -222,34 +284,68 @@ impl SecretScanner for GitleaksScanner {
 
         let mut hits = Vec::new();
         if staged > 0 {
-            let report = scratch.path.join("report.json");
+            let report = scratch.dir.path.join("report.json");
             let mut cmd = Command::new(&self.program);
             cmd.current_dir(&stage).args(["dir", "."]);
-            self.common_args(&mut cmd, root, &report);
+            self.common_args(&mut cmd, &scratch, &report);
             hits.extend(self.run(cmd, &report, &stage)?);
         }
         for (i, f) in alone.into_iter().enumerate() {
-            let report = scratch.path.join(format!("report-{i}.json"));
+            let report = scratch.dir.path.join(format!("report-{i}.json"));
             let mut cmd = Command::new(&self.program);
             cmd.current_dir(root)
                 .arg("dir")
                 .arg(f.to_string_lossy().replace('\\', "/"));
-            self.common_args(&mut cmd, root, &report);
+            self.common_args(&mut cmd, &scratch, &report);
             hits.extend(self.run(cmd, &report, root)?);
         }
         Ok(report::findings(hits))
     }
 
     fn scan_commits(&self, repo: &Path, range: &str) -> Result<Vec<Finding>, SafetyError> {
-        let scratch = ScratchDir::new(&self.work_dir, "secret-scan")?;
-        let report = scratch.path.join("report.json");
+        let scratch = self.scratch()?;
+        let report = scratch.dir.path.join("report.json");
+        let git_dir = git_dir_of(repo)?;
+        if git_dir.join(IGNORE_FILE).exists() {
+            return Err(SafetyError::Scanner(format!(
+                "{} holds a {IGNORE_FILE}, which gitleaks would honour; remove it to scan commits",
+                git_dir.display()
+            )));
+        }
+        // Scanned through the git folder, from the empty scratch directory,
+        // so no ignore file in the working tree is read.
         let mut cmd = Command::new(&self.program);
-        cmd.current_dir(repo)
-            .args(["git", "."])
+        cmd.current_dir(&scratch.ignore_dir)
+            .arg("git")
+            .arg(&git_dir)
             .arg(format!("--log-opts={range}"));
-        self.common_args(&mut cmd, repo, &report);
+        self.common_args(&mut cmd, &scratch, &report);
         Ok(report::findings(self.run(cmd, &report, repo)?))
     }
+}
+
+/// The repository's git folder, absolute (a worktree's own one under the
+/// main repository's `.git/worktrees/`).
+fn git_dir_of(repo: &Path) -> Result<PathBuf, SafetyError> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--absolute-git-dir"]);
+    crate::child_env::scrub(&mut cmd);
+    let ran = process::run(
+        &mut cmd,
+        "git rev-parse",
+        Duration::from_secs(20),
+        64 * 1024,
+    )?;
+    let text = String::from_utf8_lossy(&ran.stdout).trim().to_string();
+    if ran.status != Some(0) || text.is_empty() {
+        return Err(SafetyError::Scanner(format!(
+            "{} is not a git repository",
+            repo.display()
+        )));
+    }
+    Ok(PathBuf::from(text))
 }
 
 /// Find `name` on a `PATH`-style list. On Windows each `PATHEXT` extension

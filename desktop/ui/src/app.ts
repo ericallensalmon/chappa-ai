@@ -73,7 +73,7 @@ import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, visibleViews, type Rai
 import { buildPrsModel, prsNeedingYou, type PrRow, type PrsModel } from "./sources/prs_model";
 import { buildWorkModel, type WorkModel } from "./sources/work_model";
 import { keyMatchOf } from "./sources/work_view";
-import { SeenBaselines, buildNeedsYou, pollResult, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
+import { SeenBaselines, buildNeedsYou, pollResult, type AgentSettingsWarning, type NeedsYouModel, type TerminalAttention } from "./sources/needs_you";
 import { SourceViewsData, type DataView } from "./sources/views_data";
 import { PrsView } from "./sources/prs_view";
 import { NeedsYouView } from "./sources/needs_you_view";
@@ -444,6 +444,8 @@ export interface ProcessRow {
   restartWhenChanged: string[];
   workingDir: string | null;
   env: Record<string, string>;
+  /** Fields shown masked (`command`, `env.<KEY>`); see `ipc.UNCHANGED`. */
+  masked?: string[];
   /** Chappa-side toggles (projects.json, never the yml): favorites
    *  sort first within COMMANDS; a renaming-disabled row ignores OSC titles. */
   favorite: boolean;
@@ -519,6 +521,8 @@ export interface ProjectState {
  * notifications).
  */
 export interface WorkspaceCommandRow {
+  /** Fields shown masked (`command`, `env.<KEY>`); see `ipc.UNCHANGED`. */
+  masked?: string[];
   name: string;
   command: string;
   status: RailStatus;
@@ -1503,6 +1507,8 @@ export class App {
   private environmentModel: EnvironmentModel | null = null;
   /** The Needs you model as last built (the rail badge reads its count). */
   private needsYouModel: NeedsYouModel | null = null;
+  /** Agent settings files git would commit, by path (`agent://agent-settings`). */
+  private readonly agentSettings = new Map<string, AgentSettingsWarning>();
   private readonly dataSafetyApi: DataSafetyApi;
   /** What Rust enforces for data safety, as last sent. */
   private dataSafety: ipc.DataSafetyStateDto = EMPTY_DATA_SAFETY;
@@ -3140,6 +3146,7 @@ export class App {
     // A launch the pre-launch secret scan let through with something to
     // say (findings under the warn policy, or a scan that did not finish).
     on<ipc.SecretScanNoticeEvent>("agent://secret-scan", (p) => this.applySecretScanNotice(p));
+    on<ipc.AgentSettingsEvent>("agent://agent-settings", (p) => this.applyAgentSettings(p));
     // A json-transport agent's typed events.
     on<ipc.AgentEventEvent>("agent://event", (p) => this.applyAgentEvent(p));
     // Tauri intercepts OS drag-drop before the webview sees it; the drop
@@ -3300,6 +3307,7 @@ export class App {
       restartWhenChanged: p.restartWhenChanged ?? [],
       workingDir: p.workingDir ?? null,
       env: p.env ?? {},
+      masked: p.masked ?? [],
       favorite: p.favorite ?? false,
       disableAutoRename: p.disableAutoRename ?? false,
       exitCode: p.exitCode,
@@ -4412,6 +4420,47 @@ export class App {
       return null;
     }
     return response;
+  }
+
+  /** `agent://agent-settings` — an agent launched where an agent settings
+   *  file can be committed: a notification and a Needs you entry per file
+   *  (with "Add to .gitignore" when the file is not tracked). Never a block. */
+  private applyAgentSettings(p: ipc.AgentSettingsEvent): void {
+    const entry = this.entries.get(p.term_id);
+    for (const file of p.files) {
+      this.center.record({
+        termId: p.term_id,
+        projectId: entry?.agent?.projectId ?? null,
+        processName: entry?.name ?? null,
+        kind: "notify",
+        title: file.exposure === "tracked" ? "An agent settings file is committed" : "An agent settings file can be committed",
+        body: file.message,
+      });
+      const warning: AgentSettingsWarning = { projectRoot: p.projectRoot, file };
+      const line = file.ignoreLine;
+      if (file.exposure === "not-ignored" && line) {
+        warning.addToGitignore = () => void this.addAgentSettingsIgnore(p.projectRoot, file.path, line);
+      }
+      this.agentSettings.set(file.path, warning);
+    }
+    this.renderNeedsYou();
+  }
+
+  /** The confirm-gated "Add to .gitignore". */
+  private async addAgentSettingsIgnore(projectRoot: string, path: string, line: string): Promise<void> {
+    const ok = await confirmDialog(`Add this line to ${projectRoot}/.gitignore?\n\n${line}`, {
+      okLabel: "Add to .gitignore",
+      cancelLabel: "Cancel",
+      safeDefault: true,
+    });
+    if (!ok) return;
+    try {
+      await ipc.addAgentSettingsIgnore(projectRoot, line);
+      this.agentSettings.delete(path);
+      this.renderNeedsYou();
+    } catch (err) {
+      void this.showError(String(err instanceof Error ? err.message : err));
+    }
   }
 
   /** `agent://secret-scan` — a launch went ahead with a warning or without
@@ -6821,6 +6870,7 @@ export class App {
       environment: data.hidden("environment") ? [] : data.payloadsFor("environment"),
       needsUpdate: data.needsUpdate(),
       dataSafety: this.dataSafety,
+      agentSettings: [...this.agentSettings.values()],
     });
     this.needsYouModel = model;
     this.renderRailViews();
@@ -8265,6 +8315,7 @@ function formFromRow(row: ProcessRow): CommandForm {
     autoRestart: row.autoRestart,
     restartWhenChanged: [...row.restartWhenChanged],
     env: Object.entries(row.env),
+    ...(row.masked?.length ? { masked: [...row.masked] } : {}),
   };
 }
 
@@ -8294,6 +8345,7 @@ function wsRowFromDto(dto: ipc.WorkspaceCommandDto): WorkspaceCommandRow {
     restartWhenChanged: [...dto.restartWhenChanged],
     workingDir: dto.workingDir ?? null,
     env: dto.env,
+    masked: dto.masked ?? [],
     exitCode: dto.exitCode,
     termId: dto.termId,
     recordId: dto.recordId ?? null,
@@ -8354,5 +8406,6 @@ function wsFormFromRow(row: WorkspaceCommandRow): CommandForm {
     autoRestart: row.autoRestart,
     restartWhenChanged: [...row.restartWhenChanged],
     env: Object.entries(row.env),
+    ...(row.masked?.length ? { masked: [...row.masked] } : {}),
   };
 }

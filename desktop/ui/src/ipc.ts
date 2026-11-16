@@ -931,9 +931,17 @@ export interface ProjectInfoDto {
 }
 
 /** One process row of an open project. `status` uses the status vocabulary. */
+/** What the command editor sends for a masked value it did not replace:
+ *  Rust keeps the stored original, which never reaches the webview. */
+export const UNCHANGED = "\u0001chappa:unchanged";
+
 export interface ProjectProcessDto {
   name: string;
+  /** Secrets masked (`postgresql://app:••••@db/x`); the real line stays in Rust. */
   command: string;
+  /** The masked fields, `command` and `env.<KEY>`: the editor shows them
+   *  read-only with a Replace field. Optional so older fixtures still type. */
+  masked?: string[];
   status: string;
   autoStart: boolean;
   autoRestart: boolean;
@@ -1090,6 +1098,10 @@ export interface SettingsDto {
   secretScanPolicy: SecretScanPolicy;
   /** Path of the gitleaks executable; empty = the one on PATH. */
   secretScanProgram: string;
+  /** Path of a gitleaks config to scan with; empty = the app's own
+   *  (gitleaks' rules plus rules for credentials written inline). A config
+   *  inside a scanned folder is never used. */
+  secretScanConfig: string;
 }
 
 export type ClipboardWritesMode = "off" | "ask" | "allow";
@@ -1139,6 +1151,29 @@ export interface SecretScanNoticeEvent {
  *  many were new. */
 export function acknowledgeSecretFindings(projectId: number, findings: SecretFindingDto[], note: string | null): Promise<number> {
   return call("acknowledge_secret_findings", { projectId, findings, note });
+}
+
+/** One agent settings file git would commit (see `agent://agent-settings`). */
+export interface AgentSettingsFileDto {
+  path: string;
+  /** The `.gitignore` line that ignores it; null when it is outside the project. */
+  ignoreLine: string | null;
+  exposure: "not-ignored" | "tracked";
+  message: string;
+}
+
+/** An `agent://agent-settings` payload: raised when an agent launches in a
+ *  project whose agent settings files git would commit. Never a block. */
+export interface AgentSettingsEvent {
+  term_id: number;
+  projectRoot: string;
+  files: AgentSettingsFileDto[];
+}
+
+/** "Add to .gitignore": append the line to the project's root .gitignore
+ *  (created when missing, never twice). Answers whether it was added. */
+export function addAgentSettingsIgnore(projectRoot: string, line: string): Promise<boolean> {
+  return call("add_agent_settings_ignore", { projectRoot, line });
 }
 
 /** The project's secret-scan override: true / false, or null to follow
@@ -1404,7 +1439,10 @@ export function makeProjectFramesChannel(
  *  no project; rows are addressed by the command NAME (the workspace scope). */
 export interface WorkspaceCommandDto {
   name: string;
+  /** Secrets masked, as on project rows. */
   command: string;
+  /** The masked fields (`command`, `env.<KEY>`); see `UNCHANGED`. */
+  masked?: string[];
   status: string;
   autoStart: boolean;
   autoRestart: boolean;

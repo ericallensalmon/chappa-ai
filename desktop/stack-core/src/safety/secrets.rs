@@ -258,7 +258,7 @@ fn verify_base(root: &Path, base: &str, git: &Path) -> Result<(), SafetyError> {
             "`{base}` is not a usable base revision"
         )));
     }
-    let out = Command::new(git)
+    let out = crate::child_env::scrub(&mut Command::new(git))
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])

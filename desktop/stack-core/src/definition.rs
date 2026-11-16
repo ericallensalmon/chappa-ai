@@ -1649,7 +1649,7 @@ impl StacksDocument {
     }
 }
 
-fn read_capped(path: &Path) -> Result<Option<String>, LoadError> {
+pub(crate) fn read_capped(path: &Path) -> Result<Option<String>, LoadError> {
     let meta = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1740,6 +1740,9 @@ pub enum Rule {
     NotForDriver,
     /// A path that must stay inside the project.
     PathOutsideProject,
+    /// An argv word or env value that looks like a credential written in
+    /// the (committed) file.
+    InlineCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1787,8 +1790,50 @@ pub fn validate(doc: &StacksDocument, ctx: &ValidationContext<'_>) -> Vec<Diagno
     }
     for (name, stack) in &doc.stacks {
         validate_stack(name, stack, ctx, &mut out);
+        inline_credentials(name, stack, &mut out);
     }
     out
+}
+
+/// A warning per argv word or env value that looks like a credential: the
+/// definition is committed, so it would end up in git. The message names
+/// the field and the kind, never the value.
+fn inline_credentials(stack_name: &str, stack: &StackDef, out: &mut Vec<Diagnostic>) {
+    use crate::credentials::{detect_argv, detect_env, CredentialKind, ADVICE};
+    let mut warn = |path: String, kind: CredentialKind| {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            rule: Rule::InlineCredential,
+            message: format!(
+                "`{path}` holds what looks like {}; {ADVICE}",
+                kind.describe()
+            ),
+            path,
+        })
+    };
+    let base = format!("stacks.{stack_name}");
+    for (k, v) in &stack.env {
+        if let Some(kind) = detect_env(k, v) {
+            warn(format!("{base}.env.{k}"), kind);
+        }
+    }
+    for (c, def) in &stack.components {
+        for (hook, argv) in def.hooks() {
+            if let Some((_, kind)) = detect_argv(argv).first() {
+                warn(format!("{base}.components.{c}.{hook}"), *kind);
+            }
+        }
+        for (k, v) in def.env.iter().chain(&def.vars) {
+            if let Some(kind) = detect_env(k, v) {
+                let field = if def.env.contains_key(k) {
+                    "env"
+                } else {
+                    "vars"
+                };
+                warn(format!("{base}.components.{c}.{field}.{k}"), kind);
+            }
+        }
+    }
 }
 
 fn validate_stack(

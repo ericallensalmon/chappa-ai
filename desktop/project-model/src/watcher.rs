@@ -67,7 +67,15 @@ impl ChangeMatcher {
     /// so the restart-side exclusion list is not needed — and its project-file
     /// entry must not apply here).
     pub fn for_chappa_yml(root: PathBuf) -> Self {
-        let mut m = Self::new(root, &[crate::yml::CHAPPA_YML_NAME.to_owned()]);
+        let mut m = Self::new(
+            root,
+            &[
+                crate::yml::CHAPPA_YML_NAME.to_owned(),
+                // A stack definition kept beside the project file is part of
+                // what the project is trusted for.
+                "chappa.stack.yml".to_owned(),
+            ],
+        );
         m.skip_own_yml = false;
         m
     }

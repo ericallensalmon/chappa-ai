@@ -145,7 +145,9 @@ impl Baseline {
 
     /// Write both files atomically, creating the directory if needed.
     pub fn save(&self, work_dir: &Path) -> Result<(), SafetyError> {
-        fs::create_dir_all(work_dir).map_err(|e| SafetyError::Io {
+        // The baseline names files and lines of acknowledged secrets: the
+        // folder it lives in must never be committed.
+        crate::workdir::ensure(work_dir).map_err(|e| SafetyError::Io {
             path: work_dir.to_path_buf(),
             message: e.to_string(),
         })?;

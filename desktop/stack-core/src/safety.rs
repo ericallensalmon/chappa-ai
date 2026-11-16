@@ -46,6 +46,7 @@
 //! and every other field are ignored even when present, and gitleaks always
 //! runs with `--redact` (see [`secrets`]).
 
+pub mod agent_settings;
 pub mod data;
 pub mod secrets;
 

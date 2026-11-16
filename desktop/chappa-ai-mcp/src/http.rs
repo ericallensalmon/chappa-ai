@@ -211,7 +211,9 @@ pub fn read_response<R: Read>(
             break pos;
         }
         if buffered.len() > MAX_HEADER_BYTES {
-            return Err(HttpError::TooLarge { limit: MAX_HEADER_BYTES });
+            return Err(HttpError::TooLarge {
+                limit: MAX_HEADER_BYTES,
+            });
         }
         let n = reader.read(&mut chunk)?;
         if n == 0 {
@@ -239,7 +241,12 @@ pub fn read_response<R: Read>(
         };
         headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
     }
-    let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    };
     let connection = header("connection").map(|v| v.to_ascii_lowercase());
     let mut keep_alive = match connection.as_deref() {
         Some(v) if v.split(',').any(|t| t.trim() == "close") => false,
@@ -247,7 +254,10 @@ pub fn read_response<R: Read>(
         _ => version == "HTTP/1.1",
     };
     let chunked = header("transfer-encoding")
-        .map(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("chunked")))
+        .map(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+        })
         .unwrap_or(false);
     let length = match header("content-length") {
         Some(v) => Some(
@@ -317,7 +327,9 @@ fn read_line<R: Read>(reader: &mut R, buffered: &mut Vec<u8>) -> Result<String, 
                 .map_err(|_| HttpError::Malformed("non-UTF-8 chunk line".into()));
         }
         if buffered.len() > MAX_HEADER_BYTES {
-            return Err(HttpError::TooLarge { limit: MAX_HEADER_BYTES });
+            return Err(HttpError::TooLarge {
+                limit: MAX_HEADER_BYTES,
+            });
         }
         let n = reader.read(&mut chunk)?;
         if n == 0 {
@@ -343,14 +355,21 @@ fn read_chunked<R: Read>(
         if size == 0 {
             break;
         }
-        if body.len() + size > max_body {
+        // A size near the top of the range must not wrap: compare with
+        // what is left of the cap, and add the CRLF checked.
+        if size > max_body.saturating_sub(body.len()) {
             return Err(HttpError::TooLarge { limit: max_body });
         }
-        fill(reader, buffered, size + 2)?;
+        let with_crlf = size.checked_add(2).ok_or_else(|| {
+            HttpError::Malformed(format!("chunk size `{size_text}` is too large"))
+        })?;
+        fill(reader, buffered, with_crlf)?;
         body.extend(buffered.drain(..size));
         let crlf: Vec<u8> = buffered.drain(..2).collect();
         if crlf != b"\r\n" {
-            return Err(HttpError::Malformed("chunk data not followed by CRLF".into()));
+            return Err(HttpError::Malformed(
+                "chunk data not followed by CRLF".into(),
+            ));
         }
     }
     // Trailers (none expected, but a server may send them) end at an empty line.
@@ -390,7 +409,10 @@ mod tests {
         assert_eq!(r.json(), Some(serde_json::json!({"ok": true})));
         assert_eq!(r.header("content-type"), Some("application/json"));
         assert!(r.keep_alive, "HTTP/1.1 keeps the connection by default");
-        assert_eq!(rest, b"HTTP/1.1 204", "the next reply's bytes are kept, not lost");
+        assert_eq!(
+            rest, b"HTTP/1.1 204",
+            "the next reply's bytes are kept, not lost"
+        );
     }
 
     #[test]
@@ -420,15 +442,52 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_chunk_size_is_refused_without_overflowing() {
+        // Near the top of the range: over any real cap.
+        let huge = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nfffffffffffffff0\r\nab\r\n0\r\n\r\n";
+        assert_eq!(
+            read(huge, 1024).unwrap_err(),
+            HttpError::TooLarge { limit: 1024 }
+        );
+        // After a first chunk, the remaining cap is what counts.
+        let second = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\nffffffffffffffff\r\nab\r\n0\r\n\r\n";
+        assert_eq!(
+            read(second, 1024).unwrap_err(),
+            HttpError::TooLarge { limit: 1024 }
+        );
+        // With no cap at all, a size whose CRLF would overflow is malformed.
+        let overflow = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nab\r\n0\r\n\r\n";
+        match read(overflow, usize::MAX).unwrap_err() {
+            HttpError::Malformed(m) => assert!(m.contains("too large"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // Too many hex digits for the type is malformed, not a panic.
+        let digits = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1ffffffffffffffff\r\nab\r\n0\r\n\r\n";
+        assert!(matches!(
+            read(digits, usize::MAX).unwrap_err(),
+            HttpError::Malformed(_)
+        ));
+    }
+
+    #[test]
     fn the_body_cap_applies_to_every_framing() {
         let fixed = b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234567890123456789";
-        assert_eq!(read(fixed, 19).unwrap_err(), HttpError::TooLarge { limit: 19 });
+        assert_eq!(
+            read(fixed, 19).unwrap_err(),
+            HttpError::TooLarge { limit: 19 }
+        );
         assert!(read(fixed, 20).is_ok());
         let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\na\r\n0123456789\r\na\r\n0123456789\r\n0\r\n\r\n";
-        assert_eq!(read(chunked, 15).unwrap_err(), HttpError::TooLarge { limit: 15 });
+        assert_eq!(
+            read(chunked, 15).unwrap_err(),
+            HttpError::TooLarge { limit: 15 }
+        );
         assert_eq!(read(chunked, 20).unwrap().0.body.len(), 20);
         let eof = b"HTTP/1.0 200 OK\r\n\r\nthirty bytes of body text here";
-        assert_eq!(read(eof, 10).unwrap_err(), HttpError::TooLarge { limit: 10 });
+        assert_eq!(
+            read(eof, 10).unwrap_err(),
+            HttpError::TooLarge { limit: 10 }
+        );
         let (r, _) = read(eof, 100).unwrap();
         assert_eq!(r.body, b"thirty bytes of body text here");
         assert!(!r.keep_alive, "a read-to-end body ends the connection");
@@ -436,11 +495,19 @@ mod tests {
 
     #[test]
     fn connection_header_and_version_decide_keep_alive() {
-        let (r, _) = read(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 10).unwrap();
+        let (r, _) = read(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            10,
+        )
+        .unwrap();
         assert!(!r.keep_alive);
         let (r, _) = read(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n", 10).unwrap();
         assert!(!r.keep_alive, "HTTP/1.0 closes unless told otherwise");
-        let (r, _) = read(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n", 10).unwrap();
+        let (r, _) = read(
+            b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
+            10,
+        )
+        .unwrap();
         assert!(r.keep_alive);
         let (r, rest) = read(b"HTTP/1.1 204 No Content\r\n\r\nnext", 10).unwrap();
         assert_eq!(r.status, 204);
@@ -450,12 +517,25 @@ mod tests {
 
     #[test]
     fn malformed_and_truncated_replies_are_errors() {
-        assert_eq!(read(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab", 10).unwrap_err(), HttpError::Closed);
+        assert_eq!(
+            read(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab", 10).unwrap_err(),
+            HttpError::Closed
+        );
         assert_eq!(read(b"HTTP/1.1 200 OK", 10).unwrap_err(), HttpError::Closed);
-        assert!(matches!(read(b"NOPE 200 OK\r\n\r\n", 10).unwrap_err(), HttpError::Malformed(_)));
-        assert!(matches!(read(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n", 10).unwrap_err(), HttpError::Malformed(_)));
         assert!(matches!(
-            read(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", 10).unwrap_err(),
+            read(b"NOPE 200 OK\r\n\r\n", 10).unwrap_err(),
+            HttpError::Malformed(_)
+        ));
+        assert!(matches!(
+            read(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n", 10).unwrap_err(),
+            HttpError::Malformed(_)
+        ));
+        assert!(matches!(
+            read(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+                10
+            )
+            .unwrap_err(),
             HttpError::Malformed(_)
         ));
     }
@@ -500,8 +580,12 @@ mod tests {
             }
             seen
         });
-        let mut conn = Connection::connect(addr, "test", Duration::from_secs(2), Duration::from_secs(5)).unwrap();
-        let first = conn.request("GET", "/a", &[("X-One", "1")], None, 64).unwrap();
+        let mut conn =
+            Connection::connect(addr, "test", Duration::from_secs(2), Duration::from_secs(5))
+                .unwrap();
+        let first = conn
+            .request("GET", "/a", &[("X-One", "1")], None, 64)
+            .unwrap();
         assert_eq!(first.body, b"one");
         assert!(conn.is_reusable());
         let second = conn.request("POST", "/b", &[], Some(b"{}"), 64).unwrap();
@@ -510,11 +594,22 @@ mod tests {
         let third = conn.request("GET", "/c", &[], None, 64).unwrap();
         assert_eq!(third.body, b"three");
         assert!(!conn.is_reusable(), "the server said close");
-        assert_eq!(conn.request("GET", "/d", &[], None, 64).unwrap_err(), HttpError::Closed);
+        assert_eq!(
+            conn.request("GET", "/d", &[], None, 64).unwrap_err(),
+            HttpError::Closed
+        );
         let seen = server.join().unwrap();
-        assert_eq!(seen[0], "GET /a HTTP/1.1\r\nHost: test\r\nX-One: 1\r\nContent-Length: 0\r\n\r\n");
-        assert_eq!(seen[1], "POST /b HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n{}");
-        assert_eq!(seen[2], "GET /c HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            seen[0],
+            "GET /a HTTP/1.1\r\nHost: test\r\nX-One: 1\r\nContent-Length: 0\r\n\r\n"
+        );
+        assert_eq!(
+            seen[1],
+            "POST /b HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n{}"
+        );
+        assert_eq!(
+            seen[2],
+            "GET /c HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n"
+        );
     }
 }
-

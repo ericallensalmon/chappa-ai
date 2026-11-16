@@ -383,7 +383,16 @@ pub struct Settings {
     /// Path of the gitleaks executable to use. Empty = the one on `PATH`.
     #[serde(deserialize_with = "deserialize_editor_command")]
     pub secret_scan_program: String,
+    /// Path of a gitleaks config file to scan with. Empty = the app's own
+    /// (gitleaks' default rules plus rules for credentials written inline).
+    /// A config inside a scanned folder is never used.
+    #[serde(deserialize_with = "deserialize_editor_command")]
+    pub secret_scan_config: String,
 }
+
+/// Longest config path kept; a longer one is dropped rather than cut short
+/// into another path.
+pub const SECRET_SCAN_CONFIG_MAX_CHARS: usize = 4096;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -419,6 +428,7 @@ impl Default for Settings {
             secret_scan_before_agents: None,
             secret_scan_policy: SecretScanPolicy::default(),
             secret_scan_program: String::new(),
+            secret_scan_config: String::new(),
         }
     }
 }
@@ -489,6 +499,13 @@ impl Settings {
         let trimmed = self.secret_scan_program.trim();
         if trimmed.len() != self.secret_scan_program.len() {
             self.secret_scan_program = trimmed.to_owned();
+        }
+        let trimmed = self.secret_scan_config.trim();
+        if trimmed.len() != self.secret_scan_config.len() {
+            self.secret_scan_config = trimmed.to_owned();
+        }
+        if self.secret_scan_config.chars().count() > SECRET_SCAN_CONFIG_MAX_CHARS {
+            self.secret_scan_config.clear();
         }
     }
 
@@ -1027,6 +1044,7 @@ mod tests {
             "secretScanBeforeAgents",
             "secretScanPolicy",
             "secretScanProgram",
+            "secretScanConfig",
         ] {
             assert!(json.get(key).is_some(), "missing wire key {key}");
         }
@@ -1059,6 +1077,15 @@ mod tests {
         s.secret_scan_program = "  C:\\tools\\gitleaks.exe \n".into();
         s.normalize();
         assert_eq!(s.secret_scan_program, "C:\\tools\\gitleaks.exe");
+        assert_eq!(defaults.secret_scan_config, "");
+        s.secret_scan_config = "  C:\\cfg\\gitleaks.toml \n".into();
+        s.normalize();
+        assert_eq!(s.secret_scan_config, "C:\\cfg\\gitleaks.toml");
+        s.secret_scan_config = "x".repeat(SECRET_SCAN_CONFIG_MAX_CHARS + 1);
+        s.normalize();
+        assert_eq!(s.secret_scan_config, "", "an over-long path is dropped, not cut");
+        let s: Settings = serde_json::from_value(serde_json::json!({"secretScanConfig": 7})).unwrap();
+        assert_eq!(s.secret_scan_config, "");
     }
 
     #[test]

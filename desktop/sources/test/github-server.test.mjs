@@ -56,6 +56,22 @@ async function withSource(env, fn) {
 
 const row = (items, number, repo) => items.find((p) => p.number === number && (!repo || p.repo === repo));
 
+test("gh never sees the source's address or token", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gh-env-"));
+  const log = join(dir, "env.log");
+  try {
+    await withSource({ GH_STUB_ENV_LOG: log }, async (src) => {
+      const r = await src.call("/api/prs");
+      assert.equal(r.status, 200);
+    });
+    const lines = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(lines.length > 0);
+    for (const l of lines) assert.equal(l, "seen:");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("identity first, then the token; everything else is closed without it", () => withSource({}, async (src) => {
   const id = await src.call(`/chappa/v1/identity?challenge=${CHALLENGE}`, { auth: false });
   assert.equal(id.status, 200);

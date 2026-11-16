@@ -96,7 +96,11 @@ pub fn run(process_id: Option<u64>, client: &Client, input: &mut dyn Read) -> Ho
         return HookOutcome::NoSessionId;
     };
     let body = json!({"session_id": session_id, "provider": PROVIDER});
-    match client.request("POST", &format!("/processes/{process_id}/session"), Some(&body)) {
+    match client.request(
+        "POST",
+        &format!("/processes/{process_id}/session"),
+        Some(&body),
+    ) {
         Ok(_) => HookOutcome::Reported,
         Err(err) => HookOutcome::Failed(err.to_string()),
     }
@@ -140,12 +144,26 @@ mod tests {
     fn the_session_id_is_read_from_the_hook_payload_and_unknown_fields_are_ignored() {
         let payload = r#"{"session_id":"9e93b89b-6d27-456e-8591-58f578689d2e","transcript_path":"t.jsonl",
             "cwd":"/w","hook_event_name":"SessionStart","source":"clear","model":{"id":"m"},"extra":[1,2]}"#;
-        assert_eq!(parse_session_id(payload).as_deref(), Some("9e93b89b-6d27-456e-8591-58f578689d2e"));
+        assert_eq!(
+            parse_session_id(payload).as_deref(),
+            Some("9e93b89b-6d27-456e-8591-58f578689d2e")
+        );
         // Surrounding whitespace in the stream and in the id itself.
-        assert_eq!(parse_session_id("\n {\"session_id\": \"  abc \"}\n").as_deref(), Some("abc"));
-        for bad in ["", "not json", "[]", "\"abc\"", r#"{"session_id":""}"#, r#"{"session_id":"  "}"#,
-            r#"{"session_id":42}"#, r#"{"session_id":null}"#, r#"{"hook_event_name":"SessionStart"}"#]
-        {
+        assert_eq!(
+            parse_session_id("\n {\"session_id\": \"  abc \"}\n").as_deref(),
+            Some("abc")
+        );
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            "\"abc\"",
+            r#"{"session_id":""}"#,
+            r#"{"session_id":"  "}"#,
+            r#"{"session_id":42}"#,
+            r#"{"session_id":null}"#,
+            r#"{"hook_event_name":"SessionStart"}"#,
+        ] {
             assert_eq!(parse_session_id(bad), None, "{bad:?}");
         }
     }
@@ -168,11 +186,18 @@ mod tests {
                 panic!("stdin must not be read when the hook is skipped");
             }
         }
-        let missing = std::env::temp_dir().join(format!("chappa-ai-mcp-no-endpoint-{}", std::process::id()));
-        let client = Client::from_endpoint_file(missing.join("control_endpoint"), TokenSource::Literal("t".into()));
+        let missing =
+            std::env::temp_dir().join(format!("chappa-ai-mcp-no-endpoint-{}", std::process::id()));
+        let client = Client::from_endpoint_file(
+            missing.join("control_endpoint"),
+            TokenSource::Literal("t".into()),
+        );
         // No process id.
         assert_eq!(run(None, &client, &mut Untouchable), HookOutcome::Skipped);
         // A process id, but no app has written its endpoint file.
-        assert_eq!(run(Some(12), &client, &mut Untouchable), HookOutcome::Skipped);
+        assert_eq!(
+            run(Some(12), &client, &mut Untouchable),
+            HookOutcome::Skipped
+        );
     }
 }

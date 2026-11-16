@@ -136,6 +136,10 @@ pub struct JobRecord {
     pub log: PathBuf,
     pub result: PathBuf,
     pub work: JobWork,
+    /// The definition hash the job was accepted under. The runner refuses
+    /// to start when the definition it reads no longer has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_definition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<ExitReport>,
     /// Why it failed, in one line.

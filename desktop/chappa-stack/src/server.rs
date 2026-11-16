@@ -111,6 +111,46 @@ fn error(status: u16, kind: &str, message: impl Into<String>) -> Reply {
     (status, json!({ "kind": kind, "message": message.into() }))
 }
 
+/// What a source checks its definition against before it runs anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionPin {
+    /// No check (an embedder or a test that drives the source directly).
+    /// `chappa-stack serve` never uses it.
+    Unchecked,
+    /// Runs only while the definition hashes to this
+    /// ([`stack_core::trust::definition_trust_hash`]).
+    Trusted(String),
+    /// Nothing was trusted: read-only views only.
+    Nothing,
+}
+
+impl DefinitionPin {
+    /// From the `--trusted-definition` value: a 64-hex hash, or
+    /// [`stack_core::trust::UNTRUSTED`].
+    pub fn parse(text: &str) -> Result<DefinitionPin, String> {
+        let t = text.trim();
+        if t == stack_core::trust::UNTRUSTED {
+            return Ok(DefinitionPin::Nothing);
+        }
+        if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(DefinitionPin::Trusted(t.to_ascii_lowercase()));
+        }
+        Err(format!(
+            "--trusted-definition must be a 64-hex hash or `{}`",
+            stack_core::trust::UNTRUSTED
+        ))
+    }
+}
+
+/// The refusal while the definition is not the trusted one.
+pub const UNTRUSTED_KIND: &str = "untrusted-definition";
+/// What the Environment banner and every refusal say.
+pub const UNTRUSTED_TEXT: &str =
+    "The stack definition changed since it was trusted; review it in the app.";
+/// What a job says when the definition changed after it was accepted.
+pub const UNTRUSTED_JOB: &str =
+    "the stack definition changed after this job was accepted; nothing ran. Review it in the app.";
+
 /// The source's state across requests.
 pub struct Source {
     pub world: World,
@@ -139,6 +179,8 @@ pub struct Source {
     last_secret_tick: Mutex<Option<std::time::Instant>>,
     /// A secret rescan is running (one at a time).
     secret_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// What the definition must hash to before anything runs.
+    pin: Mutex<DefinitionPin>,
 }
 
 /// The least time between two looks at the workspaces on the refresher
@@ -177,11 +219,48 @@ impl Source {
             me: std::sync::OnceLock::new(),
             last_secret_tick: Mutex::new(None),
             secret_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pin: Mutex::new(DefinitionPin::Unchecked),
         });
         let _ = source.me.set(Arc::downgrade(&source));
         let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
         background.add_periodic(weak);
+        let gate: Weak<dyn crate::background::ScriptGate + Send + Sync> =
+            Arc::downgrade(&source) as Weak<Source>;
+        background.set_gate(gate);
         source
+    }
+
+    /// What the definition must hash to before this source runs anything.
+    pub fn set_definition_pin(&self, pin: DefinitionPin) {
+        *self.pin.lock().unwrap_or_else(|p| p.into_inner()) = pin;
+    }
+
+    pub fn definition_pin(&self) -> DefinitionPin {
+        self.pin.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Whether `loaded` is the definition the person trusted.
+    pub fn is_trusted(&self, loaded: &Loaded) -> bool {
+        match self.definition_pin() {
+            DefinitionPin::Unchecked => true,
+            DefinitionPin::Trusted(h) => loaded.definition_hash.as_deref() == Some(h.as_str()),
+            DefinitionPin::Nothing => false,
+        }
+    }
+
+    /// The definition, when it may run things: a definition that differs
+    /// from the trusted one is `409 untrusted-definition`.
+    fn load_trusted(&self) -> Result<Loaded, Reply> {
+        let loaded = self.load().map_err(|e| error(409, "definition", e))?;
+        if !self.is_trusted(&loaded) {
+            return Err(error(409, UNTRUSTED_KIND, UNTRUSTED_TEXT));
+        }
+        Ok(loaded)
+    }
+
+    /// The definition for the background work, only when trusted.
+    fn trusted_for_background(&self) -> Option<Loaded> {
+        self.load().ok().filter(|l| self.is_trusted(l))
     }
 
     fn load(&self) -> Result<Loaded, String> {
@@ -332,9 +411,14 @@ impl Source {
     }
 
     fn environment_of(&self, loaded: &Loaded, now: &str) -> Result<Value, String> {
-        let runner = loaded
-            .runner(&self.world, now)
-            .with_scripts(&*self.background);
+        let trusted = self.is_trusted(loaded);
+        let runner = loaded.runner(&self.world, now);
+        // An untrusted definition's status scripts are never queued.
+        let runner = if trusted {
+            runner.with_scripts(&*self.background)
+        } else {
+            runner
+        };
         let (inst, _) = runner.instance(loaded.slot).map_err(|e| e.to_string())?;
         let work_dir = loaded.work_dir();
         let table = ProcessTable::load(&work_dir, &inst.id);
@@ -432,6 +516,16 @@ impl Source {
             }
         }
         v["secretScan"] = secrets.wire(loaded);
+        if !trusted {
+            if let Some(banners) = v.get_mut("banners").and_then(Value::as_array_mut) {
+                banners.insert(
+                    0,
+                    json!({ "id": UNTRUSTED_KIND, "tone": "bad", "title": UNTRUSTED_TEXT, "lines": [
+                        "Nothing in this stack runs (no status scripts, checks, scans or jobs) until the project is trusted again."
+                    ] }),
+                );
+            }
+        }
         Ok(v)
     }
 
@@ -501,7 +595,7 @@ impl Source {
     /// Look at the item workspaces with git now (the refresher calls this;
     /// tests call it directly).
     pub fn refresh_work(&self) {
-        if let Ok(loaded) = self.load() {
+        if let Some(loaded) = self.trusted_for_background() {
             self.work.refresh(&self.world, &loaded);
         }
     }
@@ -520,9 +614,9 @@ impl Source {
     /// overlay's, the drift banner's or the Archived panel's.
     fn work_action(&self, body: &Value, caller: &Caller) -> Reply {
         let now = self.world.clock.now_utc();
-        let loaded = match self.load() {
+        let loaded = match self.load_trusted() {
             Ok(l) => l,
-            Err(e) => return error(409, "definition", e),
+            Err(r) => return r,
         };
         if loaded.has_errors() {
             return error(
@@ -655,9 +749,9 @@ impl Source {
         let confirmed = body.get("confirmed").and_then(Value::as_bool) == Some(true);
         let fingerprint = body.pointer("/params/fingerprint").and_then(Value::as_str);
         let now = utc_now();
-        let loaded = match self.load() {
+        let loaded = match self.load_trusted() {
             Ok(l) => l,
-            Err(e) => return error(409, "definition", e),
+            Err(r) => return r,
         };
         if loaded.has_errors() {
             return error(
@@ -804,6 +898,10 @@ impl Source {
             log: JobRecord::log_path(&work_dir, &job_id),
             result: JobRecord::result_path(&work_dir, &job_id),
             work: chosen.work.clone(),
+            trusted_definition: match self.definition_pin() {
+                DefinitionPin::Unchecked => None,
+                _ => loaded.definition_hash.clone(),
+            },
             report: None,
             error: None,
             actor: caller
@@ -997,7 +1095,7 @@ impl Source {
     /// thread every [`secret_scan::RESCAN_EVERY`]; tests call it). Whether
     /// anything was scanned.
     pub fn secret_scan_pass(&self) -> bool {
-        let Ok(loaded) = self.load() else {
+        let Some(loaded) = self.trusted_for_background() else {
             return false;
         };
         if loaded.has_errors() {
@@ -1097,7 +1195,7 @@ impl Source {
             }
             *last = Some(now_secs);
         }
-        let Ok(loaded) = self.load() else {
+        let Some(loaded) = self.trusted_for_background() else {
             return Vec::new();
         };
         if loaded.has_errors() || !data_safety::any_periodic(&loaded) {
@@ -1311,6 +1409,12 @@ fn respond(source: &Source, mut request: tiny_http::Request) {
                 .expect("static header"),
         );
     let _ = request.respond(response);
+}
+
+impl crate::background::ScriptGate for Source {
+    fn scripts_allowed(&self) -> bool {
+        self.trusted_for_background().is_some()
+    }
 }
 
 impl Periodic for Source {

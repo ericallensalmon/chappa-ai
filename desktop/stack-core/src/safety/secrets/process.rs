@@ -55,6 +55,7 @@ pub(crate) fn run(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::child_env::scrub(cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| SafetyError::Scanner(format!("could not start {what}: {e}")))?;
@@ -101,4 +102,26 @@ pub(crate) fn run(
         stdout_overflowed,
         stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scanner_never_sees_the_source_variables_or_gitleaks_overrides() {
+        for name in crate::child_env::SCRUBBED {
+            std::env::set_var(name, "planted-for-the-test");
+        }
+        let argv = crate::child_env::env_printer();
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let ran = run(&mut cmd, "env", Duration::from_secs(20), 1024 * 1024).unwrap();
+        let text = String::from_utf8_lossy(&ran.stdout);
+        assert_eq!(
+            crate::child_env::names_a_scrubbed_variable(&text),
+            None,
+            "{text}"
+        );
+    }
 }

@@ -2062,10 +2062,16 @@ pub fn spawn_agent_with(
         let launch = format!(
             "launch {} {} in {}",
             plan.command,
-            plan.args.iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
+            stack_core::credentials::mask_argv(&plan.args).iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
             cwd.as_deref().map(crate::roots::display).unwrap_or_else(|| "the home directory".to_owned())
         );
         ctx.registry.record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
+    }
+    // An agent settings file git would commit is a warning, never a block.
+    if let (Some(dir), None) = (&cwd, tool.runtime.container()) {
+        let project_root = project.as_ref().map(|(_, root)| root.as_path()).unwrap_or(dir.as_path());
+        let files = crate::secret_scan::agent_settings_warnings(project_root, dir);
+        crate::secret_scan::emit_agent_settings(created_app.as_ref(), id, project_root, &files);
     }
     if let Some(notice) = &scan_notice {
         // A launch past an unfinished scan is on the row's journal, under

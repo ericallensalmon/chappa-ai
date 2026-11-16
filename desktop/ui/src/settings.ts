@@ -110,6 +110,7 @@ export function defaultSettings(): Settings {
     secretScanBeforeAgents: null,
     secretScanPolicy: "block-agents",
     secretScanProgram: "",
+    secretScanConfig: "",
   };
 }
 
@@ -141,6 +142,16 @@ export const EDITOR_PRESETS: ReadonlyArray<{ label: string; template: string }> 
  *  OS default). */
 export function clampEditorCommand(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
+}
+
+/** Longest config path kept (matches `project_model`): a longer one is
+ *  dropped, never cut short into another path. */
+export const SECRET_SCAN_CONFIG_MAX_CHARS = 4096;
+
+/** A config path: trimmed text, or empty when it is not text or too long. */
+export function clampConfigPath(v: unknown): string {
+  const t = typeof v === "string" ? v.trim() : "";
+  return [...t].length > SECRET_SCAN_CONFIG_MAX_CHARS ? "" : t;
 }
 
 /** The three clipboard-write modes, in picker order. */
@@ -268,6 +279,7 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     secretScanBeforeAgents: clampTristate(s.secretScanBeforeAgents),
     secretScanPolicy: clampSecretScanPolicy(s.secretScanPolicy),
     secretScanProgram: clampEditorCommand(s.secretScanProgram),
+    secretScanConfig: clampConfigPath(s.secretScanConfig),
   };
 }
 

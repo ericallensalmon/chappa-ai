@@ -22,6 +22,7 @@ pub mod secret_scan;
 pub mod settings;
 pub mod source_actions;
 pub mod sources;
+pub mod stack_trust;
 pub mod startup_questions;
 pub mod stats;
 pub mod timers;
@@ -52,6 +53,10 @@ fn is_debug() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any thread starts: a source's address and token (and gitleaks'
+    // config overrides) never sit in the app's own environment, which every
+    // pane, job and agent it starts would inherit.
+    stack_core::child_env::scrub_process_env();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -296,6 +301,7 @@ pub fn run() {
         source_actions::set_source_prompt_policy,
         secret_scan::secret_scan_info,
         secret_scan::acknowledge_secret_findings,
+        secret_scan::add_agent_settings_ignore,
         projects::set_project_secret_scan,
         data_safety::data_safety_state,
     ]);
@@ -376,6 +382,7 @@ pub fn run() {
         source_actions::set_source_prompt_policy,
         secret_scan::secret_scan_info,
         secret_scan::acknowledge_secret_findings,
+        secret_scan::add_agent_settings_ignore,
         projects::set_project_secret_scan,
         data_safety::data_safety_state,
         workspace::list_workspace_commands,

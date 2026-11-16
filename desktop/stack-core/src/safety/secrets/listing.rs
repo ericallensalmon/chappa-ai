@@ -222,6 +222,7 @@ fn git_candidates(
     not_utf8: &mut usize,
 ) -> Option<Vec<String>> {
     let mut cmd = Command::new(git);
+    crate::child_env::scrub(&mut cmd);
     cmd.arg("-C")
         .arg(root)
         .args(["ls-files", "-z", "--cached", "--others"]);

@@ -39,6 +39,8 @@ interface RowRefs {
   title: HTMLButtonElement;
   detail: HTMLElement;
   actions: ActionsCell;
+  /** The app-side action button, when the row has one. */
+  local: HTMLButtonElement;
   sig: string;
   row: NeedsYouRow | null;
 }
@@ -183,8 +185,14 @@ export class NeedsYouView {
     const detail = document.createElement("div");
     detail.className = "chappa-sv-detail";
     const actions = new ActionsCell(this.ui);
-    el.append(top, detail, actions.el);
-    const r: RowRefs = { el, title, detail, actions, sig: "", row: null };
+    const local = document.createElement("button");
+    local.type = "button";
+    local.className = "chappa-needs-local";
+    local.style.cssText = "margin-top:6px;";
+    local.hidden = true;
+    el.append(top, detail, actions.el, local);
+    const r: RowRefs = { el, title, detail, actions, local, sig: "", row: null };
+    local.addEventListener("click", () => r.row?.local?.run());
     title.addEventListener("mousedown", (e) => e.preventDefault());
     title.addEventListener("click", () => {
       if (r.row) this.open(r.row);
@@ -210,6 +218,8 @@ export class NeedsYouView {
   private paintRow(r: RowRefs, row: NeedsYouRow, versions: Record<string, number>): void {
     r.row = row;
     r.actions.load(row.actions, row.actions.map((t) => `${t.sourceId}:${versions[t.sourceId] ?? 0}`).join(","));
+    r.local.hidden = !row.local;
+    r.local.textContent = row.local?.label ?? "";
     const sig = JSON.stringify([row.title, row.detail, row.tone, row.opens, row.kind]);
     if (sig === r.sig) return;
     r.sig = sig;
