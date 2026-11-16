@@ -932,7 +932,7 @@ pub struct DataVerdict {
 
 impl DataVerdict {
     /// What an acknowledgement of this verdict is tied to: every finding's
-    /// [`Finding::key`] with its count (`rule@table.column#count`), a
+    /// [`Finding::key`] with its count (`rule in table.column#count`), a
     /// `marker:` / `sample:` entry for a marker or sample problem, and the
     /// rules hash. Sorted, no repeats. Empty when clean.
     ///

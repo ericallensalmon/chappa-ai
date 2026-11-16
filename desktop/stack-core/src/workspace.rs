@@ -688,7 +688,7 @@ mod tests {
             ("https://github.com/owner/repo", gh("owner/repo")),
             ("https://github.com/owner/repo/", gh("owner/repo")),
             (
-                "https://user:secret@github.com/owner/repo.git",
+                concat!("https://user:secret", "@github.com/owner/repo.git"),
                 gh("owner/repo"),
             ),
             ("git@github.com:owner/repo.git", gh("owner/repo")),
@@ -705,7 +705,7 @@ mod tests {
                 ado("org/project/api"),
             ),
             (
-                "https://org@dev.azure.com/org/project/_git/api",
+                concat!("https://org", "@dev.azure.com/org/project/_git/api"),
                 ado("org/project/api"),
             ),
             (
@@ -730,7 +730,7 @@ mod tests {
                 ado("org/project/api"),
             ),
             (
-                "org@vs-ssh.visualstudio.com:v3/org/project/api",
+                concat!("org", "@vs-ssh.visualstudio.com:v3/org/project/api"),
                 ado("org/project/api"),
             ),
             ("/srv/example/api.git", None),

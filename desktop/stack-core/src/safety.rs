@@ -176,7 +176,7 @@ pub struct Finding {
 impl Finding {
     /// Stable identity for acknowledgements and baselines: rule plus place.
     pub fn key(&self) -> String {
-        format!("{}@{}", self.rule, self.location)
+        format!("{} in {}", self.rule, self.location)
     }
 }
 
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].rule, "email");
         assert_eq!(f[0].count, 2);
-        assert_eq!(f[0].key(), "email@customers.email");
+        assert_eq!(f[0].key(), "email in customers.email");
         // a zero threshold behaves like one
         assert_eq!(t.findings(|_| 0, |_| Severity::Warn).len(), 2);
         let json = serde_json::to_string(&f[0]).unwrap();
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(json["file"], "src/config.rs");
         assert_eq!(json["line"], 42);
         assert_eq!(serde_json::from_value::<Finding>(json).unwrap(), s);
-        assert_eq!(s.key(), "aws-access-key@src/config.rs:42 @01234567");
+        assert_eq!(s.key(), "aws-access-key in src/config.rs:42 @01234567");
     }
 
     #[test]
