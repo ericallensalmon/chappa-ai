@@ -10,6 +10,13 @@
 //!   the reachability alerts: `docker info` alone can take seconds, so the
 //!   same refresher asks every [`FACTS_TTL`].
 //!
+//! - **Script outputs** of script components: a status script may take
+//!   seconds and a `plan` script a minute, so the Environment payload and
+//!   the confirms read the last answer ([`ScriptOutputs`]); a run not seen
+//!   before is queued and reads as "not answered yet". Status is asked
+//!   again after [`SCRIPT_STATUS_TTL`], plans after [`SCRIPT_PLAN_TTL`],
+//!   both right after a job; an answer nobody asked for in [`SCRIPT_IDLE`]
+//!   is dropped.
 //! - **Periodic work** registered with [`Background::add_periodic`]: the
 //!   source's `every:` data-safety schedule looks here for due checks.
 //!
@@ -29,6 +36,9 @@ use stack_core::checks::{engine_facts, EngineFacts};
 use stack_core::definition::{ContainerOs, EngineRef};
 use stack_core::images::resolve_digest;
 use stack_core::runner::PrebuiltDigests;
+use stack_core::script::{
+    run_plan, run_status, PlanPreview, ScriptOutputs, ScriptReport, ScriptRun,
+};
 
 use crate::world::World;
 
@@ -38,6 +48,28 @@ pub const DIGEST_TTL: Duration = Duration::from_secs(10 * 60);
 pub const FACTS_TTL: Duration = Duration::from_secs(60);
 /// How often the refresher looks for work.
 pub const TICK: Duration = Duration::from_millis(500);
+/// How long a script component's status report is shown before its
+/// status script runs again.
+pub const SCRIPT_STATUS_TTL: Duration = Duration::from_secs(10);
+/// How long a plan script's preview is kept before it runs again.
+pub const SCRIPT_PLAN_TTL: Duration = Duration::from_secs(60);
+/// A script answer nobody asked for this long is forgotten.
+pub const SCRIPT_IDLE: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone)]
+enum ScriptAnswer {
+    Status(ScriptReport),
+    Plan(PlanPreview),
+}
+
+#[derive(Debug, Clone)]
+struct ScriptEntry {
+    run: ScriptRun,
+    plan: bool,
+    answer: Option<ScriptAnswer>,
+    fetched: Option<Instant>,
+    asked: Instant,
+}
 
 #[derive(Debug, Clone)]
 struct DigestEntry {
@@ -58,6 +90,7 @@ struct FactsEntry {
 struct Caches {
     digests: HashMap<(String, String), DigestEntry>,
     facts: IndexMap<String, FactsEntry>,
+    scripts: HashMap<String, ScriptEntry>,
 }
 
 /// Work the refresher does on every pass, after the caches. It must not
@@ -119,8 +152,23 @@ impl Background {
     /// questions are asked with no lock held.
     pub fn refresh_once(&self, world: &World) {
         let now = Instant::now();
-        let (digests, engines) = {
-            let c = self.caches();
+        let (digests, engines, scripts) = {
+            let mut c = self.caches();
+            c.scripts
+                .retain(|_, e| now.saturating_duration_since(e.asked) < SCRIPT_IDLE);
+            let scripts: Vec<(String, ScriptEntry)> = c
+                .scripts
+                .iter()
+                .filter(|(_, e)| {
+                    let ttl = if e.plan {
+                        SCRIPT_PLAN_TTL
+                    } else {
+                        SCRIPT_STATUS_TTL
+                    };
+                    e.fetched.is_none_or(|t| now - t >= ttl)
+                })
+                .map(|(k, e)| (k.clone(), e.clone()))
+                .collect();
             let digests: Vec<((String, String), DigestEntry)> = c
                 .digests
                 .iter()
@@ -133,8 +181,22 @@ impl Background {
                 .filter(|e| e.fetched.is_none_or(|t| now - t >= self.facts_ttl))
                 .cloned()
                 .collect();
-            (digests, engines)
+            (digests, engines, scripts)
         };
+        for (key, entry) in scripts {
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let answer = if entry.plan {
+                ScriptAnswer::Plan(run_plan(&*world.cli, &entry.run))
+            } else {
+                ScriptAnswer::Status(run_status(&*world.cli, &entry.run))
+            };
+            if let Some(e) = self.caches().scripts.get_mut(&key) {
+                e.answer = Some(answer);
+                e.fetched = Some(Instant::now());
+            }
+        }
         for (key, entry) in digests {
             if self.stop.load(Ordering::SeqCst) {
                 return;
@@ -219,12 +281,63 @@ impl Background {
     }
 
     /// Forget the facts so the next pass asks again (after a job, which
-    /// may have started or stopped an engine's containers).
+    /// may have started or stopped an engine's containers). Script
+    /// components' status reports and plan previews are asked again too;
+    /// the last answer is shown until the new one comes.
     pub fn invalidate_facts(&self) {
-        for e in self.caches().facts.values_mut() {
+        let mut c = self.caches();
+        for e in c.facts.values_mut() {
             e.fetched = None;
         }
+        for e in c.scripts.values_mut() {
+            e.fetched = None;
+        }
+        drop(c);
         self.wake.notify_all();
+    }
+
+    /// The last answer for `run`, queueing it when it is new.
+    fn script_answer(&self, run: &ScriptRun, plan: bool) -> Option<ScriptAnswer> {
+        let key = format!("{}:{}", if plan { "plan" } else { "status" }, run.key());
+        let mut c = self.caches();
+        match c.scripts.get_mut(&key) {
+            Some(e) => {
+                e.asked = Instant::now();
+                e.answer.clone()
+            }
+            None => {
+                c.scripts.insert(
+                    key,
+                    ScriptEntry {
+                        run: run.clone(),
+                        plan,
+                        answer: None,
+                        fetched: None,
+                        asked: Instant::now(),
+                    },
+                );
+                drop(c);
+                self.wake.notify_all();
+                None
+            }
+        }
+    }
+}
+
+impl ScriptOutputs for Background {
+    /// Never waits: the last report, or `None` (and queued) when new.
+    fn status(&self, run: &ScriptRun) -> Option<ScriptReport> {
+        match self.script_answer(run, false)? {
+            ScriptAnswer::Status(r) => Some(r),
+            ScriptAnswer::Plan(_) => None,
+        }
+    }
+
+    fn plan(&self, run: &ScriptRun) -> Option<PlanPreview> {
+        match self.script_answer(run, true)? {
+            ScriptAnswer::Plan(p) => Some(p),
+            ScriptAnswer::Status(_) => None,
+        }
     }
 }
 

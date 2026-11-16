@@ -10,6 +10,10 @@
 //! | process start | 2 min | spawning the dev command and seeing it survive its first moments |
 //! | anything else (gc, prune, hooks) | 5 min | |
 //!
+//! A script component's scripts are not in this table: each verb has its
+//! own limit in the definition (`timeouts:`), with defaults in
+//! `stack_core::script`.
+//!
 //! A step that runs out of time is killed and fails the job with a line in
 //! its log naming the limit, so a hung engine never leaves a job "running"
 //! forever.

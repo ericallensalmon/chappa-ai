@@ -311,6 +311,7 @@ pub fn bring_up_change(loaded: &Loaded, rec: &ReviewRecord) -> Option<Change> {
     (!targets.is_empty()).then(|| Change::Resume {
         item: Some(format!("{BINDING_PREFIX}{}", rec.name)),
         targets,
+        scripts: Vec::new(),
     })
 }
 

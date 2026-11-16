@@ -25,6 +25,13 @@
 //! | | `watch` | dev mode with the watch command |
 //! | | `logs` | a terminal following its output (not a job) |
 //! | | `open-<output>` | a link to one of its URLs |
+//! | script component | `up` / `start` / `stop` / `restart` / `rebuild` / `down` | run that script; only the verbs the definition names a script for |
+//!
+//! A plan that runs scripts says so per script: "Run the `stop` script for
+//! stack" and what its `plan` script printed (else the resolved argv). Its
+//! fingerprint also covers that text, so a plan preview that changed (or
+//! arrived) after the confirm was shown refuses the call like a moved
+//! stack does, and the next view shows the new one.
 
 use indexmap::IndexMap;
 use serde_json::{json, Value};
@@ -35,6 +42,7 @@ use stack_core::definition::{DriverKind, Mode};
 use stack_core::driver::ResolvedInstance;
 use stack_core::planner::{Change, Plan, Selection, Step, Verb};
 use stack_core::runner::{Observation, StackRunner};
+use stack_core::script::{self, ScriptVerb};
 
 use crate::records::JobWork;
 
@@ -57,9 +65,40 @@ impl Offered {
             "label": self.label,
             "mutates": true,
             "confirm": self.confirm,
-            "params": { "fingerprint": fingerprint },
+            "params": { "fingerprint": self.fingerprint_for(fingerprint) },
         })
     }
+
+    /// The fingerprint a call must bring back, given the state's: the
+    /// state's own, or for a plan that runs scripts the state and the
+    /// confirm together (a script's plan preview is not part of the state).
+    pub fn fingerprint_for(&self, state: &str) -> String {
+        let runs_scripts = matches!(&self.work, JobWork::Plan { plan, .. }
+            if plan.steps.iter().any(|s| matches!(s, Step::Script { .. })));
+        if runs_scripts {
+            crate::workspaces::fingerprint(state, &self.confirm)
+        } else {
+            state.to_string()
+        }
+    }
+}
+
+/// The paragraph each script step of `plan` adds to its confirm.
+pub fn script_lines(
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    obs: &Observation,
+    plan: &Plan,
+) -> Vec<String> {
+    plan.steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Script { component, verb } => {
+                Some(runner.script_confirm(inst, obs, component, *verb))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// `Pull db (postgres:16); start db, migrate, api; recreate web (mode
@@ -91,7 +130,7 @@ pub fn confirm_text(plan: &Plan) -> String {
     if !text.is_empty() {
         text.push('.');
     }
-    if plan.verb == Verb::Down {
+    if plan.verb == Verb::Down && plan.steps.iter().any(|s| matches!(s, Step::Remove { .. })) {
         text.push_str(" Containers are removed; volumes are kept.");
     }
     for note in &plan.notes {
@@ -126,6 +165,7 @@ pub fn channel_for(obs: &Observation, default: &str) -> String {
 
 fn planned(
     runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
     obs: &Observation,
     id: &str,
     key: Option<&str>,
@@ -137,6 +177,7 @@ fn planned(
     if plan.steps.is_empty() && !records_only {
         return None;
     }
+    let scripts = script_lines(runner, inst, obs, &plan);
     Some(Offered {
         id: id.to_string(),
         key: key.map(str::to_string),
@@ -158,7 +199,12 @@ fn planned(
                             .find_map(|c| c.channel.clone())
                     });
             }
-            confirm_text(&shown)
+            let mut text = confirm_text(&shown);
+            for s in scripts {
+                text.push_str("\n\n");
+                text.push_str(&s);
+            }
+            text
         },
         work: JobWork::Plan {
             change,
@@ -182,9 +228,10 @@ pub fn stack_actions(
         modes: IndexMap::new(),
         channel: Some(channel.to_string()),
     };
-    out.extend(planned(runner, obs, "up", None, "Bring up", up));
+    out.extend(planned(runner, inst, obs, "up", None, "Bring up", up));
     out.extend(planned(
         runner,
+        inst,
         obs,
         "start",
         None,
@@ -193,6 +240,7 @@ pub fn stack_actions(
     ));
     out.extend(planned(
         runner,
+        inst,
         obs,
         "stop",
         None,
@@ -203,6 +251,7 @@ pub fn stack_actions(
     ));
     out.extend(planned(
         runner,
+        inst,
         obs,
         "down",
         None,
@@ -213,6 +262,7 @@ pub fn stack_actions(
     ));
     out.extend(planned(
         runner,
+        inst,
         obs,
         "rebuild",
         None,
@@ -268,9 +318,13 @@ pub fn component_actions(
     let Some(def) = runner.stack.components.get(component) else {
         return out;
     };
+    if def.driver == DriverKind::Script {
+        return script_actions(runner, inst, obs, component);
+    }
     let one = vec![component.to_string()];
     out.extend(planned(
         runner,
+        inst,
         obs,
         "start",
         Some(component),
@@ -283,6 +337,7 @@ pub fn component_actions(
     ));
     out.extend(planned(
         runner,
+        inst,
         obs,
         "stop",
         Some(component),
@@ -309,6 +364,7 @@ pub fn component_actions(
     {
         out.extend(planned(
             runner,
+            inst,
             obs,
             "rebuild",
             Some(component),
@@ -325,6 +381,7 @@ pub fn component_actions(
             }
             out.extend(planned(
                 runner,
+                inst,
                 obs,
                 &format!("mode-{mode}"),
                 Some(component),
@@ -340,6 +397,7 @@ pub fn component_actions(
     if def.has_mode(Mode::Dev) && def.watch_command().is_some() {
         out.extend(planned(
             runner,
+            inst,
             obs,
             "watch",
             Some(component),
@@ -351,6 +409,61 @@ pub fn component_actions(
         ));
     }
     out
+}
+
+/// A script component's verbs: one action per script the definition
+/// names, its confirm the script's own (see [`script_lines`]).
+fn script_actions(
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    obs: &Observation,
+    component: &str,
+) -> Vec<Offered> {
+    let mut out = Vec::new();
+    let def = &runner.stack.components[component];
+    for verb in ScriptVerb::MUTATING {
+        if !script::has(def, verb) {
+            continue;
+        }
+        let change = Change::Script {
+            component: component.to_string(),
+            verb,
+        };
+        let Ok(plan) = runner.plan(obs, &change) else {
+            continue;
+        };
+        let mut confirm = script_lines(runner, inst, obs, &plan).join("\n\n");
+        for note in &plan.notes {
+            confirm.push(' ');
+            confirm.push_str(&capitalize(note));
+        }
+        out.push(Offered {
+            id: verb.as_str().to_string(),
+            key: Some(component.to_string()),
+            label: script_label(verb).to_string(),
+            confirm,
+            work: JobWork::Plan {
+                change,
+                plan: Box::new(plan),
+                save: None,
+                remove_volumes: false,
+            },
+        });
+    }
+    out
+}
+
+fn script_label(verb: ScriptVerb) -> &'static str {
+    match verb {
+        ScriptVerb::Up => "Up",
+        ScriptVerb::Start => "Start",
+        ScriptVerb::Stop => "Stop",
+        ScriptVerb::Restart => "Restart",
+        ScriptVerb::Rebuild => "Rebuild",
+        ScriptVerb::Down => "Down",
+        ScriptVerb::Status => "Status",
+        ScriptVerb::Plan => "Plan",
+    }
 }
 
 /// Every endpoint action offered now, the stack's first.

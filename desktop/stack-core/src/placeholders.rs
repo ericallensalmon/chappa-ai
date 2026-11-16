@@ -16,6 +16,9 @@
 //! | `{container}` | the container a hook runs against |
 //! | `{snapshot}` | the generated name of a data snapshot |
 //! | `{param:<name>}` | a parameter the caller supplied (state-seed arguments) |
+//! | `{instance}` | the instance id, `<stack>-<slot>` |
+//! | `{branch:<repo>}` | the branch the bound work item has in its worktree of that clone |
+//! | `{worktree:<repo>}` | the folder of the bound work item's worktree of that clone |
 //!
 //! `{host}` differs per engine because containers reach the host under a
 //! different name on each: `host.docker.internal` from docker containers,
@@ -38,7 +41,10 @@ use crate::driver::EngineKind;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Placeholder {
     Slot,
-    Port { component: String, index: u16 },
+    Port {
+        component: String,
+        index: u16,
+    },
     Image(String),
     Ref(String),
     Item,
@@ -48,6 +54,11 @@ pub enum Placeholder {
     Container,
     Snapshot,
     Param(String),
+    Instance,
+    /// The bound item's branch in its worktree of a clone.
+    Branch(String),
+    /// The bound item's worktree folder of a clone.
+    Worktree(String),
 }
 
 impl Placeholder {
@@ -81,6 +92,9 @@ impl fmt::Display for Placeholder {
             Placeholder::Container => write!(f, "{{container}}"),
             Placeholder::Snapshot => write!(f, "{{snapshot}}"),
             Placeholder::Param(p) => write!(f, "{{param:{p}}}"),
+            Placeholder::Instance => write!(f, "{{instance}}"),
+            Placeholder::Branch(r) => write!(f, "{{branch:{r}}}"),
+            Placeholder::Worktree(r) => write!(f, "{{worktree:{r}}}"),
         }
     }
 }
@@ -108,6 +122,10 @@ pub enum PlaceholderError {
     StrayClose { at: usize },
     #[error("no value for `{what}` in this context")]
     NoValue { what: String },
+    #[error("`{what}` needs a bound work item; activate one in this slot first")]
+    NoItem { what: String },
+    #[error("`{what}`: the bound work item has no worktree of `{repo}`")]
+    NoWorktree { what: String, repo: String },
     #[error("`{what}` names unknown component `{component}`")]
     UnknownComponent { what: String, component: String },
     #[error("`{what}`: component `{component}` publishes {available} port(s), index {index} is out of range")]
@@ -170,6 +188,11 @@ pub struct Context {
     pub container: Option<String>,
     pub snapshot: Option<String>,
     pub params: IndexMap<String, String>,
+    pub instance: Option<String>,
+    /// The bound item's branch per clone name.
+    pub branches: IndexMap<String, String>,
+    /// The bound item's worktree folder per clone name.
+    pub worktrees: IndexMap<String, String>,
 }
 
 /// Parse `template` into segments. Pure syntax: no values are consulted.
@@ -243,6 +266,9 @@ fn parse_one(body: &str) -> Result<Placeholder, PlaceholderError> {
         "host" => no_arg(Placeholder::Host),
         "container" => no_arg(Placeholder::Container),
         "snapshot" => no_arg(Placeholder::Snapshot),
+        "instance" => no_arg(Placeholder::Instance),
+        "branch" => needs_arg(Placeholder::Branch),
+        "worktree" => needs_arg(Placeholder::Worktree),
         "image" => needs_arg(Placeholder::Image),
         "ref" => needs_arg(Placeholder::Ref),
         "param" => needs_arg(Placeholder::Param),
@@ -316,7 +342,26 @@ fn resolve_one(p: &Placeholder, ctx: &Context) -> Result<String, PlaceholderErro
     let no_value = || PlaceholderError::NoValue { what: what.clone() };
     match p {
         Placeholder::Slot => ctx.slot.map(|s| s.to_string()).ok_or_else(no_value),
-        Placeholder::Item => ctx.item.clone().ok_or_else(no_value),
+        Placeholder::Item => ctx
+            .item
+            .clone()
+            .ok_or_else(|| PlaceholderError::NoItem { what: what.clone() }),
+        Placeholder::Instance => ctx.instance.clone().ok_or_else(no_value),
+        Placeholder::Branch(repo) | Placeholder::Worktree(repo) => {
+            if ctx.item.is_none() {
+                return Err(PlaceholderError::NoItem { what: what.clone() });
+            }
+            let map = match p {
+                Placeholder::Branch(_) => &ctx.branches,
+                _ => &ctx.worktrees,
+            };
+            map.get(repo)
+                .cloned()
+                .ok_or_else(|| PlaceholderError::NoWorktree {
+                    what: what.clone(),
+                    repo: repo.clone(),
+                })
+        }
         Placeholder::Channel => ctx.channel.clone().ok_or_else(no_value),
         Placeholder::Hostname => ctx.hostname.clone().ok_or_else(no_value),
         Placeholder::Host => ctx
@@ -386,6 +431,12 @@ mod tests {
             .insert("api".into(), "registry.example/api@sha256:abc".into());
         c.refs.insert("api".into(), "feature/x".into());
         c.params.insert("count".into(), "3".into());
+        c.instance = Some("app-2".into());
+        c.branches.insert("api".into(), "task/KEY-12".into());
+        c.worktrees.insert(
+            "api".into(),
+            "/srv/example/.work/KEY-12/src/api-01234567".into(),
+        );
         c
     }
 
@@ -424,6 +475,12 @@ mod tests {
             ("{container}", "app-2-db"),
             ("{snapshot}", "20260101T000000Z"),
             ("{param:count}", "3"),
+            ("{instance}", "app-2"),
+            ("{branch:api}", "task/KEY-12"),
+            (
+                "{worktree:api}",
+                "/srv/example/.work/KEY-12/src/api-01234567",
+            ),
         ];
         for (template, want) in table {
             assert_eq!(resolve(template, &c).unwrap(), want, "{template}");
@@ -566,6 +623,36 @@ mod tests {
     }
 
     #[test]
+    fn item_placeholders_say_when_no_item_is_bound() {
+        let mut c = ctx();
+        assert_eq!(
+            resolve("{worktree:web}", &c).unwrap_err(),
+            PlaceholderError::NoWorktree {
+                what: "{worktree:web}".into(),
+                repo: "web".into()
+            }
+        );
+        c.item = None;
+        for t in ["{item}", "{branch:api}", "{worktree:api}"] {
+            let e = resolve(t, &c).unwrap_err();
+            assert_eq!(e, PlaceholderError::NoItem { what: t.into() }, "{t}");
+            assert!(e.to_string().contains("needs a bound work item"), "{e}");
+        }
+        assert_eq!(
+            parse("{branch}").unwrap_err(),
+            PlaceholderError::MissingArgument {
+                name: "branch".into()
+            }
+        );
+        assert_eq!(
+            parse("{instance:x}").unwrap_err(),
+            PlaceholderError::UnexpectedArgument {
+                name: "instance".into()
+            }
+        );
+    }
+
+    #[test]
     fn references_lists_in_order_with_duplicates() {
         let refs = references("{port:api}-{slot}-{port:api}").unwrap();
         assert_eq!(refs.len(), 3);
@@ -605,6 +692,9 @@ mod tests {
             "{image:api}",
             "{param:n}",
             "{host}",
+            "{instance}",
+            "{branch:api}",
+            "{worktree:api}",
         ] {
             let p = references(t).unwrap().remove(0);
             assert_eq!(p.to_string(), t);

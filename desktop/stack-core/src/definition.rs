@@ -386,11 +386,12 @@ impl WorkDef {
     }
 }
 
-/// How one component uses a shared clone.
+/// How one component uses a shared clone: in a mode, or (`mode: None`)
+/// as one of a script component's `repos:`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoUse {
     pub component: String,
-    pub mode: Mode,
+    pub mode: Option<Mode>,
 }
 
 /// A shared clone named by component `repo:` paths.
@@ -1025,6 +1026,32 @@ pub struct ComponentStopDef {
     pub grace_seconds: Option<u32>,
 }
 
+/// A component's `stop:`. On a container or process it says how to stop
+/// (`{graceSeconds: 30}`); on a script component it is the `stop` script
+/// itself (an argv list), like `up` and `down` beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ComponentStop {
+    Script(Vec<String>),
+    Grace(ComponentStopDef),
+}
+
+impl ComponentStop {
+    pub fn grace_seconds(&self) -> Option<u32> {
+        match self {
+            ComponentStop::Grace(g) => g.grace_seconds,
+            ComponentStop::Script(_) => None,
+        }
+    }
+
+    pub fn script(&self) -> Option<&[String]> {
+        match self {
+            ComponentStop::Script(argv) => Some(argv),
+            ComponentStop::Grace(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentDef {
@@ -1049,13 +1076,33 @@ pub struct ComponentDef {
     pub dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub vars: IndexMap<String, String>,
-    // script
+    // script: one argv per verb (see [`crate::script`]); `stop` is below,
+    // shared with the other drivers' stop settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub up: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub down: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild: Option<Vec<String>>,
+    /// Prints what a verb would do; run with the verb appended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Vec<String>>,
+    /// Where the scripts run, relative to the project; default the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// Per verb (`up: 30m`, `status: 20s`): how long a script may run.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub timeouts: IndexMap<String, String>,
+    /// The shared clones the scripts build from (paths like a mode's
+    /// `repo:`), so a work item can have worktrees of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<PathBuf>,
     /// Keyed by mode name (`prebuilt`, `source`, `dev`); unknown names are
     /// a validation error rather than a parse failure.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
@@ -1086,7 +1133,7 @@ pub struct ComponentDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_index: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop: Option<ComponentStopDef>,
+    pub stop: Option<ComponentStop>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<DataDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1113,6 +1160,13 @@ impl ComponentDef {
             up: None,
             down: None,
             status: None,
+            start: None,
+            restart: None,
+            rebuild: None,
+            plan: None,
+            cwd: None,
+            timeouts: IndexMap::new(),
+            repos: Vec::new(),
             modes: IndexMap::new(),
             default: None,
             depends_on: Vec::new(),
@@ -1200,6 +1254,13 @@ impl ComponentDef {
         push(&mut out, "up", &self.up);
         push(&mut out, "down", &self.down);
         push(&mut out, "status", &self.status);
+        push(&mut out, "start", &self.start);
+        if let Some(argv) = self.stop.as_ref().and_then(ComponentStop::script) {
+            out.push(("stop".to_string(), argv));
+        }
+        push(&mut out, "restart", &self.restart);
+        push(&mut out, "rebuild", &self.rebuild);
+        push(&mut out, "plan", &self.plan);
         if let Some(d) = &self.data {
             push(&mut out, "data.scrub", &d.scrub);
             push(&mut out, "data.seed", &d.seed);
@@ -1267,10 +1328,11 @@ impl StackDef {
     pub fn repos(&self) -> IndexMap<String, RepoDef> {
         let mut out: IndexMap<String, RepoDef> = IndexMap::new();
         for (component, c) in &self.components {
-            for mode in Mode::ALL {
-                let Some(path) = c.mode(mode).and_then(|m| m.repo.as_ref()) else {
-                    continue;
-                };
+            let in_modes = Mode::ALL
+                .into_iter()
+                .filter_map(|mode| Some((Some(mode), c.mode(mode)?.repo.as_ref()?)));
+            let listed = c.repos.iter().map(|p| (None, p));
+            for (mode, path) in in_modes.chain(listed) {
                 let Some(name) = repo_name(path) else {
                     continue;
                 };
@@ -1402,7 +1464,7 @@ impl StackDef {
         self.components
             .get(component)
             .and_then(|c| c.stop.as_ref())
-            .and_then(|s| s.grace_seconds)
+            .and_then(ComponentStop::grace_seconds)
             .or_else(|| self.stop.as_ref().map(|s| s.grace_seconds))
             .unwrap_or(DEFAULT_GRACE_SECONDS)
     }
@@ -1664,6 +1726,15 @@ pub enum Rule {
     NotSupported,
     /// A number outside what the setting allows.
     OutOfRange,
+    /// A script argv that cannot run as written (empty, or a PowerShell
+    /// file named without its interpreter).
+    ScriptArgv,
+    /// A duration that is not a whole number and one of `s`, `m`, `h`, `d`.
+    InvalidDuration,
+    /// A setting only another driver uses.
+    NotForDriver,
+    /// A path that must stay inside the project.
+    PathOutsideProject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2039,6 +2110,12 @@ fn validate_stack(
                 }
             }
         }
+        for d in crate::script::validate_component(c, &cpath) {
+            match d.severity {
+                Severity::Error => err(d.rule, d.path, d.message),
+                Severity::Warning => warn(d.rule, d.path, d.message),
+            }
+        }
         // modes
         for (mode_name, m) in &c.modes {
             let mpath = format!("{cpath}.modes.{mode_name}");
@@ -2309,14 +2386,28 @@ fn validate_stack(
     let repos = stack.repos();
     for (name, def) in &repos {
         for u in &def.uses {
-            let written = stack.components[&u.component]
-                .mode(u.mode)
-                .and_then(|m| m.repo.as_deref());
+            let c = &stack.components[&u.component];
+            let (written, at) = match u.mode {
+                Some(mode) => (
+                    c.mode(mode).and_then(|m| m.repo.as_deref()),
+                    format!("modes.{mode}.repo"),
+                ),
+                None => {
+                    let i = c
+                        .repos
+                        .iter()
+                        .position(|p| repo_name(p).as_deref() == Some(name.as_str()));
+                    (
+                        i.map(|i| c.repos[i].as_path()),
+                        format!("repos[{}]", i.unwrap_or(0)),
+                    )
+                }
+            };
             if let Some(w) = written {
                 if stack.repo_dir(Path::new(""), w) != stack.repo_dir(Path::new(""), &def.path) {
                     err(
                         Rule::RepoNameClash,
-                        format!("{base}.components.{}.modes.{}.repo", u.component, u.mode),
+                        format!("{base}.components.{}.{at}", u.component),
                         format!(
                             "`{}` and `{}` are both the clone `{name}`; a clone is known by its folder name, so give them different names",
                             w.display(),
@@ -3637,7 +3728,7 @@ stacks:
             repos["web"].uses,
             vec![RepoUse {
                 component: "web".into(),
-                mode: Mode::Dev
+                mode: Some(Mode::Dev)
             }]
         );
         assert_eq!(stack.repo_of("api", Mode::Source).as_deref(), Some("api"));

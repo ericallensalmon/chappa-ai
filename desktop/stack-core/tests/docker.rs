@@ -75,6 +75,9 @@ fn execute(steps: &[JobStep], cli: &CliRunner) {
             JobStep::StopProcess { component, .. } => {
                 panic!("{component}: no process components in this stack")
             }
+            JobStep::Script { component, .. } => {
+                panic!("{component}: no script components in this stack")
+            }
         }
     }
 }

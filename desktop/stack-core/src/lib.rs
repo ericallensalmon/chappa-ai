@@ -24,6 +24,7 @@
 //! | [`images`] | content-keyed source builds, prebuilt digest resolution, catalog/resolve hooks, the provenance cache |
 //! | [`compose`] | the compose driver: projects, the per-instance override file, verbs as argv, `ps`/`inspect` parsing, the gateway rule |
 //! | [`process`] | the process driver: run blocks with the instance environment |
+//! | [`script`] | the script driver: a verb per script, argv resolved with the bound item's worktrees, the status JSON, last outcomes, plan previews for confirms |
 //! | [`checks`] | the checks before `up`: engine reachable and OS mode, memory, ports, registry login |
 //! | [`runner`] | the verbs end to end: observe, plan, apply into steps, status, gc, activate |
 //! | [`workspace`] | item workspaces: folder names from tracker keys, branch patterns, remote identity, the path-length check, the allow file, `item.json` |
@@ -72,6 +73,7 @@ pub mod process;
 pub mod provenance;
 pub mod runner;
 pub mod safety;
+pub mod script;
 pub mod states;
 pub mod workflow;
 pub mod workspace;

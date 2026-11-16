@@ -39,7 +39,8 @@ use std::sync::Mutex;
 
 use stack_core::cli::{engine_argv, CliError, Invocation};
 use stack_core::definition::{
-    ComponentDef, DataDef, DataStrategy, Mode, ScanWhen, SnapshotHooks, SnapshotLocation,
+    ComponentDef, DataDef, DataStrategy, DriverKind, Mode, ScanWhen, SnapshotHooks,
+    SnapshotLocation,
 };
 use stack_core::driver::ResolvedInstance;
 use stack_core::images::image_exists;
@@ -515,6 +516,17 @@ pub fn save_state(
             continue;
         }
         let prov = cx.obs.cache.components.get(name);
+        if cx.loaded.stack.components[name].driver == DriverKind::Script {
+            components.insert(
+                name.clone(),
+                StateComponent {
+                    desired: cur.desired,
+                    script: true,
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
         components.insert(
             name.clone(),
             StateComponent {
@@ -533,6 +545,7 @@ pub fn save_state(
                     .mode
                     .filter(|m| m.uses_repo())
                     .and_then(|m| cx.loaded.stack.repo_of(name, m)),
+                script: false,
             },
         );
     }
@@ -648,6 +661,7 @@ pub fn save_confirm(loaded: &Loaded, obs: &Observation, rec: &ItemRecord) -> (St
                 git_ref: cur.git_ref.clone(),
                 commit: cur.commit.clone(),
                 image: cur.image.clone(),
+                script: loaded.stack.components[name].driver == DriverKind::Script,
                 build_id: obs
                     .cache
                     .components
@@ -1256,6 +1270,8 @@ pub fn resume_proposal(
     let mut moved: Vec<Moved> = Vec::new();
     // Under `Tips`, the tip a moved component builds from instead.
     let mut at_tip: IndexMap<String, String> = IndexMap::new();
+    // Script components wanted running: their `up` script runs again.
+    let mut scripts: Vec<String> = Vec::new();
     for (name, c) in &state.components {
         if blocked.contains_key(name) {
             continue;
@@ -1264,6 +1280,14 @@ pub fn resume_proposal(
             blocked.insert(name.clone(), "the stack no longer has it".into());
             continue;
         };
+        if c.script || def.driver == DriverKind::Script {
+            if def.driver != DriverKind::Script {
+                blocked.insert(name.clone(), "it is no longer a script component".into());
+            } else if c.desired == Desired::Running {
+                scripts.push(name.clone());
+            }
+            continue;
+        }
         let Some(mode) = c.mode else {
             continue;
         };
@@ -1478,6 +1502,7 @@ pub fn resume_proposal(
     let change = Change::Resume {
         item: Some(rec.key.clone()),
         targets: targets.clone(),
+        scripts: scripts.clone(),
     };
     let mut plan = runner
         .plan(obs, &change)
@@ -1523,7 +1548,9 @@ pub fn resume_proposal(
         parts.push("What runs now is replaced and not saved; save it first to keep it.".into());
     }
     let mut shown = state.clone();
-    shown.components.retain(|n, _| targets.contains_key(n));
+    shown
+        .components
+        .retain(|n, _| targets.contains_key(n) || scripts.contains(n));
     for (n, tip) in &at_tip {
         if let Some(c) = shown.components.get_mut(n) {
             c.commit = Some(tip.clone());
@@ -1593,6 +1620,16 @@ pub fn resume_proposal(
             } else {
                 format!(", state seeds {}", seeds.join(", "))
             }
+        ));
+    }
+    if !scripts.is_empty() {
+        parts.push(format!(
+            "{} {}: {} `up` script{} again, with the environment of {}'s worktrees.",
+            scripts.join(", "),
+            stack_core::states::SCRIPT_RESTORE_NOTE,
+            plural(scripts.len(), "its", "their"),
+            plural(scripts.len(), " runs", "s run"),
+            rec.item_ref.key
         ));
     }
     for (c, why) in &blocked {

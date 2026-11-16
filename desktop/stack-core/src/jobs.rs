@@ -19,6 +19,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::script::ScriptVerb;
+
 /// A command for the host to run: argv (no shell), where, with what added
 /// to the environment, under what title.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +108,16 @@ pub enum JobStep {
         component: String,
         grace_seconds: u32,
     },
+    /// One of a script component's scripts: run like [`JobStep::Run`],
+    /// but under its own limit, killed with its whole process tree when
+    /// it runs out of time, and with its outcome recorded for the
+    /// component's state.
+    Script {
+        run: RunBlock,
+        component: String,
+        verb: ScriptVerb,
+        timeout_seconds: u64,
+    },
 }
 
 impl JobStep {
@@ -134,7 +146,7 @@ impl JobStep {
 
     pub fn as_run(&self) -> Option<&RunBlock> {
         match self {
-            JobStep::Run { run, .. } => Some(run),
+            JobStep::Run { run, .. } | JobStep::Script { run, .. } => Some(run),
             _ => None,
         }
     }
@@ -151,6 +163,9 @@ impl JobStep {
                 component,
                 grace_seconds,
             } => format!("{component}: stop process ({grace_seconds}s)"),
+            JobStep::Script {
+                component, verb, ..
+            } => format!("{component}: {verb} script"),
         }
     }
 }

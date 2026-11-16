@@ -17,7 +17,11 @@
 //! 4. the steps, in order: files are written in process, engine commands
 //!    run as children with their output streamed (each under its limit
 //!    from [`crate::timeouts`]), process components start detached and go
-//!    into the process table, process stops end their tree;
+//!    into the process table, process stops end their tree; a script
+//!    component's script runs like an engine command but under its own
+//!    limit (the definition's `timeouts`), a timeout stops its whole
+//!    process tree, and how it went is recorded for the component's state
+//!    (`.work/instances/<instance>/scripts.json`);
 //! 5. on a failed step the remaining steps are skipped, except the intent
 //!    record, which is still written: the user asked for these components
 //!    to run, so one that did not start shows as a problem, not as idle;
@@ -66,6 +70,7 @@ use stack_core::planner::{Change, Plan, PlanError, Step, Verb};
 use stack_core::runner::Observation;
 use stack_core::runner::{ApplyOptions, RunnerError, StackRunner};
 use stack_core::safety::Policy;
+use stack_core::script::{LastRun, ScriptRuns, ScriptVerb};
 use stack_core::states::{DataSnapshot, RecipeRecord, SavedState, SeedChoice};
 use stack_core::workspace::{c8, ItemRecord};
 
@@ -1014,6 +1019,9 @@ fn start_of(step: &JobStep) -> Option<&str> {
         {
             Some(component)
         }
+        JobStep::Script {
+            component, verb, ..
+        } if verb.starts() => Some(component),
         _ => None,
     }
 }
@@ -1315,6 +1323,21 @@ fn run_step(
                 Err((Some(code), format!("exited with code {code}")))
             }
         }
+        JobStep::Script {
+            run,
+            component,
+            verb,
+            timeout_seconds,
+        } => run_script(
+            world,
+            work_dir,
+            instance,
+            run,
+            component,
+            *verb,
+            *timeout_seconds,
+            out,
+        ),
         JobStep::StopProcess {
             component,
             grace_seconds,
@@ -1344,6 +1367,60 @@ fn run_step(
             Ok(None)
         }
     }
+}
+
+/// Run one script of a script component under its limit, its output
+/// streamed, and record how it went for the component's state.
+#[allow(clippy::too_many_arguments)]
+fn run_script(
+    world: &World,
+    work_dir: &Path,
+    instance: &str,
+    run: &RunBlock,
+    component: &str,
+    verb: ScriptVerb,
+    timeout_seconds: u64,
+    out: &mut Out<'_>,
+) -> Result<Option<i32>, (Option<i32>, String)> {
+    let limit = Duration::from_secs(timeout_seconds.max(1));
+    out.say(&format!(
+        "▶ {component}: {verb} script (limit {})",
+        timeouts::describe(limit)
+    ));
+    out.say(&format!(
+        "  $ {}  (in {})",
+        run.command_line(),
+        run.cwd.display()
+    ));
+    let outcome = world
+        .steps
+        .run_tree(run, limit, &mut |l| out.say(&format!("  {l}")));
+    let (result, last) = match outcome {
+        Ok(0) => (Ok(Some(0)), (true, Some(0), None)),
+        Ok(code) => (
+            Err((
+                Some(code),
+                format!("the {verb} script exited with code {code}"),
+            )),
+            (false, Some(code), None),
+        ),
+        Err(e) => {
+            let why = format!("the {verb} script: {e}");
+            (Err((None, why.clone())), (false, None, Some(why)))
+        }
+    };
+    let (ok, exit_code, error) = last;
+    let record = LastRun {
+        verb,
+        ok,
+        exit_code,
+        ended_utc: utc_now(),
+        error,
+    };
+    if let Err(e) = ScriptRuns::record(work_dir, instance, component, record) {
+        out.say(&format!("  cannot record how the script went: {e}"));
+    }
+    result
 }
 
 /// Start a process component detached, remember it, and make sure it

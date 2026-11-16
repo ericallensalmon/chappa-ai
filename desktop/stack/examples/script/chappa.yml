@@ -1,0 +1,41 @@
+# An example project whose stack is run by its own scripts: one script
+# component, `app`, wraps a whole (pretend) stack of two services, `api`
+# and `web`. The scripts are small node programs that keep the services'
+# state in a file under .work/, so the example needs nothing but node.
+# See the README beside this file.
+name: example-script
+processes:
+  # The stack runner as a source: the app starts it, checks its identity,
+  # and shows its Environment view; the scripts' verbs are its actions.
+  # Built from this repository (build it once first, see the README).
+  stack:
+    command: [cargo, run, -q, --manifest-path, ../../../Cargo.toml, -p, chappa-stack, --, serve]
+    source: {}
+    auto_start: true
+    auto_restart: false
+    restart_when_changed: []
+    env: {}
+
+stacks:
+  scripted:
+    slots: { count: 2, portBase: 15000, portStride: 100 }
+    components:
+      app:
+        driver: script
+        label: App
+        # Every verb is one argv, never a shell line. `plan` is run as
+        # `plan <verb>` to show what a verb would do in its confirm.
+        up:     [node, scripts/up.js]
+        stop:   [node, scripts/stop.js]
+        start:  [node, scripts/start.js]
+        down:   [node, scripts/down.js]
+        status: [node, scripts/status.js]
+        plan:   [node, scripts/plan.js]
+        # Two host ports in this slot: the pretend api and web.
+        ports: 2
+        env:
+          APP_API_URL: "http://localhost:{port:app}"
+          APP_WEB_URL: "http://localhost:{port:app:1}"
+        timeouts: { up: 2m, status: 10s }
+        outputs:
+          url: "http://localhost:{port:app:1}"

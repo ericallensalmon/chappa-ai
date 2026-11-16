@@ -21,7 +21,7 @@
 //! | [`records`] | job records under `.work/jobs/`, exit reports, retention |
 //! | [`runjob`] | `run-job`: one stored job, start to finish |
 //! | [`procs`] | the process table of process components |
-//! | [`background`] | registry digests and engine facts, refreshed off the status path |
+//! | [`background`] | registry digests, engine facts and script components' status and plan output, refreshed off the status path |
 //! | [`relay`] | the gateway-only TCP relay |
 //! | [`timeouts`] | the per-step time limits |
 //! | [`world`] | every outside tool as a shareable trait object, real or fake |

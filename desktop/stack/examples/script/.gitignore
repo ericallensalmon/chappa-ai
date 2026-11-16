@@ -1,0 +1,4 @@
+# Intent records, job logs and the scripts' pretend state: machine-local,
+# never committed.
+.work/
+.chappa/stack-state/

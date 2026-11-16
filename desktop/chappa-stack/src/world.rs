@@ -263,6 +263,18 @@ pub trait StepExec {
         limit: Duration,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String>;
+
+    /// [`StepExec::run`] for a command that may start children of its own
+    /// (a project's script): when it runs out of time, its whole process
+    /// tree is stopped, not just the first process.
+    fn run_tree(
+        &self,
+        run: &RunBlock,
+        limit: Duration,
+        out: &mut dyn FnMut(&str),
+    ) -> Result<i32, String> {
+        self.run(run, limit, out)
+    }
 }
 
 /// The real thing: a child process with both pipes streamed as they come.
@@ -275,73 +287,135 @@ impl StepExec for ChildSteps {
         limit: Duration,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String> {
-        let mut cmd = command_for(&run.argv)?;
-        cmd.current_dir(&run.cwd)
-            .envs(&run.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("cannot start `{}`: {e}", run.argv[0]))?;
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let readers: Vec<_> = [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|pipe| {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let mut reader = BufReader::new(pipe);
-                let mut buf = Vec::new();
-                while let Ok(n) = reader.read_until(b'\n', &mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    let line = String::from_utf8_lossy(&buf);
-                    let _ = tx.send(line.trim_end_matches(['\r', '\n']).to_string());
-                    buf.clear();
+        run_child(run, limit, out, false)
+    }
+
+    fn run_tree(
+        &self,
+        run: &RunBlock,
+        limit: Duration,
+        out: &mut dyn FnMut(&str),
+    ) -> Result<i32, String> {
+        run_child(run, limit, out, true)
+    }
+}
+
+/// Stop `pid` and everything it started: `taskkill /T` on Windows, the
+/// process group (which the child leads) elsewhere.
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("taskkill");
+        c.args(["/T", "/F", "/PID", &pid.to_string()]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("kill");
+        c.args(["-KILL", &format!("-{pid}")]);
+        c
+    };
+    let _ = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Run one command with both pipes streamed to `out`, under `limit`. With
+/// `tree`, the command leads its own process group (Unix) and a timeout
+/// stops all of its descendants.
+fn run_child(
+    run: &RunBlock,
+    limit: Duration,
+    out: &mut dyn FnMut(&str),
+    tree: bool,
+) -> Result<i32, String> {
+    let mut cmd = command_in(&run.argv, Some(&run.cwd))?;
+    cmd.current_dir(&run.cwd)
+        .envs(&run.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    if tree {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("cannot start `{}`: {e}", run.argv[0]))?;
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let readers: Vec<_> = [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|pipe| {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(pipe);
+            let mut buf = Vec::new();
+            while let Ok(n) = reader.read_until(b'\n', &mut buf) {
+                if n == 0 {
+                    break;
                 }
-            })
+                let line = String::from_utf8_lossy(&buf);
+                let _ = tx.send(line.trim_end_matches(['\r', '\n']).to_string());
+                buf.clear();
+            }
         })
-        .collect();
-        drop(tx);
-        let deadline = Instant::now() + limit;
-        let status = loop {
-            while let Ok(line) = rx.try_recv() {
-                out(&line);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {}
-                Err(e) => return Err(format!("cannot wait for `{}`: {e}", run.argv[0])),
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "timed out after {}; the command was stopped",
-                    crate::timeouts::describe(limit)
-                ));
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-        for r in readers {
-            let _ = r.join();
-        }
+    })
+    .collect();
+    drop(tx);
+    let deadline = Instant::now() + limit;
+    let status = loop {
         while let Ok(line) = rx.try_recv() {
             out(&line);
         }
-        Ok(status.code().unwrap_or(-1))
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => return Err(format!("cannot wait for `{}`: {e}", run.argv[0])),
+        }
+        if Instant::now() >= deadline {
+            if tree {
+                kill_tree(child.id());
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "timed out after {}; {} was stopped",
+                crate::timeouts::describe(limit),
+                if tree {
+                    "it and every process it started"
+                } else {
+                    "the command"
+                }
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    // A process the command left running may still hold its pipes:
+    // read what is there, and stop waiting after a short grace.
+    let grace = Instant::now() + Duration::from_secs(2);
+    while readers.iter().any(|r| !r.is_finished()) && Instant::now() < grace {
+        while let Ok(line) = rx.try_recv() {
+            out(&line);
+        }
+        thread::sleep(Duration::from_millis(20));
     }
+    while let Ok(line) = rx.try_recv() {
+        out(&line);
+    }
+    Ok(status.code().unwrap_or(-1))
 }
 
 /// Engine commands through an [`EngineCli`] (captured, not streamed): what
@@ -373,12 +447,34 @@ impl StepExec for CliSteps {
 /// `PATH` with the usual extensions, because `npm` or `npx` are `.cmd`
 /// scripts that `CreateProcess` will not find by name; a script runs
 /// through `cmd /C`, and then no argument may carry a character `cmd`
-/// would interpret.
+/// would interpret. A PowerShell file is refused: it only runs through an
+/// interpreter the argv names.
 pub fn command_for(argv: &[String]) -> Result<Command, String> {
+    command_in(argv, None)
+}
+
+/// [`command_for`] for a command that runs in `cwd`: a relative program
+/// path with a folder in it is taken from there.
+pub fn command_in(argv: &[String], cwd: Option<&Path>) -> Result<Command, String> {
     let program = argv.first().ok_or("the command is empty")?;
+    if stack_core::script::needs_interpreter(argv) {
+        return Err(format!(
+            "`{program}` is a PowerShell script, which does not run on its own; name the interpreter first, as in [powershell, -NoProfile, -File, {program}]"
+        ));
+    }
+    let has_folder = program.contains('/') || program.contains('\\');
+    let program_path = match cwd {
+        Some(dir) if has_folder && Path::new(program).is_relative() => dir.join(program),
+        _ => PathBuf::from(program),
+    };
     #[cfg(windows)]
     {
-        if let Some(found) = find_on_path(program) {
+        let batch = program_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        let found = find_on_path(program).or_else(|| batch.then(|| program_path.clone()));
+        if let Some(found) = found {
             let ext = found
                 .extension()
                 .and_then(|e| e.to_str())
@@ -402,7 +498,7 @@ pub fn command_for(argv: &[String]) -> Result<Command, String> {
             return Ok(cmd);
         }
     }
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(program_path);
     cmd.args(&argv[1..]);
     Ok(cmd)
 }
@@ -675,5 +771,85 @@ mod tests {
         }
         cached.gateway(&podman, None).unwrap();
         assert_eq!(cached.inner.0.load(Ordering::SeqCst), 2);
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_powershell_file_only_runs_through_the_interpreter_the_argv_names() {
+        let e = command_for(&argv(&["scripts/up.ps1", "-Slot", "0"])).unwrap_err();
+        assert!(
+            e.contains("[powershell, -NoProfile, -File, scripts/up.ps1]"),
+            "{e}"
+        );
+        let cmd = command_in(
+            &argv(&[
+                "powershell",
+                "-NoProfile",
+                "-File",
+                "scripts/up.ps1",
+                "-Slot",
+                "0",
+            ]),
+            Some(Path::new("/srv/example")),
+        )
+        .unwrap();
+        // The interpreter is the program (found on PATH where it exists);
+        // the script is one argument, passed as written.
+        let program = cmd.get_program().to_string_lossy().to_ascii_lowercase();
+        assert!(
+            program == "powershell" || program.ends_with("powershell.exe"),
+            "{program}"
+        );
+        assert_eq!(
+            args_of(&cmd),
+            ["-NoProfile", "-File", "scripts/up.ps1", "-Slot", "0"]
+        );
+    }
+
+    #[test]
+    fn a_relative_program_with_a_folder_is_taken_from_the_working_directory() {
+        let cmd = command_in(&argv(&["tools/up", "x"]), Some(Path::new("/srv/example"))).unwrap();
+        assert_eq!(
+            PathBuf::from(cmd.get_program()),
+            Path::new("/srv/example").join("tools/up")
+        );
+        let bare = command_in(&argv(&["node", "up.js"]), Some(Path::new("/srv/example"))).unwrap();
+        assert_ne!(
+            PathBuf::from(bare.get_program()),
+            Path::new("/srv/example").join("node")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_file_named_by_path_runs_through_the_guarded_command_shell() {
+        let cmd = command_in(
+            &argv(&["scripts\\stop.cmd", "app-0", "two words"]),
+            Some(Path::new("C:\\code\\x")),
+        )
+        .unwrap();
+        assert_eq!(cmd.get_program().to_string_lossy(), "cmd");
+        assert_eq!(
+            args_of(&cmd),
+            ["/C", "C:\\code\\x\\scripts\\stop.cmd", "app-0", "two words"]
+        );
+        let e = command_in(
+            &argv(&["scripts\\stop.bat", "a&b"]),
+            Some(Path::new("C:\\code\\x")),
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("character the command shell would interpret"),
+            "{e}"
+        );
     }
 }

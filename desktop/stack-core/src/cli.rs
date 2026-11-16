@@ -354,7 +354,7 @@ impl EngineCli for CliRunner {
 #[derive(Debug, Default)]
 pub struct FakeCli {
     pub calls: RefCell<Vec<Invocation>>,
-    rules: Vec<(Vec<String>, CliOutput)>,
+    rules: Vec<(Vec<String>, Result<CliOutput, CliError>)>,
     /// Programs that are "not installed": spawning them fails.
     missing: Vec<String>,
 }
@@ -368,7 +368,21 @@ impl FakeCli {
     pub fn on(mut self, words: &[&str], stdout: &str) -> Self {
         self.rules.push((
             words.iter().map(|s| s.to_string()).collect(),
-            CliOutput::success(stdout),
+            Ok(CliOutput::success(stdout)),
+        ));
+        self
+    }
+
+    /// Make calls containing `words` run out of time, as the real runner
+    /// reports a command it had to kill.
+    pub fn timing_out(mut self, words: &[&str]) -> Self {
+        let command = words.join(" ");
+        self.rules.push((
+            words.iter().map(|s| s.to_string()).collect(),
+            Err(CliError::Timeout {
+                command,
+                seconds: 0,
+            }),
         ));
         self
     }
@@ -377,7 +391,7 @@ impl FakeCli {
     pub fn failing(mut self, words: &[&str], status: i32, stderr: &str) -> Self {
         self.rules.push((
             words.iter().map(|s| s.to_string()).collect(),
-            CliOutput::failure(status, stderr),
+            Ok(CliOutput::failure(status, stderr)),
         ));
         self
     }
@@ -391,7 +405,7 @@ impl FakeCli {
     /// Add a rule after construction.
     pub fn add(&mut self, words: &[&str], out: CliOutput) {
         self.rules
-            .push((words.iter().map(|s| s.to_string()).collect(), out));
+            .push((words.iter().map(|s| s.to_string()).collect(), Ok(out)));
     }
 
     /// Every recorded argv, one line each (space-joined), for assertions.
@@ -438,7 +452,7 @@ impl EngineCli for FakeCli {
         let argv = inv.argv();
         for (words, out) in self.rules.iter().rev() {
             if matches_in_order(&argv, words) {
-                return Ok(out.clone());
+                return out.clone();
             }
         }
         Ok(CliOutput::success(""))

@@ -115,7 +115,16 @@ pub struct StateComponent {
     /// The shared clone it builds or runs from (source and dev).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// A script component: the state records no digest or commit for it,
+    /// because the stack cannot see what its scripts built, so it is not
+    /// restorable beyond running its `up` script again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub script: bool,
 }
+
+/// What a saved state says of a script component, in its file and in the
+/// confirms.
+pub const SCRIPT_RESTORE_NOTE: &str = "not restorable beyond re-running `up`";
 
 impl StateComponent {
     /// The exact bits to resume it to.
@@ -129,8 +138,12 @@ impl StateComponent {
         }
     }
 
-    /// `source task/ABC-1 @1a2b3c4d`, `prebuilt 16 @sha256:111111111111`.
+    /// `source task/ABC-1 @1a2b3c4d`, `prebuilt 16 @sha256:111111111111`,
+    /// `script (not restorable beyond re-running `up`)`.
     pub fn describe(&self) -> String {
+        if self.script {
+            return format!("script ({SCRIPT_RESTORE_NOTE})");
+        }
         describe(
             self.mode,
             self.git_ref.as_deref().or(self.build_id.as_deref()),
@@ -593,6 +606,10 @@ pub fn diff_lines(state: &SavedState, now: &InstanceState) -> Vec<String> {
             if cur.running {
                 lines.push(format!("{name}: stopped, as when saved (now {cur_text})"));
             }
+            continue;
+        }
+        if c.script {
+            lines.push(format!("{name}: its `up` script runs again"));
             continue;
         }
         let bits_same = cur.mode == c.mode

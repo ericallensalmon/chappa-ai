@@ -17,6 +17,14 @@
 //! | `banners` | definition warnings or errors; the hosts-file fix; agents blocked by data safety (with the acknowledge action) |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //!
+//! A script component shows as one row, or, when its status script reports
+//! several components (a wrapped whole stack), as one row per reported
+//! component (`<component>/<name>`) in its group with the script
+//! component's verbs on each. The script's facts become a section of their
+//! own, its `warn` / `bad` alerts Environment alerts, its `info` alerts rows
+//! of that section. Reported links pass the same rule as every other link:
+//! only the stack's own hostname (loopback names when it has none).
+//!
 //! `summary` is left out: the view counts the components itself, and a
 //! summary is only worth sending when it knows more than the rows do.
 
@@ -33,6 +41,7 @@ use stack_core::hosts::HostsCheck;
 use stack_core::placeholders;
 use stack_core::probe::ProbeOutcome;
 use stack_core::runner::{ComponentReport, Observation};
+use stack_core::script::{AlertTone, ScriptView, ViewFrom};
 
 use crate::actions::{logs_action, Offered};
 use crate::data_safety::{self, InstanceSafety, SafetyState};
@@ -171,15 +180,31 @@ fn host_of(authority: &str) -> &str {
     }
 }
 
+/// The host names the stack's links may point at: its hostname, else the
+/// loopback names.
+fn own_hosts(loaded: &Loaded) -> Vec<&str> {
+    match &loaded.stack.hostname {
+        Some(h) => vec![h.as_str()],
+        None => vec!["localhost", "127.0.0.1"],
+    }
+}
+
+/// Whether `url` is an http(s) link to one of the stack's own hosts.
+fn is_own_link(loaded: &Loaded, url: &str) -> bool {
+    is_http(url)
+        && authority(url).is_some_and(|a| {
+            own_hosts(loaded)
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(host_of(&a)))
+        })
+}
+
 /// The hosts the stack's links point at: its hostname (or loopback when it
 /// has none), with each port in use. Nothing else is declared, so the
 /// trust dialog lists only the stack's own names.
 pub fn link_hosts(loaded: &Loaded, inst: &ResolvedInstance) -> Vec<String> {
     let ctx = inst.host_context();
-    let own: Vec<&str> = match &loaded.stack.hostname {
-        Some(h) => vec![h.as_str()],
-        None => vec!["localhost", "127.0.0.1"],
-    };
+    let own = own_hosts(loaded);
     let mut out: BTreeSet<String> = BTreeSet::new();
     for c in inst.components.values() {
         for template in c.outputs.values() {
@@ -233,6 +258,174 @@ fn process_uptime(processes: &ProcessTable, component: &str, now_utc: &str) -> O
     uptime_text(&e.started_utc, parse_utc(now_utc)?)
 }
 
+/// The rows of one report: one, or a script component's reported ones.
+fn component_rows(inp: &EnvInputs<'_>, r: &ComponentReport) -> Vec<Value> {
+    match &r.script {
+        Some(view) => script_rows(inp, r, view),
+        None => vec![component(inp, r)],
+    }
+}
+
+fn kind_name(kind: ComponentKind) -> &'static str {
+    match kind {
+        ComponentKind::Oneshot => "oneshot",
+        ComponentKind::Service => "service",
+    }
+}
+
+fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> Vec<Value> {
+    let id = &r.status.id;
+    let label = inp
+        .loaded
+        .stack
+        .components
+        .get(id)
+        .and_then(|d| d.label.clone())
+        .unwrap_or_else(|| id.clone());
+    let fingerprint = inp.obs.state.fingerprint();
+    let verbs: Vec<Value> = inp
+        .offered
+        .iter()
+        .filter(|o| o.key.as_deref() == Some(id.as_str()))
+        .map(|o| o.to_json(&fingerprint))
+        .collect();
+    let now = parse_utc(inp.now_utc);
+    let badge_for = match view.from {
+        ViewFrom::Status => None,
+        ViewFrom::Assumed => Some(badge(
+            "no status script",
+            "muted",
+            Some("The state is what the stack asked for and how the last script run went; nothing checks it.".into()),
+        )),
+        ViewFrom::Pending => Some(badge(
+            "status not read yet",
+            "muted",
+            Some("Its status script runs in the background; the next look shows its answer.".into()),
+        )),
+        ViewFrom::Unreadable => Some(badge(
+            "status unreadable",
+            "bad",
+            view.rows.first().and_then(|r| r.detail.clone()),
+        )),
+    };
+    let mut out = Vec::new();
+    for row in &view.rows {
+        let running = matches!(
+            row.state,
+            ComponentState::Up
+                | ComponentState::Starting
+                | ComponentState::Unhealthy
+                | ComponentState::Crashloop
+        );
+        let uptime = match (running, &row.since, now) {
+            (true, Some(s), Some(n)) => uptime_text(s, n),
+            _ => None,
+        };
+        let mut c = json!({
+            "id": row.id,
+            "group": r.group,
+            "label": if view.multi { row.name.clone() } else { label.clone() },
+            "kind": kind_name(r.kind),
+            "state": row.state.as_str(),
+            "uptime": uptime,
+            "restarts": Value::Null,
+            "exitCode": row.exit_code,
+            "source": Value::Null,
+        });
+        let mut links: Vec<Value> = if view.multi { Vec::new() } else { links_of(r) };
+        let mut link_actions: Vec<Value> = Vec::new();
+        if !view.multi {
+            for (key, url) in &r.links {
+                if is_http(url) {
+                    link_actions.push(json!({
+                        "kind": "link",
+                        "id": format!("open-{key}"),
+                        "label": if key == "url" { format!("Open {label}") } else { format!("{label}: {key}") },
+                        "url": url,
+                    }));
+                }
+            }
+        }
+        let mut dropped = 0;
+        for (i, l) in row.links.iter().enumerate() {
+            if !is_own_link(inp.loaded, &l.url) {
+                dropped += 1;
+                continue;
+            }
+            links.push(json!({ "label": l.label, "url": l.url }));
+            link_actions.push(json!({
+                "kind": "link",
+                "id": format!("open-reported-{i}"),
+                "label": l.label,
+                "url": l.url,
+            }));
+        }
+        if !links.is_empty() {
+            c["links"] = links.into();
+        }
+        let mut hint: Vec<String> = row.detail.iter().cloned().collect();
+        if view.multi {
+            hint.push(format!(
+                "reported by {label}; its actions run {label}'s scripts"
+            ));
+        }
+        if dropped > 0 {
+            hint.push(format!(
+                "{dropped} reported link(s) to a host other than the stack's own left out"
+            ));
+        }
+        if !hint.is_empty() {
+            c["hint"] = hint.join("; ").into();
+        }
+        if let Some(b) = &badge_for {
+            c["badges"] = json!([b]);
+        }
+        let mut actions = verbs.clone();
+        actions.extend(link_actions);
+        if !actions.is_empty() {
+            c["actions"] = actions.into();
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A section per script component whose status reports facts or `info`
+/// alerts.
+fn script_facts(inp: &EnvInputs<'_>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for r in inp.reports {
+        let Some(view) = &r.script else { continue };
+        let mut rows: Vec<Value> = view
+            .facts
+            .iter()
+            .map(|f| row(&f.label, f.value.clone()))
+            .collect();
+        rows.extend(
+            view.alerts
+                .iter()
+                .filter(|a| a.tone == AlertTone::Info)
+                .map(|a| row("Note", a.text.clone())),
+        );
+        if rows.is_empty() {
+            continue;
+        }
+        let label = inp
+            .loaded
+            .stack
+            .components
+            .get(&r.status.id)
+            .and_then(|d| d.label.clone())
+            .unwrap_or_else(|| r.status.id.clone());
+        out.push(json!({
+            "id": format!("script-{}", r.status.id),
+            "title": label,
+            "rows": rows,
+        }));
+    }
+    out
+}
+
 fn component(inp: &EnvInputs<'_>, r: &ComponentReport) -> Value {
     let id = &r.status.id;
     let def = inp.loaded.stack.components.get(id);
@@ -249,7 +442,7 @@ fn component(inp: &EnvInputs<'_>, r: &ComponentReport) -> Value {
         "id": id,
         "group": r.group,
         "label": label,
-        "kind": match r.kind { ComponentKind::Oneshot => "oneshot", ComponentKind::Service => "service" },
+        "kind": kind_name(r.kind),
         "state": r.status.state.as_str(),
         "uptime": uptime,
         "restarts": r.status.restarts,
@@ -495,6 +688,7 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
         sections.push(json!({ "id": "relay", "title": "Relay", "rows": rows }));
     }
 
+    sections.extend(script_facts(inp));
     if inp.safety.configured {
         sections.push(data_safety_facts(inp.safety));
     }
@@ -678,16 +872,34 @@ fn data_safety_block(inp: &EnvInputs<'_>) -> Value {
 
 fn alerts(inp: &EnvInputs<'_>, components: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
-    for (r, c) in inp.reports.iter().zip(components) {
-        if !r.status.state.is_problem() {
+    for c in components {
+        let Some(state) = c["state"]
+            .as_str()
+            .and_then(|s| ComponentState::ALL.into_iter().find(|x| x.as_str() == s))
+        else {
+            continue;
+        };
+        if !state.is_problem() {
             continue;
         }
-        let label = c["label"].as_str().unwrap_or(&r.status.id);
+        let id = c["id"].as_str().unwrap_or_default();
+        let label = c["label"].as_str().unwrap_or(id);
         let text = match c["hint"].as_str() {
-            Some(h) => format!("{label} {}: {h}", state_phrase(r.status.state)),
-            None => format!("{label} {}", state_phrase(r.status.state)),
+            Some(h) => format!("{label} {}: {h}", state_phrase(state)),
+            None => format!("{label} {}", state_phrase(state)),
         };
-        out.push(json!({ "text": text, "severity": "bad", "componentId": r.status.id }));
+        out.push(json!({ "text": text, "severity": "bad", "componentId": id }));
+    }
+    for r in inp.reports {
+        let Some(view) = &r.script else { continue };
+        for a in &view.alerts {
+            let severity = match a.tone {
+                AlertTone::Bad => "bad",
+                AlertTone::Warn => "warn",
+                AlertTone::Info => continue,
+            };
+            out.push(json!({ "text": a.text, "severity": severity, "componentId": r.status.id }));
+        }
     }
     for (name, f) in &inp.facts {
         let Some(f) = f else { continue };
@@ -830,7 +1042,11 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
             groups.push(json!({ "id": id, "label": capital(&id) }));
         }
     }
-    let components: Vec<Value> = inp.reports.iter().map(|r| component(inp, r)).collect();
+    let components: Vec<Value> = inp
+        .reports
+        .iter()
+        .flat_map(|r| component_rows(inp, r))
+        .collect();
     let alerts = alerts(inp, &components);
     json!({
         "freshness": {

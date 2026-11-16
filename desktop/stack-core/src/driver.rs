@@ -237,6 +237,7 @@ impl ResolvedInstance {
             slot: Some(self.slot),
             hostname: self.hostname.clone(),
             item: self.item.clone(),
+            instance: Some(self.id.clone()),
             ..Context::default()
         };
         for (name, c) in &self.components {
@@ -692,10 +693,13 @@ pub fn checks_for_plan(
         ports.extend(c.ports.iter().copied());
     }
     for engine in inst.engines() {
-        if !plan
-            .components()
-            .iter()
-            .any(|c| inst.components[c].engine.name == engine.name)
+        // Process and script components run on the host: there is no
+        // engine of theirs to reach.
+        if !engine.kind.is_container_engine()
+            || !plan
+                .components()
+                .iter()
+                .any(|c| inst.components[c].engine.name == engine.name)
         {
             continue;
         }
@@ -854,6 +858,7 @@ impl FakeDriver {
             Step::Start { .. } => "start",
             Step::Stop { .. } => "stop",
             Step::Remove { .. } => "remove",
+            Step::Script { verb, .. } => verb.as_str(),
         };
         self.calls
             .borrow_mut()
@@ -907,6 +912,16 @@ impl Driver for FakeDriver {
                 Step::Remove { .. } => {
                     *a = Actual::default();
                 }
+                // The toy engine treats a script like the verb it stands for.
+                Step::Script { verb, .. } => match verb.desired_after() {
+                    Some(Desired::Running) => {
+                        a.exists = true;
+                        a.running = kind == ComponentKind::Service;
+                    }
+                    Some(Desired::Stopped) => a.running = false,
+                    Some(Desired::Absent) => *a = Actual::default(),
+                    None => {}
+                },
                 Step::Build { key, .. } => {
                     let p = self
                         .provenance

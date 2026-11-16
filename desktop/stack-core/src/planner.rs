@@ -21,15 +21,23 @@
 //!   recreated after it. Plain `depends_on` dependents are not touched;
 //! - `normallyOff` components are outside the default selection, but a
 //!   selected component's dependencies are always included.
+//!
+//! Script components ([`crate::script`]) take part in the same ordering,
+//! but their steps are one [`Step::Script`] per verb and are planned from
+//! the intent record alone: the runner cannot see inside a script, so what
+//! the scripts last reported never changes a plan (or its fingerprint).
+//! `up` always runs the `up` script; a stack-wide verb skips a script
+//! component that has no script for it, with a note.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use crate::definition::{CheckoutKind, ComponentKind, Mode, StackDef};
+use crate::definition::{CheckoutKind, ComponentKind, DriverKind, Mode, StackDef};
 use crate::intent::{instance_id, Desired};
 use crate::provenance::content_key;
+use crate::script::{self, ScriptVerb};
 
 /// One component as the instance has it right now.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -193,6 +201,16 @@ pub enum Change {
         item: Option<String>,
         #[serde(default)]
         targets: IndexMap<String, ResumeTarget>,
+        /// Script components brought back by running their `up` script
+        /// again: a saved state records nothing more of them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scripts: Vec<String>,
+    },
+    /// Run one script of one script component.
+    Script {
+        component: String,
+        #[serde(rename = "script")]
+        verb: ScriptVerb,
     },
 }
 
@@ -260,6 +278,7 @@ pub enum Verb {
     Watch,
     Bind,
     Resume,
+    Restart,
 }
 
 impl Change {
@@ -276,6 +295,14 @@ impl Change {
             Change::Watch { .. } => Verb::Watch,
             Change::Bind { .. } => Verb::Bind,
             Change::Resume { .. } => Verb::Resume,
+            Change::Script { verb, .. } => match verb {
+                ScriptVerb::Start => Verb::Start,
+                ScriptVerb::Stop => Verb::Stop,
+                ScriptVerb::Restart => Verb::Restart,
+                ScriptVerb::Rebuild => Verb::Rebuild,
+                ScriptVerb::Down => Verb::Down,
+                ScriptVerb::Up | ScriptVerb::Status | ScriptVerb::Plan => Verb::Up,
+            },
         }
     }
 }
@@ -358,6 +385,12 @@ pub enum Step {
     Remove {
         component: String,
     },
+    /// Run a script component's script for `verb`.
+    Script {
+        component: String,
+        #[serde(rename = "script")]
+        verb: ScriptVerb,
+    },
 }
 
 impl Step {
@@ -369,7 +402,8 @@ impl Step {
             | Step::Recreate { component, .. }
             | Step::Start { component }
             | Step::Stop { component, .. }
-            | Step::Remove { component } => component,
+            | Step::Remove { component }
+            | Step::Script { component, .. } => component,
         }
     }
 
@@ -383,6 +417,7 @@ impl Step {
             Step::Start { .. } => "Start",
             Step::Stop { .. } => "Stop",
             Step::Remove { .. } => "Remove",
+            Step::Script { .. } => "Run",
         }
     }
 
@@ -402,6 +437,7 @@ impl Step {
             Step::Recreate { reason, .. } => Some(reason.to_string()),
             Step::Start { .. } | Step::Remove { .. } => None,
             Step::Stop { grace_seconds, .. } => Some(format!("{grace_seconds}s")),
+            Step::Script { verb, .. } => Some(format!("{verb} script")),
         }
     }
 }
@@ -451,6 +487,8 @@ pub enum PlanError {
     Cycle(Vec<String>),
     #[error("the stack changed since this plan was made (planned against {expected}, now {actual}); plan again")]
     StateChanged { expected: String, actual: String },
+    #[error("component `{component}` has no `{verb}` script")]
+    NoScript { component: String, verb: ScriptVerb },
 }
 
 impl Plan {
@@ -542,9 +580,29 @@ impl Plan {
             } => {
                 self.refs.insert(component.clone(), git_ref.clone());
             }
+            Step::Script { component, verb } => {
+                if let Some(d) = verb.desired_after() {
+                    self.desired.insert(component.clone(), d);
+                }
+            }
             Step::Build { .. } | Step::Pull { .. } => {}
         }
         self.steps.push(step);
+    }
+
+    /// Run `verb` of a script component when it has that script; otherwise
+    /// say that a stack-wide verb leaves it as it is.
+    fn script_or_note(&mut self, stack: &StackDef, component: &str, verb: ScriptVerb) {
+        if script::has(&stack.components[component], verb) {
+            self.push(Step::Script {
+                component: component.to_string(),
+                verb,
+            });
+        } else {
+            self.notes.push(format!(
+                "{component} has no {verb} script, so {verb} leaves it as it is"
+            ));
+        }
     }
 
     fn has_step_for(&self, component: &str, pred: impl Fn(&Step) -> bool) -> bool {
@@ -635,6 +693,33 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 &mut plan,
             );
         }
+        Change::Script { component, verb } => {
+            require(stack, component)?;
+            if !ScriptVerb::MUTATING.contains(verb)
+                || !script::has(&stack.components[component], *verb)
+            {
+                return Err(PlanError::NoScript {
+                    component: component.clone(),
+                    verb: *verb,
+                });
+            }
+            plan.push(Step::Script {
+                component: component.clone(),
+                verb: *verb,
+            });
+        }
+        Change::Rebuild { component } if is_script(stack, component) => {
+            if !script::has(&stack.components[component], ScriptVerb::Rebuild) {
+                return Err(PlanError::NoScript {
+                    component: component.clone(),
+                    verb: ScriptVerb::Rebuild,
+                });
+            }
+            plan.push(Step::Script {
+                component: component.clone(),
+                verb: ScriptVerb::Rebuild,
+            });
+        }
         Change::Rebuild { component } => {
             require(stack, component)?;
             let cur = state.component(component);
@@ -681,6 +766,12 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 state.component(n).exists && !keep_groups.iter().any(|g| g == stack.group_of(n))
             }) {
                 let cur = state.component(&name);
+                if is_script(stack, &name) {
+                    if cur.desired == Desired::Running {
+                        plan.script_or_note(stack, &name, ScriptVerb::Stop);
+                    }
+                    continue;
+                }
                 if cur.running {
                     plan.push(Step::Stop {
                         grace_seconds: stack.grace_seconds(&name),
@@ -707,6 +798,12 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 components.iter().any(|c| c == n) && state.component(n).exists
             }) {
                 let cur = state.component(&name);
+                if is_script(stack, &name) {
+                    if cur.desired == Desired::Running {
+                        plan.script_or_note(stack, &name, ScriptVerb::Stop);
+                    }
+                    continue;
+                }
                 if cur.running {
                     plan.push(Step::Stop {
                         grace_seconds: stack.grace_seconds(&name),
@@ -727,6 +824,10 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
             for name in &order {
                 let cur = state.component(name);
                 if !cur.exists {
+                    continue;
+                }
+                if is_script(stack, name) {
+                    plan.script_or_note(stack, name, ScriptVerb::Rebuild);
                     continue;
                 }
                 let Some(mode) = cur.mode.or_else(|| stack.components[name].default_mode()) else {
@@ -754,7 +855,7 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 state.component(n).exists && !keep_groups.iter().any(|g| g == stack.group_of(n))
             });
             for name in &targets {
-                if state.component(name).running {
+                if state.component(name).running && !is_script(stack, name) {
                     plan.push(Step::Stop {
                         component: name.clone(),
                         grace_seconds: stack.grace_seconds(name),
@@ -762,7 +863,11 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 }
             }
             for name in targets {
-                plan.push(Step::Remove { component: name });
+                if is_script(stack, &name) {
+                    plan.script_or_note(stack, &name, ScriptVerb::Down);
+                } else {
+                    plan.push(Step::Remove { component: name });
+                }
             }
         }
         Change::Bind {
@@ -770,11 +875,17 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
             bind,
             release,
         } => plan_bind(stack, state, &order, item, bind, release, &mut plan)?,
-        Change::Resume { targets, .. } => plan_resume(stack, state, &order, targets, &mut plan)?,
+        Change::Resume {
+            targets, scripts, ..
+        } => plan_resume(stack, state, &order, targets, scripts, &mut plan)?,
         Change::Start { gateways } => {
             for name in &order {
                 let cur = state.component(name);
                 if cur.desired != Desired::Running {
+                    continue;
+                }
+                if is_script(stack, name) {
+                    plan.script_or_note(stack, name, ScriptVerb::Start);
                     continue;
                 }
                 if !cur.exists {
@@ -983,8 +1094,18 @@ fn plan_resume(
     state: &InstanceState,
     order: &[String],
     targets: &IndexMap<String, ResumeTarget>,
+    scripts: &[String],
     plan: &mut Plan,
 ) -> Result<(), PlanError> {
+    for name in scripts {
+        require(stack, name)?;
+        if !is_script(stack, name) {
+            return Err(PlanError::NoScript {
+                component: name.clone(),
+                verb: ScriptVerb::Up,
+            });
+        }
+    }
     for (name, t) in targets {
         require(stack, name)?;
         if !stack.components[name].has_mode(t.mode) {
@@ -996,6 +1117,13 @@ fn plan_resume(
     }
     let mut changed: Vec<String> = Vec::new();
     for name in order {
+        if scripts.contains(name) {
+            plan.push(Step::Script {
+                component: name.clone(),
+                verb: ScriptVerb::Up,
+            });
+            continue;
+        }
         let Some(t) = targets.get(name) else {
             continue;
         };
@@ -1088,6 +1216,13 @@ pub fn short_digest(digest: &str) -> String {
     }
 }
 
+fn is_script(stack: &StackDef, component: &str) -> bool {
+    stack
+        .components
+        .get(component)
+        .is_some_and(|c| c.driver == DriverKind::Script)
+}
+
 fn require(stack: &StackDef, component: &str) -> Result<(), PlanError> {
     if stack.components.contains_key(component) {
         Ok(())
@@ -1164,6 +1299,13 @@ fn plan_up(
             continue;
         }
         let def = &stack.components[name];
+        if def.driver == DriverKind::Script {
+            plan.push(Step::Script {
+                component: name.clone(),
+                verb: ScriptVerb::Up,
+            });
+            continue;
+        }
         let cur = state.component(name);
         let mode = modes
             .get(name)
@@ -2494,6 +2636,7 @@ stacks:
         let change = Change::Resume {
             item: Some("ABC-1".into()),
             targets: targets.clone(),
+            scripts: Vec::new(),
         };
         let plan = plan(&st, &state, &change).unwrap();
         assert_eq!(plan.verb, Verb::Resume);
@@ -2518,6 +2661,7 @@ stacks:
             &Change::Resume {
                 item: None,
                 targets,
+                scripts: Vec::new(),
             },
         )
         .unwrap();

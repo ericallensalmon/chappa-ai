@@ -15,6 +15,13 @@
 //! | [`StackRunner::checks`] | the pre-up checks through a [`Checker`] |
 //! | [`StackRunner::gc_plan`] / [`StackRunner::gc_apply`] | unreferenced images and build cache, as a preview then as steps |
 //! | [`StackRunner::activate`] | bind a work item to a slot |
+//! | [`StackRunner::script_run`] / [`StackRunner::script_confirm`] | a script component's script for one verb, resolved; the confirm that runs it |
+//!
+//! Script components ([`crate::script`]) are observed through a
+//! [`ScriptOutputs`] the caller hands in ([`StackRunner::with_scripts`]):
+//! their states come from what their status scripts last reported (or, with
+//! none, from the intent record and the last run), never from waiting on a
+//! script. Their part of the planner's state is the intent record alone.
 //!
 //! Nothing long runs here. A build, a pull, an `up`, a dev server all come
 //! back as run blocks; the quick engine questions (`image inspect`,
@@ -73,6 +80,10 @@ use crate::process::{self, actual_from_process, CommandLookup, ProcessError, Pro
 use crate::provenance::{
     prebuilt_staleness, worktree_staleness, GitError, GitFacts, LabelMap, Provenance, Staleness,
 };
+use crate::script::{
+    self, NoScriptOutputs, PlanPreview, ScriptBinding, ScriptError, ScriptOutputs, ScriptReport,
+    ScriptRun, ScriptRuns, ScriptVerb, ScriptView,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -90,6 +101,8 @@ pub enum RunnerError {
     Process(#[from] ProcessError),
     #[error(transparent)]
     Override(#[from] OverrideError),
+    #[error(transparent)]
+    Script(#[from] ScriptError),
     #[error("component `{component}`: {source}")]
     Placeholder {
         component: String,
@@ -163,6 +176,9 @@ pub struct Observation {
     /// read as not deployed.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// What each script component shows, from its last status report.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub scripts: IndexMap<String, ScriptView>,
 }
 
 /// One component in the status report.
@@ -182,6 +198,9 @@ pub struct ComponentReport {
     pub logs: Option<RunBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// A script component's rows, facts and alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<ScriptView>,
 }
 
 /// The outside world a runner talks to: swap every one for a fake in tests.
@@ -209,6 +228,12 @@ pub struct StackRunner<'a> {
     /// When set, building or running from a shared clone (no worktree for
     /// it) is refused unless the clone is allowed. `None`: no guard.
     pub shared_guard: Option<SharedCheckoutGuard>,
+    /// Status reports and plan previews of script components.
+    pub scripts: &'a dyn ScriptOutputs,
+    /// The bound item's key, for scripts (else the intent record's).
+    pub item: Option<String>,
+    /// The bound item's branch per clone name, for scripts.
+    pub branches: IndexMap<String, String>,
 }
 
 /// The shared-checkout guard: which shared clones a stack may build from
@@ -246,7 +271,139 @@ impl<'a> StackRunner<'a> {
             now_utc: now_utc.to_string(),
             worktrees: IndexMap::new(),
             shared_guard: None,
+            scripts: &NoScriptOutputs,
+            item: None,
+            branches: IndexMap::new(),
         }
+    }
+
+    /// The same runner reading script components' status and plans from
+    /// `scripts`.
+    pub fn with_scripts(mut self, scripts: &'a dyn ScriptOutputs) -> Self {
+        self.scripts = scripts;
+        self
+    }
+
+    /// The same runner telling scripts which item is bound and its branch
+    /// per clone (the worktrees come from [`StackRunner::with_binding`]).
+    pub fn with_item(mut self, item: Option<String>, branches: IndexMap<String, String>) -> Self {
+        self.item = item;
+        self.branches = branches;
+        self
+    }
+
+    /// What a script component's scripts see of the bound item.
+    pub fn script_binding(&self, inst: &ResolvedInstance) -> ScriptBinding {
+        ScriptBinding {
+            item: self.item.clone().or_else(|| inst.item.clone()),
+            branches: self.branches.clone(),
+            worktrees: self.worktrees.clone(),
+        }
+    }
+
+    /// `verb` of the script component `component`, resolved for `inst`.
+    pub fn script_run(
+        &self,
+        inst: &ResolvedInstance,
+        cache: &ProvenanceCache,
+        component: &str,
+        verb: ScriptVerb,
+        extra: &[String],
+    ) -> Result<ScriptRun, ScriptError> {
+        script::prepare(
+            inst,
+            self.stack,
+            self.project_dir,
+            component,
+            verb,
+            &self.script_binding(inst),
+            &self.known_images(cache),
+            extra,
+        )
+    }
+
+    /// What the Environment shows for a script component right now.
+    pub fn script_view(
+        &self,
+        inst: &ResolvedInstance,
+        cache: &ProvenanceCache,
+        component: &str,
+        runs: &ScriptRuns,
+    ) -> ScriptView {
+        let c = &inst.components[component];
+        let has_status = self
+            .stack
+            .components
+            .get(component)
+            .is_some_and(|d| script::has(d, ScriptVerb::Status));
+        let report = if has_status {
+            match self.script_run(inst, cache, component, ScriptVerb::Status, &[]) {
+                Ok(run) => self.scripts.status(&run),
+                Err(e) => Some(ScriptReport::Failed {
+                    reason: e.to_string(),
+                }),
+            }
+        } else {
+            None
+        };
+        script::view(
+            component,
+            c.kind,
+            c.desired,
+            has_status,
+            report.as_ref(),
+            runs.components.get(component),
+        )
+    }
+
+    /// The confirm of running `verb` of a script component: the plan
+    /// script's preview when it has one, else the resolved argv.
+    pub fn script_confirm(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        component: &str,
+        verb: ScriptVerb,
+    ) -> String {
+        let def = self.stack.components.get(component);
+        let label = def
+            .and_then(|d| d.label.clone())
+            .unwrap_or_else(|| component.to_string());
+        let run = self.script_run(inst, &obs.cache, component, verb, &[]);
+        let with_plan = def.is_some_and(|d| script::has(d, ScriptVerb::Plan));
+        let preview = match (&run, with_plan) {
+            (Ok(_), true) => match self.script_run(
+                inst,
+                &obs.cache,
+                component,
+                ScriptVerb::Plan,
+                &[verb.as_str().to_string()],
+            ) {
+                Ok(p) => self.scripts.plan(&p),
+                Err(e) => Some(PlanPreview::Failed {
+                    reason: e.to_string(),
+                }),
+            },
+            _ => None,
+        };
+        script::confirm(&label, verb, run.as_ref(), with_plan, preview.as_ref())
+    }
+
+    /// Refuse a plan whose scripts cannot be resolved now (a placeholder
+    /// that needs a bound item, a PowerShell file named without its
+    /// interpreter), before anything is stored or run.
+    pub fn check_scripts(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        plan: &Plan,
+    ) -> Result<(), RunnerError> {
+        for step in &plan.steps {
+            if let Step::Script { component, verb } = step {
+                self.script_run(inst, &obs.cache, component, *verb, &[])?;
+            }
+        }
+        Ok(())
     }
 
     /// The same runner bound to an item's worktrees, with the guard.
@@ -511,7 +668,34 @@ impl<'a> StackRunner<'a> {
         }
         let mut state = InstanceState::new(self.stack_name, inst.slot);
         let mut actual = IndexMap::new();
+        let runs = ScriptRuns::load(&work_dir, &inst.id);
+        let mut scripts = IndexMap::new();
         for (name, c) in &inst.components {
+            if c.driver == DriverKind::Script {
+                // The planner sees the intent only: a script's own report
+                // must not move a confirmed plan's fingerprint.
+                let view = self.script_view(inst, &cache, name, &runs);
+                actual.insert(
+                    name.clone(),
+                    Actual {
+                        exists: view.exists(),
+                        running: view.running(),
+                        exit_code: view.rows.first().and_then(|r| r.exit_code),
+                        ..Actual::default()
+                    },
+                );
+                state.components.insert(
+                    name.clone(),
+                    ComponentCurrent {
+                        desired: c.desired,
+                        exists: c.desired != Desired::Absent,
+                        running: c.desired == Desired::Running,
+                        ..ComponentCurrent::default()
+                    },
+                );
+                scripts.insert(name.clone(), view);
+                continue;
+            }
             let mode = self.current_mode(inst, &cache, name);
             let a = if Self::runs_as_process(inst, name, mode) {
                 actual_from_process(processes.get(name))
@@ -550,6 +734,7 @@ impl<'a> StackRunner<'a> {
             containers,
             gateways,
             notes,
+            scripts,
         })
     }
 
@@ -876,6 +1061,15 @@ impl<'a> StackRunner<'a> {
                         ));
                     }
                 }
+                Step::Script { verb, .. } => {
+                    let run = self.script_run(inst, &obs.cache, &component, *verb, &[])?;
+                    steps.push(JobStep::Script {
+                        run: run.run_block(),
+                        component: component.clone(),
+                        verb: *verb,
+                        timeout_seconds: run.timeout_secs,
+                    });
+                }
                 Step::Remove { .. } => {
                     if Self::runs_as_process(inst, &component, before) {
                         if obs.state.component(&component).running {
@@ -1064,6 +1258,42 @@ impl<'a> StackRunner<'a> {
         host_ctx.images = self.known_images(&obs.cache);
         let mut out = Vec::new();
         for (name, c) in &inst.components {
+            let links: IndexMap<String, String> = c
+                .outputs
+                .iter()
+                .filter_map(|(k, t)| {
+                    placeholders::resolve(t, &host_ctx)
+                        .ok()
+                        .map(|v| (k.clone(), v))
+                })
+                .collect();
+            if let Some(view) = obs.scripts.get(name) {
+                let first = view.rows.first().filter(|_| !view.multi);
+                out.push(ComponentReport {
+                    status: ComponentStatus {
+                        id: name.clone(),
+                        state: view.state(),
+                        uptime: first
+                            .filter(|r| r.state != crate::driver::ComponentState::NotDeployed)
+                            .filter(|_| view.running())
+                            .and_then(|r| r.since.as_deref())
+                            .and_then(|s| uptime_text(s, now)),
+                        restarts: None,
+                        exit_code: first.and_then(|r| r.exit_code),
+                        provenance: None,
+                        stale: Vec::new(),
+                    },
+                    group: c.group.clone(),
+                    kind: c.kind,
+                    desired: c.desired,
+                    probe: None,
+                    links,
+                    logs: None,
+                    notes: Vec::new(),
+                    script: Some(view.clone()),
+                });
+                continue;
+            }
             let mut actual = obs.actual.get(name).cloned().unwrap_or_default();
             let mut notes = Vec::new();
             let mut probe_result = None;
@@ -1105,15 +1335,6 @@ impl<'a> StackRunner<'a> {
             } else {
                 None
             };
-            let links = c
-                .outputs
-                .iter()
-                .filter_map(|(k, t)| {
-                    placeholders::resolve(t, &host_ctx)
-                        .ok()
-                        .map(|v| (k.clone(), v))
-                })
-                .collect();
             let logs = if c.driver == DriverKind::Compose
                 && !Self::runs_as_process(inst, name, provenance.as_ref().map(|p| p.mode))
             {
@@ -1140,6 +1361,7 @@ impl<'a> StackRunner<'a> {
                 links,
                 logs,
                 notes,
+                script: None,
             });
         }
         out

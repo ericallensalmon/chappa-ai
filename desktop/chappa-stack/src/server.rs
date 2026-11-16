@@ -321,7 +321,9 @@ impl Source {
     }
 
     fn environment_of(&self, loaded: &Loaded, now: &str) -> Result<Value, String> {
-        let runner = loaded.runner(&self.world, now);
+        let runner = loaded
+            .runner(&self.world, now)
+            .with_scripts(&*self.background);
         let (inst, _) = runner.instance(loaded.slot).map_err(|e| e.to_string())?;
         let work_dir = loaded.work_dir();
         let table = ProcessTable::load(&work_dir, &inst.id);
@@ -565,6 +567,7 @@ impl Source {
                             containers: IndexMap::new(),
                             gateways: IndexMap::new(),
                             notes: Vec::new(),
+                            scripts: IndexMap::new(),
                         };
                         &blank
                     }
@@ -618,7 +621,7 @@ impl Source {
                 format!("no actions on the `{view}` view"),
             );
         }
-        let key = body
+        let mut key = body
             .pointer("/target/key")
             .and_then(Value::as_str)
             .map(str::to_string);
@@ -636,7 +639,23 @@ impl Source {
                 "the stack definition has errors; fix them first",
             );
         }
-        let runner = loaded.runner(&self.world, &now);
+        // A row a script component reports (`stack/api`) acts through the
+        // script component's own verbs.
+        if let Some(k) = key.as_deref() {
+            let owner = stack_core::script::component_of_row(k);
+            if owner != k
+                && loaded
+                    .stack
+                    .components
+                    .get(owner)
+                    .is_some_and(|c| c.driver == stack_core::definition::DriverKind::Script)
+            {
+                key = Some(owner.to_string());
+            }
+        }
+        let runner = loaded
+            .runner(&self.world, &now)
+            .with_scripts(&*self.background);
         let (inst, _) = match runner.instance(loaded.slot) {
             Ok(i) => i,
             Err(e) => return error(409, "definition", e.to_string()),
@@ -673,7 +692,7 @@ impl Source {
                 "a mutating action must be confirmed",
             );
         }
-        let current = obs.state.fingerprint();
+        let current = chosen.fingerprint_for(&obs.state.fingerprint());
         if fingerprint != Some(current.as_str()) {
             return error(
                 409,
@@ -687,6 +706,9 @@ impl Source {
         if let JobWork::Plan { plan, .. } = &chosen.work {
             if let Err(e) = runner.guard_plan(&inst, &obs, plan) {
                 return error(409, "shared-checkout", e.to_string());
+            }
+            if let Err(e) = runner.check_scripts(&inst, &obs, plan) {
+                return error(409, "script", e.to_string());
             }
         }
         self.start_job(&loaded, &inst, &obs, &chosen, true, caller, &now)

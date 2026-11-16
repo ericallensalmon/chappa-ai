@@ -67,6 +67,9 @@ pub struct Binding {
     /// The item's folder name.
     pub item: Option<String>,
     pub worktrees: IndexMap<String, PathBuf>,
+    /// The branch the item's record names per clone (what scripts get as
+    /// `{branch:<repo>}`).
+    pub branches: IndexMap<String, String>,
 }
 
 impl Binding {
@@ -79,20 +82,27 @@ impl Binding {
             return Binding {
                 item: Some(item.to_string()),
                 worktrees: crate::reviews::worktrees_of(work_dir, item),
+                branches: IndexMap::new(),
             };
         }
         let dir = ItemRecord::dir(work_dir, item);
-        let worktrees = match ItemRecord::load(&dir) {
-            Ok(Some(rec)) => rec
-                .repos
-                .keys()
-                .filter_map(|r| rec.worktree(&dir, r).map(|w| (r.clone(), w)))
-                .collect(),
-            _ => IndexMap::new(),
+        let (worktrees, branches) = match ItemRecord::load(&dir) {
+            Ok(Some(rec)) => (
+                rec.repos
+                    .keys()
+                    .filter_map(|r| rec.worktree(&dir, r).map(|w| (r.clone(), w)))
+                    .collect(),
+                rec.repos
+                    .iter()
+                    .map(|(r, repo)| (r.clone(), repo.branch.clone()))
+                    .collect(),
+            ),
+            _ => (IndexMap::new(), IndexMap::new()),
         };
         Binding {
             item: Some(item.to_string()),
             worktrees,
+            branches,
         }
     }
 }
@@ -177,6 +187,7 @@ impl Loaded {
     pub fn runner<'a>(&'a self, world: &'a World, now_utc: &str) -> StackRunner<'a> {
         self.plain_runner(world, now_utc)
             .with_binding(self.binding.worktrees.clone(), Some(self.guard()))
+            .with_item(self.binding.item.clone(), self.binding.branches.clone())
     }
 
     /// A runner with no binding and no guard.
