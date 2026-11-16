@@ -6,7 +6,7 @@
 //! ```json
 //! {
 //!   "trust": {"<project path>::<command>": "<hash>", "attached:127.0.0.1:7000": "<hash>"},
-//!   "attached": [{"addr": "127.0.0.1:7000", "token_file": "/home/me/.config/x/token"}],
+//!   "attached": [{"addr": "127.0.0.1:7000", "token_file": "/home/dev/.config/x/token"}],
 //!   "hidden_views": ["prs"],
 //!   "prompt_policy": {"<key>": "always"},
 //!   "prompts_shown": {"<key>": ["agent-here"]},
