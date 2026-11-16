@@ -19,6 +19,7 @@
 //! | `{instance}` | the instance id, `<stack>-<slot>` |
 //! | `{branch:<repo>}` | the branch the bound work item has in its worktree of that clone |
 //! | `{worktree:<repo>}` | the folder of the bound work item's worktree of that clone |
+//! | `{secret:<name>}` | a random value the runner generated for this instance and keeps under `.work/` (see [`crate::instance_secrets`]) |
 //!
 //! `{host}` differs per engine because containers reach the host under a
 //! different name on each: `host.docker.internal` from docker containers,
@@ -59,6 +60,8 @@ pub enum Placeholder {
     Branch(String),
     /// The bound item's worktree folder of a clone.
     Worktree(String),
+    /// A value generated for the instance, by name.
+    Secret(String),
 }
 
 impl Placeholder {
@@ -95,6 +98,7 @@ impl fmt::Display for Placeholder {
             Placeholder::Instance => write!(f, "{{instance}}"),
             Placeholder::Branch(r) => write!(f, "{{branch:{r}}}"),
             Placeholder::Worktree(r) => write!(f, "{{worktree:{r}}}"),
+            Placeholder::Secret(n) => write!(f, "{{secret:{n}}}"),
         }
     }
 }
@@ -120,6 +124,8 @@ pub enum PlaceholderError {
     Unterminated { at: usize },
     #[error("stray `}}` at byte {at}; write `}}}}` for a literal brace")]
     StrayClose { at: usize },
+    #[error("`{{secret:{name}}}`: a secret's name is letters, digits, `-` and `_`")]
+    BadSecretName { name: String },
     #[error("no value for `{what}` in this context")]
     NoValue { what: String },
     #[error("`{what}` needs a bound work item; activate one in this slot first")]
@@ -193,6 +199,8 @@ pub struct Context {
     pub branches: IndexMap<String, String>,
     /// The bound item's worktree folder per clone name.
     pub worktrees: IndexMap<String, String>,
+    /// The instance's generated secrets.
+    pub secrets: crate::instance_secrets::Secrets,
 }
 
 /// Parse `template` into segments. Pure syntax: no values are consulted.
@@ -272,6 +280,15 @@ fn parse_one(body: &str) -> Result<Placeholder, PlaceholderError> {
         "image" => needs_arg(Placeholder::Image),
         "ref" => needs_arg(Placeholder::Ref),
         "param" => needs_arg(Placeholder::Param),
+        "secret" => {
+            let p = needs_arg(Placeholder::Secret)?;
+            match &p {
+                Placeholder::Secret(n) if !crate::instance_secrets::is_valid_name(n) => {
+                    Err(PlaceholderError::BadSecretName { name: n.clone() })
+                }
+                _ => Ok(p),
+            }
+        }
         "port" => {
             let Some(a) = arg.filter(|a| !a.is_empty()) else {
                 return Err(PlaceholderError::MissingArgument {
@@ -371,6 +388,11 @@ fn resolve_one(p: &Placeholder, ctx: &Context) -> Result<String, PlaceholderErro
         Placeholder::Container => ctx.container.clone().ok_or_else(no_value),
         Placeholder::Snapshot => ctx.snapshot.clone().ok_or_else(no_value),
         Placeholder::Param(name) => ctx.params.get(name).cloned().ok_or_else(no_value),
+        Placeholder::Secret(name) => ctx
+            .secrets
+            .get(name)
+            .map(str::to_owned)
+            .ok_or_else(no_value),
         Placeholder::Image(c) => {
             ctx.images
                 .get(c)
@@ -437,6 +459,7 @@ mod tests {
             "api".into(),
             "/srv/example/.work/KEY-12/src/api-01234567".into(),
         );
+        c.secrets = crate::instance_secrets::Secrets::from_pairs([("db", "generated-value")]);
         c
     }
 
@@ -481,10 +504,31 @@ mod tests {
                 "{worktree:api}",
                 "/srv/example/.work/KEY-12/src/api-01234567",
             ),
+            ("{secret:db}", "generated-value"),
         ];
         for (template, want) in table {
             assert_eq!(resolve(template, &c).unwrap(), want, "{template}");
         }
+    }
+
+    #[test]
+    fn a_secret_needs_a_plain_name_and_a_generated_value() {
+        assert_eq!(
+            parse("{secret:../x}").unwrap_err(),
+            PlaceholderError::BadSecretName {
+                name: "../x".into()
+            }
+        );
+        assert!(matches!(
+            parse("{secret}").unwrap_err(),
+            PlaceholderError::MissingArgument { .. }
+        ));
+        assert_eq!(
+            resolve("{secret:other}", &ctx()).unwrap_err(),
+            PlaceholderError::NoValue {
+                what: "{secret:other}".into()
+            }
+        );
     }
 
     #[test]

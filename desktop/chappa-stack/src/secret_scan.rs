@@ -1031,8 +1031,11 @@ pub fn env_files(
     out
 }
 
-/// The env the stack hands its components: the instance env and each
-/// component's own (`KEY (component)`), as far as it resolves now.
+/// The env the stack hands its components, as it is scanned: the instance
+/// env and each component's own (`KEY (component)`), as far as it resolves
+/// now, with every value the runner generated (`{secret:<name>}`) put back
+/// as its placeholder. Those live only in the work folder; a credential
+/// written into the definition or a file it names is still scanned as is.
 pub fn instance_env(loaded: &Loaded, inst: &ResolvedInstance) -> IndexMap<String, String> {
     let mut env = stack_core::process::instance_env(inst, &loaded.stack, &IndexMap::new());
     for (name, c) in &inst.components {
@@ -1042,6 +1045,9 @@ pub fn instance_env(loaded: &Loaded, inst: &ResolvedInstance) -> IndexMap<String
                 env.insert(format!("{k} ({name})"), v);
             }
         }
+    }
+    for v in env.values_mut() {
+        *v = inst.secrets.mask(v);
     }
     env
 }

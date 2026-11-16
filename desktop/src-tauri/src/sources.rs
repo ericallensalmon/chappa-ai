@@ -2835,6 +2835,13 @@ mod tests {
         let path = dir.path().join("token");
         assert!(read_attached_token(&path).is_err(), "missing file");
         std::fs::write(&path, "not a token\n").unwrap();
+        // The permission check comes first on Unix; make the file
+        // owner-only so the content check is the one under test.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert!(read_attached_token(&path)
             .unwrap_err()
             .contains("64-character"));

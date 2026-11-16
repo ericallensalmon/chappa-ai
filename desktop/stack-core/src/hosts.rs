@@ -125,17 +125,15 @@ impl HostOs {
     }
 }
 
-/// The hosts file of this machine.
+/// The hosts file of a machine running `os`. The Windows path is built
+/// with Windows separators whatever OS computes it, so the elevated
+/// command names the same file wherever it is put together.
 pub fn hosts_file_path(os: HostOs) -> PathBuf {
     match os {
         HostOs::Windows => {
-            let root = std::env::var_os("SystemRoot")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-            root.join("System32")
-                .join("drivers")
-                .join("etc")
-                .join("hosts")
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            let root = root.trim_end_matches(['\\', '/']);
+            PathBuf::from(format!(r"{root}\System32\drivers\etc\hosts"))
         }
         HostOs::Unix => PathBuf::from("/etc/hosts"),
     }

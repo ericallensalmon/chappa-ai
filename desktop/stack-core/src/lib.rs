@@ -16,6 +16,7 @@
 //! | [`provenance`] | what a component was built from, how stale that is, and image-label mapping |
 //! | [`driver`] | the engine-facing traits and the nine component states, with fakes for tests |
 //! | [`intent`] | the per-instance desired-state record and the active-item file under `.work/` |
+//! | [`instance_secrets`] | `{secret:<name>}`: random values generated per instance and kept under `.work/`, so no password is written into a committed file |
 //! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value, the data-safety rule engine ([`safety::data`]) and the secret-scan runner ([`safety::secrets`]) |
 //! | [`cli`] | the one [`cli::EngineCli`] trait every engine call goes through (argv, env, cwd, timeout, captured output), the real runner and a recording fake |
 //! | [`jobs`] | run blocks and the steps an applied plan is made of |
@@ -69,6 +70,7 @@ pub mod definition;
 pub mod driver;
 pub mod hosts;
 pub mod images;
+pub mod instance_secrets;
 pub mod intent;
 pub mod jobs;
 pub mod placeholders;

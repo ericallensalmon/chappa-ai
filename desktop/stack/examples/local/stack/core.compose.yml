@@ -1,12 +1,14 @@
 # The `core` group: a database and its one-shot migration, on docker.
 # Ports are not published here: the generated per-instance override file
 # publishes each slot's own host port, so two slots never collide.
+# No password is written here either: `POSTGRES_PASSWORD` (db) and
+# `PGPASSWORD` (migrate) come from the override file, which fills in the
+# instance's generated `{secret:db}`.
 services:
   db:
     image: postgres:16
     environment:
       POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
       POSTGRES_DB: app
     expose: ["5432"]
     volumes:
@@ -18,8 +20,6 @@ services:
 
   migrate:
     image: postgres:16
-    environment:
-      PGPASSWORD: app
     # Waits for the database, applies the schema, exits. Judged by exit code.
     command:
       - sh

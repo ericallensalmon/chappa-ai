@@ -897,6 +897,95 @@ fn real_gitleaks_scans_with_the_settings_config_and_never_one_from_the_tree() {
     );
 }
 
+/// The scan of the instance env reports a database password written into
+/// the definition and lets one the runner generated (`{secret:db}`) pass:
+/// the generated value is scanned as its placeholder. The same value
+/// written out in full is still reported, so it is the placeholder, not
+/// the scanner's taste, that lets it pass. Real gitleaks, the app's rules.
+#[test]
+fn real_gitleaks_reports_a_written_password_and_not_a_generated_one() {
+    let Some(scanner) = GitleaksOnPath::default().scanner(&std::env::temp_dir()) else {
+        eprintln!("skipped: gitleaks is not on PATH");
+        return;
+    };
+    // Built at run time so no source line holds a URL with a password.
+    let written = [
+        "postgres://app:",
+        &"Wr1tten9".repeat(3),
+        "@localhost:5432/app",
+    ]
+    .concat();
+    let yml = format!(
+        r#"
+name: gen
+stacks:
+  app:
+    hostname: dev.example.test
+    env:
+      GENERATED_URL: "postgres://app:{{secret:db}}@{{hostname}}:{{port:db}}/app"
+      WRITTEN_URL: "{written}"
+    groups:
+      core: {{ engine: docker }}
+    components:
+      db:
+        group: core
+        driver: compose
+        file: stack/core.yml
+        service: db
+        modes:
+          prebuilt: {{ image: postgres, tag: "16" }}
+        ports: 1
+        env:
+          POSTGRES_PASSWORD: "{{secret:db}}"
+"#
+    );
+    let p = Project::with(
+        &yml,
+        &[(
+            "stack/core.yml",
+            "services:\n  db:\n    image: postgres:16\n    expose: [\"5432\"]\n",
+        )],
+    );
+    let f = fakes(FakeCli::new(), FakeHttp::default());
+    let loaded = Loaded::load(&p.dir, None, 0).unwrap();
+    let runner = loaded.runner(&f.world, NOW);
+    let (inst, _) = runner.instance(0).unwrap();
+    let generated = fs::read_to_string(p.work().join("instances/app-0/secrets/db")).unwrap();
+    assert_eq!(inst.secrets.get("db"), Some(generated.as_str()));
+
+    let env = secret_scan::instance_env(&loaded, &inst);
+    assert!(
+        env.values().all(|v| !v.contains(&generated)),
+        "the scanned env never holds the generated value: {env:?}"
+    );
+    assert_eq!(env["POSTGRES_PASSWORD (db)"], "{secret:db}");
+    let entry = secret_scan::scan_env(&*scanner, &p.dir, &p.work(), &[], &env, NOW);
+    assert!(entry.error.is_none(), "{:?}", entry.error);
+    let flagged = |entry: &secret_scan::TargetEntry| -> Vec<String> {
+        entry
+            .findings
+            .iter()
+            .filter_map(|f| match &f.location {
+                Location::Source { file, .. } => Some(file.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(flagged(&entry), ["instance env: WRITTEN_URL"], "{entry:?}");
+
+    // The generated value written out in full is a password like any other.
+    let mut unmasked = env.clone();
+    unmasked.insert(
+        "SPELLED_OUT_URL".into(),
+        ["postgres://app:", &generated, "@localhost:5432/app"].concat(),
+    );
+    let entry = secret_scan::scan_env(&*scanner, &p.dir, &p.work(), &[], &unmasked, NOW);
+    assert!(
+        flagged(&entry).contains(&"instance env: SPELLED_OUT_URL".to_string()),
+        "{entry:?}"
+    );
+}
+
 #[test]
 fn a_store_that_cannot_be_read_keeps_agents_out_of_the_bound_worktree() {
     let Some(s) = setup("warn", false) else {

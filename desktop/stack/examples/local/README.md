@@ -46,11 +46,12 @@ from every file it merges.
 
 `db` runs on docker and `api` on podman, and the two engines share no
 network. So `api` reaches the database through the host:
-`DATABASE_URL` is `postgres://app:app@{host}:{port:db}/app`, where `{host}`
-is whatever address that engine's containers reach the host at. Every URL
-shown to a person uses `{hostname}` (`dev.example.test`), which resolves to
-loopback on the host and to each engine's gateway inside its containers
-(an `extra_hosts` entry in the override). Add it to the hosts file once:
+`DATABASE_URL` is `postgres://app:{secret:db}@{host}:{port:db}/app`, where
+`{host}` is whatever address that engine's containers reach the host at.
+Every URL shown to a person uses `{hostname}` (`dev.example.test`), which
+resolves to loopback on the host and to each engine's gateway inside its
+containers (an `extra_hosts` entry in the override). Add it to the hosts
+file once:
 
 ```
 127.0.0.1 dev.example.test
@@ -84,6 +85,44 @@ components that use it cannot reach the host. The stack runner's other
 checks (whether a port is free) only bind a socket without listening, so
 they never raise this prompt. This example does not use `relay:` (`api`
 reaches the database through `{host}`), so it never asks.
+
+## The database password
+
+No file of the example holds a password, and yours should not either:
+`chappa.yml` and the compose files are committed and copied into every
+clone. The definition names a generated secret instead:
+
+```yaml
+db:
+  env:
+    POSTGRES_PASSWORD: "{secret:db}"
+  outputs:
+    url: "postgres://app:{secret:db}@{hostname}:{port:db}/app"
+migrate:
+  env:
+    PGPASSWORD: "{secret:db}"
+api:
+  env:
+    DATABASE_URL: "postgres://app:{secret:db}@{host}:{port:db}/app"
+```
+
+The first time an instance is resolved, the stack runner generates a
+random value for each `{secret:<name>}` the definition uses and keeps it
+in `.work/instances/<instance>/secrets/<name>` (owner-only on Linux and
+macOS). Every `{secret:db}` of that instance is the same value; `local-0`
+and `local-1` get different ones. The value reaches the containers through
+the generated override file, also under `.work/`, so the compose files
+leave `POSTGRES_PASSWORD` and `PGPASSWORD` out.
+
+To see or use the password, read the file. To choose your own, write it
+into the file before the first `up`. Postgres takes the password only when
+it creates the `db-data` volume: if you delete or change the file while
+the volume exists, use **Down and delete data** so the database starts
+again with the current value.
+
+The secret scan of the instance environment skips values the runner
+generated this way. A password written into `chappa.yml` or a file it
+names is still reported.
 
 ## Validation
 
@@ -266,7 +305,9 @@ cd ../web && CHAPPA_STACK=local CHAPPA_STACK_SLOT=0 \
 ```
 
 `--no-deps` is deliberate: the runner orders the starts itself and decides
-which components a given `up` brings up.
+which components a given `up` brings up. The override file is also what
+carries the database password, so `db` does not start from the compose
+file alone.
 
 Stopping is the reverse order with a grace period
 (`compose stop -t 10 <service>`); `compose down` removes an instance's

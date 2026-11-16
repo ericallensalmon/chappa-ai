@@ -1002,22 +1002,31 @@ stacks:
     #[test]
     fn std_port_probe_sees_a_real_listener_on_either_address_and_never_keeps_the_port() {
         // A listener on loopback, then one on the wildcard address: taken.
+        // Once it is dropped the port is free and the probe must not keep
+        // it: a real listener binds each address right after the probe,
+        // twice over. A released ephemeral port can be picked up by another
+        // process's outgoing connection at any moment, so that half retries
+        // on a fresh port instead of failing on someone else's socket.
+        fn binds(host: &str, port: u16) -> bool {
+            TcpListener::bind((host, port)).is_ok() // dropped on return
+        }
+        let released_and_kept_free = |port: u16| {
+            (0..2).all(|_| {
+                StdPortProbe.is_free(port) && binds("0.0.0.0", port) && binds("127.0.0.1", port)
+            })
+        };
         for host in ["127.0.0.1", "0.0.0.0"] {
-            let listener = TcpListener::bind((host, 0)).unwrap();
-            let port = listener.local_addr().unwrap().port();
-            assert!(!StdPortProbe.is_free(port), "{host}:{port} is listened on");
-            drop(listener);
-            assert!(StdPortProbe.is_free(port), "{host}:{port} was let go");
-            // The probe let go of it too: a real listener binds both
-            // addresses right after it, twice over.
-            for _ in 0..2 {
-                assert!(StdPortProbe.is_free(port));
-                let a = TcpListener::bind(("0.0.0.0", port));
-                assert!(a.is_ok(), "0.0.0.0:{port} after the probe: {a:?}");
-                drop(a);
-                let b = TcpListener::bind(("127.0.0.1", port));
-                assert!(b.is_ok(), "127.0.0.1:{port} after the probe: {b:?}");
-            }
+            let freed = (0..5).any(|_| {
+                let listener = TcpListener::bind((host, 0)).unwrap();
+                let port = listener.local_addr().unwrap().port();
+                assert!(!StdPortProbe.is_free(port), "{host}:{port} is listened on");
+                drop(listener);
+                released_and_kept_free(port)
+            });
+            assert!(
+                freed,
+                "{host}: a released port never read free and bindable"
+            );
         }
     }
 

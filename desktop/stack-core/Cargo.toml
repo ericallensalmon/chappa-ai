@@ -11,6 +11,9 @@ edition = "2021"
 
 [dependencies]
 blake3 = "1"
+# The generated per-instance secrets (`{secret:<name>}`) come from the OS
+# random source.
+getrandom = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 # Data-safety rule patterns: linear-time matching, because both the rules
 # and the sampled values they run over are untrusted.

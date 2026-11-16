@@ -38,6 +38,10 @@ fn words(def: &ProcessDef) -> Vec<String> {
 /// Whether `def` starts the stack runner's server: a word naming the
 /// `chappa-stack` program (a path, a `.exe`, or cargo's `-p chappa-stack`)
 /// followed later by `serve`.
+///
+/// Both path separators count on every OS: `chappa.yml` is shared between
+/// machines, and the same file must give the same trust hash wherever it
+/// is opened.
 pub fn is_stack_serve(def: &ProcessDef) -> bool {
     if !def.is_source() {
         return false;
@@ -45,7 +49,8 @@ pub fn is_stack_serve(def: &ProcessDef) -> bool {
     let w = words(def);
     let named = w.iter().position(|word| {
         let word = word.trim_matches(['"', '\'']);
-        Path::new(word)
+        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        Path::new(file)
             .file_stem()
             .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("chappa-stack"))
     });
@@ -290,6 +295,11 @@ mod tests {
         assert!(is_stack_serve(&def("chappa-stack serve --slot 1", true)));
         assert!(is_stack_serve(&def(
             "C:\\tools\\chappa-stack.exe serve",
+            true
+        )));
+        assert!(is_stack_serve(&def("/opt/tools/chappa-stack serve", true)));
+        assert!(is_stack_serve(&def(
+            "./target/debug/chappa-stack serve",
             true
         )));
         assert!(is_stack_serve(&def(

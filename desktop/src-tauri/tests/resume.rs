@@ -138,7 +138,9 @@ fn two_ids_program() -> (String, Vec<String>) {
 }
 
 /// A persistent machine-mode stand-in: announces its session in its init
-/// line, answers each stdin line, exits at EOF.
+/// line, answers each stdin line, exits at EOF. The machine-mode flags go
+/// before the tool's args, so outside Windows the script itself is the
+/// program (`sh` would refuse them as its own options).
 fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
     let init = r#"{"type":"system","subtype":"init","session_id":"ses-json","model":"fake-model"}"#;
     let result = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"usage":{"input_tokens":5,"output_tokens":2},"result":"pong"}"#;
@@ -172,9 +174,21 @@ fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
             "",
         ]
         .join("\n");
-        std::fs::write(&script, body).unwrap();
-        ("sh".into(), vec![script.to_string_lossy().into_owned()])
+        write_executable(&script, &body);
+        (script.to_string_lossy().into_owned(), Vec::new())
     }
+}
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn write_executable(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).unwrap();
 }
 
 fn wait_until<T>(mut pred: impl FnMut() -> Option<T>) -> T {

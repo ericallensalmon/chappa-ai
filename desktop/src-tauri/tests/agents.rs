@@ -35,11 +35,18 @@ fn echo_tool() -> (String, Vec<String>) {
     ("cmd".into(), vec!["/K".into(), "echo".into()])
 }
 
+/// `for a; do :; done` walks the positional arguments, leaving the last
+/// one in `$a`: a spaced argument split on the way would echo only its
+/// last word.
 #[cfg(not(windows))]
 fn echo_tool() -> (String, Vec<String>) {
     (
         "sh".into(),
-        vec!["-c".into(), "echo \"$1\"; exec sh".into(), "sh".into()],
+        vec![
+            "-c".into(),
+            "for a; do :; done; echo \"$a\"; exec sh".into(),
+            "sh".into(),
+        ],
     )
 }
 
@@ -489,6 +496,13 @@ fn http(addr: &str, method: &str, path: &str, body: &str) -> (u16, Value) {
 /// `system/init`, an `assistant` text echoing the line, and a `result` (as
 /// claude does per user message), and exits on EOF. A batch file on
 /// Windows, a `sh` script elsewhere.
+///
+/// The machine-mode flags go BEFORE the tool's args, so the program itself
+/// has to take them, as a real CLI does: `cmd` lets them pass, `sh` would
+/// refuse them as its own options. So elsewhere the script is the program
+/// (executable, with a shebang), and its one arg stands for the tool's own.
+/// `sh` answers within microseconds, so it pauses before the `result`, as a
+/// real turn does: a test reads the turn as started before it has ended.
 fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
     let init =
         r#"{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-model"}"#;
@@ -520,14 +534,39 @@ fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
             "while IFS= read -r line; do",
             &format!("  echo '{init}'"),
             "  echo '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"got\"}]}}'",
+            "  sleep 0.2",
             &format!("  echo '{result}'"),
             "done",
             "",
         ]
         .join("\n");
-        std::fs::write(&script, body).unwrap();
-        ("sh".into(), vec![script.to_string_lossy().into_owned()])
+        write_executable(&script, &body);
+        (
+            script.to_string_lossy().into_owned(),
+            vec!["--tool-arg".into()],
+        )
     }
+}
+
+/// The fake CLI's script file, as [`fake_json_cli`] wrote it.
+fn fake_json_cli_script(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join(if cfg!(windows) {
+        "fake_json_cli.cmd"
+    } else {
+        "fake_json_cli.sh"
+    })
+}
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn write_executable(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).unwrap();
 }
 
 /// Spawn a json-transport tool (claude type, fake program): machine-mode
@@ -880,7 +919,7 @@ fn fake_json_cli_ready(dir: &std::path::Path) -> (String, Vec<String>) {
     let (program, args) = fake_json_cli(dir);
     let init =
         r#"{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-model"}"#;
-    let script = std::path::PathBuf::from(args.last().unwrap());
+    let script = fake_json_cli_script(dir);
     let body = std::fs::read_to_string(&script).unwrap();
     let body = if cfg!(windows) {
         body.replacen("@echo off\r\n", &format!("@echo off\r\necho {init}\r\n"), 1)

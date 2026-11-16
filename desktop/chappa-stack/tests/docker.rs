@@ -6,11 +6,15 @@
 //! mode; otherwise it prints why it skipped and passes. The `api` component
 //! of the example runs on podman and `web` from a checkout that is not part
 //! of the example, so only `db` (docker, `postgres:16`) is brought up.
+//!
+//! Both tests run the example's slot 0, which is one compose project
+//! (`local-0-core`) with fixed container, network and volume names, so
+//! they take turns.
 
 mod common;
 
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use chappa_stack::world::{ThreadSpawner, World};
@@ -21,16 +25,53 @@ fn skip(reason: &str) {
     eprintln!("skipping the real-docker round trip: {reason}");
 }
 
-/// `compose down` of the example's docker project, whatever happened.
+static SLOT_ZERO: Mutex<()> = Mutex::new(());
+
+/// The example's slot 0, held for the whole test. A test that failed
+/// while holding it leaves nothing behind (its [`Cleanup`] ran), so a
+/// poisoned lock is still a free slot.
+fn take_slot_zero() -> MutexGuard<'static, ()> {
+    SLOT_ZERO.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `compose down` of the example's docker project, before the test (what
+/// an interrupted earlier run left) and after it, whatever happened.
 struct Cleanup(std::path::PathBuf);
 
-impl Drop for Cleanup {
-    fn drop(&mut self) {
+impl Cleanup {
+    fn new(dir: &std::path::Path) -> Cleanup {
+        let c = Cleanup(dir.to_path_buf());
+        c.down();
+        c
+    }
+
+    fn down(&self) {
         let _ = std::process::Command::new("docker")
             .args(["compose", "-p", "local-0-core", "down", "--volumes"])
             .current_dir(&self.0)
             .output();
     }
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        self.down();
+    }
+}
+
+/// The example keeps its database password out of its files: the runner
+/// generated one for slot 0, and the scan of the instance env, which
+/// reads the resolved URLs that carry it, found nothing.
+fn the_password_was_generated_and_not_flagged(p: &Project, env: &Value) {
+    let password = std::fs::read_to_string(p.work().join("instances/local-0/secrets/db")).unwrap();
+    assert_eq!(password.len(), 48);
+    let findings = env["secretScan"]["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| !f["file"].as_str().unwrap().starts_with("instance env")),
+        "{findings:?}"
+    );
 }
 
 fn wait(what: &str, within: Duration, mut f: impl FnMut() -> bool) {
@@ -91,8 +132,9 @@ fn the_example_database_comes_up_and_goes_down_through_the_protocol() {
         Ok(out) => return skip(&format!("docker is not in Linux mode ({})", out.summary())),
         Err(e) => return skip(&format!("docker is not reachable ({e})")),
     }
+    let _slot = take_slot_zero();
     let p = Project::example();
-    let _cleanup = Cleanup(p.dir.clone());
+    let _cleanup = Cleanup::new(&p.dir);
     let mut world = World::real();
     world.spawner = Arc::new(ThreadSpawner);
     world.hosts_text = Some("127.0.0.1 localhost dev.example.test\n".into());
@@ -116,6 +158,7 @@ fn the_example_database_comes_up_and_goes_down_through_the_protocol() {
         component(&get(&src, "/api/environment").1, "db")["state"] == "up"
     });
     let (_, env) = get(&src, "/api/environment");
+    the_password_was_generated_and_not_flagged(&p, &env);
     let db = component(&env, "db");
     assert_eq!(db["source"]["mode"], "prebuilt");
     assert!(db["source"]["image"]
@@ -193,8 +236,9 @@ fn the_example_saves_its_database_goes_down_and_resumes_it() {
     if !docker_ready() {
         return;
     }
+    let _slot = take_slot_zero();
     let p = Project::example();
-    let _cleanup = Cleanup(p.dir.clone());
+    let _cleanup = Cleanup::new(&p.dir);
     // A work item with no repos, bound to slot 0 (the example builds
     // nothing from a clone, so binding changes no component).
     let item = p.work().join("ABC-1");

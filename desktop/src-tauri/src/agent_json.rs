@@ -2067,10 +2067,14 @@ mod tests {
         }
         assert!(!handle.io().child_alive(), "exit reported to the actor");
         assert!(handle.io().has_output(), "bytes were noted, never parsed");
+        // stderr is its own pipe read by its own thread, so its line can
+        // land anywhere among the stdout events; the order is checked on
+        // stdout alone.
         let ks: Vec<&str> = emitted
             .lock()
             .unwrap()
             .iter()
+            .filter(|e| !(e.kind == AgentEventKind::Raw && e.payload.get("stderr").is_some()))
             .map(|e| e.kind.as_str())
             .collect();
         assert!(
@@ -2088,7 +2092,7 @@ mod tests {
             Some(json!("oops")),
             "stderr lines pass through as raw"
         );
-        assert_eq!(agent.events_since(0).len(), ks.len());
+        assert_eq!(agent.events_since(0).len(), emitted.lock().unwrap().len());
         // The actor reported the exit through the normal event path.
         let mut saw_exit = false;
         while let Ok(ev) = rx.recv_timeout(Duration::from_secs(5)) {

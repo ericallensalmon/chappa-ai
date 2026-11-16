@@ -469,12 +469,20 @@ impl<'a> StackRunner<'a> {
         parse_utc(&self.now_utc).unwrap_or(0)
     }
 
-    /// Resolve `slot` with its intent record (a fresh one when none exists).
+    /// Resolve `slot` with its intent record (a fresh one when none exists)
+    /// and its generated secrets (made on first use).
     pub fn instance(&self, slot: u32) -> Result<(ResolvedInstance, IntentRecord), RunnerError> {
         let id = instance_id(self.stack_name, slot);
-        let intent = IntentRecord::load(&self.work_dir(), &id)?
+        let work_dir = self.work_dir();
+        let intent = IntentRecord::load(&work_dir, &id)?
             .unwrap_or_else(|| IntentRecord::new(self.stack_name, slot, &self.now_utc));
-        let inst = crate::driver::resolve(self.stack_name, self.stack, slot, Some(&intent))?;
+        let mut inst = crate::driver::resolve(self.stack_name, self.stack, slot, Some(&intent))?;
+        inst.secrets = crate::instance_secrets::load_or_create(
+            &work_dir,
+            &id,
+            &crate::instance_secrets::names(self.stack),
+        )
+        .map_err(|e| RunnerError::Io(format!("the generated secrets of {id}: {e}")))?;
         Ok((inst, intent))
     }
 

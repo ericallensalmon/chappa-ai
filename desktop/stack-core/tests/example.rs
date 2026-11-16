@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use stack_core::cli::{CliOutput, FakeCli};
 use stack_core::compose::{FakeGateways, Gateway};
 use stack_core::definition::{
-    has_errors, validate, Mode, Rule, StackDef, StacksDocument, ValidationContext,
+    has_errors, validate, Mode, StackDef, StacksDocument, ValidationContext,
 };
 use stack_core::driver::{ComponentState, ResolvedInstance};
 use stack_core::intent::{ActiveRecord, Desired};
@@ -235,20 +235,30 @@ fn the_example_loads_and_validates_without_findings() {
     assert!(!has_errors(&diags), "{diags:#?}");
     // The database keeps data and has a data-safety check with a rules
     // file, so neither the unscanned nor the sample-without-rules warning
-    // applies.
-    // The one warning is the throwaway local database password written into
-    // the api's connection URL, which the inline-credential check points
-    // out as it would in any committed file.
-    let rules: Vec<(Rule, &str)> = diags.iter().map(|d| (d.rule, d.path.as_str())).collect();
-    assert_eq!(
-        rules,
-        [(
-            Rule::InlineCredential,
-            "stacks.local.components.api.env.DATABASE_URL"
-        )],
-        "{diags:#?}"
-    );
-    assert!(diags.iter().all(|d| !d.message.contains("app:app")));
+    // applies. The database password is a generated `{secret:db}`, so the
+    // inline-credential check has nothing to point out either.
+    assert!(diags.is_empty(), "{diags:#?}");
+    let committed = [
+        fs::read_to_string(dir.join("chappa.yml")).unwrap(),
+        fs::read_to_string(dir.join("stack").join("core.compose.yml")).unwrap(),
+        fs::read_to_string(dir.join("stack").join("apis.compose.yml")).unwrap(),
+    ];
+    use stack_core::credentials::{is_placeholder, spans, CredentialKind};
+    for text in &committed {
+        assert!(
+            spans(text)
+                .iter()
+                .all(|s| s.kind != CredentialKind::UrlUserinfo),
+            "no URL with a password in a committed file: {text}"
+        );
+        for line in text.lines() {
+            if let Some((key, value)) = line.split_once(':') {
+                if key.trim().ends_with("PASSWORD") {
+                    assert!(is_placeholder(value), "{line}");
+                }
+            }
+        }
+    }
     let db_check = stack_core_db_check(&doc);
     assert!(db_check.marker.is_some() && db_check.sample.is_some());
     let rules_file = doc.stacks["local"]
@@ -363,6 +373,23 @@ fn up_on_a_fresh_instance_writes_overrides_pulls_starts_in_order_and_records() {
     assert!(apis.2.contains("14001:8080"), "{}", apis.2);
     // the api reaches the database through the host, per engine
     assert!(apis.2.contains("DATABASE_URL"), "{}", apis.2);
+    // the generated password reaches every container that needs it, and
+    // only through the override files under `.work/`
+    let password =
+        fs::read_to_string(ex.dir.join(".work/instances/local-0/secrets").join("db")).unwrap();
+    assert_eq!(password.len(), 48);
+    for (text, wanted) in [
+        (&core.2, "POSTGRES_PASSWORD"),
+        (&core.2, "PGPASSWORD"),
+        (&apis.2, "DATABASE_URL"),
+    ] {
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with(wanted))
+            .unwrap_or_else(|| panic!("{wanted} in {text}"));
+        assert!(line.contains(&password), "{wanted}");
+    }
+    assert!(!apis.2.contains("{secret:"), "{}", apis.2);
 
     // 2. the runs, in dependency order
     let rs = runs(&applied.steps);
@@ -725,9 +752,10 @@ fn status_after_up_reads_all_nine_states_from_ps_inspect_and_probes() {
     assert_eq!(prov.mode, Mode::Prebuilt);
     assert_eq!(prov.image.as_deref(), Some(PG_DIGEST));
     assert_eq!(prov.build_id.as_deref(), Some("16"));
+    let password = fs::read_to_string(ex.dir.join(".work/instances/local-0/secrets/db")).unwrap();
     assert_eq!(
         db.links["url"],
-        "postgres://app:app@dev.example.test:14000/app"
+        format!("postgres://app:{password}@dev.example.test:14000/app")
     );
     let logs = db.logs.as_ref().unwrap();
     assert_eq!(logs.argv[..4], ["docker", "compose", "-p", "local-0-core"]);
@@ -1130,9 +1158,10 @@ fn watch_swaps_the_container_for_the_watch_command() {
     assert!(w.cwd.ends_with("api"));
     assert_eq!(w.env["CHAPPA_STACK_SLOT"], "0");
     let url = &w.env["DATABASE_URL"];
-    assert!(
-        url.starts_with("postgres://app:app@") && url.ends_with(":14000/app"),
-        "{url}"
+    let password = fs::read_to_string(ex.dir.join(".work/instances/local-0/secrets/db")).unwrap();
+    assert_eq!(
+        url,
+        &format!("postgres://app:{password}@localhost:14000/app")
     );
     assert_eq!(applied.intent.components["api"].mode, Some(Mode::Dev));
 }

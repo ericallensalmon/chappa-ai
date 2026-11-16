@@ -739,8 +739,16 @@ fn write_owner_only(path: &Path, token: &str) -> std::io::Result<()> {
     result
 }
 
-/// Strip inherited ACEs and grant only the current user. `icacls` ships with
-/// every Windows; shelling out keeps the crate windows-sys-free.
+/// Leave the current user's grant as the file's only ACE. `icacls` ships
+/// with every Windows; shelling out keeps the crate free of the Win32
+/// security API.
+///
+/// Two steps, because a new file can carry explicit ACEs that
+/// `/inheritance:r` keeps: where the folder passes nothing down, Windows
+/// writes the creating token's default DACL onto the file (SYSTEM and
+/// Administrators for an elevated account). `/reset` drops every explicit
+/// ACE, leaving only what the folder passes down; `/inheritance:r` then
+/// strips that, and the grant is all that is left.
 ///
 /// `icacls` is run by its full System32 path, never resolved by name, so a
 /// same-named binary next to the app or earlier on PATH can't stand in for
@@ -755,20 +763,27 @@ fn restrict_acl_windows(path: &Path) -> std::io::Result<()> {
         Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
         _ => user,
     };
-    let output = std::process::Command::new(icacls_path()?)
-        .arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(format!("{principal}:F"))
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "icacls failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )))
-    }
+    let icacls = icacls_path()?;
+    let run = |args: &[std::ffi::OsString]| -> std::io::Result<()> {
+        let output = std::process::Command::new(&icacls)
+            .arg(path)
+            .args(args)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "icacls failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )))
+        }
+    };
+    run(&["/reset".into()])?;
+    run(&[
+        "/inheritance:r".into(),
+        "/grant:r".into(),
+        format!("{principal}:F").into(),
+    ])
 }
 
 /// `%SystemRoot%\System32\icacls.exe` (`windir` as the fallback). With

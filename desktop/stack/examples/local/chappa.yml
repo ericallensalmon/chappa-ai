@@ -90,8 +90,12 @@ stacks:
           sample: [node, stack/sample-db.js]
           when: [after-up, every: 6h]
         ports: 1
+        # The password is generated per instance and kept under .work/;
+        # nothing committed holds it (see the README).
+        env:
+          POSTGRES_PASSWORD: "{secret:db}"
         outputs:
-          url: "postgres://app:app@{hostname}:{port:db}/app"
+          url: "postgres://app:{secret:db}@{hostname}:{port:db}/app"
         memoryMb: 256
       migrate:
         group: core
@@ -102,6 +106,8 @@ stacks:
         modes:
           prebuilt: { image: postgres, tag: "16" }
         depends_on: [db]
+        env:
+          PGPASSWORD: "{secret:db}"
         ports: 0
       api:
         group: apis
@@ -115,7 +121,7 @@ stacks:
         default: prebuilt
         depends_on: [db]
         env:
-          DATABASE_URL: "postgres://app:app@{host}:{port:db}/app"
+          DATABASE_URL: "postgres://app:{secret:db}@{host}:{port:db}/app"
         probe: { url: "http://{hostname}:{port:api}/health/ready", rule: health }
         outputs:
           url: "http://{hostname}:{port:api}"

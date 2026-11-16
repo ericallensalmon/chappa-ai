@@ -129,6 +129,10 @@ pub struct ResolvedInstance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
     pub components: IndexMap<String, ResolvedComponent>,
+    /// The values behind `{secret:<name>}`. Filled by the runner from the
+    /// work folder, never serialized: an instance goes out on the wire.
+    #[serde(skip)]
+    pub secrets: crate::instance_secrets::Secrets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -186,6 +190,7 @@ pub fn resolve(
         hostname: stack.hostname.clone(),
         item: intent.and_then(|i| i.item.clone()),
         components,
+        secrets: Default::default(),
     })
 }
 
@@ -238,6 +243,7 @@ impl ResolvedInstance {
             hostname: self.hostname.clone(),
             item: self.item.clone(),
             instance: Some(self.id.clone()),
+            secrets: self.secrets.clone(),
             ..Context::default()
         };
         for (name, c) in &self.components {
