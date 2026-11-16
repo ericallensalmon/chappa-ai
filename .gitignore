@@ -7,6 +7,10 @@ desktop/ui/dist/
 desktop/src-tauri/gen/
 node_modules/
 
+# Agent CLI local settings: approved commands are stored verbatim, secrets
+# included, so these never belong in a repository.
+.claude/settings.local.json
+
 # Editor and OS state
 .vscode/
 .idea/
