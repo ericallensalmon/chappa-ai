@@ -116,7 +116,9 @@ pub fn from_browser(headers: &[tiny_http::Header]) -> bool {
             let value = h.value.as_str().trim().to_ascii_lowercase();
             let host = match value.strip_prefix('[') {
                 Some(v6) => v6.split(']').next().unwrap_or(""),
-                None => value.rsplit_once(':').map_or(value.as_str(), |(host, _)| host),
+                None => value
+                    .rsplit_once(':')
+                    .map_or(value.as_str(), |(host, _)| host),
             };
             return !matches!(host, "127.0.0.1" | "localhost" | "::1");
         }
@@ -340,4 +342,3 @@ fn close(registry: &Registry, id: TermId) -> tiny_http::Response<std::io::Cursor
         None => json(404, json!({"error": format!("no such terminal: {id}")})),
     }
 }
-

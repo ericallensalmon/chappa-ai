@@ -31,13 +31,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
-use serde::Serialize;
 use project_model::backoff::RestartBackoff;
 use project_model::records::{RecordKind, Run, RunHead, TailKind};
 use project_model::settings::Settings;
 use project_model::status::{Lifecycle, ProcessEvent, RUNNING_AFTER_MS};
 use project_model::workspace::{validate_workspace_def, WorkspaceStore};
 use project_model::yml::ProcessDef;
+use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
 use term_core::actor::epoch_ms;
@@ -120,7 +120,13 @@ impl Workspace {
     /// are addressable; actual auto_start spawns are frontend-initiated (the
     /// frames-channel constraint). Every stored command gets its record id
     /// here, so the rows carry one before their first start.
-    pub fn init(&self, app: &AppHandle, config_dir: std::path::PathBuf, settings: SettingsState, coordination: Coordination) {
+    pub fn init(
+        &self,
+        app: &AppHandle,
+        config_dir: std::path::PathBuf,
+        settings: SettingsState,
+        coordination: Coordination,
+    ) {
         let store = WorkspaceStore::new(config_dir.join("workspace.json"));
         let defs = store.commands();
         for name in defs.keys() {
@@ -177,7 +183,12 @@ impl Workspace {
     /// command record IS its definition): the file is written first (a
     /// refused delete must not have killed anything), the record's run
     /// history is pruned, then the running process, if any, is stopped.
-    pub fn delete_command(&self, app: &AppHandle, registry: &Registry, name: &str) -> Result<Vec<WorkspaceCommandDto>, String> {
+    pub fn delete_command(
+        &self,
+        app: &AppHandle,
+        registry: &Registry,
+        name: &str,
+    ) -> Result<Vec<WorkspaceCommandDto>, String> {
         let store = self.store()?;
         let record_id = store.command_record_id(name);
         store.delete_command(name)?;
@@ -280,7 +291,9 @@ fn begin_command_run(inner: &WsInner, name: &str) -> Option<RecordBinding> {
     let run_uuid = match crate::control_http::random_hex(16) {
         Ok(uuid) => uuid,
         Err(e) => {
-            log::warn!("workspace `{name}`: no record for this run: cannot generate a run uuid: {e}");
+            log::warn!(
+                "workspace `{name}`: no record for this run: cannot generate a run uuid: {e}"
+            );
             return None;
         }
     };
@@ -289,10 +302,16 @@ fn begin_command_run(inner: &WsInner, name: &str) -> Option<RecordBinding> {
         log::warn!("workspace `{name}`: run {run_uuid} not recorded: {e}");
         return None;
     }
-    if let Err(e) = inner.ledger.insert(&record_id, None, RecordKind::Command, &run) {
+    if let Err(e) = inner
+        .ledger
+        .insert(&record_id, None, RecordKind::Command, &run)
+    {
         log::warn!("workspace `{name}`: ledger row for run {run_uuid} not written: {e}");
     }
-    Some(RecordBinding { record_id, run_uuid })
+    Some(RecordBinding {
+        record_id,
+        run_uuid,
+    })
 }
 
 /// Wire one command's terminal spawn up with its auto_restart hook. `name` is
@@ -375,7 +394,9 @@ fn make_exit_handler(
                 None => return,
             };
             proc.exit_code = code;
-            let status = proc.lifecycle.on(ProcessEvent::Exited { success }, now_ms());
+            let status = proc
+                .lifecycle
+                .on(ProcessEvent::Exited { success }, now_ms());
             emit_status(&app, &name, status, code, proc.term_id);
             let plan = if proc.def.auto_restart
                 && proc.lifecycle.status() != ProcessStatus::Stopped
@@ -520,7 +541,8 @@ fn rebuild(inner: &mut WsInner, registry: &Registry, app: &AppHandle, ws: Arc<Mu
                         p.lifecycle.on(ProcessEvent::Stop, now_ms());
                         p.generation += 1;
                         let record = begin_command_run(inner, &name);
-                        let _ = spawn_proc(registry, app, ws.clone(), &name, &settings, &mut p, record);
+                        let _ =
+                            spawn_proc(registry, app, ws.clone(), &name, &settings, &mut p, record);
                     } else {
                         log::warn!(
                             "workspace `{name}` keeps running on its old definition — the new one does not spawn"
@@ -589,7 +611,11 @@ pub struct WorkspaceCommandDto {
 }
 
 impl WorkspaceCommandDto {
-    fn from_proc(name: &str, p: &WsProc, record: Option<&project_model::projects::ProcessOverride>) -> Self {
+    fn from_proc(
+        name: &str,
+        p: &WsProc,
+        record: Option<&project_model::projects::ProcessOverride>,
+    ) -> Self {
         Self {
             name: name.to_owned(),
             command: crate::projects::shown_command(&p.def.command),
@@ -601,7 +627,12 @@ impl WorkspaceCommandDto {
             term_id: p.term_id,
             exit_code: p.exit_code,
             working_dir: p.def.working_dir.as_ref().map(|d| d.display().to_string()),
-            env: p.def.env.iter().map(|(k, v)| (k.clone(), stack_core::credentials::mask_env(k, v))).collect(),
+            env: p
+                .def
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), stack_core::credentials::mask_env(k, v)))
+                .collect(),
             record_id: record.and_then(|r| r.record_id.clone()),
             last_run: record.and_then(|r| r.last_run.as_ref().map(Run::head)),
         }
@@ -638,7 +669,9 @@ pub fn save_workspace_command(
     let (name, mut ws_def) = def.into_def();
     // A masked value the editor kept comes back as a marker: the stored
     // original goes back in before anything is written.
-    let existing = original_name.as_deref().and_then(|old| workspace.lock().ok()?.procs.get(old).map(|p| p.def.clone()));
+    let existing = original_name
+        .as_deref()
+        .and_then(|old| workspace.lock().ok()?.procs.get(old).map(|p| p.def.clone()));
     crate::projects::resolve_unchanged(&mut ws_def, existing.as_ref())?;
     store.save_command(original_name.as_deref(), &name, ws_def)?;
     let mut inner = workspace.lock()?;
@@ -708,7 +741,15 @@ fn start_ws(
     match spec {
         Ok(_) => {
             proc.term_id = None; // force a fresh id on this start
-            match spawn_proc(registry, app, workspace.arc(), &name, &settings, proc, record) {
+            match spawn_proc(
+                registry,
+                app,
+                workspace.arc(),
+                &name,
+                &settings,
+                proc,
+                record,
+            ) {
                 Ok(id) => {
                     proc.backoff.reset();
                     Ok(id)
@@ -741,7 +782,12 @@ pub fn stop_workspace_command(
     stop_ws(&registry, &app, &workspace, &name)
 }
 
-fn stop_ws(registry: &Registry, app: &AppHandle, workspace: &Workspace, name: &str) -> Result<(), String> {
+fn stop_ws(
+    registry: &Registry,
+    app: &AppHandle,
+    workspace: &Workspace,
+    name: &str,
+) -> Result<(), String> {
     let mut inner = workspace.lock()?;
     let proc = inner
         .procs
@@ -816,7 +862,10 @@ mod tests {
             ..Default::default()
         };
         let spec = build_workspace_spec(&home, &s).unwrap();
-        assert_eq!(spec.cwd, None, "empty working_dir = home, like a plain shell");
+        assert_eq!(
+            spec.cwd, None,
+            "empty working_dir = home, like a plain shell"
+        );
 
         let rel = ProcessDef {
             command: "echo hi".into(),

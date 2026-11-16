@@ -116,7 +116,13 @@ pub fn timer_set(state: &ControlState, params: &Params, query: &str, body: &str)
     })
 }
 
-fn fire_when_idle(kind: TimerKind, state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+fn fire_when_idle(
+    kind: TimerKind,
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     run(query, body, |a| {
         let processes = process_tokens(a)?;
         let max_wait_ms = required_ms(a, "max_wait_ms")?;
@@ -137,11 +143,21 @@ fn fire_when_idle(kind: TimerKind, state: &ControlState, params: &Params, query:
     })
 }
 
-pub fn timer_fire_when_idle_any(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+pub fn timer_fire_when_idle_any(
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     fire_when_idle(TimerKind::IdleAny, state, params, query, body)
 }
 
-pub fn timer_fire_when_idle_all(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+pub fn timer_fire_when_idle_all(
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     fire_when_idle(TimerKind::IdleAll, state, params, query, body)
 }
 
@@ -159,7 +175,13 @@ pub fn timer_list(state: &ControlState, params: &Params, query: &str, body: &str
     })
 }
 
-fn lifecycle(op: Lifecycle, state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+fn lifecycle(
+    op: Lifecycle,
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     run(query, body, |_: &Args| {
         state.timers.lifecycle(&params.actor, record(params)?, op)
     })

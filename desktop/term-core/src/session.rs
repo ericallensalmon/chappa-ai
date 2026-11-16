@@ -109,7 +109,11 @@ impl LineMatcher {
                 },
                 Strip::OscEsc => {
                     // `ESC \` closes the string; anything else is a new escape.
-                    self.strip = if b == b'\\' { Strip::Text } else { Strip::Escape };
+                    self.strip = if b == b'\\' {
+                        Strip::Text
+                    } else {
+                        Strip::Escape
+                    };
                     if self.strip == Strip::Escape && b == b'[' {
                         self.strip = Strip::Csi;
                     } else if self.strip == Strip::Escape && b == b']' {
@@ -150,13 +154,18 @@ mod tests {
     use super::*;
 
     fn after(prefix: &'static str) -> SessionMatcher {
-        SessionMatcher::new(move |line| line.strip_prefix(prefix).map(|rest| rest.trim().to_owned()))
+        SessionMatcher::new(move |line| {
+            line.strip_prefix(prefix).map(|rest| rest.trim().to_owned())
+        })
     }
 
     #[test]
     fn matches_completed_lines_in_stream_order() {
         let mut m = LineMatcher::new(after("session: "));
-        assert!(m.feed(b"session: abc").is_empty(), "an unterminated line waits");
+        assert!(
+            m.feed(b"session: abc").is_empty(),
+            "an unterminated line waits"
+        );
         assert_eq!(m.feed(b"\nother\r\nsession: def\n"), vec!["abc", "def"]);
     }
 
@@ -181,7 +190,14 @@ mod tests {
         let long = vec![b'a'; MAX_LINE + 10];
         assert!(m.feed(b"session: ").is_empty());
         assert!(m.feed(&long).is_empty());
-        assert!(m.feed(b"\n").is_empty(), "the oversized line never reaches the matcher");
-        assert_eq!(m.feed(b"session: ok\n"), vec!["ok"], "the next line is matched normally");
+        assert!(
+            m.feed(b"\n").is_empty(),
+            "the oversized line never reaches the matcher"
+        );
+        assert_eq!(
+            m.feed(b"session: ok\n"),
+            vec!["ok"],
+            "the next line is matched normally"
+        );
     }
 }

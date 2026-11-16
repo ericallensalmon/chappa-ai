@@ -76,7 +76,14 @@ fn meta() -> AgentMeta {
 fn entry(registry: &Registry, sink: Arc<MockSink>) -> (u32, TermHandle) {
     let id = registry.reserve_id();
     let cfg = ActorConfig {
-        spec: PtySpec { command: String::new(), args: vec![], cwd: None, env: vec![], cols: 40, rows: 6 },
+        spec: PtySpec {
+            command: String::new(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+            cols: 40,
+            rows: 6,
+        },
         scrollback_lines: 100,
         ..ActorConfig::default()
     };
@@ -87,7 +94,9 @@ fn entry(registry: &Registry, sink: Arc<MockSink>) -> (u32, TermHandle) {
 }
 
 fn row_status(registry: &Registry, id: u32) -> Option<ProgramStatus> {
-    registry.control_snapshot(id).and_then(|row| row.program_status)
+    registry
+        .control_snapshot(id)
+        .and_then(|row| row.program_status)
 }
 
 #[test]
@@ -102,24 +111,57 @@ fn a_reported_status_lands_on_the_row_and_the_exit_clears_it() {
     handle.feed(b"\x1b]777;status;blocked\x1b\\");
     wait_until(|| (row_status(&registry, id) == Some(ProgramStatus::Blocked)).then_some(()));
     assert_eq!(registry.program_status(id), Some(ProgramStatus::Blocked));
-    let rail = registry.list_rows().into_iter().find(|r| r.base.id == id).unwrap();
-    assert_eq!(rail.program_status, Some(ProgramStatus::Blocked), "the rail row carries it too");
+    let rail = registry
+        .list_rows()
+        .into_iter()
+        .find(|r| r.base.id == id)
+        .unwrap();
+    assert_eq!(
+        rail.program_status,
+        Some(ProgramStatus::Blocked),
+        "the rail row carries it too"
+    );
     let wire = serde_json::to_value(registry.control_snapshot(id).unwrap()).unwrap();
-    assert_eq!(wire["program_status"], json!("blocked"), "lowercase on the wire");
+    assert_eq!(
+        wire["program_status"],
+        json!("blocked"),
+        "lowercase on the wire"
+    );
 
     // A repeat is not news; an unknown word changes nothing.
     handle.feed(b"\x1b]777;status;blocked\x07\x1b]777;status;Done\x07\x1b]777;status;done\x07");
     wait_until(|| (row_status(&registry, id) == Some(ProgramStatus::Done)).then_some(()));
-    assert_eq!(sink.statuses(), vec![json!("working"), json!("blocked"), json!("done")]);
+    assert_eq!(
+        sink.statuses(),
+        vec![json!("working"), json!("blocked"), json!("done")]
+    );
 
     // The exit clears it; an ended run takes no more.
     handle.feed(b"\x1b]777;status;failed\x07");
-    handle.note_child_exit(ExitStatus { code: Some(1), success: false });
-    wait_until(|| registry.control_snapshot(id).filter(|row| !row.child_alive && row.base.status.as_str() == "failed"));
-    assert_eq!(row_status(&registry, id), None, "an ended run reports nothing");
-    assert_eq!(registry.record_program_status(id, ProgramStatus::Blocked), None);
+    handle.note_child_exit(ExitStatus {
+        code: Some(1),
+        success: false,
+    });
+    wait_until(|| {
+        registry
+            .control_snapshot(id)
+            .filter(|row| !row.child_alive && row.base.status.as_str() == "failed")
+    });
+    assert_eq!(
+        row_status(&registry, id),
+        None,
+        "an ended run reports nothing"
+    );
+    assert_eq!(
+        registry.record_program_status(id, ProgramStatus::Blocked),
+        None
+    );
     assert_eq!(row_status(&registry, id), None);
-    assert_eq!(registry.record_program_status(9999, ProgramStatus::Working), None, "unknown terminal");
+    assert_eq!(
+        registry.record_program_status(9999, ProgramStatus::Working),
+        None,
+        "unknown terminal"
+    );
     registry.close(id);
 }
 
@@ -133,7 +175,12 @@ fn a_blocked_row_holds_a_delivery_until_it_reports_anything_else() {
 
     let gate = registry.clone();
     let delivery = std::thread::spawn(move || {
-        deliver_prompt_when_ready(&gate, id, "next step", DeliveryPolicy::quiet_only(50, Duration::from_secs(10)))
+        deliver_prompt_when_ready(
+            &gate,
+            id,
+            "next step",
+            DeliveryPolicy::quiet_only(50, Duration::from_secs(10)),
+        )
     });
     // Quiet for well past the window, but blocked: nothing is written.
     std::thread::sleep(Duration::from_millis(500));
@@ -149,9 +196,18 @@ fn a_blocked_row_holds_a_delivery_until_it_reports_anything_else() {
     // Blocked through the whole cap: the receipt says why.
     handle.feed(b"\x1b]777;status;blocked\x07");
     wait_until(|| (registry.program_status(id) == Some(ProgramStatus::Blocked)).then_some(()));
-    let receipt = deliver_prompt_when_ready(&registry, id, "later", DeliveryPolicy::quiet_only(50, Duration::from_millis(300)));
+    let receipt = deliver_prompt_when_ready(
+        &registry,
+        id,
+        "later",
+        DeliveryPolicy::quiet_only(50, Duration::from_millis(300)),
+    );
     assert!(!receipt.delivered);
     assert_eq!(receipt.reason.as_deref(), Some("blocked"));
-    assert_eq!(registry.input_journal(id).unwrap().len(), 1, "nothing more was written");
+    assert_eq!(
+        registry.input_journal(id).unwrap().len(),
+        1,
+        "nothing more was written"
+    );
     registry.close(id);
 }

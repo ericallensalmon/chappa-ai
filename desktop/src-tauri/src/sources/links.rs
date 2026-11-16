@@ -76,7 +76,9 @@ pub struct SystemResolver {
 
 impl Default for SystemResolver {
     fn default() -> Self {
-        Self { deadline: RESOLVE_DEADLINE }
+        Self {
+            deadline: RESOLVE_DEADLINE,
+        }
     }
 }
 
@@ -96,7 +98,10 @@ impl HostResolver for SystemResolver {
             .map_err(|e| format!("cannot look up `{host}`: {e}"))?;
         match rx.recv_timeout(self.deadline) {
             Ok(answer) => answer,
-            Err(_) => Err(format!("looking up `{host}` took longer than {} s", self.deadline.as_secs())),
+            Err(_) => Err(format!(
+                "looking up `{host}` took longer than {} s",
+                self.deadline.as_secs()
+            )),
         }
     }
 }
@@ -108,16 +113,26 @@ pub fn source_link_check(url: &str, trusted_link_hosts: &[String]) -> Result<Che
 }
 
 /// The full check with an explicit resolver.
-pub fn source_link_check_with(url: &str, trusted_link_hosts: &[String], resolver: &dyn HostResolver) -> Result<CheckedLink, String> {
+pub fn source_link_check_with(
+    url: &str,
+    trusted_link_hosts: &[String],
+    resolver: &dyn HostResolver,
+) -> Result<CheckedLink, String> {
     let parsed = parse_and_match(url, trusted_link_hosts)?;
     if parsed.plain_http {
         if let Locality::NeedsLookup = locality(&parsed.host) {
             let port = parsed.port.unwrap_or(80);
-            let addrs = resolver
-                .resolve(&parsed.host, port)
-                .map_err(|e| format!("{PLAIN_HTTP_RULE}, and `{}` could not be looked up ({e})", parsed.shown))?;
+            let addrs = resolver.resolve(&parsed.host, port).map_err(|e| {
+                format!(
+                    "{PLAIN_HTTP_RULE}, and `{}` could not be looked up ({e})",
+                    parsed.shown
+                )
+            })?;
             if addrs.is_empty() {
-                return Err(format!("{PLAIN_HTTP_RULE}, and `{}` resolved to no address", parsed.shown));
+                return Err(format!(
+                    "{PLAIN_HTTP_RULE}, and `{}` resolved to no address",
+                    parsed.shown
+                ));
             }
             if let Some(away) = addrs.iter().find(|a| !is_loopback(a)) {
                 return Err(format!(
@@ -127,15 +142,24 @@ pub fn source_link_check_with(url: &str, trusted_link_hosts: &[String], resolver
             }
         }
     }
-    Ok(CheckedLink { host: parsed.shown, plain_http: parsed.plain_http })
+    Ok(CheckedLink {
+        host: parsed.shown,
+        plain_http: parsed.plain_http,
+    })
 }
 
 /// Everything but the name lookup: what listing an action uses, so a view
 /// never waits on DNS. A plain-http link on a trusted NAME passes here and
 /// is decided by the lookup when it is opened.
-pub fn source_link_shape_check(url: &str, trusted_link_hosts: &[String]) -> Result<CheckedLink, String> {
+pub fn source_link_shape_check(
+    url: &str,
+    trusted_link_hosts: &[String],
+) -> Result<CheckedLink, String> {
     let parsed = parse_and_match(url, trusted_link_hosts)?;
-    Ok(CheckedLink { host: parsed.shown, plain_http: parsed.plain_http })
+    Ok(CheckedLink {
+        host: parsed.shown,
+        plain_http: parsed.plain_http,
+    })
 }
 
 struct Parsed {
@@ -156,12 +180,17 @@ fn parse_and_match(url: &str, trusted_link_hosts: &[String]) -> Result<Parsed, S
     if url.bytes().any(|b| b <= b' ' || b == 0x7f) {
         return Err("the link contains whitespace or control characters".into());
     }
-    let (scheme, rest) =
-        split_scheme(url).ok_or_else(|| "the link has no scheme; only https links open (and plain http to this machine)".to_owned())?;
+    let (scheme, rest) = split_scheme(url).ok_or_else(|| {
+        "the link has no scheme; only https links open (and plain http to this machine)".to_owned()
+    })?;
     let plain_http = match scheme.as_str() {
         "https" => false,
         "http" => true,
-        other => return Err(format!("only https links open (and plain http to this machine); this one is `{other}:`")),
+        other => {
+            return Err(format!(
+                "only https links open (and plain http to this machine); this one is `{other}:`"
+            ))
+        }
     };
     let default_port = if plain_http { 80 } else { 443 };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -194,10 +223,17 @@ fn parse_and_match(url: &str, trusted_link_hosts: &[String]) -> Result<Parsed, S
     }
     if plain_http {
         if let Locality::Elsewhere = locality(&host) {
-            return Err(format!("{PLAIN_HTTP_RULE} (`{shown}` is not one); other links must be https"));
+            return Err(format!(
+                "{PLAIN_HTTP_RULE} (`{shown}` is not one); other links must be https"
+            ));
         }
     }
-    Ok(Parsed { plain_http, host, port, shown })
+    Ok(Parsed {
+        plain_http,
+        host,
+        port,
+        shown,
+    })
 }
 
 enum Locality {
@@ -210,9 +246,16 @@ enum Locality {
 }
 
 fn locality(host: &str) -> Locality {
-    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     if let Ok(ip) = bare.parse::<IpAddr>() {
-        return if is_loopback(&ip) { Locality::Here } else { Locality::Elsewhere };
+        return if is_loopback(&ip) {
+            Locality::Here
+        } else {
+            Locality::Elsewhere
+        };
     }
     if host == "localhost" || host == "localhost." {
         return Locality::Here;
@@ -224,7 +267,9 @@ fn locality(host: &str) -> Locality {
 fn is_loopback(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
-        IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
     }
 }
 
@@ -255,7 +300,9 @@ fn split_scheme(url: &str) -> Option<(String, &str)> {
 /// `host[:port]`, with an IPv6 literal in brackets kept whole.
 fn split_port(authority: &str) -> Result<(&str, Option<u16>), String> {
     if let Some(rest) = authority.strip_prefix('[') {
-        let end = rest.find(']').ok_or("the link's IPv6 host is not closed with `]`")?;
+        let end = rest
+            .find(']')
+            .ok_or("the link's IPv6 host is not closed with `]`")?;
         let host = &authority[..end + 2];
         let after = &rest[end + 1..];
         return match after.strip_prefix(':') {
@@ -271,7 +318,8 @@ fn split_port(authority: &str) -> Result<(&str, Option<u16>), String> {
 }
 
 fn parse_port(text: &str) -> Result<u16, String> {
-    text.parse::<u16>().map_err(|_| format!("the link's port `{text}` is not a number"))
+    text.parse::<u16>()
+        .map_err(|_| format!("the link's port `{text}` is not a number"))
 }
 
 #[cfg(test)]
@@ -292,7 +340,10 @@ mod tests {
 
     impl Fake {
         fn answering(answer: Result<Vec<IpAddr>, String>) -> Self {
-            Self { answer, asked: RefCell::new(Vec::new()) }
+            Self {
+                answer,
+                asked: RefCell::new(Vec::new()),
+            }
         }
     }
 
@@ -320,9 +371,16 @@ mod tests {
         let check = |url: &str| source_link_check_with(url, &trusted, &r).unwrap().host;
         assert_eq!(check("https://github.com/owner/repo/pull/12"), "github.com");
         assert_eq!(check("HTTPS://GitHub.COM:443/x?y#z"), "github.com");
-        assert_eq!(check("https://dev.example.test:8443/"), "dev.example.test:8443");
+        assert_eq!(
+            check("https://dev.example.test:8443/"),
+            "dev.example.test:8443"
+        );
         assert_eq!(check("https://github.com"), "github.com");
-        assert!(!source_link_check_with("https://github.com", &trusted, &r).unwrap().plain_http);
+        assert!(
+            !source_link_check_with("https://github.com", &trusted, &r)
+                .unwrap()
+                .plain_http
+        );
         assert!(r.asked.borrow().is_empty(), "https never looks anything up");
     }
 
@@ -340,8 +398,12 @@ mod tests {
         assert!(refuse("https://").contains("no host"));
         assert!(refuse("https://github.com /x").contains("whitespace"));
         assert!(refuse("https://github.com@evil.example/").contains("credentials"));
-        assert!(refuse("https://evil.example/github.com").contains("`evil.example` is not one of the hosts"));
-        assert!(refuse("https://github.com:8443/x").contains("github.com:8443"), "a different port is a different host");
+        assert!(refuse("https://evil.example/github.com")
+            .contains("`evil.example` is not one of the hosts"));
+        assert!(
+            refuse("https://github.com:8443/x").contains("github.com:8443"),
+            "a different port is a different host"
+        );
         assert!(refuse("https://github.com:abc/").contains("port"));
     }
 
@@ -351,13 +413,22 @@ mod tests {
         let err = source_link_check("https://gist.github.com/x", &trusted).unwrap_err();
         assert!(err.contains("not by subdomain"), "{err}");
         assert!(source_link_check("https://github.com.evil.example/", &trusted).is_err());
-        assert!(source_link_check("https://api.github.com/", &hosts(&["api.github.com", "github.com"])).is_ok());
+        assert!(source_link_check(
+            "https://api.github.com/",
+            &hosts(&["api.github.com", "github.com"])
+        )
+        .is_ok());
     }
 
     #[test]
     fn ipv6_literals_keep_their_brackets() {
         let trusted = hosts(&["[::1]:8443"]);
-        assert_eq!(source_link_check("https://[::1]:8443/ui", &trusted).unwrap().host, "[::1]:8443");
+        assert_eq!(
+            source_link_check("https://[::1]:8443/ui", &trusted)
+                .unwrap()
+                .host,
+            "[::1]:8443"
+        );
         assert!(source_link_check("https://[::1/ui", &trusted).is_err());
         assert!(source_link_check("https://[::1]x/ui", &trusted).is_err());
     }
@@ -374,19 +445,37 @@ mod tests {
     /// ports included; the default port may be left out on either side.
     #[test]
     fn plain_http_opens_for_loopback_literals_and_localhost() {
-        let trusted = hosts(&["127.0.0.1:8080", "127.0.0.2", "[::1]:3000", "localhost:5173", "localhost"]);
+        let trusted = hosts(&[
+            "127.0.0.1:8080",
+            "127.0.0.2",
+            "[::1]:3000",
+            "localhost:5173",
+            "localhost",
+        ]);
         let r = never();
         let check = |url: &str| source_link_check_with(url, &trusted, &r);
         let ok = check("http://127.0.0.1:8080/health").unwrap();
         assert_eq!((ok.host.as_str(), ok.plain_http), ("127.0.0.1:8080", true));
         assert_eq!(check("http://127.0.0.2/").unwrap().host, "127.0.0.2");
-        assert_eq!(check("http://127.0.0.2:80/").unwrap().host, "127.0.0.2", "port 80 is the default");
+        assert_eq!(
+            check("http://127.0.0.2:80/").unwrap().host,
+            "127.0.0.2",
+            "port 80 is the default"
+        );
         assert_eq!(check("http://[::1]:3000/ui").unwrap().host, "[::1]:3000");
-        assert_eq!(check("http://LOCALHOST:5173/").unwrap().host, "localhost:5173");
+        assert_eq!(
+            check("http://LOCALHOST:5173/").unwrap().host,
+            "localhost:5173"
+        );
         assert_eq!(check("http://localhost/").unwrap().host, "localhost");
-        assert!(r.asked.borrow().is_empty(), "literals and localhost need no lookup");
+        assert!(
+            r.asked.borrow().is_empty(),
+            "literals and localhost need no lookup"
+        );
         // The same host on another port is another host.
-        assert!(check("http://localhost:9999/").unwrap_err().contains("not one of the hosts"));
+        assert!(check("http://localhost:9999/")
+            .unwrap_err()
+            .contains("not one of the hosts"));
     }
 
     /// A trusted non-loopback literal is refused over http with the rule,
@@ -396,8 +485,15 @@ mod tests {
         let trusted = hosts(&["192.0.2.7:8080", "[2001:db8::1]"]);
         let r = never();
         let err = source_link_check_with("http://192.0.2.7:8080/", &trusted, &r).unwrap_err();
-        assert!(err.contains(PLAIN_HTTP_RULE) && err.contains("192.0.2.7:8080"), "{err}");
-        assert!(source_link_check_with("http://[2001:db8::1]/", &trusted, &r).unwrap_err().contains(PLAIN_HTTP_RULE));
+        assert!(
+            err.contains(PLAIN_HTTP_RULE) && err.contains("192.0.2.7:8080"),
+            "{err}"
+        );
+        assert!(
+            source_link_check_with("http://[2001:db8::1]/", &trusted, &r)
+                .unwrap_err()
+                .contains(PLAIN_HTTP_RULE)
+        );
         assert!(source_link_check_with("https://192.0.2.7:8080/", &trusted, &r).is_ok());
         assert!(r.asked.borrow().is_empty());
     }
@@ -406,7 +502,9 @@ mod tests {
     #[test]
     fn plain_http_with_credentials_is_refused() {
         let r = Fake::answering(Ok(vec![V4_HERE]));
-        let err = source_link_check_with("http://me@localhost:3000/", &hosts(&["localhost:3000"]), &r).unwrap_err();
+        let err =
+            source_link_check_with("http://me@localhost:3000/", &hosts(&["localhost:3000"]), &r)
+                .unwrap_err();
         assert!(err.contains("credentials"), "{err}");
         assert!(r.asked.borrow().is_empty());
     }
@@ -418,8 +516,14 @@ mod tests {
         let trusted = hosts(&["dev.example.test:14001"]);
         let r = Fake::answering(Ok(vec![V4_HERE, V4_HERE_TOO, V6_HERE]));
         let ok = source_link_check_with("http://dev.example.test:14001/api", &trusted, &r).unwrap();
-        assert_eq!((ok.host.as_str(), ok.plain_http), ("dev.example.test:14001", true));
-        assert_eq!(r.asked.borrow().as_slice(), [("dev.example.test".to_owned(), 14001)]);
+        assert_eq!(
+            (ok.host.as_str(), ok.plain_http),
+            ("dev.example.test:14001", true)
+        );
+        assert_eq!(
+            r.asked.borrow().as_slice(),
+            [("dev.example.test".to_owned(), 14001)]
+        );
     }
 
     /// One address off this machine in the answer refuses the link.
@@ -427,10 +531,16 @@ mod tests {
     fn a_name_resolving_to_a_mix_is_refused() {
         let trusted = hosts(&["dev.example.test:14001"]);
         let r = Fake::answering(Ok(vec![V4_HERE, AWAY]));
-        let err = source_link_check_with("http://dev.example.test:14001/", &trusted, &r).unwrap_err();
-        assert!(err.contains(PLAIN_HTTP_RULE) && err.contains("192.0.2.7"), "{err}");
+        let err =
+            source_link_check_with("http://dev.example.test:14001/", &trusted, &r).unwrap_err();
+        assert!(
+            err.contains(PLAIN_HTTP_RULE) && err.contains("192.0.2.7"),
+            "{err}"
+        );
         let only_away = Fake::answering(Ok(vec![AWAY]));
-        assert!(source_link_check_with("http://dev.example.test:14001/", &trusted, &only_away).is_err());
+        assert!(
+            source_link_check_with("http://dev.example.test:14001/", &trusted, &only_away).is_err()
+        );
     }
 
     /// A failed lookup, or an empty answer, refuses the link.
@@ -438,18 +548,35 @@ mod tests {
     fn a_name_that_does_not_resolve_is_refused() {
         let trusted = hosts(&["dev.example.test"]);
         let failed = Fake::answering(Err("no such host".into()));
-        let err = source_link_check_with("http://dev.example.test/", &trusted, &failed).unwrap_err();
-        assert!(err.contains(PLAIN_HTTP_RULE) && err.contains("no such host"), "{err}");
-        assert_eq!(failed.asked.borrow()[0].1, 80, "the default port is asked for");
+        let err =
+            source_link_check_with("http://dev.example.test/", &trusted, &failed).unwrap_err();
+        assert!(
+            err.contains(PLAIN_HTTP_RULE) && err.contains("no such host"),
+            "{err}"
+        );
+        assert_eq!(
+            failed.asked.borrow()[0].1,
+            80,
+            "the default port is asked for"
+        );
         let empty = Fake::answering(Ok(vec![]));
-        assert!(source_link_check_with("http://dev.example.test/", &trusted, &empty).unwrap_err().contains("no address"));
+        assert!(
+            source_link_check_with("http://dev.example.test/", &trusted, &empty)
+                .unwrap_err()
+                .contains("no address")
+        );
     }
 
     /// An untrusted name is refused by the host rule before any lookup.
     #[test]
     fn an_untrusted_name_is_never_looked_up() {
         let r = Fake::answering(Ok(vec![V4_HERE]));
-        let err = source_link_check_with("http://other.example.test:14001/", &hosts(&["dev.example.test:14001"]), &r).unwrap_err();
+        let err = source_link_check_with(
+            "http://other.example.test:14001/",
+            &hosts(&["dev.example.test:14001"]),
+            &r,
+        )
+        .unwrap_err();
         assert!(err.contains("not one of the hosts"), "{err}");
         assert!(r.asked.borrow().is_empty());
     }
@@ -461,7 +588,9 @@ mod tests {
         let trusted = hosts(&["dev.example.test:14001", "192.0.2.7"]);
         let ok = source_link_shape_check("http://dev.example.test:14001/", &trusted).unwrap();
         assert!(ok.plain_http);
-        assert!(source_link_shape_check("http://192.0.2.7/", &trusted).unwrap_err().contains(PLAIN_HTTP_RULE));
+        assert!(source_link_shape_check("http://192.0.2.7/", &trusted)
+            .unwrap_err()
+            .contains(PLAIN_HTTP_RULE));
         assert!(source_link_shape_check("file:///x", &trusted).is_err());
     }
 
@@ -470,30 +599,71 @@ mod tests {
     /// https anywhere it matches, plain http only on this machine.
     #[test]
     fn an_any_port_entry_matches_its_host_on_every_port_and_nothing_else() {
-        let trusted = hosts(&["dev.example.test:*", "localhost:*", "[::1]:*", "192.0.2.7:*"]);
+        let trusted = hosts(&[
+            "dev.example.test:*",
+            "localhost:*",
+            "[::1]:*",
+            "192.0.2.7:*",
+        ]);
         let r = never();
         let check = |url: &str| source_link_check_with(url, &trusted, &r);
-        assert_eq!(check("https://dev.example.test:14001/api").unwrap().host, "dev.example.test:14001");
-        assert_eq!(check("https://DEV.example.test:9/").unwrap().host, "dev.example.test:9");
-        assert_eq!(check("https://dev.example.test/").unwrap().host, "dev.example.test", "the default port too");
-        assert_eq!(check("http://localhost:5173/").unwrap().host, "localhost:5173");
+        assert_eq!(
+            check("https://dev.example.test:14001/api").unwrap().host,
+            "dev.example.test:14001"
+        );
+        assert_eq!(
+            check("https://DEV.example.test:9/").unwrap().host,
+            "dev.example.test:9"
+        );
+        assert_eq!(
+            check("https://dev.example.test/").unwrap().host,
+            "dev.example.test",
+            "the default port too"
+        );
+        assert_eq!(
+            check("http://localhost:5173/").unwrap().host,
+            "localhost:5173"
+        );
         assert_eq!(check("http://localhost/").unwrap().host, "localhost");
         assert_eq!(check("http://[::1]:3000/").unwrap().host, "[::1]:3000");
         assert!(r.asked.borrow().is_empty());
         // Other hosts and subdomains are not covered.
-        assert!(check("https://api.dev.example.test:14001/").unwrap_err().contains("not one of the hosts"));
-        assert!(check("https://example.test:14001/").unwrap_err().contains("not one of the hosts"));
-        assert!(check("http://127.0.0.1:5173/").unwrap_err().contains("not one of the hosts"), "localhost:* is not 127.0.0.1");
+        assert!(check("https://api.dev.example.test:14001/")
+            .unwrap_err()
+            .contains("not one of the hosts"));
+        assert!(check("https://example.test:14001/")
+            .unwrap_err()
+            .contains("not one of the hosts"));
+        assert!(
+            check("http://127.0.0.1:5173/")
+                .unwrap_err()
+                .contains("not one of the hosts"),
+            "localhost:* is not 127.0.0.1"
+        );
         // The scheme rules are unchanged.
-        assert!(check("ftp://dev.example.test:21/").unwrap_err().contains("`ftp:`"));
-        assert!(check("http://192.0.2.7:8080/").unwrap_err().contains(PLAIN_HTTP_RULE));
+        assert!(check("ftp://dev.example.test:21/")
+            .unwrap_err()
+            .contains("`ftp:`"));
+        assert!(check("http://192.0.2.7:8080/")
+            .unwrap_err()
+            .contains(PLAIN_HTTP_RULE));
         assert!(check("https://192.0.2.7:8080/").is_ok());
-        assert!(check("https://me@dev.example.test:1/").unwrap_err().contains("credentials"));
+        assert!(check("https://me@dev.example.test:1/")
+            .unwrap_err()
+            .contains("credentials"));
         // A plain-http name still needs every address to be loopback.
         let here = Fake::answering(Ok(vec![V4_HERE]));
-        assert!(source_link_check_with("http://dev.example.test:14009/", &trusted, &here).unwrap().plain_http);
+        assert!(
+            source_link_check_with("http://dev.example.test:14009/", &trusted, &here)
+                .unwrap()
+                .plain_http
+        );
         let away = Fake::answering(Ok(vec![AWAY]));
-        assert!(source_link_check_with("http://dev.example.test:14009/", &trusted, &away).unwrap_err().contains(PLAIN_HTTP_RULE));
+        assert!(
+            source_link_check_with("http://dev.example.test:14009/", &trusted, &away)
+                .unwrap_err()
+                .contains(PLAIN_HTTP_RULE)
+        );
     }
 
     /// The system resolver answers for an IP literal (no network needed).

@@ -43,7 +43,9 @@ use std::time::Duration;
 
 use project_model::settings::{SecretScanPolicy, Settings};
 use serde::{Deserialize, Serialize};
-use stack_core::safety::secrets::{scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason};
+use stack_core::safety::secrets::{
+    scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason,
+};
 use stack_core::safety::{Finding, Location, Policy, SafetyError, SecretScanner, Severity};
 use tauri::{AppHandle, Emitter};
 
@@ -71,7 +73,11 @@ pub struct FindingDto {
 impl FindingDto {
     fn from_finding(f: &Finding) -> Option<Self> {
         match &f.location {
-            Location::Source { file, line, .. } => Some(Self { file: file.to_string_lossy().replace('\\', "/"), rule: f.rule.clone(), line: *line }),
+            Location::Source { file, line, .. } => Some(Self {
+                file: file.to_string_lossy().replace('\\', "/"),
+                rule: f.rule.clone(),
+                line: *line,
+            }),
             Location::Data { .. } => None,
         }
     }
@@ -81,7 +87,11 @@ impl FindingDto {
     fn to_finding(&self) -> Finding {
         Finding {
             rule: self.rule.clone(),
-            location: Location::Source { file: PathBuf::from(&self.file), line: self.line, commit: None },
+            location: Location::Source {
+                file: PathBuf::from(&self.file),
+                line: self.line,
+                commit: None,
+            },
             count: 1,
             severity: Severity::Bad,
         }
@@ -109,8 +119,16 @@ pub struct ScanBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ScanNotice {
-    Warn { cwd: String, findings: Vec<FindingDto>, skipped: usize },
-    LaunchedAnyway { cwd: String, reason: String, note: String },
+    Warn {
+        cwd: String,
+        findings: Vec<FindingDto>,
+        skipped: usize,
+    },
+    LaunchedAnyway {
+        cwd: String,
+        reason: String,
+        note: String,
+    },
 }
 
 /// What the gate decided, before it is turned into an error or a notice.
@@ -118,9 +136,14 @@ pub enum ScanNotice {
 pub enum GateOutcome {
     /// The scan is off here.
     Skipped,
-    Clean { skipped: usize },
+    Clean {
+        skipped: usize,
+    },
     Blocked(ScanBlock),
-    Warn { findings: Vec<FindingDto>, skipped: usize },
+    Warn {
+        findings: Vec<FindingDto>,
+        skipped: usize,
+    },
     /// The scan did not run or did not finish: the launch is refused unless
     /// the person launches anyway.
     Incomplete(String),
@@ -128,7 +151,11 @@ pub enum GateOutcome {
 
 /// Whether the scan runs in a project: the project's override, else the
 /// app setting, else automatic (on when a scanner was found).
-pub fn effective_enabled(setting: Option<bool>, project_pref: Option<bool>, scanner_found: bool) -> bool {
+pub fn effective_enabled(
+    setting: Option<bool>,
+    project_pref: Option<bool>,
+    scanner_found: bool,
+) -> bool {
     project_pref.or(setting).unwrap_or(scanner_found)
 }
 
@@ -136,12 +163,16 @@ pub fn effective_enabled(setting: Option<bool>, project_pref: Option<bool>, scan
 /// gitleaks on `PATH`. The scratch dir is the project's `.work`, which the
 /// file lister always skips, so staging is never itself scanned.
 pub fn detect_scanner(settings: &Settings, project_root: &Path) -> Option<GitleaksScanner> {
-    let configured = Some(settings.secret_scan_program.trim()).filter(|p| !p.is_empty()).map(Path::new);
+    let configured = Some(settings.secret_scan_program.trim())
+        .filter(|p| !p.is_empty())
+        .map(Path::new);
     GitleaksScanner::detect(configured, project_root.join(WORK_DIR)).map(|mut g| {
         g.timeout = SCAN_TIMEOUT;
         // The person's own config from Settings, never one from the tree;
         // without it the scanner writes the app's config for each run.
-        g.config = Some(settings.secret_scan_config.trim()).filter(|p| !p.is_empty()).map(PathBuf::from);
+        g.config = Some(settings.secret_scan_config.trim())
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from);
         g
     })
 }
@@ -155,27 +186,48 @@ fn to_policy(policy: SecretScanPolicy) -> Policy {
 
 /// Scan `cwd` with `scanner` under `policy`, subtracting the baseline kept
 /// in `<project_root>/.work`. Pure over the scanner, so tests use a fake.
-pub fn evaluate(scanner: &dyn SecretScanner, policy: SecretScanPolicy, project_root: &Path, cwd: &Path, limits: &ListLimits) -> GateOutcome {
+pub fn evaluate(
+    scanner: &dyn SecretScanner,
+    policy: SecretScanPolicy,
+    project_root: &Path,
+    cwd: &Path,
+    limits: &ListLimits,
+) -> GateOutcome {
     let work = project_root.join(WORK_DIR);
     let baseline = match Baseline::load(&work) {
         Ok(b) => b,
-        Err(e) => return GateOutcome::Incomplete(format!("the secret baseline could not be read: {e}")),
+        Err(e) => {
+            return GateOutcome::Incomplete(format!("the secret baseline could not be read: {e}"))
+        }
     };
-    let target = ScanTarget::WorkingTree { root: cwd.to_path_buf(), excludes: Vec::new() };
+    let target = ScanTarget::WorkingTree {
+        root: cwd.to_path_buf(),
+        excludes: Vec::new(),
+    };
     // Scanned without the baseline, then named from the project and only
     // then compared with it, so the baseline holds project-relative names.
     let report = match scan(scanner, &target, limits, &Baseline::default()) {
         Ok(report) => report,
         Err(SafetyError::Timeout { seconds, .. }) => {
-            return GateOutcome::Incomplete(format!("the secret scan did not finish within {seconds} s"));
+            return GateOutcome::Incomplete(format!(
+                "the secret scan did not finish within {seconds} s"
+            ));
         }
         Err(e) => return GateOutcome::Incomplete(format!("the secret scan failed: {e}")),
     };
     let prefix = project_prefix(project_root, cwd);
-    let named: Vec<Finding> = report.findings.into_iter().map(|f| from_project(&prefix, f)).collect();
+    let named: Vec<Finding> = report
+        .findings
+        .into_iter()
+        .map(|f| from_project(&prefix, f))
+        .collect();
     let (fresh, _) = baseline.apply(named);
     let findings: Vec<FindingDto> = fresh.iter().filter_map(FindingDto::from_finding).collect();
-    let over_total = report.skipped.iter().filter(|s| matches!(s.reason, SkipReason::OverTotal { .. })).count();
+    let over_total = report
+        .skipped
+        .iter()
+        .filter(|s| matches!(s.reason, SkipReason::OverTotal { .. }))
+        .count();
     let skipped = report.skipped.len() - over_total;
     let blocks = !matches!(to_policy(policy), Policy::Warn);
     if !findings.is_empty() && blocks {
@@ -204,8 +256,15 @@ pub fn evaluate(scanner: &dyn SecretScanner, policy: SecretScanPolicy, project_r
 /// The folder `cwd` is in, relative to the project (`""` when it is the
 /// project itself, or outside it).
 fn project_prefix(project_root: &Path, cwd: &Path) -> String {
-    let strip = |root: &Path, dir: &Path| dir.strip_prefix(root).ok().map(|r| r.to_string_lossy().replace('\\', "/"));
-    if let (Ok(root), Ok(dir)) = (std::fs::canonicalize(project_root), std::fs::canonicalize(cwd)) {
+    let strip = |root: &Path, dir: &Path| {
+        dir.strip_prefix(root)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+    };
+    if let (Ok(root), Ok(dir)) = (
+        std::fs::canonicalize(project_root),
+        std::fs::canonicalize(cwd),
+    ) {
         if let Some(rel) = strip(&root, &dir) {
             return rel;
         }
@@ -218,7 +277,10 @@ fn project_prefix(project_root: &Path, cwd: &Path) -> String {
 fn from_project(prefix: &str, mut f: Finding) -> Finding {
     if let Location::Source { file, .. } = &mut f.location {
         if !prefix.is_empty() {
-            *file = PathBuf::from(format!("{prefix}/{}", file.to_string_lossy().replace('\\', "/")));
+            *file = PathBuf::from(format!(
+                "{prefix}/{}",
+                file.to_string_lossy().replace('\\', "/")
+            ));
         }
     }
     f
@@ -227,14 +289,23 @@ fn from_project(prefix: &str, mut f: Finding) -> Finding {
 /// The whole gate for one launch: resolve the switch, find the scanner,
 /// scan. The outcome is still data; [`gate_launch`] turns it into the
 /// spawn's error or notice.
-pub fn decide(settings: &Settings, project_pref: Option<bool>, project_root: &Path, cwd: &Path) -> GateOutcome {
+pub fn decide(
+    settings: &Settings,
+    project_pref: Option<bool>,
+    project_root: &Path,
+    cwd: &Path,
+) -> GateOutcome {
     // A folder that does not exist holds nothing an agent could read (the
     // spawn fails, or starts elsewhere, on its own terms).
     if !cwd.is_dir() {
         return GateOutcome::Skipped;
     }
     let scanner = detect_scanner(settings, project_root);
-    if !effective_enabled(settings.secret_scan_before_agents, project_pref, scanner.is_some()) {
+    if !effective_enabled(
+        settings.secret_scan_before_agents,
+        project_pref,
+        scanner.is_some(),
+    ) {
         return GateOutcome::Skipped;
     }
     match scanner {
@@ -261,26 +332,36 @@ pub fn gate_launch(
     match decide(settings, project_pref, project_root, cwd) {
         GateOutcome::Skipped | GateOutcome::Clean { .. } => Ok(None),
         GateOutcome::Blocked(block) => Err(block_error(&block)),
-        GateOutcome::Warn { findings, skipped } => Ok(Some(ScanNotice::Warn { cwd: cwd.display().to_string(), findings, skipped })),
-        GateOutcome::Incomplete(reason) => match launch_anyway.map(str::trim).filter(|n| !n.is_empty()) {
-            Some(note) => Ok(Some(ScanNotice::LaunchedAnyway { cwd: cwd.display().to_string(), reason, note: note.chars().take(1000).collect() })),
-            None => Err(block_error(&ScanBlock {
-                project_root: project_root.display().to_string(),
-                cwd: cwd.display().to_string(),
-                findings: Vec::new(),
-                skipped: 0,
-                incomplete: Some(reason),
-            })),
-        },
+        GateOutcome::Warn { findings, skipped } => Ok(Some(ScanNotice::Warn {
+            cwd: cwd.display().to_string(),
+            findings,
+            skipped,
+        })),
+        GateOutcome::Incomplete(reason) => {
+            match launch_anyway.map(str::trim).filter(|n| !n.is_empty()) {
+                Some(note) => Ok(Some(ScanNotice::LaunchedAnyway {
+                    cwd: cwd.display().to_string(),
+                    reason,
+                    note: note.chars().take(1000).collect(),
+                })),
+                None => Err(block_error(&ScanBlock {
+                    project_root: project_root.display().to_string(),
+                    cwd: cwd.display().to_string(),
+                    findings: Vec::new(),
+                    skipped: 0,
+                    incomplete: Some(reason),
+                })),
+            }
+        }
     }
 }
 
 /// The journal line a "Launch anyway" leaves on the agent's row.
 pub fn launch_anyway_record(notice: &ScanNotice) -> Option<String> {
     match notice {
-        ScanNotice::LaunchedAnyway { cwd, reason, note } => {
-            Some(format!("launched anyway: the secret scan of {cwd} did not finish ({reason}); note: {note}"))
-        }
+        ScanNotice::LaunchedAnyway { cwd, reason, note } => Some(format!(
+            "launched anyway: the secret scan of {cwd} did not finish ({reason}); note: {note}"
+        )),
         ScanNotice::Warn { .. } => None,
     }
 }
@@ -288,7 +369,10 @@ pub fn launch_anyway_record(notice: &ScanNotice) -> Option<String> {
 /// The refusal text: a sentence for logs and plain callers, then the
 /// machine-readable block for the dialog.
 pub fn block_error(block: &ScanBlock) -> String {
-    format!("{BLOCK_PREFIX}{}", serde_json::to_string(block).unwrap_or_default())
+    format!(
+        "{BLOCK_PREFIX}{}",
+        serde_json::to_string(block).unwrap_or_default()
+    )
 }
 
 /// The block behind a refusal, if the error is one.
@@ -323,17 +407,31 @@ pub fn describe_block(block: &ScanBlock) -> String {
 
 /// Record `findings` in the project's baseline with the user's note, so
 /// they stop blocking launches until the file changes around them.
-pub fn acknowledge(project_root: &Path, findings: &[FindingDto], who: &str, note: &str) -> Result<usize, String> {
+pub fn acknowledge(
+    project_root: &Path,
+    findings: &[FindingDto],
+    who: &str,
+    note: &str,
+) -> Result<usize, String> {
     let work = project_root.join(WORK_DIR);
     let mut baseline = Baseline::load(&work).map_err(|e| e.to_string())?;
     let upstream: Vec<Finding> = findings.iter().map(FindingDto::to_finding).collect();
-    let added = baseline.acknowledge(&upstream, who, note, &crate::sources::iso_utc(term_core::actor::epoch_ms()));
+    let added = baseline.acknowledge(
+        &upstream,
+        who,
+        note,
+        &crate::sources::iso_utc(term_core::actor::epoch_ms()),
+    );
     baseline.save(&work).map_err(|e| e.to_string())?;
     log::info!(
         "[secret-scan] {who} acknowledged {} finding(s) in {} ({added} new): {}",
         findings.len(),
         project_root.display(),
-        findings.iter().map(|f| format!("{}:{}", f.file, f.rule)).collect::<Vec<_>>().join(", ")
+        findings
+            .iter()
+            .map(|f| format!("{}:{}", f.file, f.rule))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(added)
 }
@@ -344,12 +442,21 @@ pub fn emit_notice(app: Option<&AppHandle>, term_id: u32, notice: &ScanNotice) {
         ScanNotice::Warn { cwd, findings, .. } => log::warn!(
             "[secret-scan] launched in {cwd} with {} finding(s): {}",
             findings.len(),
-            findings.iter().map(|f| format!("{}:{}", f.file, f.rule)).collect::<Vec<_>>().join(", ")
+            findings
+                .iter()
+                .map(|f| format!("{}:{}", f.file, f.rule))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
-        ScanNotice::LaunchedAnyway { cwd, reason, .. } => log::warn!("[secret-scan] launched anyway in {cwd}, unscanned: {reason}"),
+        ScanNotice::LaunchedAnyway { cwd, reason, .. } => {
+            log::warn!("[secret-scan] launched anyway in {cwd}, unscanned: {reason}")
+        }
     }
     if let Some(app) = app {
-        let _ = app.emit(EVENT, serde_json::json!({ "term_id": term_id, "notice": notice }));
+        let _ = app.emit(
+            EVENT,
+            serde_json::json!({ "term_id": term_id, "notice": notice }),
+        );
     }
 }
 
@@ -360,13 +467,21 @@ pub const AGENT_SETTINGS_EVENT: &str = "agent://agent-settings";
 /// The agent settings files in the project and in the agent's folder that
 /// git would commit (see [`stack_core::safety::agent_settings`]). Never
 /// blocks: the caller warns.
-pub fn agent_settings_warnings(project_root: &Path, cwd: &Path) -> Vec<stack_core::safety::agent_settings::AgentSettingsFile> {
+pub fn agent_settings_warnings(
+    project_root: &Path,
+    cwd: &Path,
+) -> Vec<stack_core::safety::agent_settings::AgentSettingsFile> {
     stack_core::safety::agent_settings::check(project_root, &[project_root, cwd])
 }
 
 /// Warn about each exposed settings file: a log line and the event the
 /// webview turns into a notification and a Needs you entry.
-pub fn emit_agent_settings(app: Option<&AppHandle>, term_id: u32, project_root: &Path, files: &[stack_core::safety::agent_settings::AgentSettingsFile]) {
+pub fn emit_agent_settings(
+    app: Option<&AppHandle>,
+    term_id: u32,
+    project_root: &Path,
+    files: &[stack_core::safety::agent_settings::AgentSettingsFile],
+) {
     if files.is_empty() {
         return;
     }
@@ -393,11 +508,14 @@ pub fn emit_agent_settings(app: Option<&AppHandle>, term_id: u32, project_root: 
 /// `.gitignore` (created when missing, never a duplicate line). Only a line
 /// naming one of the known agent settings files is accepted.
 pub fn add_agent_settings_ignore_line(project_root: &Path, line: &str) -> Result<bool, String> {
-    let known = stack_core::safety::agent_settings::AGENT_SETTINGS_FILES.iter().any(|f| line.trim().ends_with(&format!("/{f}")));
+    let known = stack_core::safety::agent_settings::AGENT_SETTINGS_FILES
+        .iter()
+        .any(|f| line.trim().ends_with(&format!("/{f}")));
     if !known {
         return Err(format!("`{line}` does not name an agent settings file"));
     }
-    stack_core::safety::agent_settings::add_to_gitignore(project_root, line).map_err(|e| format!("cannot update .gitignore: {e}"))
+    stack_core::safety::agent_settings::add_to_gitignore(project_root, line)
+        .map_err(|e| format!("cannot update .gitignore: {e}"))
 }
 
 /// What the Security tab shows: whether a scanner was found and where.
@@ -415,7 +533,11 @@ pub fn scanner_info(settings: &Settings) -> ScannerInfo {
     ScannerInfo {
         found: scanner.is_some(),
         program: scanner.as_ref().map(|s| s.program.display().to_string()),
-        effective_enabled: effective_enabled(settings.secret_scan_before_agents, None, scanner.is_some()),
+        effective_enabled: effective_enabled(
+            settings.secret_scan_before_agents,
+            None,
+            scanner.is_some(),
+        ),
     }
 }
 
@@ -442,8 +564,16 @@ pub fn acknowledge_secret_findings(
     findings: Vec<FindingDto>,
     note: Option<String>,
 ) -> Result<usize, String> {
-    let (_, root) = projects.project_root(project_id).ok_or_else(|| format!("no such project: {project_id}"))?;
-    acknowledge(&root, &findings, "user", note.as_deref().unwrap_or("acknowledged from the launch dialog"))
+    let (_, root) = projects
+        .project_root(project_id)
+        .ok_or_else(|| format!("no such project: {project_id}"))?;
+    acknowledge(
+        &root,
+        &findings,
+        "user",
+        note.as_deref()
+            .unwrap_or("acknowledged from the launch dialog"),
+    )
 }
 
 #[cfg(test)]
@@ -460,12 +590,19 @@ mod tests {
 
     impl Fake {
         fn with(findings: Vec<Finding>) -> Self {
-            Self { answer: RefCell::new(findings), fail: None }
+            Self {
+                answer: RefCell::new(findings),
+                fail: None,
+            }
         }
     }
 
     impl SecretScanner for Fake {
-        fn scan_files(&self, _root: &Path, _files: &[PathBuf]) -> Result<Vec<Finding>, SafetyError> {
+        fn scan_files(
+            &self,
+            _root: &Path,
+            _files: &[PathBuf],
+        ) -> Result<Vec<Finding>, SafetyError> {
             if let Some(make) = self.fail {
                 return Err(make());
             }
@@ -479,14 +616,21 @@ mod tests {
     fn finding(file: &str, rule: &str, line: u32) -> Finding {
         Finding {
             rule: rule.into(),
-            location: Location::Source { file: PathBuf::from(file), line: Some(line), commit: None },
+            location: Location::Source {
+                file: PathBuf::from(file),
+                line: Some(line),
+                commit: None,
+            },
             count: 1,
             severity: Severity::Bad,
         }
     }
 
     fn no_git() -> ListLimits {
-        ListLimits { use_git: false, ..ListLimits::default() }
+        ListLimits {
+            use_git: false,
+            ..ListLimits::default()
+        }
     }
 
     fn tree() -> (tempfile::TempDir, PathBuf) {
@@ -504,7 +648,10 @@ mod tests {
         assert!(!effective_enabled(None, None, false));
         assert!(effective_enabled(Some(true), None, false));
         assert!(!effective_enabled(Some(false), None, true));
-        assert!(effective_enabled(Some(false), Some(true), false), "the project wins");
+        assert!(
+            effective_enabled(Some(false), Some(true), false),
+            "the project wins"
+        );
         assert!(!effective_enabled(Some(true), Some(false), true));
     }
 
@@ -512,16 +659,37 @@ mod tests {
     fn block_agents_refuses_with_file_and_rule_and_never_a_value() {
         let (_dir, root) = tree();
         let fake = Fake::with(vec![finding("sub/.env", "generic-api-key", 1)]);
-        let outcome = evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &root, &no_git());
-        let GateOutcome::Blocked(block) = outcome else { panic!("{outcome:?}") };
-        assert_eq!(block.findings, vec![FindingDto { file: "sub/.env".into(), rule: "generic-api-key".into(), line: Some(1) }]);
+        let outcome = evaluate(
+            &fake,
+            SecretScanPolicy::BlockAgents,
+            &root,
+            &root,
+            &no_git(),
+        );
+        let GateOutcome::Blocked(block) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(
+            block.findings,
+            vec![FindingDto {
+                file: "sub/.env".into(),
+                rule: "generic-api-key".into(),
+                line: Some(1)
+            }]
+        );
         let err = block_error(&block);
         assert!(err.starts_with(BLOCK_PREFIX));
-        assert!(!err.contains("value"), "the refusal never carries matched text: {err}");
+        assert!(
+            !err.contains("value"),
+            "the refusal never carries matched text: {err}"
+        );
         assert_eq!(parse_block_error(&err).unwrap(), block);
         assert!(parse_block_error("busy guard: refused").is_none());
         let text = describe_block(&block);
-        assert!(text.contains("sub/.env:1 (generic-api-key)") && text.contains("acknowledge"), "{text}");
+        assert!(
+            text.contains("sub/.env:1 (generic-api-key)") && text.contains("acknowledge"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -532,39 +700,106 @@ mod tests {
             GateOutcome::Warn { findings, .. } => assert_eq!(findings.len(), 2),
             other => panic!("{other:?}"),
         }
-        assert_eq!(evaluate(&Fake::with(vec![]), SecretScanPolicy::BlockAgents, &root, &root, &no_git()), GateOutcome::Clean { skipped: 0 });
+        assert_eq!(
+            evaluate(
+                &Fake::with(vec![]),
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &no_git()
+            ),
+            GateOutcome::Clean { skipped: 0 }
+        );
     }
 
     #[test]
     fn acknowledging_writes_the_baseline_and_the_next_scan_is_clean() {
         let (_dir, root) = tree();
         let fake = Fake::with(vec![finding("sub/.env", "generic-api-key", 1)]);
-        let GateOutcome::Blocked(block) = evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &root, &no_git()) else { panic!() };
-        assert_eq!(acknowledge(&root, &block.findings, "user", "test fixture").unwrap(), 1);
-        let baseline = std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap();
-        assert!(baseline.contains("generic-api-key") && !baseline.contains("KEY=value"), "{baseline}");
-        let notes = std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.notes.json")).unwrap();
+        let GateOutcome::Blocked(block) = evaluate(
+            &fake,
+            SecretScanPolicy::BlockAgents,
+            &root,
+            &root,
+            &no_git(),
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            acknowledge(&root, &block.findings, "user", "test fixture").unwrap(),
+            1
+        );
+        let baseline =
+            std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap();
+        assert!(
+            baseline.contains("generic-api-key") && !baseline.contains("KEY=value"),
+            "{baseline}"
+        );
+        let notes =
+            std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.notes.json"))
+                .unwrap();
         assert!(notes.contains("test fixture"));
-        assert_eq!(evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &root, &no_git()), GateOutcome::Clean { skipped: 0 });
+        assert_eq!(
+            evaluate(
+                &fake,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &no_git()
+            ),
+            GateOutcome::Clean { skipped: 0 }
+        );
         // Acknowledging again is idempotent (nothing new).
-        assert_eq!(acknowledge(&root, &block.findings, "user", "again").unwrap(), 0);
+        assert_eq!(
+            acknowledge(&root, &block.findings, "user", "again").unwrap(),
+            0
+        );
         // A finding on another line is not covered.
         let moved = Fake::with(vec![finding("sub/.env", "generic-api-key", 2)]);
-        assert!(matches!(evaluate(&moved, SecretScanPolicy::BlockAgents, &root, &root, &no_git()), GateOutcome::Blocked(_)));
+        assert!(matches!(
+            evaluate(
+                &moved,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &no_git()
+            ),
+            GateOutcome::Blocked(_)
+        ));
     }
 
     #[test]
     fn a_timeout_or_scanner_error_is_an_incomplete_scan() {
         let (_dir, root) = tree();
-        let hung = Fake { answer: RefCell::new(vec![]), fail: Some(|| SafetyError::Timeout { what: "gitleaks".into(), seconds: 60 }) };
+        let hung = Fake {
+            answer: RefCell::new(vec![]),
+            fail: Some(|| SafetyError::Timeout {
+                what: "gitleaks".into(),
+                seconds: 60,
+            }),
+        };
         for policy in [SecretScanPolicy::BlockAgents, SecretScanPolicy::Warn] {
             match evaluate(&hung, policy, &root, &root, &no_git()) {
-                GateOutcome::Incomplete(reason) => assert!(reason.contains("did not finish within 60 s"), "{reason}"),
+                GateOutcome::Incomplete(reason) => {
+                    assert!(reason.contains("did not finish within 60 s"), "{reason}")
+                }
                 other => panic!("{other:?}"),
             }
         }
-        let broken = Fake { answer: RefCell::new(vec![]), fail: Some(|| SafetyError::InvalidTarget("no such scanner".into())) };
-        assert!(matches!(evaluate(&broken, SecretScanPolicy::BlockAgents, &root, &root, &no_git()), GateOutcome::Incomplete(_)));
+        let broken = Fake {
+            answer: RefCell::new(vec![]),
+            fail: Some(|| SafetyError::InvalidTarget("no such scanner".into())),
+        };
+        assert!(matches!(
+            evaluate(
+                &broken,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &no_git()
+            ),
+            GateOutcome::Incomplete(_)
+        ));
     }
 
     #[test]
@@ -580,17 +815,35 @@ mod tests {
             assert!(block.findings.is_empty());
             let reason = block.incomplete.clone().unwrap();
             assert!(reason.contains("gitleaks was not found"), "{reason}");
-            assert!(describe_block(&block).contains("did not finish"), "{}", describe_block(&block));
+            assert!(
+                describe_block(&block).contains("did not finish"),
+                "{}",
+                describe_block(&block)
+            );
             // A blank note is no override.
             assert!(gate_launch(&settings, None, &root, &root, Some("  ")).is_err());
-            let notice = gate_launch(&settings, None, &root, &root, Some("scanner is being reinstalled")).unwrap().unwrap();
+            let notice = gate_launch(
+                &settings,
+                None,
+                &root,
+                &root,
+                Some("scanner is being reinstalled"),
+            )
+            .unwrap()
+            .unwrap();
             let line = launch_anyway_record(&notice).unwrap();
-            assert!(line.contains("launched anyway") && line.contains("scanner is being reinstalled"), "{line}");
+            assert!(
+                line.contains("launched anyway") && line.contains("scanner is being reinstalled"),
+                "{line}"
+            );
         }
         // The override is not an acknowledgement: nothing reaches the baseline.
         assert!(!root.join(WORK_DIR).join("secrets-baseline.json").exists());
         // Turning the scan off still skips it entirely.
-        assert_eq!(gate_launch(&settings, Some(false), &root, &root, None), Ok(None));
+        assert_eq!(
+            gate_launch(&settings, Some(false), &root, &root, None),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -598,9 +851,24 @@ mod tests {
         let (_dir, root) = tree();
         std::fs::write(root.join("big.bin"), vec![b'x'; 4096]).unwrap();
         let fake = Fake::with(vec![]);
-        let per_file = ListLimits { max_file_bytes: 1024, ..no_git() };
-        assert_eq!(evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &root, &per_file), GateOutcome::Clean { skipped: 1 });
-        let total = ListLimits { max_total_bytes: 8, ..no_git() };
+        let per_file = ListLimits {
+            max_file_bytes: 1024,
+            ..no_git()
+        };
+        assert_eq!(
+            evaluate(
+                &fake,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &per_file
+            ),
+            GateOutcome::Clean { skipped: 1 }
+        );
+        let total = ListLimits {
+            max_total_bytes: 8,
+            ..no_git()
+        };
         match evaluate(&fake, SecretScanPolicy::Warn, &root, &root, &total) {
             GateOutcome::Incomplete(reason) => assert!(reason.contains("size limit"), "{reason}"),
             other => panic!("{other:?}"),
@@ -608,19 +876,35 @@ mod tests {
     }
 
     #[test]
-    fn findings_in_a_subfolder_are_named_from_the_project_so_one_baseline_entry_serves_both_sides() {
+    fn findings_in_a_subfolder_are_named_from_the_project_so_one_baseline_entry_serves_both_sides()
+    {
         let (_dir, root) = tree();
-        let wt = root.join(".work").join("ABC-1").join("src").join("api-1a2b3c4d");
+        let wt = root
+            .join(".work")
+            .join("ABC-1")
+            .join("src")
+            .join("api-1a2b3c4d");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join(".env"), "KEY=value\n").unwrap();
         let fake = Fake::with(vec![finding(".env", "planted", 1)]);
-        let GateOutcome::Blocked(block) = evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &wt, &no_git()) else { panic!() };
+        let GateOutcome::Blocked(block) =
+            evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &wt, &no_git())
+        else {
+            panic!()
+        };
         assert_eq!(block.findings[0].file, ".work/ABC-1/src/api-1a2b3c4d/.env");
         acknowledge(&root, &block.findings, "user", "fixture").unwrap();
-        let raw = std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap();
+        let raw =
+            std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap();
         // The same fingerprint the stack's scan of that worktree uses.
-        assert!(raw.contains("\".work/ABC-1/src/api-1a2b3c4d/.env:planted:1\""), "{raw}");
-        assert_eq!(evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &wt, &no_git()), GateOutcome::Clean { skipped: 0 });
+        assert!(
+            raw.contains("\".work/ABC-1/src/api-1a2b3c4d/.env:planted:1\""),
+            "{raw}"
+        );
+        assert_eq!(
+            evaluate(&fake, SecretScanPolicy::BlockAgents, &root, &wt, &no_git()),
+            GateOutcome::Clean { skipped: 0 }
+        );
     }
 
     #[test]
@@ -638,7 +922,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // A project override turns it off whatever the app says.
-        assert_eq!(decide(&settings, Some(false), &root, &root), GateOutcome::Skipped);
+        assert_eq!(
+            decide(&settings, Some(false), &root, &root),
+            GateOutcome::Skipped
+        );
         // Automatic + the same missing program = off (no scanner was found).
         settings.secret_scan_before_agents = None;
         assert_eq!(decide(&settings, None, &root, &root), GateOutcome::Skipped);
@@ -662,7 +949,14 @@ mod tests {
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&root)
-                .args(["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false"])
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(args)
                 .output()
                 .map(|o| o.status.success())
@@ -677,27 +971,64 @@ mod tests {
         // Assembled at run time so no source file holds a token-shaped string.
         let token = format!("ghp_{}", "A1b2C3d4".repeat(5));
         std::fs::write(root.join(".env"), format!("GITHUB_TOKEN={token}\n")).unwrap();
-        let outcome = evaluate(&scanner, SecretScanPolicy::BlockAgents, &root, &root, &ListLimits::default());
-        let GateOutcome::Blocked(block) = outcome else { panic!("{outcome:?}") };
+        let outcome = evaluate(
+            &scanner,
+            SecretScanPolicy::BlockAgents,
+            &root,
+            &root,
+            &ListLimits::default(),
+        );
+        let GateOutcome::Blocked(block) = outcome else {
+            panic!("{outcome:?}")
+        };
         // The token's own rule, and the app config's rule for a credential
         // assigned inline: both on the one line of `.env`.
         let rules: Vec<&str> = block.findings.iter().map(|f| f.rule.as_str()).collect();
-        assert_eq!(rules, ["github-pat", "inline-credential-assignment"], "{block:?}");
+        assert_eq!(
+            rules,
+            ["github-pat", "inline-credential-assignment"],
+            "{block:?}"
+        );
         assert!(block.findings.iter().all(|f| f.file == ".env"));
         assert!(!block_error(&block).contains(&token));
         acknowledge(&root, &block.findings, "user", "test").unwrap();
-        assert!(matches!(evaluate(&scanner, SecretScanPolicy::BlockAgents, &root, &root, &ListLimits::default()), GateOutcome::Clean { .. }));
-        assert!(!std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap().contains(&token));
+        assert!(matches!(
+            evaluate(
+                &scanner,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &ListLimits::default()
+            ),
+            GateOutcome::Clean { .. }
+        ));
+        assert!(
+            !std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json"))
+                .unwrap()
+                .contains(&token)
+        );
     }
 
     #[test]
     fn the_ignore_action_only_takes_agent_settings_lines_and_never_duplicates() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(add_agent_settings_ignore_line(tmp.path(), "/.claude/settings.local.json"), Ok(true));
-        assert_eq!(add_agent_settings_ignore_line(tmp.path(), "/.claude/settings.local.json"), Ok(false));
-        assert_eq!(add_agent_settings_ignore_line(tmp.path(), "/sub/.claude/settings.local.json"), Ok(true));
+        assert_eq!(
+            add_agent_settings_ignore_line(tmp.path(), "/.claude/settings.local.json"),
+            Ok(true)
+        );
+        assert_eq!(
+            add_agent_settings_ignore_line(tmp.path(), "/.claude/settings.local.json"),
+            Ok(false)
+        );
+        assert_eq!(
+            add_agent_settings_ignore_line(tmp.path(), "/sub/.claude/settings.local.json"),
+            Ok(true)
+        );
         assert!(add_agent_settings_ignore_line(tmp.path(), "/src/main.rs").is_err());
         let text = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert_eq!(text, "/.claude/settings.local.json\n/sub/.claude/settings.local.json\n");
+        assert_eq!(
+            text,
+            "/.claude/settings.local.json\n/sub/.claude/settings.local.json\n"
+        );
     }
 }

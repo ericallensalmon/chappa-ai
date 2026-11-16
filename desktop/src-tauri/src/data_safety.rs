@@ -173,17 +173,34 @@ pub fn parse_block_of(payload: &Value, kind: BlockKind) -> Option<WireBlock> {
     let b = payload.get(kind.wire_key()).filter(|b| b.is_object())?;
     let state = str_of(b, "state");
     let garbled = state.is_none();
-    let list = |key: &str| b.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let list = |key: &str| {
+        b.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
     let bound = b.get("bound").filter(|v| v.is_object()).and_then(|v| {
         let key = str_of(v, "key")?;
-        let folders = v.get("folders").and_then(Value::as_array).map(|f| f.iter().filter_map(abs_path).collect()).unwrap_or_default();
-        Some(WireBound { source: str_of(v, "source"), key, folders })
+        let folders = v
+            .get("folders")
+            .and_then(Value::as_array)
+            .map(|f| f.iter().filter_map(abs_path).collect())
+            .unwrap_or_default();
+        Some(WireBound {
+            source: str_of(v, "source"),
+            key,
+            folders,
+        })
     });
     Some(WireBlock {
         kind,
         instance: str_of(b, "instance").unwrap_or_else(|| "the stack".to_owned()),
         state: state.unwrap_or_else(|| "error".to_owned()),
-        blocks_agents: b.get("blocksAgents").and_then(Value::as_bool).unwrap_or(false) || (garbled && kind == BlockKind::SecretScan),
+        blocks_agents: b
+            .get("blocksAgents")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || (garbled && kind == BlockKind::SecretScan),
         findings: list("findings")
             .iter()
             .filter_map(|f| {
@@ -195,10 +212,18 @@ pub fn parse_block_of(payload: &Value, kind: BlockKind) -> Option<WireBlock> {
                 })
             })
             .collect(),
-        unscanned: list("unscanned").iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
+        unscanned: list("unscanned")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
         reasons: list("reasons")
             .iter()
-            .filter_map(|r| Some(WireReason { component: str_of(r, "component"), text: str_of(r, "text")? }))
+            .filter_map(|r| {
+                Some(WireReason {
+                    component: str_of(r, "component"),
+                    text: str_of(r, "text")?,
+                })
+            })
             .collect(),
         bound,
         project: b.get("project").and_then(abs_path),
@@ -220,7 +245,12 @@ impl WireBlock {
     /// the findings counted per rule, else the state in words.
     pub fn summary(&self) -> String {
         if !self.reasons.is_empty() {
-            return self.reasons.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("; ");
+            return self
+                .reasons
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
         }
         if self.kind == BlockKind::SecretScan && !self.findings.is_empty() {
             let n = self.findings.len();
@@ -234,8 +264,16 @@ impl WireBlock {
                     _ => f.rule.clone(),
                 })
                 .collect();
-            let more = if n > 5 { format!(", and {} more", n - 5) } else { String::new() };
-            return format!("{n} possible secret{} ({}{more})", if n == 1 { "" } else { "s" }, places.join(", "));
+            let more = if n > 5 {
+                format!(", and {} more", n - 5)
+            } else {
+                String::new()
+            };
+            return format!(
+                "{n} possible secret{} ({}{more})",
+                if n == 1 { "" } else { "s" },
+                places.join(", ")
+            );
         }
         if !self.findings.is_empty() {
             let mut per_rule: Vec<(String, u64)> = Vec::new();
@@ -247,7 +285,11 @@ impl WireBlock {
             }
             let total: u64 = per_rule.iter().map(|(_, n)| n).sum();
             let items: Vec<String> = per_rule.iter().map(|(r, n)| format!("{r} ×{n}")).collect();
-            return format!("{total} finding{} ({})", if total == 1 { "" } else { "s" }, items.join(", "));
+            return format!(
+                "{total} finding{} ({})",
+                if total == 1 { "" } else { "s" },
+                items.join(", ")
+            );
         }
         if self.kind == BlockKind::SecretScan {
             return match self.state.as_str() {
@@ -258,7 +300,9 @@ impl WireBlock {
         }
         match self.state.as_str() {
             "error" => "the data-safety check could not be judged".to_owned(),
-            "unscanned" if !self.unscanned.is_empty() => format!("data not checked yet ({})", self.unscanned.join(", ")),
+            "unscanned" if !self.unscanned.is_empty() => {
+                format!("data not checked yet ({})", self.unscanned.join(", "))
+            }
             "unscanned" => "data not checked yet".to_owned(),
             "not-clean" => "the data is not known to be scrubbed".to_owned(),
             other => format!("data safety is `{other}`"),
@@ -281,12 +325,20 @@ pub fn reason_text(block: &WireBlock, current: bool) -> String {
 /// The reason of a kept block whose launched source the project's
 /// `chappa.yml` no longer declares: it stays until that content is trusted.
 pub fn removed_reason(block: &WireBlock) -> String {
-    format!("last known: {}, source removed — trust the new chappa.yml to lift", what_and_where(block))
+    format!(
+        "last known: {}, source removed — trust the new chappa.yml to lift",
+        what_and_where(block)
+    )
 }
 
 fn what_and_where(block: &WireBlock) -> String {
-    let acknowledgeable = block.state == "not-clean" || (block.kind == BlockKind::SecretScan && block.state == "error");
-    let next = if acknowledgeable { "acknowledge in Environment" } else { "see Environment" };
+    let acknowledgeable = block.state == "not-clean"
+        || (block.kind == BlockKind::SecretScan && block.state == "error");
+    let next = if acknowledgeable {
+        "acknowledge in Environment"
+    } else {
+        "see Environment"
+    };
     format!("{} — {next}", block.summary())
 }
 
@@ -296,7 +348,9 @@ pub const UNHEARD_STATE: &str = "unknown";
 
 /// The reason of that block.
 pub fn unheard_reason(source_label: &str) -> String {
-    format!("{source_label} has not said yet whether its data is safe — agents wait until it answers")
+    format!(
+        "{source_label} has not said yet whether its data is safe — agents wait until it answers"
+    )
 }
 
 /// A block in force, as the webview and the gates see it.
@@ -339,13 +393,24 @@ pub struct BoundItem {
 /// agents out (or names no folder at all, which cannot happen for a
 /// launched source). `fallback` is the folder of the project that launched
 /// the source, used when the block names no project.
-pub fn active_block(source_id: &str, source_label: &str, block: &WireBlock, current: bool, fallback: Option<&Path>) -> Option<ActiveBlock> {
+pub fn active_block(
+    source_id: &str,
+    source_label: &str,
+    block: &WireBlock,
+    current: bool,
+    fallback: Option<&Path>,
+) -> Option<ActiveBlock> {
     if !block.enforces() {
         return None;
     }
     let covered: Vec<PathBuf> = match block.bound.as_ref().filter(|b| !b.folders.is_empty()) {
         Some(b) => b.folders.clone(),
-        None => block.project.clone().or_else(|| fallback.map(Path::to_path_buf)).into_iter().collect(),
+        None => block
+            .project
+            .clone()
+            .or_else(|| fallback.map(Path::to_path_buf))
+            .into_iter()
+            .collect(),
     };
     if covered.is_empty() {
         log::warn!("[data-safety] {source_label}: a {} block for {} names no folder; nothing can be enforced", block.kind.check(), block.instance);
@@ -360,8 +425,15 @@ pub fn active_block(source_id: &str, source_label: &str, block: &WireBlock, curr
         current,
         reason: reason_text(block, current),
         folders: covered.iter().map(|p| display(p)).collect(),
-        bound: block.bound.as_ref().map(|b| BoundItem { source: b.source.clone(), key: b.key.clone() }),
-        component: block.reasons.iter().find_map(|r| r.component.clone()).or_else(|| block.unscanned.first().cloned()),
+        bound: block.bound.as_ref().map(|b| BoundItem {
+            source: b.source.clone(),
+            key: b.key.clone(),
+        }),
+        component: block
+            .reasons
+            .iter()
+            .find_map(|r| r.component.clone())
+            .or_else(|| block.unscanned.first().cloned()),
         ack_action_id: block.ack_action_id.clone(),
         covered,
     })
@@ -393,7 +465,9 @@ fn resolved(path: &Path) -> PathBuf {
 /// Whether `cwd` is one of `folders` or inside one, on resolved paths.
 pub fn covers(folders: &[PathBuf], cwd: &Path) -> bool {
     let cwd = resolved(cwd);
-    folders.iter().any(|f| same_or_inside(&resolved(f), &cwd, CASE_INSENSITIVE))
+    folders
+        .iter()
+        .any(|f| same_or_inside(&resolved(f), &cwd, CASE_INSENSITIVE))
 }
 
 /// The first block covering `cwd`.
@@ -435,12 +509,20 @@ pub fn hold_text(block: &ActiveBlock) -> String {
         BlockKind::DataSafety => "data safety",
         BlockKind::SecretScan => "the secret scan",
     };
-    format!("held until {what} on {} clears: {}", block.instance, block.reason)
+    format!(
+        "held until {what} on {} clears: {}",
+        block.instance, block.reason
+    )
 }
 
 /// What a disabled agent button says.
 pub fn disabled_text(block: &ActiveBlock) -> String {
-    format!("agents blocked — {} on {}: {}", block.kind.check(), block.instance, block.reason)
+    format!(
+        "agents blocked — {} on {}: {}",
+        block.kind.check(),
+        block.instance,
+        block.reason
+    )
 }
 
 /// The spawn path's check: `Err` with the reason when `cwd` is blocked.
@@ -511,8 +593,16 @@ pub fn state_of(sources: &Sources, registry: &Registry) -> DataSafetyState {
             })
         })
         .collect();
-    let held = registry.held_counts().into_iter().map(|(term_id, count)| HeldCount { term_id, count }).collect();
-    DataSafetyState { blocks, agents, held }
+    let held = registry
+        .held_counts()
+        .into_iter()
+        .map(|(term_id, count)| HeldCount { term_id, count })
+        .collect();
+    DataSafetyState {
+        blocks,
+        agents,
+        held,
+    }
 }
 
 /// One pass of the watcher: release what the blocks no longer hold, then
@@ -528,20 +618,22 @@ pub fn spawn_watch(sources: Sources, registry: Registry, app: AppHandle) {
     let emit: Arc<dyn Fn(&DataSafetyState) + Send + Sync> = Arc::new(move |s| {
         let _ = app.emit(EVENT, s);
     });
-    let spawned = std::thread::Builder::new().name("data safety".into()).spawn(move || {
-        let mut last = DataSafetyState::default();
-        loop {
-            if sources.is_shutting_down() {
-                return;
+    let spawned = std::thread::Builder::new()
+        .name("data safety".into())
+        .spawn(move || {
+            let mut last = DataSafetyState::default();
+            loop {
+                if sources.is_shutting_down() {
+                    return;
+                }
+                let now = tick(&sources, &registry);
+                if now != last {
+                    emit(&now);
+                    last = now;
+                }
+                std::thread::sleep(WATCH_EVERY);
             }
-            let now = tick(&sources, &registry);
-            if now != last {
-                emit(&now);
-                last = now;
-            }
-            std::thread::sleep(WATCH_EVERY);
-        }
-    });
+        });
     if let Err(e) = spawned {
         log::error!("[data-safety] cannot start the watcher: {e}");
     }
@@ -576,7 +668,11 @@ mod tests {
     }
 
     fn abs(rel: &str) -> String {
-        if cfg!(windows) { format!("C:\\{}", rel.replace('/', "\\")) } else { format!("/{rel}") }
+        if cfg!(windows) {
+            format!("C:\\{}", rel.replace('/', "\\"))
+        } else {
+            format!("/{rel}")
+        }
     }
 
     #[test]
@@ -594,7 +690,11 @@ mod tests {
             let b = block(base(state, blocks));
             assert_eq!(b.state, state);
             assert_eq!(b.enforces(), enforces, "{state} blocksAgents={blocks}");
-            assert_eq!(active_block("s1", "Stack", &b, true, None).is_some(), enforces, "{state}");
+            assert_eq!(
+                active_block("s1", "Stack", &b, true, None).is_some(),
+                enforces,
+                "{state}"
+            );
         }
         // No block at all: an older source, or not a stack.
         assert_eq!(parse_block(&json!({ "components": [] })), None);
@@ -612,10 +712,16 @@ mod tests {
             { "rule": "card-number", "table": "payments", "column": "card", "count": 1, "severity": "bad" },
         ]);
         let b = block(v.clone());
-        assert_eq!(reason_text(&b, true), "3 findings (email-real-domain ×2, card-number ×1) — acknowledge in Environment");
+        assert_eq!(
+            reason_text(&b, true),
+            "3 findings (email-real-domain ×2, card-number ×1) — acknowledge in Environment"
+        );
         v["reasons"] = json!([{ "component": "db", "text": "db: 3 findings (email-real-domain ×2, card-number ×1)" }]);
         let b = block(v);
-        assert_eq!(reason_text(&b, true), "db: 3 findings (email-real-domain ×2, card-number ×1) — acknowledge in Environment");
+        assert_eq!(
+            reason_text(&b, true),
+            "db: 3 findings (email-real-domain ×2, card-number ×1) — acknowledge in Environment"
+        );
         assert_eq!(
             reason_text(&b, false),
             "last known: db: 3 findings (email-real-domain ×2, card-number ×1) — acknowledge in Environment, source unavailable"
@@ -623,7 +729,10 @@ mod tests {
         let a = active_block("s1", "Stack", &b, true, None).unwrap();
         assert_eq!(a.component.as_deref(), Some("db"));
         let err = block(base("error", false));
-        assert_eq!(reason_text(&err, true), "the data-safety check could not be judged — see Environment");
+        assert_eq!(
+            reason_text(&err, true),
+            "the data-safety check could not be judged — see Environment"
+        );
     }
 
     #[test]
@@ -645,18 +754,36 @@ mod tests {
         assert!(!covers(&unbound.covered, &other));
         v["bound"] = json!({ "source": "tracker", "key": "ABC-1", "folders": [item.display().to_string(), outside.display().to_string(), "relative/ignored"] });
         let bound = active_block("s1", "Stack", &block(v), true, None).unwrap();
-        assert_eq!(bound.bound, Some(BoundItem { source: Some("tracker".into()), key: "ABC-1".into() }));
+        assert_eq!(
+            bound.bound,
+            Some(BoundItem {
+                source: Some("tracker".into()),
+                key: "ABC-1".into()
+            })
+        );
         assert_eq!(bound.covered.len(), 2, "a relative folder is ignored");
         assert!(covers(&bound.covered, &item));
-        assert!(covers(&bound.covered, &item.join("src").join("deep")), "a folder not created yet inside it");
+        assert!(
+            covers(&bound.covered, &item.join("src").join("deep")),
+            "a folder not created yet inside it"
+        );
         assert!(covers(&bound.covered, &outside));
-        assert!(!covers(&bound.covered, &project), "bound: the project itself is not the item");
+        assert!(
+            !covers(&bound.covered, &project),
+            "bound: the project itself is not the item"
+        );
         assert!(!covers(&bound.covered, &other));
         // `..` is folded before comparing, both ways.
-        assert!(covers(&bound.covered, &other.join("..").join("stack").join(".work").join("ABC-1")));
+        assert!(covers(
+            &bound.covered,
+            &other.join("..").join("stack").join(".work").join("ABC-1")
+        ));
         assert!(!covers(&bound.covered, &item.join("..").join("ABC-2")));
         // A sibling whose name merely starts the same is not inside.
-        assert!(!covers(&bound.covered, &project.join(".work").join("ABC-10")));
+        assert!(!covers(
+            &bound.covered,
+            &project.join(".work").join("ABC-10")
+        ));
         // Case: Windows ignores it, so does the check there.
         let shouted = PathBuf::from(item.display().to_string().to_uppercase());
         assert_eq!(covers(&bound.covered, &shouted), cfg!(windows));
@@ -665,7 +792,11 @@ mod tests {
         bare.as_object_mut().unwrap().remove("project");
         let b = active_block("s1", "Stack", &block(bare.clone()), true, Some(&project)).unwrap();
         assert!(covers(&b.covered, &item));
-        assert_eq!(active_block("s1", "Stack", &block(bare), true, None), None, "no folder named: nothing to enforce");
+        assert_eq!(
+            active_block("s1", "Stack", &block(bare), true, None),
+            None,
+            "no folder named: nothing to enforce"
+        );
     }
 
     fn secret(v: Value) -> WireBlock {
@@ -692,7 +823,8 @@ mod tests {
         assert_eq!(parse_block(&payload), None);
         assert!(parse_secret_block(&json!({ "dataSafety": base("error", false) })).is_none());
         // A garbled secret block fails closed.
-        let garbled = parse_secret_block(&json!({ "secretScan": { "instance": "app/0" } })).unwrap();
+        let garbled =
+            parse_secret_block(&json!({ "secretScan": { "instance": "app/0" } })).unwrap();
         assert!(garbled.enforces());
         // Reasons and the refusal name the check and the files, never a value.
         let dir = tempfile::tempdir().unwrap();
@@ -704,13 +836,19 @@ mod tests {
         let a = active_block("s1", "Stack", &b, true, None).unwrap();
         assert_eq!(a.kind, BlockKind::SecretScan);
         let text = launch_refusal(&a, dir.path());
-        assert!(text.starts_with(REFUSAL_LEAD) && text.contains("the secret scan on app/0 (Stack)"), "{text}");
+        assert!(
+            text.starts_with(REFUSAL_LEAD) && text.contains("the secret scan on app/0 (Stack)"),
+            "{text}"
+        );
         assert!(!text.contains("may be real"), "{text}");
         assert!(hold_text(&a).starts_with("held until the secret scan on app/0 clears"));
         assert!(disabled_text(&a).starts_with("agents blocked — secret scan on app/0"));
         let mut e = base("error", true);
         e["project"] = json!(dir.path().display().to_string());
-        assert_eq!(reason_text(&secret(e), true), "the secret scan did not finish — acknowledge in Environment");
+        assert_eq!(
+            reason_text(&secret(e), true),
+            "the secret scan did not finish — acknowledge in Environment"
+        );
         // A saved verdict from before the kind existed reads as data safety.
         let old: WireBlock = serde_json::from_value(json!({
             "instance": "app/0", "state": "not-clean", "blocksAgents": true, "findings": [], "unscanned": [],
@@ -730,7 +868,12 @@ mod tests {
         let text = launch_refusal(&a, dir.path());
         assert!(text.contains("agents cannot start in"), "{text}");
         assert!(text.contains("on app/0 (Stack)"), "{text}");
-        assert!(text.ends_with("may be real; db: 1 finding (card-number ×1) — acknowledge in Environment"), "{text}");
+        assert!(
+            text.ends_with(
+                "may be real; db: 1 finding (card-number ×1) — acknowledge in Environment"
+            ),
+            "{text}"
+        );
         assert_eq!(hold_text(&a), "held until data safety on app/0 clears: db: 1 finding (card-number ×1) — acknowledge in Environment");
     }
 }

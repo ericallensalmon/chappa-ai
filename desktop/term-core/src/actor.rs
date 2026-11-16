@@ -45,9 +45,9 @@ use crate::keys::{
     encode_key, encode_mouse, encode_paste, Key, KeyEvent, ModeSnapshot, MouseEvent, MouseProto,
 };
 use crate::pty::{self, ExitStatus, PtySession, PtySpec};
-use crate::status::ProgramStatus;
 use crate::scanner::{KittyEvent, OscEvent, OscScanner, PromptMarkKind};
 use crate::session::{LineMatcher, SessionMatcher};
+use crate::status::ProgramStatus;
 
 /// Re-exported so embedders never need to reach into alacritty_terminal.
 pub use alacritty_terminal::index::Point;
@@ -743,14 +743,20 @@ impl TermHandle {
 
 /// Control-channel messages (the only way to touch `Term` from outside).
 enum Control {
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     /// PTY-level winsize wiggle; the grid is untouched.
     Poke,
     Scroll(i32),
     SetDisplayOffset(usize),
     Selection(SelectionOp),
     CopySelection(SyncReply),
-    DumpText { lines: usize, reply: TextReply },
+    DumpText {
+        lines: usize,
+        reply: TextReply,
+    },
     Search(Option<String>),
     SearchNav(SearchNavDir),
     SetSyntheticMarks(bool),
@@ -1310,8 +1316,7 @@ impl Actor {
                     // Mode 1 (the parser admits nothing else): replace the
                     // supported bits with the given values.
                     _ => {
-                        self.kitty_flags =
-                            (self.kitty_flags & !KITTY_SUPPORTED_FLAGS) | flags;
+                        self.kitty_flags = (self.kitty_flags & !KITTY_SUPPORTED_FLAGS) | flags;
                     }
                 }
             }

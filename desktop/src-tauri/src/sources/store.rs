@@ -92,7 +92,10 @@ pub struct KeyMatch {
 
 impl Default for KeyMatch {
     fn default() -> Self {
-        Self { enabled: true, pattern: None }
+        Self {
+            enabled: true,
+            pattern: None,
+        }
     }
 }
 
@@ -190,7 +193,11 @@ impl SourceStore {
 
     /// How a source's agent prompts are shown (default: first time only).
     pub fn prompt_policy(&self, key: &str) -> PromptPolicy {
-        self.data.prompt_policy.get(key).copied().unwrap_or_default()
+        self.data
+            .prompt_policy
+            .get(key)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn set_prompt_policy(&mut self, key: &str, policy: PromptPolicy) -> Result<(), String> {
@@ -204,15 +211,28 @@ impl SourceStore {
 
     /// Whether the prompt of `action_id` was shown (and accepted) before.
     pub fn prompt_shown(&self, key: &str, action_id: &str) -> bool {
-        self.data.prompts_shown.get(key).is_some_and(|set| set.contains(action_id))
+        self.data
+            .prompts_shown
+            .get(key)
+            .is_some_and(|set| set.contains(action_id))
     }
 
     pub fn prompts_shown(&self, key: &str) -> Vec<String> {
-        self.data.prompts_shown.get(key).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+        self.data
+            .prompts_shown
+            .get(key)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn mark_prompt_shown(&mut self, key: &str, action_id: &str) -> Result<(), String> {
-        if self.data.prompts_shown.entry(key.to_owned()).or_default().insert(action_id.to_owned()) {
+        if self
+            .data
+            .prompts_shown
+            .entry(key.to_owned())
+            .or_default()
+            .insert(action_id.to_owned())
+        {
             self.save()?;
         }
         Ok(())
@@ -226,17 +246,27 @@ impl SourceStore {
     /// Store the key-match choice. A blank pattern means the default; a
     /// pattern with control characters or longer than [`KEY_PATTERN_MAX`]
     /// is refused.
-    pub fn set_key_match(&mut self, key: &str, enabled: bool, pattern: Option<&str>) -> Result<(), String> {
+    pub fn set_key_match(
+        &mut self,
+        key: &str,
+        enabled: bool,
+        pattern: Option<&str>,
+    ) -> Result<(), String> {
         let pattern = pattern.map(str::trim).filter(|p| !p.is_empty());
         if let Some(p) = pattern {
             if p.chars().count() > KEY_PATTERN_MAX {
-                return Err(format!("a key pattern is at most {KEY_PATTERN_MAX} characters"));
+                return Err(format!(
+                    "a key pattern is at most {KEY_PATTERN_MAX} characters"
+                ));
             }
             if p.chars().any(char::is_control) {
                 return Err("a key pattern cannot hold control characters".into());
             }
         }
-        let choice = KeyMatch { enabled, pattern: pattern.map(str::to_owned) };
+        let choice = KeyMatch {
+            enabled,
+            pattern: pattern.map(str::to_owned),
+        };
         if choice == KeyMatch::default() {
             self.data.key_match.remove(key);
         } else {
@@ -277,8 +307,14 @@ mod tests {
         assert!(!store.is_trusted(&key, "h1"));
         store.mark_trusted(&key, "h1").unwrap();
         assert!(store.is_trusted(&key, "h1"));
-        assert!(!store.is_trusted(&key, "h2"), "a changed hash re-arms the gate");
-        assert!(!store.is_trusted(&SourceStore::launched_key(Path::new("/code/app"), "other"), "h1"));
+        assert!(
+            !store.is_trusted(&key, "h2"),
+            "a changed hash re-arms the gate"
+        );
+        assert!(!store.is_trusted(
+            &SourceStore::launched_key(Path::new("/code/app"), "other"),
+            "h1"
+        ));
         let reopened = SourceStore::new(dir.path().join(FILE_NAME));
         assert!(reopened.is_trusted(&key, "h1"));
         let mut reopened = reopened;
@@ -290,11 +326,17 @@ mod tests {
     fn attached_sources_and_hidden_views_round_trip() {
         let (dir, mut store) = temp_store();
         store
-            .add_attached(AttachedSource { addr: "127.0.0.1:7000".into(), token_file: "/tmp/t".into() })
+            .add_attached(AttachedSource {
+                addr: "127.0.0.1:7000".into(),
+                token_file: "/tmp/t".into(),
+            })
             .unwrap();
         // Re-adding the same address re-points it rather than duplicating.
         store
-            .add_attached(AttachedSource { addr: "127.0.0.1:7000".into(), token_file: "/tmp/t2".into() })
+            .add_attached(AttachedSource {
+                addr: "127.0.0.1:7000".into(),
+                token_file: "/tmp/t2".into(),
+            })
             .unwrap();
         store.set_view_hidden("prs", true).unwrap();
         store.set_view_hidden("prs", true).unwrap();
@@ -303,11 +345,16 @@ mod tests {
         let reopened = SourceStore::new(dir.path().join(FILE_NAME));
         assert_eq!(reopened.attached().len(), 1);
         assert_eq!(reopened.attached()[0].token_file, PathBuf::from("/tmp/t2"));
-        assert_eq!(reopened.hidden_views().iter().cloned().collect::<Vec<_>>(), ["prs"]);
+        assert_eq!(
+            reopened.hidden_views().iter().cloned().collect::<Vec<_>>(),
+            ["prs"]
+        );
         let mut reopened = reopened;
         assert!(reopened.remove_attached("127.0.0.1:7000").unwrap());
         assert!(!reopened.remove_attached("127.0.0.1:7000").unwrap());
-        assert!(SourceStore::new(dir.path().join(FILE_NAME)).attached().is_empty());
+        assert!(SourceStore::new(dir.path().join(FILE_NAME))
+            .attached()
+            .is_empty());
     }
 
     #[test]
@@ -324,10 +371,15 @@ mod tests {
         assert!(!reopened.prompt_shown("k", "b"));
         assert_eq!(reopened.prompts_shown("k"), ["a"]);
         let mut reopened = reopened;
-        reopened.set_prompt_policy("k", PromptPolicy::FirstTime).unwrap();
+        reopened
+            .set_prompt_policy("k", PromptPolicy::FirstTime)
+            .unwrap();
         reopened.forget_prompts("k").unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
-        assert!(!text.contains("prompt_policy") && !text.contains("prompts_shown"), "defaults leave no keys: {text}");
+        assert!(
+            !text.contains("prompt_policy") && !text.contains("prompts_shown"),
+            "defaults leave no keys: {text}"
+        );
         assert_eq!(PromptPolicy::parse("always"), Some(PromptPolicy::Always));
         assert_eq!(PromptPolicy::parse("sometimes"), None);
     }
@@ -335,18 +387,47 @@ mod tests {
     #[test]
     fn key_match_choices_round_trip_and_defaults_leave_no_key() {
         let (dir, mut store) = temp_store();
-        assert_eq!(store.key_match("k"), KeyMatch { enabled: true, pattern: None });
-        store.set_key_match("k", false, Some("  [A-Z]+-\\d+ ")).unwrap();
+        assert_eq!(
+            store.key_match("k"),
+            KeyMatch {
+                enabled: true,
+                pattern: None
+            }
+        );
+        store
+            .set_key_match("k", false, Some("  [A-Z]+-\\d+ "))
+            .unwrap();
         let reopened = SourceStore::new(dir.path().join(FILE_NAME));
-        assert_eq!(reopened.key_match("k"), KeyMatch { enabled: false, pattern: Some("[A-Z]+-\\d+".into()) });
+        assert_eq!(
+            reopened.key_match("k"),
+            KeyMatch {
+                enabled: false,
+                pattern: Some("[A-Z]+-\\d+".into())
+            }
+        );
         assert_eq!(reopened.key_match("other"), KeyMatch::default());
         let mut reopened = reopened;
-        assert!(reopened.set_key_match("k", true, Some(&"x".repeat(KEY_PATTERN_MAX + 1))).unwrap_err().contains("at most"));
-        assert!(reopened.set_key_match("k", true, Some("a
-b")).unwrap_err().contains("control"));
+        assert!(reopened
+            .set_key_match("k", true, Some(&"x".repeat(KEY_PATTERN_MAX + 1)))
+            .unwrap_err()
+            .contains("at most"));
+        assert!(reopened
+            .set_key_match(
+                "k",
+                true,
+                Some(
+                    "a
+b"
+                )
+            )
+            .unwrap_err()
+            .contains("control"));
         reopened.set_key_match("k", true, Some("  ")).unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
-        assert!(!text.contains("key_match"), "on with the default pattern is the default: {text}");
+        assert!(
+            !text.contains("key_match"),
+            "on with the default pattern is the default: {text}"
+        );
     }
 
     #[test]

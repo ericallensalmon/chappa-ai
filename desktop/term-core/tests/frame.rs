@@ -174,12 +174,10 @@ fn build_frame(f: &Fixture) -> FrameData {
         },
         display_offset: f.display_offset as usize,
         history_len: f.history_len as usize,
-        selection: f.selection.as_ref().map(|s| {
-            (
-                point(s.start_row, s.start_col),
-                point(s.end_row, s.end_col),
-            )
-        }),
+        selection: f
+            .selection
+            .as_ref()
+            .map(|s| (point(s.start_row, s.start_col), point(s.end_row, s.end_col))),
         selection_active: f.selection_active.unwrap_or(f.selection.is_some()),
         mouse_capture: f.mouse_capture.unwrap_or(false),
         alt_screen: f.alt_screen.unwrap_or(false),
@@ -307,7 +305,9 @@ fn decode_frame(bytes: &[u8]) -> Result<FrameData, String> {
     };
     let flags = r.u8()?;
     if flags & !0b111 != 0 {
-        return Err(format!("bad flags {flags:#x} (only bits 0..=2 defined in v1)"));
+        return Err(format!(
+            "bad flags {flags:#x} (only bits 0..=2 defined in v1)"
+        ));
     }
     let selection_active = flags & 1 != 0;
     let mouse_capture = flags & 2 != 0;
@@ -388,7 +388,10 @@ fn decode_frame(bytes: &[u8]) -> Result<FrameData, String> {
     }
 
     if !r.at_end() {
-        return Err(format!("trailing bytes after match section (pos {:#x})", r.pos));
+        return Err(format!(
+            "trailing bytes after match section (pos {:#x})",
+            r.pos
+        ));
     }
 
     Ok(FrameData {
@@ -435,8 +438,8 @@ fn fixtures_roundtrip_and_write_bin() {
 
     for path in files {
         let text = fs::read_to_string(&path).expect("fixture readable");
-        let fixture: Fixture = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let fixture: Fixture =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let frame = build_frame(&fixture);
 
         let mut buf = Vec::new();
@@ -444,7 +447,10 @@ fn fixtures_roundtrip_and_write_bin() {
 
         let name = path.file_name().unwrap().to_string_lossy();
         let stem = path.file_stem().unwrap().to_string_lossy();
-        assert_eq!(fixture.name, stem, "{name}: fixture name must match filename");
+        assert_eq!(
+            fixture.name, stem,
+            "{name}: fixture name must match filename"
+        );
         let bin_path = path.with_extension("bin");
         match fixture.truncate_to {
             Some(n) => {
@@ -559,7 +565,10 @@ fn random_frame(rng: &mut Rng) -> FrameData {
 
     let mut matches = Vec::new();
     for _ in 0..rng.below(3) {
-        matches.push((random_point(rng, rows as i32, cols), random_point(rng, rows as i32, cols)));
+        matches.push((
+            random_point(rng, rows as i32, cols),
+            random_point(rng, rows as i32, cols),
+        ));
     }
 
     FrameData {
@@ -578,7 +587,10 @@ fn random_frame(rng: &mut Rng) -> FrameData {
         display_offset: rng.below(10_000) as usize,
         history_len: rng.below(100_000) as usize,
         selection: if rng.chance(50) {
-            Some((random_point(rng, rows as i32, cols), random_point(rng, rows as i32, cols)))
+            Some((
+                random_point(rng, rows as i32, cols),
+                random_point(rng, rows as i32, cols),
+            ))
         } else {
             None
         },
@@ -635,7 +647,10 @@ fn flag_bits_above_2_are_malformed() {
     for bit in [0x08u8, 0x10, 0x40, 0x80] {
         let mut buf = buf.clone();
         buf[7] |= bit;
-        assert!(decode_frame(&buf).is_err(), "flags bit {bit:#x} must be rejected");
+        assert!(
+            decode_frame(&buf).is_err(),
+            "flags bit {bit:#x} must be rejected"
+        );
     }
     // The three defined bits still round-trip.
     let mut buf = Vec::new();

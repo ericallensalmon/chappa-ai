@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use serde::Serialize;
 use project_model::link_hosts::{any_port_host, check_any_port_host};
+use serde::Serialize;
 use serde_json::Value;
 
 use super::actions::{parse_action, NoteRule, SourceAction};
@@ -56,7 +56,8 @@ impl Endpoint {
     }
 
     fn declared(path: &str, what: &str) -> Result<Self, ManifestError> {
-        validate_endpoint_path(path).map_err(|why| ManifestError::Invalid(format!("{what}: {why}")))?;
+        validate_endpoint_path(path)
+            .map_err(|why| ManifestError::Invalid(format!("{what}: {why}")))?;
         Ok(Endpoint(path.to_owned()))
     }
 
@@ -89,7 +90,9 @@ pub fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -168,7 +171,10 @@ impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManifestError::NeedsUpdate { contract: Some(c) } => {
-                write!(f, "the source speaks contract version {c}; this app speaks {CONTRACT_VERSION}")
+                write!(
+                    f,
+                    "the source speaks contract version {c}; this app speaks {CONTRACT_VERSION}"
+                )
             }
             ManifestError::NeedsUpdate { contract: None } => {
                 f.write_str("the manifest names no contract version")
@@ -201,7 +207,9 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
-            .ok_or_else(|| ManifestError::Invalid(format!("`source.{key}` must be a non-empty string")))
+            .ok_or_else(|| {
+                ManifestError::Invalid(format!("`source.{key}` must be a non-empty string"))
+            })
     };
     let id = text(source, "id")?;
     let label = text(source, "label")?;
@@ -213,24 +221,35 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
             .as_object()
             .ok_or_else(|| ManifestError::Invalid("`views` must be an object".into()))?;
         for name in VIEW_NAMES {
-            let Some(view) = declared.get(name) else { continue };
-            let view = view
-                .as_object()
-                .ok_or_else(|| ManifestError::Invalid(format!("`views.{name}` must be an object")))?;
-            let list = view
-                .get("list")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ManifestError::Invalid(format!("`views.{name}.list` must be a path")))?;
+            let Some(view) = declared.get(name) else {
+                continue;
+            };
+            let view = view.as_object().ok_or_else(|| {
+                ManifestError::Invalid(format!("`views.{name}` must be an object"))
+            })?;
+            let list = view.get("list").and_then(Value::as_str).ok_or_else(|| {
+                ManifestError::Invalid(format!("`views.{name}.list` must be a path"))
+            })?;
             let list = Endpoint::declared(list, &format!("views.{name}.list"))?;
             let item = match view.get("item") {
                 None | Some(Value::Null) => None,
-                Some(Value::String(path)) => Some(Endpoint::declared(path, &format!("views.{name}.item"))?),
-                Some(_) => return Err(ManifestError::Invalid(format!("`views.{name}.item` must be a path"))),
+                Some(Value::String(path)) => {
+                    Some(Endpoint::declared(path, &format!("views.{name}.item"))?)
+                }
+                Some(_) => {
+                    return Err(ManifestError::Invalid(format!(
+                        "`views.{name}.item` must be a path"
+                    )))
+                }
             };
             let poll = match view.get("pollSeconds") {
                 None | Some(Value::Null) => POLL_DEFAULT,
                 Some(Value::Number(n)) => clamp_poll(n.as_f64().unwrap_or(0.0)),
-                Some(_) => return Err(ManifestError::Invalid(format!("`views.{name}.pollSeconds` must be a number"))),
+                Some(_) => {
+                    return Err(ManifestError::Invalid(format!(
+                        "`views.{name}.pollSeconds` must be a number"
+                    )))
+                }
             };
             views.insert(name.to_owned(), ViewEndpoint { list, item, poll });
         }
@@ -252,7 +271,11 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
-                        .ok_or_else(|| ManifestError::Invalid(format!("`{key}` entries must be non-empty strings")))
+                        .ok_or_else(|| {
+                            ManifestError::Invalid(format!(
+                                "`{key}` entries must be non-empty strings"
+                            ))
+                        })
                 })
                 .collect(),
             Some(_) => Err(ManifestError::Invalid(format!("`{key}` must be a list"))),
@@ -260,7 +283,8 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
     };
     let link_hosts = strings("linkHosts")?;
     for host in &link_hosts {
-        validate_link_host(host).map_err(|why| ManifestError::Invalid(format!("linkHosts `{host}`: {why}")))?;
+        validate_link_host(host)
+            .map_err(|why| ManifestError::Invalid(format!("linkHosts `{host}`: {why}")))?;
     }
     Ok(Manifest {
         id,
@@ -284,7 +308,11 @@ fn parse_item_actions(value: Option<&Value>) -> Result<Vec<ItemAction>, Manifest
     let list = match value {
         None | Some(Value::Null) => return Ok(Vec::new()),
         Some(Value::Array(list)) => list,
-        Some(_) => return Err(ManifestError::Invalid("`itemActions` must be a list".into())),
+        Some(_) => {
+            return Err(ManifestError::Invalid(
+                "`itemActions` must be a list".into(),
+            ))
+        }
     };
     let mut out: Vec<ItemAction> = Vec::new();
     for (i, raw) in list.iter().enumerate() {
@@ -298,7 +326,10 @@ fn parse_item_actions(value: Option<&Value>) -> Result<Vec<ItemAction>, Manifest
             )));
         }
         if action.is_unconfirmable_mutation() {
-            return Err(bad(format!("`{}` changes something and has no `confirm` text", action.id())));
+            return Err(bad(format!(
+                "`{}` changes something and has no `confirm` text",
+                action.id()
+            )));
         }
         if out.iter().any(|a| a.id() == action.id()) {
             return Err(bad(format!("the id `{}` is used twice", action.id())));
@@ -311,7 +342,12 @@ fn parse_item_actions(value: Option<&Value>) -> Result<Vec<ItemAction>, Manifest
             .get("view")
             .and_then(Value::as_str)
             .filter(|v| ITEM_ACTION_VIEWS.contains(v))
-            .ok_or_else(|| bad(format!("`on.view` must be one of {}", ITEM_ACTION_VIEWS.join(", "))))?
+            .ok_or_else(|| {
+                bad(format!(
+                    "`on.view` must be one of {}",
+                    ITEM_ACTION_VIEWS.join(", ")
+                ))
+            })?
             .to_owned();
         let mut sources: Vec<String> = match on.get("sources") {
             Some(Value::String(s)) if s == ANY_SOURCE => vec![ANY_SOURCE.to_owned()],
@@ -322,17 +358,27 @@ fn parse_item_actions(value: Option<&Value>) -> Result<Vec<ItemAction>, Manifest
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
-                        .ok_or_else(|| bad("`on.sources` entries must be non-empty source ids".into()))
+                        .ok_or_else(|| {
+                            bad("`on.sources` entries must be non-empty source ids".into())
+                        })
                 })
                 .collect::<Result<_, _>>()?,
-            _ => return Err(bad("`on.sources` must be a list of source ids or \"*\"".into())),
+            _ => {
+                return Err(bad(
+                    "`on.sources` must be a list of source ids or \"*\"".into()
+                ))
+            }
         };
         if sources.iter().any(|s| s == ANY_SOURCE) {
             sources = vec![ANY_SOURCE.to_owned()];
         }
         sources.sort();
         sources.dedup();
-        out.push(ItemAction { action, view, sources });
+        out.push(ItemAction {
+            action,
+            view,
+            sources,
+        });
     }
     Ok(out)
 }
@@ -347,7 +393,9 @@ pub fn validate_endpoint_path(path: &str) -> Result<(), String> {
         return Err("empty path".into());
     }
     if !path.starts_with('/') {
-        return Err(format!("`{path}` is not relative to the source's address (must start with `/`)"));
+        return Err(format!(
+            "`{path}` is not relative to the source's address (must start with `/`)"
+        ));
     }
     if path.starts_with("//") {
         return Err(format!("`{path}` would name another host"));
@@ -356,7 +404,9 @@ pub fn validate_endpoint_path(path: &str) -> Result<(), String> {
         return Err(format!("`{path}` is a URL, not a path"));
     }
     if path.bytes().any(|b| b <= b' ' || b == 0x7f) {
-        return Err(format!("`{path}` contains whitespace or control characters"));
+        return Err(format!(
+            "`{path}` contains whitespace or control characters"
+        ));
     }
     if path.split(['/', '?', '#']).any(|seg| seg == "..") {
         return Err(format!("`{path}` climbs with `..`"));
@@ -380,7 +430,9 @@ fn validate_link_host(host: &str) -> Result<(), String> {
         return check_any_port_host(&bare);
     }
     if host.contains('*') {
-        return Err("the only wildcard allowed is a whole port (`host:*`), never part of the host".into());
+        return Err(
+            "the only wildcard allowed is a whole port (`host:*`), never part of the host".into(),
+        );
     }
     Ok(())
 }
@@ -398,7 +450,9 @@ pub fn clamp_poll(seconds: f64) -> Duration {
 /// of a view polled every `poll`: `poll × 2^failures`, capped at
 /// `poll × 8`. Zero failures is the plain interval.
 pub fn backoff_delay(poll: Duration, failures: u32) -> Duration {
-    let factor = 2u32.saturating_pow(failures.min(8)).min(BACKOFF_CAP_MULTIPLIER);
+    let factor = 2u32
+        .saturating_pow(failures.min(8))
+        .min(BACKOFF_CAP_MULTIPLIER);
     poll.saturating_mul(factor)
 }
 
@@ -411,7 +465,9 @@ pub fn parse_loopback_addr(text: &str) -> Result<SocketAddr, String> {
         .parse()
         .map_err(|_| format!("`{text}` is not an `ip:port` address"))?;
     if !addr.ip().is_loopback() {
-        return Err(format!("`{text}` is not a loopback address; a source must listen on 127.0.0.1 or [::1]"));
+        return Err(format!(
+            "`{text}` is not a loopback address; a source must listen on 127.0.0.1 or [::1]"
+        ));
     }
     if addr.port() == 0 {
         return Err(format!("`{text}` names no port"));
@@ -463,7 +519,14 @@ fn canonical_value(value: &Value) -> String {
                 .collect();
             format!("{{{}}}", parts.join(","))
         }
-        Value::Array(items) => format!("[{}]", items.iter().map(canonical_value).collect::<Vec<_>>().join(",")),
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(canonical_value)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         other => other.to_string(),
     }
 }
@@ -473,7 +536,20 @@ fn canonical_value(value: &Value) -> String {
 fn canonical_item_action(item: &ItemAction) -> String {
     let quoted = |s: &str| Value::String(s.to_owned()).to_string();
     let (mutates, confirm, params, note, inputs) = match &item.action {
-        SourceAction::Endpoint { mutates, confirm, params, note, inputs, .. } => (*mutates, confirm.as_deref(), params.as_ref(), *note, inputs.as_slice()),
+        SourceAction::Endpoint {
+            mutates,
+            confirm,
+            params,
+            note,
+            inputs,
+            ..
+        } => (
+            *mutates,
+            confirm.as_deref(),
+            params.as_ref(),
+            *note,
+            inputs.as_slice(),
+        ),
         _ => (false, None, None, None, &[][..]),
     };
     let note = note.map(|n| match n {
@@ -486,7 +562,10 @@ fn canonical_item_action(item: &ItemAction) -> String {
     let inputs = if inputs.is_empty() {
         String::new()
     } else {
-        format!(",\"inputs\":{}", canonical_value(&serde_json::to_value(inputs).unwrap_or(Value::Null)))
+        format!(
+            ",\"inputs\":{}",
+            canonical_value(&serde_json::to_value(inputs).unwrap_or(Value::Null))
+        )
     };
     format!(
         "{{\"id\":{},\"label\":{},\"mutates\":{},\"confirm\":{},\"note\":{},\"params\":{},\"view\":{},\"sources\":[{}]{}}}",
@@ -525,7 +604,10 @@ pub fn canonical_trust_json(manifest: &Manifest) -> String {
     roots.dedup();
     let views: Vec<&String> = manifest.views.keys().collect(); // BTreeMap: sorted
     let list = |items: &[String]| -> String {
-        let quoted: Vec<String> = items.iter().map(|s| Value::String(s.clone()).to_string()).collect();
+        let quoted: Vec<String> = items
+            .iter()
+            .map(|s| Value::String(s.clone()).to_string())
+            .collect();
         format!("[{}]", quoted.join(","))
     };
     let view_names: Vec<String> = views.into_iter().cloned().collect();
@@ -533,10 +615,20 @@ pub fn canonical_trust_json(manifest: &Manifest) -> String {
     let item_actions = if items.is_empty() {
         String::new()
     } else {
-        format!(",\"itemActions\":[{}]", items.into_iter().map(canonical_item_action).collect::<Vec<_>>().join(","))
+        format!(
+            ",\"itemActions\":[{}]",
+            items
+                .into_iter()
+                .map(canonical_item_action)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     };
     let owner_updates = match &manifest.owner_updates {
-        Some(path) => format!(",\"ownerUpdates\":{}", Value::String(path.path().to_owned())),
+        Some(path) => format!(
+            ",\"ownerUpdates\":{}",
+            Value::String(path.path().to_owned())
+        ),
         None => String::new(),
     };
     format!(
@@ -575,7 +667,9 @@ pub fn trust_summary(manifest: &Manifest) -> TrustSummary {
             .into_iter()
             .map(|item| {
                 let (mutates, confirm) = match &item.action {
-                    SourceAction::Endpoint { mutates, confirm, .. } => (*mutates, confirm.clone()),
+                    SourceAction::Endpoint {
+                        mutates, confirm, ..
+                    } => (*mutates, confirm.clone()),
                     _ => (false, None),
                 };
                 ItemActionSummary {
@@ -609,13 +703,25 @@ mod tests {
     #[test]
     fn the_fixture_manifest_parses_with_every_field() {
         let m = fixture();
-        assert_eq!((m.id.as_str(), m.label.as_str(), m.version.as_str()), ("fixture", "Fixture", "0.1.0"));
-        assert_eq!(m.views.keys().cloned().collect::<Vec<_>>(), ["attention", "environment", "prs", "work"]);
+        assert_eq!(
+            (m.id.as_str(), m.label.as_str(), m.version.as_str()),
+            ("fixture", "Fixture", "0.1.0")
+        );
+        assert_eq!(
+            m.views.keys().cloned().collect::<Vec<_>>(),
+            ["attention", "environment", "prs", "work"]
+        );
         assert_eq!(m.views["work"].list.path(), "/api/work");
-        assert_eq!(m.views["work"].item.as_ref().unwrap().path(), "/api/work/{key}");
+        assert_eq!(
+            m.views["work"].item.as_ref().unwrap().path(),
+            "/api/work/{key}"
+        );
         assert_eq!(m.views["work"].poll, Duration::from_secs(60));
         assert_eq!(m.views["prs"].poll, Duration::from_secs(300));
-        assert_eq!(m.views["attention"].poll, POLL_DEFAULT, "no pollSeconds = the default");
+        assert_eq!(
+            m.views["attention"].poll, POLL_DEFAULT,
+            "no pollSeconds = the default"
+        );
         assert!(m.views["prs"].item.is_none());
         assert_eq!(m.workflows.as_ref().unwrap().path(), "/api/workflows");
         assert_eq!(m.actions.as_ref().unwrap().path(), "/api/actions");
@@ -629,13 +735,27 @@ mod tests {
         let jobs = fixture().jobs.unwrap();
         assert!(jobs.has_placeholder("id"));
         assert!(!jobs.has_placeholder("key"));
-        assert_eq!(jobs.with_placeholder("id", "job-1").path(), "/api/jobs/job-1");
-        assert_eq!(jobs.with_placeholder("id", "a/b?c=d e#f").path(), "/api/jobs/a%2Fb%3Fc%3Dd%20e%23f");
-        assert_eq!(jobs.with_placeholder("id", "../other").path(), "/api/jobs/..%2Fother");
+        assert_eq!(
+            jobs.with_placeholder("id", "job-1").path(),
+            "/api/jobs/job-1"
+        );
+        assert_eq!(
+            jobs.with_placeholder("id", "a/b?c=d e#f").path(),
+            "/api/jobs/a%2Fb%3Fc%3Dd%20e%23f"
+        );
+        assert_eq!(
+            jobs.with_placeholder("id", "../other").path(),
+            "/api/jobs/..%2Fother"
+        );
         assert_eq!(percent_encode("A-z_0.9~"), "A-z_0.9~");
         assert_eq!(percent_encode("é"), "%C3%A9");
         // A payload-named panel path gets the same shape rules as the manifest.
-        assert_eq!(Endpoint::named_in_payload("/api/panel/validate").unwrap().path(), "/api/panel/validate");
+        assert_eq!(
+            Endpoint::named_in_payload("/api/panel/validate")
+                .unwrap()
+                .path(),
+            "/api/panel/validate"
+        );
         assert!(Endpoint::named_in_payload("http://10.0.0.5/x").is_err());
         assert!(Endpoint::named_in_payload("/api/../x").is_err());
         assert!(Endpoint::named_in_payload("api/panel").is_err());
@@ -645,9 +765,15 @@ mod tests {
     fn a_wrong_or_missing_contract_is_needs_update_not_a_crash() {
         let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
         v["contract"] = json!(2);
-        assert_eq!(parse_manifest(&v), Err(ManifestError::NeedsUpdate { contract: Some(2) }));
+        assert_eq!(
+            parse_manifest(&v),
+            Err(ManifestError::NeedsUpdate { contract: Some(2) })
+        );
         v.as_object_mut().unwrap().remove("contract");
-        assert_eq!(parse_manifest(&v), Err(ManifestError::NeedsUpdate { contract: None }));
+        assert_eq!(
+            parse_manifest(&v),
+            Err(ManifestError::NeedsUpdate { contract: None })
+        );
         // The version check comes first: a v2 manifest with shapes this build
         // does not know is still "needs update".
         assert!(matches!(
@@ -668,7 +794,10 @@ mod tests {
         assert_eq!(m.views.keys().cloned().collect::<Vec<_>>(), ["work"]);
         assert!(m.link_hosts.is_empty() && m.roots.is_empty());
         // Every view is optional.
-        let bare = parse_manifest(&json!({"contract": 1, "source": {"id": "x", "label": "X", "version": "1"}})).unwrap();
+        let bare = parse_manifest(
+            &json!({"contract": 1, "source": {"id": "x", "label": "X", "version": "1"}}),
+        )
+        .unwrap();
         assert!(bare.views.is_empty());
     }
 
@@ -706,7 +835,10 @@ mod tests {
             "/api/w\u{7f}ork",
             "/api/w\r\nX-Injected: 1",
         ] {
-            assert!(validate_endpoint_path(bad).is_err(), "{bad:?} must be refused");
+            assert!(
+                validate_endpoint_path(bad).is_err(),
+                "{bad:?} must be refused"
+            );
         }
         // A manifest naming such a path is unusable as a whole.
         let v = json!({
@@ -747,8 +879,20 @@ mod tests {
                 "linkHosts": [host]
             }))
         };
-        for ok in ["localhost:*", "127.0.0.1:*", "[::1]:*", "192.0.2.7:*", "dev.example.test:*", "example.com:*", "Dev.Example.Test:*"] {
-            assert!(with(ok).is_ok(), "{ok} must be accepted: {:?}", with(ok).err());
+        for ok in [
+            "localhost:*",
+            "127.0.0.1:*",
+            "[::1]:*",
+            "192.0.2.7:*",
+            "dev.example.test:*",
+            "example.com:*",
+            "Dev.Example.Test:*",
+        ] {
+            assert!(
+                with(ok).is_ok(),
+                "{ok} must be accepted: {:?}",
+                with(ok).err()
+            );
         }
         let refused = [
             ("*", "only wildcard"),
@@ -776,10 +920,26 @@ mod tests {
     #[test]
     fn only_loopback_ip_literals_are_accepted_as_source_addresses() {
         assert!(parse_loopback_addr("127.0.0.1:5000").is_ok());
-        assert!(parse_loopback_addr("127.5.6.7:1").is_ok(), "the whole 127/8 block is loopback");
+        assert!(
+            parse_loopback_addr("127.5.6.7:1").is_ok(),
+            "the whole 127/8 block is loopback"
+        );
         assert!(parse_loopback_addr("[::1]:9").is_ok());
-        assert!(parse_loopback_addr(" 127.0.0.1:5000 ").is_ok(), "surrounding whitespace is trimmed");
-        for bad in ["10.0.0.5:5000", "0.0.0.0:5000", "[::]:5000", "192.168.1.2:80", "localhost:5000", "127.0.0.1", "127.0.0.1:0", "http://127.0.0.1:5000", ""] {
+        assert!(
+            parse_loopback_addr(" 127.0.0.1:5000 ").is_ok(),
+            "surrounding whitespace is trimmed"
+        );
+        for bad in [
+            "10.0.0.5:5000",
+            "0.0.0.0:5000",
+            "[::]:5000",
+            "192.168.1.2:80",
+            "localhost:5000",
+            "127.0.0.1",
+            "127.0.0.1:0",
+            "http://127.0.0.1:5000",
+            "",
+        ] {
             assert!(parse_loopback_addr(bad).is_err(), "{bad:?} must be refused");
         }
     }
@@ -791,9 +951,17 @@ mod tests {
         assert_eq!(backoff_delay(poll, 1), Duration::from_secs(120));
         assert_eq!(backoff_delay(poll, 2), Duration::from_secs(240));
         assert_eq!(backoff_delay(poll, 3), Duration::from_secs(480));
-        assert_eq!(backoff_delay(poll, 4), Duration::from_secs(480), "capped at poll × 8");
+        assert_eq!(
+            backoff_delay(poll, 4),
+            Duration::from_secs(480),
+            "capped at poll × 8"
+        );
         assert_eq!(backoff_delay(poll, 40), Duration::from_secs(480));
-        assert_eq!(backoff_delay(POLL_MAX, u32::MAX), POLL_MAX * 8, "no overflow at the extremes");
+        assert_eq!(
+            backoff_delay(POLL_MAX, u32::MAX),
+            POLL_MAX * 8,
+            "no overflow at the extremes"
+        );
     }
 
     #[test]
@@ -825,7 +993,8 @@ mod tests {
         let mut any_port = m.clone();
         any_port.link_hosts = vec!["dev.example.test:*".into(), "registry.example".into()];
         assert_ne!(trust_hash(&any_port), hash);
-        assert!(canonical_trust_json(&any_port).contains(r#""linkHosts":["dev.example.test:*","registry.example"]"#));
+        assert!(canonical_trust_json(&any_port)
+            .contains(r#""linkHosts":["dev.example.test:*","registry.example"]"#));
         let mut root = m.clone();
         root.roots.push("/".into());
         assert_ne!(trust_hash(&root), hash);
@@ -848,7 +1017,8 @@ mod tests {
 
     /// The overlay fixture's manifest: a second source that adds to the
     /// first one's work items and offers actions on its rows.
-    const OVERLAY_FIXTURE: &str = include_str!("../../../sources/fixture/data-overlay/manifest.json");
+    const OVERLAY_FIXTURE: &str =
+        include_str!("../../../sources/fixture/data-overlay/manifest.json");
 
     fn with_item_actions(items: Value) -> Result<Manifest, ManifestError> {
         parse_manifest(&json!({
@@ -861,14 +1031,29 @@ mod tests {
     #[test]
     fn item_actions_are_endpoint_actions_with_a_place_to_be_offered() {
         let m = parse_manifest(&serde_json::from_str(OVERLAY_FIXTURE).unwrap()).unwrap();
-        assert_eq!(m.item_actions.iter().map(ItemAction::id).collect::<Vec<_>>(), ["start-work", "review-later"]);
+        assert_eq!(
+            m.item_actions
+                .iter()
+                .map(ItemAction::id)
+                .collect::<Vec<_>>(),
+            ["start-work", "review-later"]
+        );
         let start = &m.item_actions[0];
-        assert_eq!((start.view.as_str(), start.sources.as_slice()), ("work", &["fixture".to_owned()][..]));
+        assert_eq!(
+            (start.view.as_str(), start.sources.as_slice()),
+            ("work", &["fixture".to_owned()][..])
+        );
         assert!(start.offered_on("work", "fixture"));
-        assert!(!start.offered_on("work", "other"), "only the listed sources' rows");
+        assert!(
+            !start.offered_on("work", "other"),
+            "only the listed sources' rows"
+        );
         assert!(!start.offered_on("prs", "fixture"), "only the named view");
         let later = &m.item_actions[1];
-        assert_eq!((later.view.as_str(), later.sources.as_slice()), ("prs", &[ANY_SOURCE.to_owned()][..]));
+        assert_eq!(
+            (later.view.as_str(), later.sources.as_slice()),
+            ("prs", &[ANY_SOURCE.to_owned()][..])
+        );
         assert!(later.offered_on("prs", "anything"));
 
         // "*" as a string, or inside a list, means every other source.
@@ -889,22 +1074,42 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let on = json!({"view": "work", "sources": "*"});
-        assert!(bad(json!({"kind": "agent", "id": "a", "label": "A", "cwd": "/x", "prompt": "p", "on": on})).contains("only `endpoint`"));
-        assert!(bad(json!({"kind": "link", "id": "l", "label": "L", "url": "https://x", "on": on})).contains("only `endpoint`"));
-        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": true, "on": on})).contains("no `confirm`"));
-        assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false})).contains("`on`"));
+        assert!(bad(
+            json!({"kind": "agent", "id": "a", "label": "A", "cwd": "/x", "prompt": "p", "on": on})
+        )
+        .contains("only `endpoint`"));
+        assert!(bad(
+            json!({"kind": "link", "id": "l", "label": "L", "url": "https://x", "on": on})
+        )
+        .contains("only `endpoint`"));
+        assert!(bad(
+            json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": true, "on": on})
+        )
+        .contains("no `confirm`"));
+        assert!(
+            bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false}))
+                .contains("`on`")
+        );
         assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "environment", "sources": "*"}})).contains("`on.view`"));
         assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "work"}})).contains("`on.sources`"));
         assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "work", "sources": "tracker"}})).contains("`on.sources`"));
         assert!(bad(json!({"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": {"view": "work", "sources": [""]}})).contains("non-empty"));
-        assert!(bad(json!({"kind": "endpoint", "label": "M", "mutates": false, "on": on})).contains("`id`"));
+        assert!(
+            bad(json!({"kind": "endpoint", "label": "M", "mutates": false, "on": on}))
+                .contains("`id`")
+        );
         let twice = with_item_actions(json!([
             {"kind": "endpoint", "id": "m", "label": "M", "mutates": false, "on": on},
             {"kind": "endpoint", "id": "m", "label": "N", "mutates": false, "on": on}
         ]));
         assert!(matches!(twice, Err(ManifestError::Invalid(why)) if why.contains("used twice")));
-        assert!(matches!(with_item_actions(json!({"id": "m"})), Err(ManifestError::Invalid(why)) if why.contains("must be a list")));
-        assert!(with_item_actions(Value::Null).unwrap().item_actions.is_empty());
+        assert!(
+            matches!(with_item_actions(json!({"id": "m"})), Err(ManifestError::Invalid(why)) if why.contains("must be a list"))
+        );
+        assert!(with_item_actions(Value::Null)
+            .unwrap()
+            .item_actions
+            .is_empty());
     }
 
     #[test]
@@ -916,18 +1121,40 @@ mod tests {
         let mut v = base.clone();
         v["ownerUpdates"] = json!("/api/work/owner");
         let asking = parse_manifest(&v).unwrap();
-        assert_eq!(asking.owner_updates.as_ref().unwrap().path(), "/api/work/owner");
+        assert_eq!(
+            asking.owner_updates.as_ref().unwrap().path(),
+            "/api/work/owner"
+        );
         assert!(trust_summary(&asking).owner_updates);
-        assert!(canonical_trust_json(&asking).ends_with(r#","views":["work"],"ownerUpdates":"/api/work/owner"}"#), "{}", canonical_trust_json(&asking));
-        assert!(!canonical_trust_json(&plain).contains("ownerUpdates"), "a source without it keeps its old canonical form");
+        assert!(
+            canonical_trust_json(&asking)
+                .ends_with(r#","views":["work"],"ownerUpdates":"/api/work/owner"}"#),
+            "{}",
+            canonical_trust_json(&asking)
+        );
+        assert!(
+            !canonical_trust_json(&plain).contains("ownerUpdates"),
+            "a source without it keeps its old canonical form"
+        );
         assert_ne!(trust_hash(&asking), trust_hash(&plain));
         let mut moved = v.clone();
         moved["ownerUpdates"] = json!("/api/owner");
-        assert_ne!(trust_hash(&parse_manifest(&moved).unwrap()), trust_hash(&asking));
-        for bad in [json!("http://10.0.0.5/owner"), json!("owner"), json!("/a/../b"), json!(7)] {
+        assert_ne!(
+            trust_hash(&parse_manifest(&moved).unwrap()),
+            trust_hash(&asking)
+        );
+        for bad in [
+            json!("http://10.0.0.5/owner"),
+            json!("owner"),
+            json!("/a/../b"),
+            json!(7),
+        ] {
             let mut v = base.clone();
             v["ownerUpdates"] = bad.clone();
-            assert!(matches!(parse_manifest(&v), Err(ManifestError::Invalid(_))), "{bad}");
+            assert!(
+                matches!(parse_manifest(&v), Err(ManifestError::Invalid(_))),
+                "{bad}"
+            );
         }
     }
 
@@ -967,18 +1194,35 @@ mod tests {
         let mut none = m.clone();
         none.item_actions.clear();
         assert_ne!(trust_hash(&none), hash, "dropping them is a change too");
-        assert!(!canonical_trust_json(&none).contains("itemActions"), "a source without item actions keeps its old canonical form");
+        assert!(
+            !canonical_trust_json(&none).contains("itemActions"),
+            "a source without item actions keeps its old canonical form"
+        );
         // Inputs are part of what an item action does.
         let mut v: Value = serde_json::from_str(OVERLAY_FIXTURE).unwrap();
-        v["itemActions"][0]["inputs"] = json!([{"name": "slot", "label": "Slot", "kind": "number", "max": 3}]);
+        v["itemActions"][0]["inputs"] =
+            json!([{"name": "slot", "label": "Slot", "kind": "number", "max": 3}]);
         let asking = parse_manifest(&v).unwrap();
         assert_ne!(trust_hash(&asking), hash);
         assert!(canonical_trust_json(&asking).contains(r#""inputs":[{"default":null,"kind":"number","label":"Slot","max":3,"name":"slot","required":false}]"#), "{}", canonical_trust_json(&asking));
         let summary = trust_summary(&m);
-        assert_eq!(summary.item_actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["review-later", "start-work"]);
+        assert_eq!(
+            summary
+                .item_actions
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["review-later", "start-work"]
+        );
         let start = &summary.item_actions[1];
-        assert_eq!((start.label.as_str(), start.view.as_str(), start.mutates), ("Start work", "work", true));
-        assert_eq!(start.confirm.as_deref(), Some("Create a workspace for {key} — {title}"));
+        assert_eq!(
+            (start.label.as_str(), start.view.as_str(), start.mutates),
+            ("Start work", "work", true)
+        );
+        assert_eq!(
+            start.confirm.as_deref(),
+            Some("Create a workspace for {key} — {title}")
+        );
         assert_eq!(start.sources, ["fixture"]);
     }
 }

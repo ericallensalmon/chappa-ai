@@ -128,7 +128,14 @@ impl SourceAction {
     /// Such an action is never rendered: the user would have nothing to
     /// accept, and `confirmed: true` is only ever set by the dialog.
     pub fn is_unconfirmable_mutation(&self) -> bool {
-        matches!(self, SourceAction::Endpoint { mutates: true, confirm: None, .. })
+        matches!(
+            self,
+            SourceAction::Endpoint {
+                mutates: true,
+                confirm: None,
+                ..
+            }
+        )
     }
 }
 
@@ -185,7 +192,9 @@ pub const INPUT_NAME_MAX: usize = 100;
 fn valid_input_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= INPUT_NAME_MAX
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
 }
 
 fn parse_inputs(obj: &serde_json::Map<String, Value>) -> Result<Vec<EndpointInput>, String> {
@@ -195,15 +204,26 @@ fn parse_inputs(obj: &serde_json::Map<String, Value>) -> Result<Vec<EndpointInpu
         Some(_) => return Err("`inputs` must be a list".into()),
     };
     if list.len() > INPUTS_MAX {
-        return Err(format!("`inputs` holds {} entries; at most {INPUTS_MAX}", list.len()));
+        return Err(format!(
+            "`inputs` holds {} entries; at most {INPUTS_MAX}",
+            list.len()
+        ));
     }
     let mut out: Vec<EndpointInput> = Vec::new();
     for (i, raw) in list.iter().enumerate() {
         let at = |why: String| format!("inputs[{i}]: {why}");
-        let o = raw.as_object().ok_or_else(|| at("must be an object".into()))?;
-        let name = o.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
+        let o = raw
+            .as_object()
+            .ok_or_else(|| at("must be an object".into()))?;
+        let name = o
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         if !valid_input_name(&name) {
-            return Err(at(format!("`name` must be 1–{INPUT_NAME_MAX} of [A-Za-z0-9._:/-]")));
+            return Err(at(format!(
+                "`name` must be 1–{INPUT_NAME_MAX} of [A-Za-z0-9._:/-]"
+            )));
         }
         if out.iter().any(|x| x.name == name) {
             return Err(at(format!("the name `{name}` is used twice")));
@@ -228,15 +248,25 @@ fn parse_inputs(obj: &serde_json::Map<String, Value>) -> Result<Vec<EndpointInpu
                 }
                 let mut parsed: Vec<InputOption> = Vec::new();
                 for opt in opts {
-                    let value = opt.get("value").and_then(Value::as_str).filter(|v| !v.is_empty() && !v.chars().any(char::is_control));
-                    let label = opt.get("label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty());
+                    let value = opt
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty() && !v.chars().any(char::is_control));
+                    let label = opt
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty());
                     let (Some(value), Some(label)) = (value, label) else {
                         return Err(at("every option needs a `value` and a `label`".into()));
                     };
                     if parsed.iter().any(|p| p.value == value) {
                         return Err(at(format!("the option `{value}` is listed twice")));
                     }
-                    parsed.push(InputOption { value: value.to_owned(), label: label.to_owned() });
+                    parsed.push(InputOption {
+                        value: value.to_owned(),
+                        label: label.to_owned(),
+                    });
                 }
                 parsed
             }
@@ -260,9 +290,18 @@ fn parse_inputs(obj: &serde_json::Map<String, Value>) -> Result<Vec<EndpointInpu
             (InputKind::Number, Some(_)) => return Err(at("`max` of a number input must be a number".into())),
             (_, Some(_)) => return Err(at("`max` belongs to text and number inputs only".into())),
         };
-        let mut input = EndpointInput { name, label, kind, options, required, default: None, max };
+        let mut input = EndpointInput {
+            name,
+            label,
+            kind,
+            options,
+            required,
+            default: None,
+            max,
+        };
         if let Some(d) = o.get("default").filter(|d| !d.is_null()) {
-            check_input_value(&input, d).map_err(|why| at(format!("its `default` is unusable: {why}")))?;
+            check_input_value(&input, d)
+                .map_err(|why| at(format!("its `default` is unusable: {why}")))?;
             input.default = Some(d.clone());
         }
         out.push(input);
@@ -296,7 +335,11 @@ fn check_input_value(input: &EndpointInput, value: &Value) -> Result<(), String>
         }
         InputKind::Text => {
             let v = value.as_str().ok_or("must be text")?;
-            let cap = input.max.as_ref().and_then(serde_json::Number::as_u64).unwrap_or(TEXT_INPUT_MAX);
+            let cap = input
+                .max
+                .as_ref()
+                .and_then(serde_json::Number::as_u64)
+                .unwrap_or(TEXT_INPUT_MAX);
             if v.chars().count() as u64 > cap {
                 return Err(format!("is longer than {cap} characters"));
             }
@@ -306,9 +349,14 @@ fn check_input_value(input: &EndpointInput, value: &Value) -> Result<(), String>
             Ok(())
         }
         InputKind::Number => {
-            let n = value.as_f64().filter(|n| n.is_finite()).ok_or("must be a number")?;
+            let n = value
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .ok_or("must be a number")?;
             match &input.max {
-                Some(max) if max.as_f64().is_some_and(|m| n > m) => Err(format!("must be at most {max}")),
+                Some(max) if max.as_f64().is_some_and(|m| n > m) => {
+                    Err(format!("must be at most {max}"))
+                }
                 _ => Ok(()),
             }
         }
@@ -320,7 +368,11 @@ fn check_input_value(input: &EndpointInput, value: &Value) -> Result<(), String>
 /// param of that name. A name nothing declared, a missing required value,
 /// or a value its input does not take refuses the call before it is made.
 /// An input left empty (null, blank text, nothing chosen) is left out.
-pub fn check_input_values(inputs: &[EndpointInput], values: Option<&Value>, params: Option<Value>) -> Result<Option<Value>, String> {
+pub fn check_input_values(
+    inputs: &[EndpointInput],
+    values: Option<&Value>,
+    params: Option<Value>,
+) -> Result<Option<Value>, String> {
     let empty = serde_json::Map::new();
     let given = match values {
         None | Some(Value::Null) => &empty,
@@ -371,9 +423,13 @@ pub fn validate_env(env: &BTreeMap<String, String>) -> Result<(), String> {
             return Err(format!("env name `{name}` is reserved"));
         }
         let mut chars = name.chars();
-        let head_ok = chars.next().is_some_and(|c| c.is_ascii_uppercase() || c == '_');
+        let head_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase() || c == '_');
         if !head_ok || !chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
-            return Err(format!("env name `{name}` is not of the form [A-Z_][A-Z0-9_]*"));
+            return Err(format!(
+                "env name `{name}` is not of the form [A-Z_][A-Z0-9_]*"
+            ));
         }
     }
     Ok(())
@@ -388,7 +444,10 @@ fn text(obj: &serde_json::Map<String, Value>, key: &str) -> Result<String, Strin
         .ok_or_else(|| format!("`{key}` must be a non-empty string"))
 }
 
-fn optional_text(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Option<String>, String> {
+fn optional_text(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, String> {
     match obj.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.trim().to_owned()).filter(|s| !s.is_empty())),
@@ -421,7 +480,9 @@ fn env_of(obj: &serde_json::Map<String, Value>) -> Result<BTreeMap<String, Strin
         None | Some(Value::Null) => {}
         Some(Value::Object(map)) => {
             for (k, v) in map {
-                let value = v.as_str().ok_or_else(|| format!("env `{k}` must be a string"))?;
+                let value = v
+                    .as_str()
+                    .ok_or_else(|| format!("env `{k}` must be a string"))?;
                 env.insert(k.clone(), value.to_owned());
             }
         }
@@ -452,14 +513,31 @@ pub fn parse_action(value: &Value) -> Result<SourceAction, String> {
                 None | Some(Value::Null) => Vec::new(),
                 Some(Value::Array(words)) => words
                     .iter()
-                    .map(|w| w.as_str().map(str::to_owned).ok_or_else(|| "`command` must be a list of strings".to_owned()))
+                    .map(|w| {
+                        w.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "`command` must be a list of strings".to_owned())
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
-                Some(_) => return Err("`command` must be a list of strings (argv), never a shell line".into()),
+                Some(_) => {
+                    return Err(
+                        "`command` must be a list of strings (argv), never a shell line".into(),
+                    )
+                }
             };
-            Ok(SourceAction::Terminal { id, label, cwd: text(obj, "cwd")?, command, env: env_of(obj)? })
+            Ok(SourceAction::Terminal {
+                id,
+                label,
+                cwd: text(obj, "cwd")?,
+                command,
+                env: env_of(obj)?,
+            })
         }
         "endpoint" => {
-            let mutates = obj.get("mutates").and_then(Value::as_bool).ok_or("`mutates` must be a boolean")?;
+            let mutates = obj
+                .get("mutates")
+                .and_then(Value::as_bool)
+                .ok_or("`mutates` must be a boolean")?;
             let note = match obj.get("note") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(s)) if s == "optional" => Some(NoteRule::Optional),
@@ -482,8 +560,16 @@ pub fn parse_action(value: &Value) -> Result<SourceAction, String> {
                 disabled: disabled_reason(obj)?,
             })
         }
-        "link" => Ok(SourceAction::Link { id, label, url: text(obj, "url")? }),
-        "panel" => Ok(SourceAction::Panel { id, label, endpoint: text(obj, "endpoint")? }),
+        "link" => Ok(SourceAction::Link {
+            id,
+            label,
+            url: text(obj, "url")?,
+        }),
+        "panel" => Ok(SourceAction::Panel {
+            id,
+            label,
+            endpoint: text(obj, "endpoint")?,
+        }),
         other => Err(format!("unknown action kind `{other}`")),
     }
 }
@@ -524,7 +610,11 @@ fn item_key(obj: &serde_json::Map<String, Value>) -> Option<String> {
     if let Some(k) = text("key").or_else(|| text("id")) {
         return Some(k.to_owned());
     }
-    if let Some(k) = obj.get("ref").and_then(|r| r.get("key")).and_then(Value::as_str) {
+    if let Some(k) = obj
+        .get("ref")
+        .and_then(|r| r.get("key"))
+        .and_then(Value::as_str)
+    {
         return Some(k.to_owned());
     }
     if let (Some(forge), Some(repo), Some(number)) = (text("forge"), text("repo"), text("number")) {
@@ -545,24 +635,51 @@ pub fn pr_key(forge: &str, repo: &str, number: &str) -> String {
 /// as that item, a panel's section as the panel.
 pub const PART_LISTS: [&str; 3] = ["banners", "sections", "facts"];
 
-fn walk(value: &Value, key: Option<&str>, path: &str, found: &mut Vec<FoundAction>, broken: &mut Vec<(String, String)>) {
+fn walk(
+    value: &Value,
+    key: Option<&str>,
+    path: &str,
+    found: &mut Vec<FoundAction>,
+    broken: &mut Vec<(String, String)>,
+) {
     walk_in(value, key, path, false, found, broken);
 }
 
 /// `part`: `value` sits in one of the [`PART_LISTS`], so it cannot own a key.
-fn walk_in(value: &Value, key: Option<&str>, path: &str, part: bool, found: &mut Vec<FoundAction>, broken: &mut Vec<(String, String)>) {
+fn walk_in(
+    value: &Value,
+    key: Option<&str>,
+    path: &str,
+    part: bool,
+    found: &mut Vec<FoundAction>,
+    broken: &mut Vec<(String, String)>,
+) {
     match value {
         Value::Object(obj) => {
             // The outermost keyed object on the path owns what is below it.
-            let own_key = key.map(str::to_owned).or_else(|| if path.is_empty() || part { None } else { item_key(obj) });
+            let own_key = key.map(str::to_owned).or_else(|| {
+                if path.is_empty() || part {
+                    None
+                } else {
+                    item_key(obj)
+                }
+            });
             for (k, v) in obj {
-                let child_path = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                let child_path = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
                 if k == "actions" {
                     if let Value::Array(list) = v {
                         for (i, raw) in list.iter().enumerate() {
                             let at = format!("{child_path}[{i}]");
                             match parse_action(raw) {
-                                Ok(action) => found.push(FoundAction { key: own_key.clone(), action, path: at }),
+                                Ok(action) => found.push(FoundAction {
+                                    key: own_key.clone(),
+                                    action,
+                                    path: at,
+                                }),
                                 Err(why) => broken.push((at, why)),
                             }
                         }
@@ -571,7 +688,14 @@ fn walk_in(value: &Value, key: Option<&str>, path: &str, part: bool, found: &mut
                     }
                     continue;
                 }
-                walk_in(v, own_key.as_deref(), &child_path, PART_LISTS.contains(&k.as_str()), found, broken);
+                walk_in(
+                    v,
+                    own_key.as_deref(),
+                    &child_path,
+                    PART_LISTS.contains(&k.as_str()),
+                    found,
+                    broken,
+                );
             }
         }
         Value::Array(list) => {
@@ -585,12 +709,18 @@ fn walk_in(value: &Value, key: Option<&str>, path: &str, part: bool, found: &mut
 
 /// The actions under `key` (`None` = the payload's own).
 pub fn actions_for(value: &Value, key: Option<&str>) -> Vec<FoundAction> {
-    actions_in(value).0.into_iter().filter(|f| f.key.as_deref() == key).collect()
+    actions_in(value)
+        .0
+        .into_iter()
+        .filter(|f| f.key.as_deref() == key)
+        .collect()
 }
 
 /// The action `action_id` under `key`, if the payload has one.
 pub fn find_action(value: &Value, key: Option<&str>, action_id: &str) -> Option<FoundAction> {
-    actions_for(value, key).into_iter().find(|f| f.action.id() == action_id)
+    actions_for(value, key)
+        .into_iter()
+        .find(|f| f.action.id() == action_id)
 }
 
 /// Where a work entry that adds to another source's item points:
@@ -605,13 +735,19 @@ pub fn overlay_ref(item: &Value) -> Option<(&str, &str)> {
 
 /// The entries of a list payload.
 fn items(payload: &Value) -> &[Value] {
-    payload.get("items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+    payload
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 /// The first `items` entry of a work payload addressed by `key` (the key
 /// its actions are filed under, see [`actions_in`]).
 pub fn work_entry<'a>(payload: &'a Value, key: &str) -> Option<&'a Value> {
-    items(payload).iter().find(|item| item.as_object().and_then(item_key).as_deref() == Some(key))
+    items(payload)
+        .iter()
+        .find(|item| item.as_object().and_then(item_key).as_deref() == Some(key))
 }
 
 /// The row a source owns under `key` in its `view` payload, exactly as it
@@ -634,7 +770,9 @@ pub fn owned_row<'a>(payload: &'a Value, view: &str, key: &str) -> Option<&'a Va
 /// Whether a work payload carries an entry adding to `key` of the source
 /// whose manifest id is `owner`.
 pub fn has_overlay(payload: &Value, owner: &str, key: &str) -> bool {
-    items(payload).iter().any(|item| overlay_ref(item) == Some((owner, key)))
+    items(payload)
+        .iter()
+        .any(|item| overlay_ref(item) == Some((owner, key)))
 }
 
 /// How much of a row's title a filled-in confirm text carries.
@@ -643,7 +781,11 @@ pub const CONFIRM_TITLE_MAX: usize = 80;
 /// A title as one line (control characters and runs of whitespace become
 /// one space), cut to `max` characters with a trailing `…` when longer.
 pub fn one_line_title(title: &str, max: usize) -> String {
-    let flat = title.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    let flat = title
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     if flat.chars().count() <= max {
         return flat;
     }
@@ -658,15 +800,22 @@ pub fn one_line_title(title: &str, max: usize) -> String {
 /// placeholder. The title is one line of at most [`CONFIRM_TITLE_MAX`]
 /// characters; an item without one reads "(no title)".
 pub fn fill_confirm(template: &str, key: &str, title: Option<&str>, source: &str) -> String {
-    let title = title.map(|t| one_line_title(t, CONFIRM_TITLE_MAX)).filter(|t| !t.is_empty()).unwrap_or_else(|| "(no title)".to_owned());
+    let title = title
+        .map(|t| one_line_title(t, CONFIRM_TITLE_MAX))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "(no title)".to_owned());
     let mut out = String::with_capacity(template.len() + title.len());
     let mut rest = template;
     while let Some(at) = rest.find('{') {
         out.push_str(&rest[..at]);
         let tail = &rest[at..];
-        let filled = [("{key}", key), ("{title}", title.as_str()), ("{source}", source)]
-            .into_iter()
-            .find(|(slot, _)| tail.starts_with(slot));
+        let filled = [
+            ("{key}", key),
+            ("{title}", title.as_str()),
+            ("{source}", source),
+        ]
+        .into_iter()
+        .find(|(slot, _)| tail.starts_with(slot));
         match filled {
             Some((slot, value)) => {
                 out.push_str(value);
@@ -709,18 +858,33 @@ pub struct ActionVerdict {
 
 impl ActionVerdict {
     fn ok() -> Self {
-        Self { enabled: true, reason: None, hidden: false, cwd: None, tool: None }
+        Self {
+            enabled: true,
+            reason: None,
+            hidden: false,
+            cwd: None,
+            tool: None,
+        }
     }
 
     fn disabled(reason: String) -> Self {
-        Self { enabled: false, reason: Some(reason), hidden: false, cwd: None, tool: None }
+        Self {
+            enabled: false,
+            reason: Some(reason),
+            hidden: false,
+            cwd: None,
+            tool: None,
+        }
     }
 }
 
 /// The agent tool an `agent` action names: by name among the configured
 /// tools, or the first enabled one when it names none. Disabled tools and
 /// unknown names are errors with the fix in the text.
-pub fn resolve_tool<'a>(tools: &'a [AgentTool], name: Option<&str>) -> Result<&'a AgentTool, String> {
+pub fn resolve_tool<'a>(
+    tools: &'a [AgentTool],
+    name: Option<&str>,
+) -> Result<&'a AgentTool, String> {
     match name {
         Some(name) => {
             let tool = tools
@@ -742,7 +906,13 @@ pub fn resolve_tool<'a>(tools: &'a [AgentTool], name: Option<&str>) -> Result<&'
 /// Judge `action` against `ctx`.
 pub fn action_verdict(action: &SourceAction, ctx: &VerdictContext<'_>) -> ActionVerdict {
     match action {
-        SourceAction::Agent { cwd, tool, env, prompt, .. } => {
+        SourceAction::Agent {
+            cwd,
+            tool,
+            env,
+            prompt,
+            ..
+        } => {
             if prompt.trim().is_empty() {
                 return ActionVerdict::disabled("the action carries no prompt".into());
             }
@@ -754,11 +924,17 @@ pub fn action_verdict(action: &SourceAction, ctx: &VerdictContext<'_>) -> Action
                 return ActionVerdict::disabled(why);
             }
             match check_cwd(ctx.roots, cwd) {
-                RootsVerdict::Allowed { cwd, .. } => ActionVerdict { cwd: Some(cwd), tool: Some((tool.id, tool.name.clone())), ..ActionVerdict::ok() },
+                RootsVerdict::Allowed { cwd, .. } => ActionVerdict {
+                    cwd: Some(cwd),
+                    tool: Some((tool.id, tool.name.clone())),
+                    ..ActionVerdict::ok()
+                },
                 RootsVerdict::Denied { reason } => ActionVerdict::disabled(reason),
             }
         }
-        SourceAction::Terminal { cwd, env, command, .. } => {
+        SourceAction::Terminal {
+            cwd, env, command, ..
+        } => {
             if command.first().is_some_and(|w| w.trim().is_empty()) {
                 return ActionVerdict::disabled("the command's program name is empty".into());
             }
@@ -766,7 +942,10 @@ pub fn action_verdict(action: &SourceAction, ctx: &VerdictContext<'_>) -> Action
                 return ActionVerdict::disabled(why);
             }
             match check_cwd(ctx.roots, cwd) {
-                RootsVerdict::Allowed { cwd, .. } => ActionVerdict { cwd: Some(cwd), ..ActionVerdict::ok() },
+                RootsVerdict::Allowed { cwd, .. } => ActionVerdict {
+                    cwd: Some(cwd),
+                    ..ActionVerdict::ok()
+                },
                 RootsVerdict::Denied { reason } => ActionVerdict::disabled(reason),
             }
         }
@@ -777,7 +956,10 @@ pub fn action_verdict(action: &SourceAction, ctx: &VerdictContext<'_>) -> Action
             cwd: None,
             tool: None,
         },
-        SourceAction::Endpoint { disabled: Some(why), .. } => ActionVerdict::disabled(why.clone()),
+        SourceAction::Endpoint {
+            disabled: Some(why),
+            ..
+        } => ActionVerdict::disabled(why.clone()),
         SourceAction::Endpoint { .. } => ActionVerdict::ok(),
         // Listing never waits on a name lookup; opening does the full check.
         SourceAction::Link { url, .. } => match source_link_shape_check(url, ctx.link_hosts) {
@@ -814,31 +996,66 @@ mod tests {
         assert_eq!(agent.kind(), "agent");
         assert_eq!(agent.id(), "a");
         match &agent {
-            SourceAction::Agent { env, tool, title, .. } => {
+            SourceAction::Agent {
+                env, tool, title, ..
+            } => {
                 assert_eq!(env["CHAPPA_STACK_SLOT"], "1");
                 assert_eq!(tool.as_deref(), Some("claude"));
                 assert_eq!(title.as_deref(), Some("fixer"));
             }
             other => panic!("{other:?}"),
         }
-        let term = parse_action(&json!({"kind": "terminal", "id": "t", "label": "Shell", "cwd": "/srv/x"})).unwrap();
+        let term = parse_action(
+            &json!({"kind": "terminal", "id": "t", "label": "Shell", "cwd": "/srv/x"}),
+        )
+        .unwrap();
         assert!(matches!(term, SourceAction::Terminal { ref command, .. } if command.is_empty()));
         let ep = parse_action(&json!({"kind": "endpoint", "id": "e", "label": "Approve", "mutates": true, "confirm": "Approve?", "note": "required", "params": {"to": "done"}})).unwrap();
-        assert!(matches!(ep, SourceAction::Endpoint { note: Some(NoteRule::Required), mutates: true, .. }));
+        assert!(matches!(
+            ep,
+            SourceAction::Endpoint {
+                note: Some(NoteRule::Required),
+                mutates: true,
+                ..
+            }
+        ));
         assert!(!ep.is_unconfirmable_mutation());
-        let unsafe_ep = parse_action(&json!({"kind": "endpoint", "id": "u", "label": "Nuke", "mutates": true})).unwrap();
+        let unsafe_ep =
+            parse_action(&json!({"kind": "endpoint", "id": "u", "label": "Nuke", "mutates": true}))
+                .unwrap();
         assert!(unsafe_ep.is_unconfirmable_mutation());
-        assert!(matches!(parse_action(&json!({"kind": "link", "id": "l", "label": "Open", "url": "https://x"})).unwrap(), SourceAction::Link { .. }));
-        assert!(matches!(parse_action(&json!({"kind": "panel", "id": "p", "label": "Validate", "endpoint": "/api/panel"})).unwrap(), SourceAction::Panel { .. }));
+        assert!(matches!(
+            parse_action(&json!({"kind": "link", "id": "l", "label": "Open", "url": "https://x"}))
+                .unwrap(),
+            SourceAction::Link { .. }
+        ));
+        assert!(matches!(
+            parse_action(
+                &json!({"kind": "panel", "id": "p", "label": "Validate", "endpoint": "/api/panel"})
+            )
+            .unwrap(),
+            SourceAction::Panel { .. }
+        ));
 
         let err = |v: Value| parse_action(&v).unwrap_err();
-        assert!(err(json!({"kind": "agent", "id": "a", "label": "x", "cwd": "/y"})).contains("`prompt`"));
-        assert!(err(json!({"kind": "terminal", "id": "t", "label": "x", "cwd": "/y", "command": "rm -rf /"})).contains("argv"));
+        assert!(
+            err(json!({"kind": "agent", "id": "a", "label": "x", "cwd": "/y"}))
+                .contains("`prompt`")
+        );
+        assert!(err(
+            json!({"kind": "terminal", "id": "t", "label": "x", "cwd": "/y", "command": "rm -rf /"})
+        )
+        .contains("argv"));
         assert!(err(json!({"kind": "endpoint", "id": "e", "label": "x"})).contains("`mutates`"));
-        assert!(err(json!({"kind": "endpoint", "id": "e", "label": "x", "mutates": false, "note": "maybe"})).contains("`note`"));
+        assert!(err(
+            json!({"kind": "endpoint", "id": "e", "label": "x", "mutates": false, "note": "maybe"})
+        )
+        .contains("`note`"));
         assert!(err(json!({"kind": "agent", "id": "a", "label": "x", "cwd": "/y", "prompt": "p", "env": {"lower": "1"}})).contains("env name `lower`"));
         assert!(err(json!({"kind": "agent", "id": "a", "label": "x", "cwd": "/y", "prompt": "p", "env": {"A=B": "1"}})).contains("A=B"));
-        assert!(err(json!({"kind": "wat", "id": "a", "label": "x"})).contains("unknown action kind"));
+        assert!(
+            err(json!({"kind": "wat", "id": "a", "label": "x"})).contains("unknown action kind")
+        );
         assert!(err(json!("nope")).contains("object"));
     }
 
@@ -852,34 +1069,89 @@ mod tests {
                 {"name": "why", "label": "Why", "kind": "text", "max": 10},
                 {"name": "count", "label": "Count", "kind": "number", "max": 50}
             ]})).unwrap();
-        let SourceAction::Endpoint { inputs, params, .. } = action else { panic!() };
-        assert_eq!(inputs.iter().map(|i| (i.name.as_str(), i.kind)).collect::<Vec<_>>(), [("profile", InputKind::Choice), ("seeds", InputKind::Multi), ("why", InputKind::Text), ("count", InputKind::Number)]);
+        let SourceAction::Endpoint { inputs, params, .. } = action else {
+            panic!()
+        };
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|i| (i.name.as_str(), i.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("profile", InputKind::Choice),
+                ("seeds", InputKind::Multi),
+                ("why", InputKind::Text),
+                ("count", InputKind::Number)
+            ]
+        );
         assert_eq!(inputs[0].default, Some(json!("small")));
         assert_eq!(inputs[2].max, Some(serde_json::Number::from(10)));
 
         // Merged into params, an input overriding the fixed param of its name.
         let merged = check_input_values(&inputs, Some(&json!({"profile": "big", "seeds": ["db/b", "db/a"], "why": "  demo  ", "count": 7})), params.clone()).unwrap().unwrap();
-        assert_eq!(merged, json!({"slot": 0, "count": 7, "profile": "big", "seeds": ["db/b", "db/a"], "why": "demo"}));
+        assert_eq!(
+            merged,
+            json!({"slot": 0, "count": 7, "profile": "big", "seeds": ["db/b", "db/a"], "why": "demo"})
+        );
         // Empty optional ones are left out; the fixed params stay.
-        let merged = check_input_values(&inputs, Some(&json!({"profile": "small", "seeds": [], "why": " ", "count": null})), params.clone()).unwrap().unwrap();
-        assert_eq!(merged, json!({"slot": 0, "count": "fixed", "profile": "small"}));
+        let merged = check_input_values(
+            &inputs,
+            Some(&json!({"profile": "small", "seeds": [], "why": " ", "count": null})),
+            params.clone(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            merged,
+            json!({"slot": 0, "count": "fixed", "profile": "small"})
+        );
         // No inputs answered and none declared: the params as they were.
-        assert_eq!(check_input_values(&[], None, params.clone()).unwrap(), params);
+        assert_eq!(
+            check_input_values(&[], None, params.clone()).unwrap(),
+            params
+        );
         assert_eq!(check_input_values(&[], None, None).unwrap(), None);
 
         // Refused before the call.
         for (values, says) in [
             (json!({}), "Profile is required"),
-            (json!({"profile": "huge"}), "Profile `huge` is not one of the options"),
+            (
+                json!({"profile": "huge"}),
+                "Profile `huge` is not one of the options",
+            ),
             (json!({"profile": 3}), "Profile must be one of the options"),
-            (json!({"profile": "big", "seeds": ["db/c"]}), "Seeds `db/c` is not one of the options"),
-            (json!({"profile": "big", "seeds": ["db/a", "db/a"]}), "chosen twice"),
-            (json!({"profile": "big", "seeds": "db/a"}), "Seeds must be a list of options"),
-            (json!({"profile": "big", "why": "eleven chars"}), "Why is longer than 10 characters"),
-            (json!({"profile": "big", "why": "two\nlines"}), "one line of printable text"),
-            (json!({"profile": "big", "count": 51}), "Count must be at most 50"),
-            (json!({"profile": "big", "count": "7"}), "Count must be a number"),
-            (json!({"profile": "big", "nope": 1}), "asks for no input `nope`"),
+            (
+                json!({"profile": "big", "seeds": ["db/c"]}),
+                "Seeds `db/c` is not one of the options",
+            ),
+            (
+                json!({"profile": "big", "seeds": ["db/a", "db/a"]}),
+                "chosen twice",
+            ),
+            (
+                json!({"profile": "big", "seeds": "db/a"}),
+                "Seeds must be a list of options",
+            ),
+            (
+                json!({"profile": "big", "why": "eleven chars"}),
+                "Why is longer than 10 characters",
+            ),
+            (
+                json!({"profile": "big", "why": "two\nlines"}),
+                "one line of printable text",
+            ),
+            (
+                json!({"profile": "big", "count": 51}),
+                "Count must be at most 50",
+            ),
+            (
+                json!({"profile": "big", "count": "7"}),
+                "Count must be a number",
+            ),
+            (
+                json!({"profile": "big", "nope": 1}),
+                "asks for no input `nope`",
+            ),
             (json!(["big"]), "must be an object"),
         ] {
             let err = check_input_values(&inputs, Some(&values), params.clone()).unwrap_err();
@@ -887,40 +1159,96 @@ mod tests {
         }
         // Text without a declared max is capped at the default.
         let free = parse_action(&json!({"kind": "endpoint", "id": "n", "label": "N", "mutates": false, "inputs": [{"name": "t", "label": "T", "kind": "text"}]})).unwrap();
-        let SourceAction::Endpoint { inputs: free, .. } = free else { panic!() };
+        let SourceAction::Endpoint { inputs: free, .. } = free else {
+            panic!()
+        };
         assert!(check_input_values(&free, Some(&json!({"t": "x".repeat(200)})), None).is_ok());
-        assert!(check_input_values(&free, Some(&json!({"t": "x".repeat(201)})), None).unwrap_err().contains("longer than 200"));
+        assert!(
+            check_input_values(&free, Some(&json!({"t": "x".repeat(201)})), None)
+                .unwrap_err()
+                .contains("longer than 200")
+        );
     }
 
     #[test]
     fn badly_declared_inputs_refuse_the_action() {
-        let with = |inputs: Value| parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false, "inputs": inputs}));
+        let with = |inputs: Value| {
+            parse_action(
+                &json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false, "inputs": inputs}),
+            )
+        };
         let opts = json!([{"value": "a", "label": "A"}]);
         for (inputs, says) in [
             (json!({"name": "x"}), "must be a list"),
             (json!(["x"]), "must be an object"),
-            (json!([{"name": "", "label": "L", "kind": "text"}]), "`name`"),
-            (json!([{"name": "has space", "label": "L", "kind": "text"}]), "`name`"),
-            (json!([{"name": "a", "label": "L", "kind": "text"}, {"name": "a", "label": "M", "kind": "text"}]), "used twice"),
-            (json!([{"name": "a", "label": " ", "kind": "text"}]), "`label`"),
-            (json!([{"name": "a", "label": "L", "kind": "date"}]), "`kind`"),
-            (json!([{"name": "a", "label": "L", "kind": "choice"}]), "needs `options`"),
-            (json!([{"name": "a", "label": "L", "kind": "text", "options": opts}]), "choice and multi inputs only"),
-            (json!([{"name": "a", "label": "L", "kind": "choice", "options": [{"value": "a", "label": "A"}, {"value": "a", "label": "B"}]}]), "listed twice"),
-            (json!([{"name": "a", "label": "L", "kind": "choice", "options": [{"value": "a"}]}]), "`value` and a `label`"),
-            (json!([{"name": "a", "label": "L", "kind": "choice", "options": opts, "default": "b"}]), "`default` is unusable"),
-            (json!([{"name": "a", "label": "L", "kind": "text", "max": 0}]), "`max` of a text input"),
-            (json!([{"name": "a", "label": "L", "kind": "text", "max": 20000}]), "`max` of a text input"),
-            (json!([{"name": "a", "label": "L", "kind": "choice", "options": opts, "max": 3}]), "text and number inputs only"),
-            (json!([{"name": "a", "label": "L", "kind": "text", "required": "yes"}]), "`required`"),
+            (
+                json!([{"name": "", "label": "L", "kind": "text"}]),
+                "`name`",
+            ),
+            (
+                json!([{"name": "has space", "label": "L", "kind": "text"}]),
+                "`name`",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "text"}, {"name": "a", "label": "M", "kind": "text"}]),
+                "used twice",
+            ),
+            (
+                json!([{"name": "a", "label": " ", "kind": "text"}]),
+                "`label`",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "date"}]),
+                "`kind`",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "choice"}]),
+                "needs `options`",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "text", "options": opts}]),
+                "choice and multi inputs only",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "choice", "options": [{"value": "a", "label": "A"}, {"value": "a", "label": "B"}]}]),
+                "listed twice",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "choice", "options": [{"value": "a"}]}]),
+                "`value` and a `label`",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "choice", "options": opts, "default": "b"}]),
+                "`default` is unusable",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "text", "max": 0}]),
+                "`max` of a text input",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "text", "max": 20000}]),
+                "`max` of a text input",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "choice", "options": opts, "max": 3}]),
+                "text and number inputs only",
+            ),
+            (
+                json!([{"name": "a", "label": "L", "kind": "text", "required": "yes"}]),
+                "`required`",
+            ),
         ] {
             let err = with(inputs.clone()).unwrap_err();
             assert!(err.contains(says), "{inputs}: {err}");
         }
-        let many: Vec<Value> = (0..=INPUTS_MAX).map(|i| json!({"name": format!("i{i}"), "label": "L", "kind": "text"})).collect();
+        let many: Vec<Value> = (0..=INPUTS_MAX)
+            .map(|i| json!({"name": format!("i{i}"), "label": "L", "kind": "text"}))
+            .collect();
         assert!(with(Value::Array(many)).unwrap_err().contains("at most"));
         // No inputs is no inputs, and they are not serialized then.
-        let plain = parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false})).unwrap();
+        let plain =
+            parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false}))
+                .unwrap();
         assert!(!serde_json::to_string(&plain).unwrap().contains("inputs"));
     }
 
@@ -928,31 +1256,49 @@ mod tests {
     /// capped; empty is not disabled, and any other type refuses the action.
     #[test]
     fn disabled_reasons_are_cleaned_and_capped() {
-        let parse = |disabled: Value| parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false, "disabled": disabled}));
+        let parse = |disabled: Value| {
+            parse_action(
+                &json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false, "disabled": disabled}),
+            )
+        };
         let reason = |disabled: Value| match parse(disabled).unwrap() {
             SourceAction::Endpoint { disabled, .. } => disabled,
             other => panic!("{other:?}"),
         };
-        assert_eq!(reason(json!("  Still working\n it out \u{7}")).as_deref(), Some("Still working it out"));
+        assert_eq!(
+            reason(json!("  Still working\n it out \u{7}")).as_deref(),
+            Some("Still working it out")
+        );
         assert_eq!(reason(json!("   ")), None);
         assert_eq!(reason(json!("")), None);
         assert_eq!(reason(Value::Null), None);
         let long = reason(json!("é".repeat(500))).unwrap();
         assert_eq!(long.chars().count(), DISABLED_REASON_MAX);
         for bad in [json!(true), json!(1), json!(["x"]), json!({"why": "x"})] {
-            assert!(parse(bad.clone()).unwrap_err().contains("`disabled`"), "{bad}");
+            assert!(
+                parse(bad.clone()).unwrap_err().contains("`disabled`"),
+                "{bad}"
+            );
         }
         // Not sent back when absent, so the webview's shape is unchanged.
-        let plain = serde_json::to_value(parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false})).unwrap()).unwrap();
+        let plain = serde_json::to_value(
+            parse_action(&json!({"kind": "endpoint", "id": "e", "label": "E", "mutates": false}))
+                .unwrap(),
+        )
+        .unwrap();
         assert!(plain.get("disabled").is_none(), "{plain}");
     }
 
     #[test]
     fn env_names_follow_the_identifier_rule() {
-        let ok: BTreeMap<String, String> = [("CHAPPA_STACK_SLOT", "1"), ("_X", ""), ("A9", "z")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let ok: BTreeMap<String, String> = [("CHAPPA_STACK_SLOT", "1"), ("_X", ""), ("A9", "z")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         assert!(validate_env(&ok).is_ok());
         for bad in ["", "9A", "a", "A-B", "A B", "Ä"] {
-            let env: BTreeMap<String, String> = [(bad.to_string(), "v".to_string())].into_iter().collect();
+            let env: BTreeMap<String, String> =
+                [(bad.to_string(), "v".to_string())].into_iter().collect();
             assert!(validate_env(&env).is_err(), "{bad:?}");
         }
     }
@@ -971,7 +1317,10 @@ mod tests {
             "actions": [{"kind": "endpoint", "id": "ping", "label": "Ping", "mutates": false}, {"kind": "bogus"}]
         });
         let (found, broken) = actions_in(&payload);
-        let summary: Vec<(Option<&str>, &str, &str)> = found.iter().map(|f| (f.key.as_deref(), f.action.id(), f.path.as_str())).collect();
+        let summary: Vec<(Option<&str>, &str, &str)> = found
+            .iter()
+            .map(|f| (f.key.as_deref(), f.action.id(), f.path.as_str()))
+            .collect();
         assert_eq!(
             summary,
             vec![
@@ -986,13 +1335,37 @@ mod tests {
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0].0, "actions[1]");
         assert_eq!(actions_for(&payload, Some("ABC-1")).len(), 2);
-        assert_eq!(actions_for(&payload, None).len(), 2, "the payload's own and its banner's");
-        assert!(find_action(&payload, Some("drift"), "validate").is_none(), "a banner's id is not a key");
-        assert_eq!(find_action(&payload, Some("ABC-2"), "approve").unwrap().path, "items[1].actions[0]");
-        assert!(find_action(&payload, Some("ABC-1"), "approve").unwrap().action.is_unconfirmable_mutation() == false);
-        assert!(find_action(&payload, Some("ABC-2"), "approve").unwrap().action.is_unconfirmable_mutation());
+        assert_eq!(
+            actions_for(&payload, None).len(),
+            2,
+            "the payload's own and its banner's"
+        );
+        assert!(
+            find_action(&payload, Some("drift"), "validate").is_none(),
+            "a banner's id is not a key"
+        );
+        assert_eq!(
+            find_action(&payload, Some("ABC-2"), "approve")
+                .unwrap()
+                .path,
+            "items[1].actions[0]"
+        );
+        assert!(
+            find_action(&payload, Some("ABC-1"), "approve")
+                .unwrap()
+                .action
+                .is_unconfirmable_mutation()
+                == false
+        );
+        assert!(find_action(&payload, Some("ABC-2"), "approve")
+            .unwrap()
+            .action
+            .is_unconfirmable_mutation());
         assert!(find_action(&payload, Some("ABC-9"), "open").is_none());
-        assert!(find_action(&payload, None, "open").is_none(), "an item's action is not a top-level one");
+        assert!(
+            find_action(&payload, None, "open").is_none(),
+            "an item's action is not a top-level one"
+        );
     }
 
     #[test]
@@ -1003,9 +1376,15 @@ mod tests {
             "components": [{"id": "api", "sections": [{"id": "conf", "title": "C", "rows": [], "actions": [{"kind": "endpoint", "id": "reload", "label": "R", "mutates": false}]}]}]
         });
         let found = actions_in(&payload).0;
-        let mut keys: Vec<(Option<&str>, &str)> = found.iter().map(|f| (f.key.as_deref(), f.action.id())).collect();
+        let mut keys: Vec<(Option<&str>, &str)> = found
+            .iter()
+            .map(|f| (f.key.as_deref(), f.action.id()))
+            .collect();
         keys.sort();
-        assert_eq!(keys, vec![(None, "refresh"), (None, "rerun"), (Some("api"), "reload")]);
+        assert_eq!(
+            keys,
+            vec![(None, "refresh"), (None, "rerun"), (Some("api"), "reload")]
+        );
     }
 
     #[test]
@@ -1022,12 +1401,28 @@ mod tests {
             Some(SourceAction::Link { url, .. }) => Some(url),
             _ => None,
         };
-        assert_eq!(pr_key("github", "owner/repo", "#12"), "github:owner/repo:#12");
-        assert_eq!(url("github:owner/repo:#12").as_deref(), Some("https://x/a/12"));
-        assert_eq!(url("github:owner/other:#12").as_deref(), Some("https://x/b/12"));
+        assert_eq!(
+            pr_key("github", "owner/repo", "#12"),
+            "github:owner/repo:#12"
+        );
+        assert_eq!(
+            url("github:owner/repo:#12").as_deref(),
+            Some("https://x/a/12")
+        );
+        assert_eq!(
+            url("github:owner/other:#12").as_deref(),
+            Some("https://x/b/12")
+        );
         assert_eq!(url("#12"), None, "the bare number no longer names either");
-        assert_eq!(url("#3").as_deref(), Some("https://x/c/3"), "without forge and repo the number still keys");
-        assert_eq!(actions_for(&payload, Some("github:owner/repo:#12")).len(), 1);
+        assert_eq!(
+            url("#3").as_deref(),
+            Some("https://x/c/3"),
+            "without forge and repo the number still keys"
+        );
+        assert_eq!(
+            actions_for(&payload, Some("github:owner/repo:#12")).len(),
+            1
+        );
     }
 
     #[test]
@@ -1036,9 +1431,19 @@ mod tests {
         let root = dir.path().join("app");
         std::fs::create_dir_all(root.join("wt")).unwrap();
         let tools = [tool(1, "claude", true), tool(2, "codex", false)];
-        let roots = [Root::new(&root, RootKind::Project { id: 1, name: "app".into() })];
+        let roots = [Root::new(
+            &root,
+            RootKind::Project {
+                id: 1,
+                name: "app".into(),
+            },
+        )];
         let hosts = vec!["github.com".to_owned()];
-        let ctx = VerdictContext { tools: &tools, roots: &roots, link_hosts: &hosts };
+        let ctx = VerdictContext {
+            tools: &tools,
+            roots: &roots,
+            link_hosts: &hosts,
+        };
         let inside = root.join("wt").display().to_string();
         let agent = |tool: Option<&str>, cwd: &str| SourceAction::Agent {
             id: "a".into(),
@@ -1054,50 +1459,128 @@ mod tests {
         assert_eq!(v.tool, Some((1, "claude".into())));
         assert!(v.cwd.is_some());
         let v = action_verdict(&agent(None, &inside), &ctx);
-        assert_eq!(v.tool, Some((1, "claude".into())), "no name = the first enabled tool");
-        assert!(action_verdict(&agent(Some("codex"), &inside), &ctx).reason.unwrap().contains("disabled"));
-        assert!(action_verdict(&agent(Some("gemini"), &inside), &ctx).reason.unwrap().contains("no agent tool is named `gemini`"));
+        assert_eq!(
+            v.tool,
+            Some((1, "claude".into())),
+            "no name = the first enabled tool"
+        );
+        assert!(action_verdict(&agent(Some("codex"), &inside), &ctx)
+            .reason
+            .unwrap()
+            .contains("disabled"));
+        assert!(action_verdict(&agent(Some("gemini"), &inside), &ctx)
+            .reason
+            .unwrap()
+            .contains("no agent tool is named `gemini`"));
         let outside = dir.path().join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
         let v = action_verdict(&agent(Some("claude"), &outside.display().to_string()), &ctx);
         assert!(!v.enabled);
         assert!(v.reason.unwrap().contains("not inside an open project"));
-        assert!(action_verdict(&agent(Some("claude"), "relative/dir"), &ctx).reason.unwrap().contains("relative"));
+        assert!(action_verdict(&agent(Some("claude"), "relative/dir"), &ctx)
+            .reason
+            .unwrap()
+            .contains("relative"));
 
-        let term = SourceAction::Terminal { id: "t".into(), label: "T".into(), cwd: inside.clone(), command: vec![], env: BTreeMap::new() };
+        let term = SourceAction::Terminal {
+            id: "t".into(),
+            label: "T".into(),
+            cwd: inside.clone(),
+            command: vec![],
+            env: BTreeMap::new(),
+        };
         assert!(action_verdict(&term, &ctx).enabled);
         let mut bad_env = BTreeMap::new();
         bad_env.insert("path".to_owned(), "x".to_owned());
-        let term = SourceAction::Terminal { id: "t".into(), label: "T".into(), cwd: inside.clone(), command: vec![], env: bad_env };
-        assert!(action_verdict(&term, &ctx).reason.unwrap().contains("env name"));
+        let term = SourceAction::Terminal {
+            id: "t".into(),
+            label: "T".into(),
+            cwd: inside.clone(),
+            command: vec![],
+            env: bad_env,
+        };
+        assert!(action_verdict(&term, &ctx)
+            .reason
+            .unwrap()
+            .contains("env name"));
 
-        let hidden = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: None, params: None, note: None, inputs: vec![], disabled: None };
+        let hidden = SourceAction::Endpoint {
+            id: "u".into(),
+            label: "U".into(),
+            mutates: true,
+            confirm: None,
+            params: None,
+            note: None,
+            inputs: vec![],
+            disabled: None,
+        };
         let v = action_verdict(&hidden, &ctx);
         assert!(v.hidden && !v.enabled);
-        let shown = SourceAction::Endpoint { id: "u".into(), label: "U".into(), mutates: true, confirm: Some("Sure?".into()), params: None, note: None, inputs: vec![], disabled: None };
+        let shown = SourceAction::Endpoint {
+            id: "u".into(),
+            label: "U".into(),
+            mutates: true,
+            confirm: Some("Sure?".into()),
+            params: None,
+            note: None,
+            inputs: vec![],
+            disabled: None,
+        };
         assert!(action_verdict(&shown, &ctx).enabled);
-        let read_only = SourceAction::Endpoint { id: "p".into(), label: "P".into(), mutates: false, confirm: None, params: None, note: None, inputs: vec![], disabled: None };
-        assert!(action_verdict(&read_only, &ctx).enabled, "a non-mutating action needs no confirm");
+        let read_only = SourceAction::Endpoint {
+            id: "p".into(),
+            label: "P".into(),
+            mutates: false,
+            confirm: None,
+            params: None,
+            note: None,
+            inputs: vec![],
+            disabled: None,
+        };
+        assert!(
+            action_verdict(&read_only, &ctx).enabled,
+            "a non-mutating action needs no confirm"
+        );
         // A source's own `disabled` disables it with the reason; a hidden
         // one stays hidden.
         let waiting = parse_action(&json!({"kind": "endpoint", "id": "up", "label": "Up", "mutates": true, "confirm": "Run up?", "disabled": "Its plan is still being worked out"})).unwrap();
         let v = action_verdict(&waiting, &ctx);
         assert!(!v.enabled && !v.hidden, "{v:?}");
-        assert_eq!(v.reason.as_deref(), Some("Its plan is still being worked out"));
+        assert_eq!(
+            v.reason.as_deref(),
+            Some("Its plan is still being worked out")
+        );
         let both = parse_action(&json!({"kind": "endpoint", "id": "u", "label": "U", "mutates": true, "disabled": "later"})).unwrap();
         assert!(action_verdict(&both, &ctx).hidden);
 
-        let link = |url: &str| SourceAction::Link { id: "l".into(), label: "L".into(), url: url.into() };
+        let link = |url: &str| SourceAction::Link {
+            id: "l".into(),
+            label: "L".into(),
+            url: url.into(),
+        };
         assert!(action_verdict(&link("https://github.com/x"), &ctx).enabled);
         // Listing never looks a name up: plain http on a trusted name is
         // offered, and opening it decides by the lookup (`links.rs`).
         assert!(action_verdict(&link("http://github.com/x"), &ctx).enabled);
-        assert!(action_verdict(&link("ftp://github.com/x"), &ctx).reason.unwrap().contains("only https"));
-        assert!(action_verdict(&link("https://gist.github.com/x"), &ctx).reason.unwrap().contains("not by subdomain"));
+        assert!(action_verdict(&link("ftp://github.com/x"), &ctx)
+            .reason
+            .unwrap()
+            .contains("only https"));
+        assert!(action_verdict(&link("https://gist.github.com/x"), &ctx)
+            .reason
+            .unwrap()
+            .contains("not by subdomain"));
 
-        let panel = |ep: &str| SourceAction::Panel { id: "p".into(), label: "P".into(), endpoint: ep.into() };
+        let panel = |ep: &str| SourceAction::Panel {
+            id: "p".into(),
+            label: "P".into(),
+            endpoint: ep.into(),
+        };
         assert!(action_verdict(&panel("/api/panel/validate"), &ctx).enabled);
-        assert!(action_verdict(&panel("http://10.0.0.5/steal"), &ctx).reason.unwrap().contains("unusable"));
+        assert!(action_verdict(&panel("http://10.0.0.5/steal"), &ctx)
+            .reason
+            .unwrap()
+            .contains("unusable"));
     }
 
     #[test]
@@ -1108,19 +1591,38 @@ mod tests {
             {"key": "ABC-3", "title": "own"},
             {"ref": {"source": "", "key": "ABC-4"}, "key": "ABC-4"}
         ]});
-        assert_eq!(overlay_ref(&payload["items"][0]), Some(("tracker", "ABC-1")));
+        assert_eq!(
+            overlay_ref(&payload["items"][0]),
+            Some(("tracker", "ABC-1"))
+        );
         assert_eq!(overlay_ref(&payload["items"][2]), None);
-        assert_eq!(overlay_ref(&payload["items"][3]), None, "a ref without a source is no overlay");
+        assert_eq!(
+            overlay_ref(&payload["items"][3]),
+            None,
+            "a ref without a source is no overlay"
+        );
         // An overlay that names no key of its own is addressed by `ref.key`.
         assert!(find_action(&payload, Some("ABC-2"), "archive").is_some());
-        assert_eq!(work_entry(&payload, "ABC-2").unwrap()["ref"]["key"], "ABC-2");
-        assert!(owned_row(&payload, "work", "ABC-1").is_none(), "an overlay is not the source's own row");
-        assert_eq!(owned_row(&payload, "work", "ABC-3").unwrap()["title"], "own");
+        assert_eq!(
+            work_entry(&payload, "ABC-2").unwrap()["ref"]["key"],
+            "ABC-2"
+        );
+        assert!(
+            owned_row(&payload, "work", "ABC-1").is_none(),
+            "an overlay is not the source's own row"
+        );
+        assert_eq!(
+            owned_row(&payload, "work", "ABC-3").unwrap()["title"],
+            "own"
+        );
         assert!(has_overlay(&payload, "tracker", "ABC-1"));
         assert!(!has_overlay(&payload, "tracker", "ABC-3"));
         assert!(!has_overlay(&payload, "other", "ABC-1"));
         let prs = json!({"items": [{"forge": "github", "repo": "owner/repo", "number": "#1", "title": "t"}]});
-        assert_eq!(owned_row(&prs, "prs", "github:owner/repo:#1").unwrap()["title"], "t");
+        assert_eq!(
+            owned_row(&prs, "prs", "github:owner/repo:#1").unwrap()["title"],
+            "t"
+        );
         assert!(owned_row(&prs, "prs", "github:owner/repo:#12").is_none());
         assert!(owned_row(&prs, "environment", "x").is_none());
     }
@@ -1128,10 +1630,19 @@ mod tests {
     #[test]
     fn confirm_texts_are_filled_in_one_pass_with_a_short_one_line_title() {
         let t = "Create a workspace for {key} — {title} (from {source})";
-        assert_eq!(fill_confirm(t, "ABC-1", Some("Fix login"), "Tracker"), "Create a workspace for ABC-1 — Fix login (from Tracker)");
-        assert_eq!(fill_confirm(t, "ABC-1", None, "Tracker"), "Create a workspace for ABC-1 — (no title) (from Tracker)");
+        assert_eq!(
+            fill_confirm(t, "ABC-1", Some("Fix login"), "Tracker"),
+            "Create a workspace for ABC-1 — Fix login (from Tracker)"
+        );
+        assert_eq!(
+            fill_confirm(t, "ABC-1", None, "Tracker"),
+            "Create a workspace for ABC-1 — (no title) (from Tracker)"
+        );
         // A title cannot bring in another placeholder; unknown braces stay.
-        assert_eq!(fill_confirm("{title} / {key} {nope} {", "K", Some("{source}"), "S"), "{source} / K {nope} {");
+        assert_eq!(
+            fill_confirm("{title} / {key} {nope} {", "K", Some("{source}"), "S"),
+            "{source} / K {nope} {"
+        );
         // Line breaks and control characters flatten; exactly 80 stays, 81 is cut to 79 + an ellipsis.
         assert_eq!(one_line_title("a\n\tb\u{7}  c", 80), "a b c");
         let eighty = "x".repeat(80);
@@ -1141,19 +1652,44 @@ mod tests {
         assert_eq!(cut.chars().count(), 80);
         assert!(cut.ends_with('…') && cut.starts_with(&"x".repeat(79)));
         let filled = fill_confirm("{title}", "K", Some(&"é".repeat(200)), "S");
-        assert_eq!(filled.chars().count(), 80, "counted in characters, not bytes");
+        assert_eq!(
+            filled.chars().count(),
+            80,
+            "counted in characters, not bytes"
+        );
     }
 
     #[test]
     fn the_fixture_payloads_parse_with_their_actions() {
         for (name, text) in [
-            ("work", include_str!("../../../sources/fixture/data/work.json")),
-            ("prs", include_str!("../../../sources/fixture/data/prs.json")),
-            ("attention", include_str!("../../../sources/fixture/data/attention.json")),
-            ("environment", include_str!("../../../sources/fixture/data/environment.json")),
-            ("panel", include_str!("../../../sources/fixture/data/panel.json")),
-            ("panel-checks", include_str!("../../../sources/fixture/data/panel-checks.json")),
-            ("overlay work", include_str!("../../../sources/fixture/data-overlay/work.json")),
+            (
+                "work",
+                include_str!("../../../sources/fixture/data/work.json"),
+            ),
+            (
+                "prs",
+                include_str!("../../../sources/fixture/data/prs.json"),
+            ),
+            (
+                "attention",
+                include_str!("../../../sources/fixture/data/attention.json"),
+            ),
+            (
+                "environment",
+                include_str!("../../../sources/fixture/data/environment.json"),
+            ),
+            (
+                "panel",
+                include_str!("../../../sources/fixture/data/panel.json"),
+            ),
+            (
+                "panel-checks",
+                include_str!("../../../sources/fixture/data/panel-checks.json"),
+            ),
+            (
+                "overlay work",
+                include_str!("../../../sources/fixture/data-overlay/work.json"),
+            ),
         ] {
             let value: Value = serde_json::from_str(text).unwrap();
             let (found, broken) = actions_in(&value);

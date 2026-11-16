@@ -301,7 +301,9 @@ impl<'de> Deserialize<'de> for SecretScanPolicy {
 /// `secret_scan_before_agents` on the wire: `true`, `false`, or `null` for
 /// "automatic" (on when a scanner is installed). A non-boolean hand edit
 /// reads as automatic rather than failing the parse.
-fn deserialize_tristate<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+fn deserialize_tristate<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value.as_bool())
 }
@@ -313,7 +315,9 @@ fn deserialize_tristate<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Re
 /// substituting, so a path always lands inside one argument, and runs it
 /// without a shell. Stored trimmed; a non-string value (a hand edit) loads as
 /// empty instead of failing the whole parse.
-fn deserialize_editor_command<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+fn deserialize_editor_command<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value.as_str().unwrap_or_default().to_owned())
 }
@@ -470,9 +474,10 @@ impl Settings {
         self.agent_ready_quiet_ms = self
             .agent_ready_quiet_ms
             .clamp(AGENT_READY_QUIET_MS_RANGE.0, AGENT_READY_QUIET_MS_RANGE.1);
-        self.agent_ready_max_wait_ms = self
-            .agent_ready_max_wait_ms
-            .clamp(AGENT_READY_MAX_WAIT_MS_RANGE.0, AGENT_READY_MAX_WAIT_MS_RANGE.1);
+        self.agent_ready_max_wait_ms = self.agent_ready_max_wait_ms.clamp(
+            AGENT_READY_MAX_WAIT_MS_RANGE.0,
+            AGENT_READY_MAX_WAIT_MS_RANGE.1,
+        );
         self.agent_stale_after_s = self
             .agent_stale_after_s
             .clamp(AGENT_STALE_AFTER_S_RANGE.0, AGENT_STALE_AFTER_S_RANGE.1);
@@ -808,7 +813,11 @@ mod tests {
         assert_eq!(d.agent_stale_after_s, 900);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        fs::write(&path, r#"{"agentReadyQuietMs": 10, "agentReadyMaxWaitMs": 5, "agentStaleAfterS": 1}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"agentReadyQuietMs": 10, "agentReadyMaxWaitMs": 5, "agentStaleAfterS": 1}"#,
+        )
+        .unwrap();
         let s = SettingsStore::new(path.clone());
         assert_eq!(s.get().agent_ready_quiet_ms, 250);
         assert_eq!(s.get().agent_ready_max_wait_ms, 1000);
@@ -842,7 +851,11 @@ mod tests {
         assert_eq!(s.get().timer_delivery_timeout_ms, 1_000);
         assert_eq!(s.get().timer_retention_hours, 1);
         // 0 is IN range for the two "disable me" knobs and survives untouched.
-        assert_eq!(s.get().timer_confirm_ms, 5_000, "untouched key keeps its default");
+        assert_eq!(
+            s.get().timer_confirm_ms,
+            5_000,
+            "untouched key keeps its default"
+        );
         fs::write(
             &path,
             r#"{"idleThresholdMs": 99999999, "timerConfirmMs": 0, "timerDedupeMs": 0, "timerRetentionHours": 99999}"#,
@@ -872,8 +885,14 @@ mod tests {
         fs::write(&path, r#"{"copyOnSelect": true, "fontSize": 16}"#).unwrap();
         let store = SettingsStore::new(path);
         let s = store.get();
-        assert!(s.ctrl_v_pastes, "missing field falls to the TRUE default, not FALSE");
-        assert!(s.ctrl_c_copy_only, "missing field falls to the TRUE default, not FALSE");
+        assert!(
+            s.ctrl_v_pastes,
+            "missing field falls to the TRUE default, not FALSE"
+        );
+        assert!(
+            s.ctrl_c_copy_only,
+            "missing field falls to the TRUE default, not FALSE"
+        );
         assert!(s.copy_on_select, "a present field still wins");
         assert_eq!(s.font_size, 16);
     }
@@ -899,8 +918,14 @@ mod tests {
         // false values must survive that write and a fresh load.
         store.set(store.get().clone()).unwrap();
         let reopened = SettingsStore::new(path);
-        assert!(!reopened.get().ctrl_v_pastes, "false survives set + restart");
-        assert!(!reopened.get().ctrl_c_copy_only, "false survives set + restart");
+        assert!(
+            !reopened.get().ctrl_v_pastes,
+            "false survives set + restart"
+        );
+        assert!(
+            !reopened.get().ctrl_c_copy_only,
+            "false survives set + restart"
+        );
         assert!(reopened.get().copy_on_select, "unrelated fields untouched");
     }
 
@@ -983,7 +1008,10 @@ mod tests {
         ] {
             let s: Settings = serde_json::from_value(raw.clone()).unwrap();
             assert_eq!(s.clipboard_writes, ClipboardWrites::Ask, "{raw}");
-            assert_eq!(s.font_size, 16, "a bad clipboardWrites must not reset other fields");
+            assert_eq!(
+                s.font_size, 16,
+                "a bad clipboardWrites must not reset other fields"
+            );
         }
         assert_eq!(ClipboardWrites::parse(""), ClipboardWrites::Ask);
     }
@@ -996,7 +1024,10 @@ mod tests {
         let mut next = store.get().clone();
         next.clipboard_writes = ClipboardWrites::Off;
         store.set(next).unwrap();
-        assert_eq!(SettingsStore::new(path).get().clipboard_writes, ClipboardWrites::Off);
+        assert_eq!(
+            SettingsStore::new(path).get().clipboard_writes,
+            ClipboardWrites::Off
+        );
     }
 
     #[test]
@@ -1009,7 +1040,10 @@ mod tests {
         next.editor_command = "  code --goto {path}:{line}:{col}\t\n".to_owned();
         let stored = store.set(next).unwrap();
         assert_eq!(stored.editor_command, "code --goto {path}:{line}:{col}");
-        assert_eq!(SettingsStore::new(path).get().editor_command, "code --goto {path}:{line}:{col}");
+        assert_eq!(
+            SettingsStore::new(path).get().editor_command,
+            "code --goto {path}:{line}:{col}"
+        );
 
         for raw in [
             serde_json::json!({ "fontSize": 16, "editorCommand": 7 }),
@@ -1018,7 +1052,10 @@ mod tests {
         ] {
             let s: Settings = serde_json::from_value(raw.clone()).unwrap();
             assert_eq!(s.editor_command, "", "{raw}");
-            assert_eq!(s.font_size, 16, "a bad editorCommand must not reset other fields");
+            assert_eq!(
+                s.font_size, 16,
+                "a bad editorCommand must not reset other fields"
+            );
         }
     }
 
@@ -1057,17 +1094,36 @@ mod tests {
     #[test]
     fn secret_scan_settings_default_to_automatic_and_block_and_survive_bad_values() {
         let defaults = Settings::default();
-        assert_eq!(defaults.secret_scan_before_agents, None, "automatic until the user decides");
+        assert_eq!(
+            defaults.secret_scan_before_agents, None,
+            "automatic until the user decides"
+        );
         assert_eq!(defaults.secret_scan_policy, SecretScanPolicy::BlockAgents);
         assert_eq!(defaults.secret_scan_program, "");
         let json = serde_json::to_value(&defaults).unwrap();
         assert_eq!(json["secretScanBeforeAgents"], serde_json::Value::Null);
         assert_eq!(json["secretScanPolicy"], "block-agents");
         for (raw, enabled, policy) in [
-            (serde_json::json!({"secretScanBeforeAgents": true, "secretScanPolicy": "warn"}), Some(true), SecretScanPolicy::Warn),
-            (serde_json::json!({"secretScanBeforeAgents": false, "secretScanPolicy": "block-agents"}), Some(false), SecretScanPolicy::BlockAgents),
-            (serde_json::json!({"secretScanBeforeAgents": "yes", "secretScanPolicy": "stop"}), None, SecretScanPolicy::BlockAgents),
-            (serde_json::json!({"secretScanBeforeAgents": 1, "secretScanPolicy": 7, "fontSize": 16}), None, SecretScanPolicy::BlockAgents),
+            (
+                serde_json::json!({"secretScanBeforeAgents": true, "secretScanPolicy": "warn"}),
+                Some(true),
+                SecretScanPolicy::Warn,
+            ),
+            (
+                serde_json::json!({"secretScanBeforeAgents": false, "secretScanPolicy": "block-agents"}),
+                Some(false),
+                SecretScanPolicy::BlockAgents,
+            ),
+            (
+                serde_json::json!({"secretScanBeforeAgents": "yes", "secretScanPolicy": "stop"}),
+                None,
+                SecretScanPolicy::BlockAgents,
+            ),
+            (
+                serde_json::json!({"secretScanBeforeAgents": 1, "secretScanPolicy": 7, "fontSize": 16}),
+                None,
+                SecretScanPolicy::BlockAgents,
+            ),
         ] {
             let s: Settings = serde_json::from_value(raw).unwrap();
             assert_eq!(s.secret_scan_before_agents, enabled);
@@ -1083,8 +1139,12 @@ mod tests {
         assert_eq!(s.secret_scan_config, "C:\\cfg\\gitleaks.toml");
         s.secret_scan_config = "x".repeat(SECRET_SCAN_CONFIG_MAX_CHARS + 1);
         s.normalize();
-        assert_eq!(s.secret_scan_config, "", "an over-long path is dropped, not cut");
-        let s: Settings = serde_json::from_value(serde_json::json!({"secretScanConfig": 7})).unwrap();
+        assert_eq!(
+            s.secret_scan_config, "",
+            "an over-long path is dropped, not cut"
+        );
+        let s: Settings =
+            serde_json::from_value(serde_json::json!({"secretScanConfig": 7})).unwrap();
         assert_eq!(s.secret_scan_config, "");
     }
 

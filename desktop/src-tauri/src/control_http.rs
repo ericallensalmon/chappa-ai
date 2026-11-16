@@ -48,7 +48,9 @@ use tauri::AppHandle;
 use term_core::pty::PtySpec;
 
 use crate::agent_tools::AgentToolsState;
-use crate::agents::{agent_events, json_send_input, spawn_agent_headless, SpawnAgentRequest, SpawnContext};
+use crate::agents::{
+    agent_events, json_send_input, spawn_agent_headless, SpawnAgentRequest, SpawnContext,
+};
 use crate::commands::default_shell;
 use crate::coordination::Coordination;
 use crate::coordination_http as coord;
@@ -953,7 +955,10 @@ fn respond(state: &ControlState, token: &str, mut request: tiny_http::Request) {
         let body = read_body(&mut request.as_reader());
         guarded(|| dispatch_as(state, actor.as_deref(), &method, &url, &body))
     } else {
-        json(401, json!({"error": "unauthorized: send `Authorization: Bearer <token>` (token file: <app-config>/control_token)"}))
+        json(
+            401,
+            json!({"error": "unauthorized: send `Authorization: Bearer <token>` (token file: <app-config>/control_token)"}),
+        )
     };
     let _ = request.respond(response);
 }
@@ -971,7 +976,10 @@ fn guarded(f: impl FnOnce() -> Resp) -> Resp {
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "non-string panic".into());
             log::error!("[control_http] handler panicked: {what}");
-            json(500, json!({"error": "internal", "message": format!("handler panicked: {what}")}))
+            json(
+                500,
+                json!({"error": "internal", "message": format!("handler panicked: {what}")}),
+            )
         }
     }
 }
@@ -1048,7 +1056,13 @@ pub fn dispatch(state: &ControlState, method: &str, url: &str, body: &str) -> Re
 }
 
 /// [`dispatch`] with an explicit actor (`None` = `"user"`).
-pub fn dispatch_as(state: &ControlState, actor: Option<&str>, method: &str, url: &str, body: &str) -> Resp {
+pub fn dispatch_as(
+    state: &ControlState,
+    actor: Option<&str>,
+    method: &str,
+    url: &str,
+    body: &str,
+) -> Resp {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let mut path_matched = false;
     for route in ROUTES {
@@ -1065,7 +1079,10 @@ pub fn dispatch_as(state: &ControlState, actor: Option<&str>, method: &str, url:
     if path_matched {
         json(405, json!({"error": "method not allowed"}))
     } else {
-        json(404, json!({"error": "unknown route (GET / lists the surface)"}))
+        json(
+            404,
+            json!({"error": "unknown route (GET / lists the surface)"}),
+        )
     }
 }
 
@@ -1093,14 +1110,20 @@ fn route_table(state: &ControlState, _: &Params, _: &str, _: &str) -> Resp {
 
 fn identity_route(state: &ControlState, _: &Params, query: &str, _: &str) -> Resp {
     let Some(identity) = state.identity.as_deref() else {
-        return json(500, json!({"error": "this server has no instance identity"}));
+        return json(
+            500,
+            json!({"error": "this server has no instance identity"}),
+        );
     };
     let challenge = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("challenge="))
         .unwrap_or("");
     if !chappa_ai_mcp::identity::is_valid_challenge(challenge) {
-        return json(400, json!({"error": "challenge must be 32 random bytes as lowercase hex"}));
+        return json(
+            400,
+            json!({"error": "challenge must be 32 random bytes as lowercase hex"}),
+        );
     }
     json(
         200,
@@ -1241,7 +1264,10 @@ pub fn query_u64(query: &str, key: &str) -> Option<u64> {
 
 fn get_output(state: &ControlState, params: &Params, query: &str, _: &str) -> Resp {
     let id = params.id.unwrap_or_default();
-    let (handle, screen_rows) = match (state.registry.handle(id), state.registry.control_snapshot(id)) {
+    let (handle, screen_rows) = match (
+        state.registry.handle(id),
+        state.registry.control_snapshot(id),
+    ) {
         (Some(handle), Some(row)) => (handle, row.base.rows as usize),
         _ => return no_such_terminal(id),
     };
@@ -1252,7 +1278,10 @@ fn get_output(state: &ControlState, params: &Params, query: &str, _: &str) -> Re
     let lines = query_u64(query, "lines").unwrap_or(0);
     let offset = query_u64(query, "offset").unwrap_or(0);
     if lines > MAX_WINDOW || offset > MAX_WINDOW {
-        return json(400, json!({"error": format!("lines and offset must be <= {MAX_WINDOW}")}));
+        return json(
+            400,
+            json!({"error": format!("lines and offset must be <= {MAX_WINDOW}")}),
+        );
     }
     let (lines, offset) = (lines as usize, offset as usize);
     // dump_text(n) = last n history lines + the whole screen, oldest first.
@@ -1320,9 +1349,21 @@ pub fn submit_payload(text: &str, submit: bool) -> Vec<u8> {
 /// A delivery to an agent that data safety holds: queued (in order behind
 /// any held before it) and made by `deliver` once the block clears. The
 /// answer says so; nothing was written and nothing is journaled yet.
-fn held(state: &ControlState, params: &Params, id: TermId, reason: String, text: &str, deliver: Box<dyn FnOnce() + Send>) -> Resp {
-    let count = state.registry.hold_delivery(id, params.actor.clone(), text.to_owned(), deliver);
-    json(200, json!({"written": false, "held": true, "held_count": count, "reason": reason}))
+fn held(
+    state: &ControlState,
+    params: &Params,
+    id: TermId,
+    reason: String,
+    text: &str,
+    deliver: Box<dyn FnOnce() + Send>,
+) -> Resp {
+    let count = state
+        .registry
+        .hold_delivery(id, params.actor.clone(), text.to_owned(), deliver);
+    json(
+        200,
+        json!({"written": false, "held": true, "held_count": count, "reason": reason}),
+    )
 }
 
 fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Resp {
@@ -1343,16 +1384,26 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
             );
         }
         if body.text.trim().is_empty() {
-            return json(400, json!({"error": "text is empty: a json-transport agent takes whole messages"}));
+            return json(
+                400,
+                json!({"error": "text is empty: a json-transport agent takes whole messages"}),
+            );
         }
         if let Some(reason) = hold {
             let registry = state.registry.clone();
             let text = body.text.clone();
-            return held(state, params, id, reason, &body.text, Box::new(move || {
-                if let Err(e) = json_send_input(&registry, id, &text, None) {
-                    log::warn!("[control] a held message to {id} was not delivered: {e}");
-                }
-            }));
+            return held(
+                state,
+                params,
+                id,
+                reason,
+                &body.text,
+                Box::new(move || {
+                    if let Err(e) = json_send_input(&registry, id, &text, None) {
+                        log::warn!("[control] a held message to {id} was not delivered: {e}");
+                    }
+                }),
+            );
         }
         return match json_send_input(&state.registry, id, &body.text, body.wait_ms) {
             Ok(receipt) => {
@@ -1369,9 +1420,16 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
     if let Some(reason) = hold {
         let registry = state.registry.clone();
         let text = body.text.clone();
-        return held(state, params, id, reason, &body.text, Box::new(move || {
-            registry.write_journaled(id, &payload, text, submit);
-        }));
+        return held(
+            state,
+            params,
+            id,
+            reason,
+            &body.text,
+            Box::new(move || {
+                registry.write_journaled(id, &payload, text, submit);
+            }),
+        );
     }
     deliver(state, id, &payload, body.text, submit, body.wait_ms)
 }
@@ -1385,7 +1443,10 @@ fn get_agent_events(state: &ControlState, params: &Params, query: &str, _: &str)
     let since = query_u64(query, "since").unwrap_or(0);
     match agent_events(&state.registry, id, since) {
         Some(events) => json(200, json!({"id": id, "since": since, "events": events})),
-        None => json(409, json!({"error": format!("process {id} is not a json-transport agent")})),
+        None => json(
+            409,
+            json!({"error": format!("process {id} is not a json-transport agent")}),
+        ),
     }
 }
 
@@ -1396,15 +1457,25 @@ fn send_bytes(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
         Err(err) => return json(400, json!({"error": format!("bad body: {err}")})),
     };
     if state.registry.json_agent(id).is_some() {
-        return json(409, json!({"error": format!("process {id} is a json-transport agent: it takes messages via /input, not raw bytes")}));
+        return json(
+            409,
+            json!({"error": format!("process {id} is a json-transport agent: it takes messages via /input, not raw bytes")}),
+        );
     }
     let text = String::from_utf8_lossy(&body.bytes).into_owned();
     if let Some(reason) = state.registry.hold_reason(id) {
         let registry = state.registry.clone();
         let (bytes, shown) = (body.bytes.clone(), text.clone());
-        return held(state, params, id, reason, &text, Box::new(move || {
-            registry.write_journaled(id, &bytes, shown, false);
-        }));
+        return held(
+            state,
+            params,
+            id,
+            reason,
+            &text,
+            Box::new(move || {
+                registry.write_journaled(id, &bytes, shown, false);
+            }),
+        );
     }
     deliver(state, id, &body.bytes, text, false, body.wait_ms)
 }
@@ -1547,7 +1618,11 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
             json(200, json!(resp))
         }
         Err(err) if err.starts_with("no such") => json(404, json!({"error": err})),
-        Err(err) if err.starts_with("refused") || err.contains("disabled") || crate::data_safety::is_refusal(&err) => {
+        Err(err)
+            if err.starts_with("refused")
+                || err.contains("disabled")
+                || crate::data_safety::is_refusal(&err) =>
+        {
             json(409, json!({"error": err}))
         }
         Err(err) => json(500, json!({"error": format!("spawn failed: {err}")})),
@@ -1611,12 +1686,18 @@ fn start_process(state: &ControlState, params: &Params, _: &str, body: &str) -> 
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let (project, name) = (params.project.unwrap_or_default(), params.name.clone().unwrap_or_default());
+    let (project, name) = (
+        params.project.unwrap_or_default(),
+        params.name.clone().unwrap_or_default(),
+    );
     lifecycle_response(state.projects.control_start(project, &name, wait_ms))
 }
 
 fn stop_process(state: &ControlState, params: &Params, _: &str, _: &str) -> Resp {
-    let (project, name) = (params.project.unwrap_or_default(), params.name.clone().unwrap_or_default());
+    let (project, name) = (
+        params.project.unwrap_or_default(),
+        params.name.clone().unwrap_or_default(),
+    );
     lifecycle_response(state.projects.control_stop(&state.registry, project, &name))
 }
 
@@ -1625,7 +1706,10 @@ fn restart_process(state: &ControlState, params: &Params, _: &str, body: &str) -
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let (project, name) = (params.project.unwrap_or_default(), params.name.clone().unwrap_or_default());
+    let (project, name) = (
+        params.project.unwrap_or_default(),
+        params.name.clone().unwrap_or_default(),
+    );
     lifecycle_response(
         state
             .projects
@@ -1678,8 +1762,9 @@ pub const MAX_BODY_BYTES: u64 = 1 << 20;
 /// A JSON response with an explicit status code and content-type header.
 /// Shared with `debug_http`.
 pub fn json(status: u16, value: Value) -> Resp {
-    let mut response = tiny_http::Response::from_data(serde_json::to_vec(&value).unwrap_or_default())
-        .with_status_code(status);
+    let mut response =
+        tiny_http::Response::from_data(serde_json::to_vec(&value).unwrap_or_default())
+            .with_status_code(status);
     response.add_header(
         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
             .unwrap_or_else(|_| unreachable!("literal header bytes")),
@@ -1696,8 +1781,12 @@ pub fn json(status: u16, value: Value) -> Resp {
 pub fn render_api_doc() -> String {
     let mut out = String::new();
     out.push_str("# chappa-ai control API\n\n");
-    out.push_str("GENERATED from `desktop/src-tauri/src/control_http.rs::ROUTES` — do not edit by hand.\n");
-    out.push_str("Regenerate: `CONTROL_API_WRITE=1 cargo test -p chappa-ai-desktop control_api_doc`.\n\n");
+    out.push_str(
+        "GENERATED from `desktop/src-tauri/src/control_http.rs::ROUTES` — do not edit by hand.\n",
+    );
+    out.push_str(
+        "Regenerate: `CONTROL_API_WRITE=1 cargo test -p chappa-ai-desktop control_api_doc`.\n\n",
+    );
     out.push_str(&format!(
         "Bound to `http://{BIND}` in every build. Every request must carry\n\
          `Authorization: Bearer <token>` where the token is the contents of\n\
@@ -1843,7 +1932,10 @@ mod tests {
         resp.into_reader().read_to_string(&mut body).unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["error"], "internal");
-        assert!(v["message"].as_str().unwrap().contains("boom in a route"), "{body}");
+        assert!(
+            v["message"].as_str().unwrap().contains("boom in a route"),
+            "{body}"
+        );
         // And a non-panicking handler passes straight through.
         let ok = guarded(|| json(204, json!({"ok": true})));
         assert_eq!(ok.status_code().0, 204);

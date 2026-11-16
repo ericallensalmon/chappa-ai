@@ -34,7 +34,11 @@ pub const STARTUP_QUESTIONS: &[StartupQuestion] = &[
         id: "mcp-server-approval",
         label: "the new MCP server question",
         all: &["mcp server"],
-        any: &["use this and all future mcp servers", "use this mcp server", "continue without using this mcp server"],
+        any: &[
+            "use this and all future mcp servers",
+            "use this mcp server",
+            "continue without using this mcp server",
+        ],
     },
     StartupQuestion {
         id: "external-claude-md",
@@ -56,7 +60,10 @@ pub const STARTUP_QUESTIONS: &[StartupQuestion] = &[
 fn normalise(lines: &[String]) -> String {
     let mut out = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
     let mut pending_space = false;
-    for ch in lines.iter().flat_map(|l| l.chars().chain(std::iter::once('\n'))) {
+    for ch in lines
+        .iter()
+        .flat_map(|l| l.chars().chain(std::iter::once('\n')))
+    {
         if ch.is_whitespace() {
             pending_space = true;
             continue;
@@ -164,7 +171,8 @@ mod tests {
             (CLAUDE_MD_IMPORT, "external-claude-md"),
             (BYPASS_PERMISSIONS, "skip-permissions"),
         ] {
-            let q = detect_startup_question(&screen(text)).unwrap_or_else(|| panic!("{id} not detected"));
+            let q = detect_startup_question(&screen(text))
+                .unwrap_or_else(|| panic!("{id} not detected"));
             assert_eq!(q.id, id);
             assert_eq!(held_reason(q), format!("held: waiting on {}", q.label));
         }
@@ -203,17 +211,32 @@ mod tests {
              \n\
              ❯ 1.   Yes,   proceed",
         );
-        assert_eq!(detect_startup_question(&wrapped).unwrap().id, "folder-trust");
+        assert_eq!(
+            detect_startup_question(&wrapped).unwrap().id,
+            "folder-trust"
+        );
         assert_eq!(normalise(&screen("  A  b\n\n c ")), "a b c");
     }
 
     #[test]
     fn the_list_names_the_four_known_questions_once_each() {
         let ids: Vec<&str> = STARTUP_QUESTIONS.iter().map(|q| q.id).collect();
-        assert_eq!(ids, ["folder-trust", "mcp-server-approval", "external-claude-md", "skip-permissions"]);
+        assert_eq!(
+            ids,
+            [
+                "folder-trust",
+                "mcp-server-approval",
+                "external-claude-md",
+                "skip-permissions"
+            ]
+        );
         for q in STARTUP_QUESTIONS {
             assert!(!q.all.is_empty() && !q.any.is_empty(), "{}", q.id);
-            assert!(q.all.iter().chain(q.any).all(|n| *n == n.to_lowercase()), "{}: needles are lowercase", q.id);
+            assert!(
+                q.all.iter().chain(q.any).all(|n| *n == n.to_lowercase()),
+                "{}: needles are lowercase",
+                q.id
+            );
         }
     }
 }

@@ -108,7 +108,11 @@ pub struct Undeclared {
 struct FileShape {
     #[serde(default)]
     verdicts: BTreeMap<String, SavedVerdict>,
-    #[serde(default, rename = "stackSources", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        rename = "stackSources",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     stack_sources: BTreeMap<String, RememberedStack>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     undeclared: BTreeMap<String, Undeclared>,
@@ -125,7 +129,10 @@ impl VerdictStore {
     pub fn load(path: PathBuf) -> Self {
         let data = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<FileShape>(&text).unwrap_or_else(|e| {
-                log::warn!("[data-safety] {} cannot be read ({e}); starting with no saved verdicts", path.display());
+                log::warn!(
+                    "[data-safety] {} cannot be read ({e}); starting with no saved verdicts",
+                    path.display()
+                );
                 FileShape::default()
             }),
             Err(_) => FileShape::default(),
@@ -154,7 +161,12 @@ impl VerdictStore {
     /// Replace the record of `source_id`. Written (atomically, owner-only)
     /// only when what it says changed.
     pub fn put(&mut self, source_id: &str, verdict: SavedVerdict) -> Result<(), String> {
-        if self.data.verdicts.get(source_id).is_some_and(|v| v.same_as(&verdict)) {
+        if self
+            .data
+            .verdicts
+            .get(source_id)
+            .is_some_and(|v| v.same_as(&verdict))
+        {
             return Ok(());
         }
         self.data.verdicts.insert(source_id.to_owned(), verdict);
@@ -169,9 +181,19 @@ impl VerdictStore {
     /// Record what the trusted manifest of `source_id` says: `Some` = a
     /// stack source, `None` = not one (the flag goes). Written only on a
     /// change.
-    pub fn set_stack(&mut self, source_id: &str, stack: Option<RememberedStack>) -> Result<(), String> {
+    pub fn set_stack(
+        &mut self,
+        source_id: &str,
+        stack: Option<RememberedStack>,
+    ) -> Result<(), String> {
         let changed = match stack {
-            Some(stack) => self.data.stack_sources.insert(source_id.to_owned(), stack.clone()).as_ref() != Some(&stack),
+            Some(stack) => {
+                self.data
+                    .stack_sources
+                    .insert(source_id.to_owned(), stack.clone())
+                    .as_ref()
+                    != Some(&stack)
+            }
             None => self.data.stack_sources.remove(source_id).is_some(),
         };
         if changed {
@@ -198,9 +220,19 @@ impl VerdictStore {
 
     /// Mark `source_id` as no longer declared (`Some`), or as declared again
     /// (`None`). Written only on a change.
-    pub fn set_undeclared(&mut self, source_id: &str, undeclared: Option<Undeclared>) -> Result<(), String> {
+    pub fn set_undeclared(
+        &mut self,
+        source_id: &str,
+        undeclared: Option<Undeclared>,
+    ) -> Result<(), String> {
         let changed = match undeclared {
-            Some(u) => self.data.undeclared.insert(source_id.to_owned(), u.clone()).as_ref() != Some(&u),
+            Some(u) => {
+                self.data
+                    .undeclared
+                    .insert(source_id.to_owned(), u.clone())
+                    .as_ref()
+                    != Some(&u)
+            }
             None => self.data.undeclared.remove(source_id).is_some(),
         };
         if changed {
@@ -211,7 +243,8 @@ impl VerdictStore {
 
     /// Whether anything is kept for `source_id`.
     pub fn holds(&self, source_id: &str) -> bool {
-        self.data.verdicts.contains_key(source_id) || self.data.stack_sources.contains_key(source_id)
+        self.data.verdicts.contains_key(source_id)
+            || self.data.stack_sources.contains_key(source_id)
     }
 
     /// Drop everything kept for a source that is gone: its verdict, whether
@@ -262,10 +295,26 @@ mod tests {
         let mut store = VerdictStore::load(path.clone());
         assert!(store.get("s1").is_none());
         store.put("s1", verdict("not-clean", true, 1)).unwrap();
-        store.put("s2", SavedVerdict { block: None, ..verdict("clean", false, 1) }).unwrap();
+        store
+            .put(
+                "s2",
+                SavedVerdict {
+                    block: None,
+                    ..verdict("clean", false, 1)
+                },
+            )
+            .unwrap();
         let reopened = VerdictStore::load(path.clone());
-        assert_eq!(reopened.get("s1"), Some(&verdict("not-clean", true, 1)), "every field round-trips");
-        assert_eq!(reopened.get("s2").unwrap().block, None, "an answer without a block is kept as such");
+        assert_eq!(
+            reopened.get("s1"),
+            Some(&verdict("not-clean", true, 1)),
+            "every field round-trips"
+        );
+        assert_eq!(
+            reopened.get("s2").unwrap().block,
+            None,
+            "an answer without a block is kept as such"
+        );
         assert_eq!(reopened.all().count(), 2);
 
         // The same verdict at a later time does not rewrite the file.
@@ -273,7 +322,9 @@ mod tests {
         store.put("s1", verdict("not-clean", true, 99)).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         // A changed one replaces it.
-        store.put("s1", verdict("acknowledged", false, 100)).unwrap();
+        store
+            .put("s1", verdict("acknowledged", false, 100))
+            .unwrap();
         let reopened = VerdictStore::load(path.clone());
         let b = reopened.get("s1").unwrap().block.as_ref().unwrap();
         assert_eq!((b.state.as_str(), b.blocks_agents), ("acknowledged", false));
@@ -292,8 +343,14 @@ mod tests {
         let mut store = VerdictStore::load(path.clone());
         store.put("s1", verdict("clean", false, 1)).unwrap();
         let without_flags = std::fs::read_to_string(&path).unwrap();
-        assert!(!without_flags.contains("stackSources"), "no empty map on disk: {without_flags}");
-        let stack = RememberedStack { manifest_id: "stack:app".into(), source_label: "Stack app".into() };
+        assert!(
+            !without_flags.contains("stackSources"),
+            "no empty map on disk: {without_flags}"
+        );
+        let stack = RememberedStack {
+            manifest_id: "stack:app".into(),
+            source_label: "Stack app".into(),
+        };
         store.set_stack("s1", Some(stack.clone())).unwrap();
         store.set_stack("s2", Some(stack.clone())).unwrap();
         let reopened = VerdictStore::load(path.clone());
@@ -323,13 +380,26 @@ mod tests {
         let mut store = VerdictStore::load(path.clone());
         store.put("s1", verdict("not-clean", true, 1)).unwrap();
         assert!(store.holds("s1") && !store.holds("s2"));
-        let mark = |project: &str, command: &str| Undeclared { project: PathBuf::from(project), command: command.into() };
-        store.set_undeclared("s1", Some(mark("/srv/a", "stack"))).unwrap();
-        store.set_undeclared("s3", Some(mark("/srv/b", "stack"))).unwrap();
+        let mark = |project: &str, command: &str| Undeclared {
+            project: PathBuf::from(project),
+            command: command.into(),
+        };
+        store
+            .set_undeclared("s1", Some(mark("/srv/a", "stack")))
+            .unwrap();
+        store
+            .set_undeclared("s3", Some(mark("/srv/b", "stack")))
+            .unwrap();
         let reopened = VerdictStore::load(path.clone());
         assert_eq!(reopened.undeclared("s1"), Some(&mark("/srv/a", "stack")));
-        assert_eq!(reopened.undeclared_in(Path::new("/srv/a")), vec![("s1".to_owned(), mark("/srv/a", "stack"))]);
-        assert!(reopened.get("s1").is_some(), "the verdict stays while it waits");
+        assert_eq!(
+            reopened.undeclared_in(Path::new("/srv/a")),
+            vec![("s1".to_owned(), mark("/srv/a", "stack"))]
+        );
+        assert!(
+            reopened.get("s1").is_some(),
+            "the verdict stays while it waits"
+        );
         store.set_undeclared("s3", None).unwrap();
         assert!(VerdictStore::load(path.clone()).undeclared("s3").is_none());
         store.remove("s1").unwrap();
@@ -344,6 +414,9 @@ mod tests {
         assert_eq!(VerdictStore::load(path.clone()).all().count(), 0);
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(VerdictStore::load(path.clone()).all().count(), 0);
-        assert_eq!(VerdictStore::beside(&dir.path().join("sources.json")).path(), path);
+        assert_eq!(
+            VerdictStore::beside(&dir.path().join("sources.json")).path(),
+            path
+        );
     }
 }

@@ -95,7 +95,9 @@ impl CoordError {
     pub fn status(&self) -> u16 {
         match self {
             CoordError::NotFound(_) => 404,
-            CoordError::RevisionConflict { .. } | CoordError::Locked { .. } | CoordError::Cycle(_) => 409,
+            CoordError::RevisionConflict { .. }
+            | CoordError::Locked { .. }
+            | CoordError::Cycle(_) => 409,
             CoordError::Invalid(_) => 400,
             CoordError::Internal(_) => 500,
         }
@@ -105,7 +107,11 @@ impl CoordError {
     pub fn to_json(&self) -> Value {
         match self {
             CoordError::NotFound(m) => json!({"error": "not_found", "message": m}),
-            CoordError::RevisionConflict { current_revision, current_content, current_content_truncated } => {
+            CoordError::RevisionConflict {
+                current_revision,
+                current_content,
+                current_content_truncated,
+            } => {
                 let mut v = json!({
                     "error": "revision_conflict",
                     "message": format!("expected_revision does not match the current revision {current_revision}; re-read and retry"),
@@ -117,7 +123,10 @@ impl CoordError {
                 }
                 v
             }
-            CoordError::Locked { locked_by, lock_expires_at } => json!({
+            CoordError::Locked {
+                locked_by,
+                lock_expires_at,
+            } => json!({
                 "error": "locked",
                 "message": format!("todo is locked by actor {locked_by} until {lock_expires_at} (unix ms)"),
                 "locked_by": locked_by,
@@ -132,7 +141,11 @@ impl CoordError {
 
 impl std::fmt::Display for CoordError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_json()["message"].as_str().unwrap_or("error"))
+        write!(
+            f,
+            "{}",
+            self.to_json()["message"].as_str().unwrap_or("error")
+        )
     }
 }
 
@@ -182,8 +195,7 @@ impl Coordination {
     /// Open (creating + migrating) the database at `path`.
     pub fn open(&self, path: PathBuf) -> Result<()> {
         if let Some(dir) = path.parent() {
-            project_model::atomic::ensure_private_dir(dir)
-                .map_err(CoordError::Internal)?;
+            project_model::atomic::ensure_private_dir(dir).map_err(CoordError::Internal)?;
         }
         let conn = open_db(&path)?;
         restrict_db_files(&path);
@@ -246,10 +258,8 @@ fn restrict_db_files(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
-        let _ = std::fs::set_permissions(
-            PathBuf::from(name),
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ =
+            std::fs::set_permissions(PathBuf::from(name), std::fs::Permissions::from_mode(0o600));
     }
 }
 
@@ -516,7 +526,11 @@ pub fn headings(content: &str) -> Vec<Heading> {
         }
         // parse_heading already refuses indented code lines.
         if let Some((level, text)) = parse_heading(line) {
-            out.push(Heading { line: i, level, text });
+            out.push(Heading {
+                line: i,
+                level,
+                text,
+            });
         }
     }
     out
@@ -529,9 +543,9 @@ pub fn section_range(content: &str, heading: &str) -> Option<(usize, usize)> {
     let want = heading.trim();
     let want_text = parse_heading(want).map(|(_, t)| t);
     let all = headings(content);
-    let idx = all.iter().position(|h| {
-        h.text == want || want_text.as_deref() == Some(h.text.as_str())
-    })?;
+    let idx = all
+        .iter()
+        .position(|h| h.text == want || want_text.as_deref() == Some(h.text.as_str()))?;
     let start = all[idx].line;
     let level = all[idx].level;
     let end = all[idx + 1..]
@@ -554,7 +568,10 @@ fn join(lines: &[&str]) -> String {
 /// next heading, keeping the section's trailing blank lines after it).
 pub fn append_under(content: &str, heading: &str, extra: &str) -> Result<String> {
     let (start, end) = section_range(content, heading).ok_or_else(|| {
-        CoordError::Invalid(format!("no section with heading `{}` — append_section only appends under an EXISTING heading", heading.trim()))
+        CoordError::Invalid(format!(
+            "no section with heading `{}` — append_section only appends under an EXISTING heading",
+            heading.trim()
+        ))
     })?;
     let lines = lines_of(content);
     let mut cut = end;
@@ -572,8 +589,9 @@ pub fn append_under(content: &str, heading: &str, extra: &str) -> Result<String>
 /// replaces the whole section (heading included); otherwise the matched
 /// heading line is kept and the body under it is replaced.
 pub fn replace_section(content: &str, heading: &str, replacement: &str) -> Result<String> {
-    let (start, end) = section_range(content, heading)
-        .ok_or_else(|| CoordError::Invalid(format!("no section with heading `{}`", heading.trim())))?;
+    let (start, end) = section_range(content, heading).ok_or_else(|| {
+        CoordError::Invalid(format!("no section with heading `{}`", heading.trim()))
+    })?;
     let lines = lines_of(content);
     let keep_heading = parse_heading(replacement.lines().next().unwrap_or("")).is_none();
     let mut out: Vec<&str> = lines[..start].to_vec();
@@ -586,7 +604,12 @@ pub fn replace_section(content: &str, heading: &str, replacement: &str) -> Resul
 }
 
 /// Replace 1-based inclusive `start_line..=end_line`, bounds-checked.
-pub fn replace_lines(content: &str, start_line: usize, end_line: usize, replacement: &str) -> Result<String> {
+pub fn replace_lines(
+    content: &str,
+    start_line: usize,
+    end_line: usize,
+    replacement: &str,
+) -> Result<String> {
     let lines = lines_of(content);
     if start_line == 0 || end_line < start_line || end_line > lines.len() {
         return Err(CoordError::Invalid(format!(
@@ -764,7 +787,9 @@ impl ResponseMode {
         match s {
             None | Some("slim") => Ok(Self::Slim),
             Some("rich") => Ok(Self::Rich),
-            Some(other) => Err(CoordError::Invalid(format!("response_mode must be slim or rich (got `{other}`)"))),
+            Some(other) => Err(CoordError::Invalid(format!(
+                "response_mode must be slim or rich (got `{other}`)"
+            ))),
         }
     }
 }
@@ -807,7 +832,9 @@ impl ReadMode {
             Some("outline") | Some("headings") => Ok(Self::Outline),
             Some("section") => section_heading
                 .map(|h| Self::Section(h.to_owned()))
-                .ok_or_else(|| CoordError::Invalid("mode=section requires section_heading (or heading)".into())),
+                .ok_or_else(|| {
+                    CoordError::Invalid("mode=section requires section_heading (or heading)".into())
+                }),
             Some(other) => Err(CoordError::Invalid(format!(
                 "mode must be full | outline | section | lines (got `{other}`)"
             ))),
@@ -827,14 +854,21 @@ impl EditTarget {
     /// the tagged forms `{type: "section", section_heading}` or
     /// `{type: "line_range", offset, limit}` (0-based offset + count).
     pub fn parse(target: &Value) -> Result<Self> {
-        if let Some(h) = target.get("heading").or_else(|| target.get("section_heading")).and_then(Value::as_str) {
+        if let Some(h) = target
+            .get("heading")
+            .or_else(|| target.get("section_heading"))
+            .and_then(Value::as_str)
+        {
             return Ok(Self::Section(h.to_owned()));
         }
         if let (Some(s), Some(e)) = (
             target.get("start_line").and_then(Value::as_u64),
             target.get("end_line").and_then(Value::as_u64),
         ) {
-            return Ok(Self::Lines { start_line: s as usize, end_line: e as usize });
+            return Ok(Self::Lines {
+                start_line: s as usize,
+                end_line: e as usize,
+            });
         }
         if let (Some(o), Some(l)) = (
             target.get("offset").and_then(Value::as_u64),
@@ -843,7 +877,10 @@ impl EditTarget {
             if l == 0 {
                 return Err(CoordError::Invalid("line_range limit must be >= 1".into()));
             }
-            return Ok(Self::Lines { start_line: o as usize + 1, end_line: (o + l) as usize });
+            return Ok(Self::Lines {
+                start_line: o as usize + 1,
+                end_line: (o + l) as usize,
+            });
         }
         Err(CoordError::Invalid(
             "target must be {heading} | {start_line, end_line} (1-based inclusive) | {type: section, section_heading} | {type: line_range, offset, limit}".into(),
@@ -879,9 +916,13 @@ pub struct FindQuery {
 // ---- scratchpad operations --------------------------------------------------
 
 fn load_pad(tx: &Transaction<'_>, id: i64) -> Result<Scratchpad> {
-    tx.query_row("SELECT * FROM scratchpads WHERE id = ?1", params![id], Scratchpad::from_row)
-        .optional()?
-        .ok_or_else(|| CoordError::NotFound(format!("no such scratchpad: {id}")))
+    tx.query_row(
+        "SELECT * FROM scratchpads WHERE id = ?1",
+        params![id],
+        Scratchpad::from_row,
+    )
+    .optional()?
+    .ok_or_else(|| CoordError::NotFound(format!("no such scratchpad: {id}")))
 }
 
 /// Whether a stale write on this op should carry the pad's content back
@@ -931,7 +972,14 @@ fn guard_revision(pad: &Scratchpad, expected: Option<i64>, guard: Guard) -> Resu
 
 /// One history row per write (create/commit/archive/delete all go through
 /// here), pruned to the newest [`HISTORY_CAP`] rows per pad.
-fn record_history(tx: &Transaction<'_>, id: i64, revision: i64, actor: &str, op: &str, at: i64) -> Result<()> {
+fn record_history(
+    tx: &Transaction<'_>,
+    id: i64,
+    revision: i64,
+    actor: &str,
+    op: &str,
+    at: i64,
+) -> Result<()> {
     tx.execute(
         "INSERT INTO scratchpad_history (scratchpad_id, revision, actor, op, at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, revision, actor, op, at],
@@ -1024,7 +1072,13 @@ impl Coordination {
         self.with_tx(|tx| load_pad(tx, id))
     }
 
-    pub fn scratchpad_rename(&self, actor: &str, id: i64, name: &str, expected_revision: Option<i64>) -> Result<Scratchpad> {
+    pub fn scratchpad_rename(
+        &self,
+        actor: &str,
+        id: i64,
+        name: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<Scratchpad> {
         let name = name.trim().to_owned();
         if name.is_empty() {
             return Err(CoordError::Invalid("name must not be empty".into()));
@@ -1037,7 +1091,13 @@ impl Coordination {
         })
     }
 
-    pub fn scratchpad_add_tags(&self, actor: &str, id: i64, tags: Vec<String>, expected_revision: Option<i64>) -> Result<Scratchpad> {
+    pub fn scratchpad_add_tags(
+        &self,
+        actor: &str,
+        id: i64,
+        tags: Vec<String>,
+        expected_revision: Option<i64>,
+    ) -> Result<Scratchpad> {
         self.with_tx(|tx| {
             let mut pad = load_pad(tx, id)?;
             guard_revision(&pad, expected_revision, Guard::Meta)?;
@@ -1048,7 +1108,13 @@ impl Coordination {
         })
     }
 
-    pub fn scratchpad_remove_tags(&self, actor: &str, id: i64, tags: Vec<String>, expected_revision: Option<i64>) -> Result<Scratchpad> {
+    pub fn scratchpad_remove_tags(
+        &self,
+        actor: &str,
+        id: i64,
+        tags: Vec<String>,
+        expected_revision: Option<i64>,
+    ) -> Result<Scratchpad> {
         let remove = normalize_tags(tags);
         self.with_tx(|tx| {
             let mut pad = load_pad(tx, id)?;
@@ -1060,7 +1126,13 @@ impl Coordination {
 
     /// Append at the end (guard optional: last-writer-wins is acceptable for
     /// appends). A newline is inserted when the content does not end in one.
-    pub fn scratchpad_append(&self, actor: &str, id: i64, content: &str, expected_revision: Option<i64>) -> Result<Scratchpad> {
+    pub fn scratchpad_append(
+        &self,
+        actor: &str,
+        id: i64,
+        content: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<Scratchpad> {
         self.with_tx(|tx| {
             let mut pad = load_pad(tx, id)?;
             guard_revision(&pad, expected_revision, Guard::Optional)?;
@@ -1109,13 +1181,21 @@ impl Coordination {
             guard_revision(&pad, expected_revision, Guard::Content)?;
             pad.content = match target {
                 EditTarget::Section(h) => replace_section(&pad.content, h, content)?,
-                EditTarget::Lines { start_line, end_line } => replace_lines(&pad.content, *start_line, *end_line, content)?,
+                EditTarget::Lines {
+                    start_line,
+                    end_line,
+                } => replace_lines(&pad.content, *start_line, *end_line, content)?,
             };
             commit_pad(tx, &pad, actor, "edit")
         })
     }
 
-    pub fn scratchpad_clear(&self, actor: &str, id: i64, expected_revision: Option<i64>) -> Result<Scratchpad> {
+    pub fn scratchpad_clear(
+        &self,
+        actor: &str,
+        id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<Scratchpad> {
         self.with_tx(|tx| {
             let mut pad = load_pad(tx, id)?;
             guard_revision(&pad, expected_revision, Guard::Content)?;
@@ -1126,7 +1206,12 @@ impl Coordination {
 
     /// Delete at `expected_revision` (required). History is kept, with the
     /// same convention as every other op (the revision the op produced).
-    pub fn scratchpad_delete(&self, actor: &str, id: i64, expected_revision: Option<i64>) -> Result<Scratchpad> {
+    pub fn scratchpad_delete(
+        &self,
+        actor: &str,
+        id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<Scratchpad> {
         self.with_tx(|tx| {
             let pad = load_pad(tx, id)?;
             guard_revision(&pad, expected_revision, Guard::Meta)?;
@@ -1176,9 +1261,17 @@ impl Coordination {
     /// (the snippet needs it); tags and the query itself stay in Rust
     /// (JSON array any-of, Unicode case folding).
     pub fn scratchpad_list(&self, q: &ScratchpadListQuery) -> Result<Value> {
-        let needle = q.query.as_deref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+        let needle = q
+            .query
+            .as_deref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
         let (scope_sql, scope_params) = pad_scope_sql(q.project_id, q.include_global);
-        let archived_sql = if q.include_archived { "1" } else { "archived = 0" };
+        let archived_sql = if q.include_archived {
+            "1"
+        } else {
+            "archived = 0"
+        };
         let content_col = if needle.is_some() { "content" } else { "''" };
         let sql = format!(
             "SELECT id, project_id, name, revision, tags, archived, created_at, updated_at, updated_by, \
@@ -1220,7 +1313,10 @@ impl Coordination {
                     fields.push("name");
                 }
                 let mut snippet = None;
-                if let Some(line) = lines_of(&content).iter().find(|l| l.to_lowercase().contains(needle)) {
+                if let Some(line) = lines_of(&content)
+                    .iter()
+                    .find(|l| l.to_lowercase().contains(needle))
+                {
                     fields.push("content");
                     snippet = Some(snip(line, needle));
                 }
@@ -1242,8 +1338,11 @@ impl Coordination {
     pub fn scratchpad_tags(&self, project_id: Option<Option<i64>>) -> Result<Vec<String>> {
         let (scope_sql, scope_params) = pad_scope_sql(project_id, false);
         self.with_tx(|tx| {
-            let mut stmt = tx.prepare(&format!("SELECT tags FROM scratchpads WHERE {scope_sql}"))?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(scope_params.iter()), |r| r.get::<_, String>(0))?;
+            let mut stmt =
+                tx.prepare(&format!("SELECT tags FROM scratchpads WHERE {scope_sql}"))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(scope_params.iter()), |r| {
+                r.get::<_, String>(0)
+            })?;
             let mut out: Vec<String> = Vec::new();
             for tags in rows {
                 let tags: Vec<String> = serde_json::from_str(&tags?).unwrap_or_default();
@@ -1259,14 +1358,26 @@ impl Coordination {
     }
 
     /// `scratchpad_read`: the row (content per mode) plus revision metadata.
-    pub fn scratchpad_read(&self, id: i64, mode: &ReadMode, offset: usize, limit: Option<usize>) -> Result<Value> {
+    pub fn scratchpad_read(
+        &self,
+        id: i64,
+        mode: &ReadMode,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Value> {
         let pad = self.scratchpad_get(id)?;
         let all = lines_of(&pad.content);
         let mut out = pad.summary();
         match mode {
             ReadMode::Full => {
-                let end = limit.map(|l| (offset + l).min(all.len())).unwrap_or(all.len());
-                let window = if offset >= all.len() { &[][..] } else { &all[offset..end] };
+                let end = limit
+                    .map(|l| (offset + l).min(all.len()))
+                    .unwrap_or(all.len());
+                let window = if offset >= all.len() {
+                    &[][..]
+                } else {
+                    &all[offset..end]
+                };
                 out["content"] = json!(join(window));
                 out["offset"] = json!(offset);
                 out["returned_lines"] = json!(window.len());
@@ -1275,8 +1386,9 @@ impl Coordination {
                 out["headings"] = json!(headings(&pad.content));
             }
             ReadMode::Section(h) => {
-                let (s, e) = section_range(&pad.content, h)
-                    .ok_or_else(|| CoordError::Invalid(format!("no section with heading `{}`", h.trim())))?;
+                let (s, e) = section_range(&pad.content, h).ok_or_else(|| {
+                    CoordError::Invalid(format!("no section with heading `{}`", h.trim()))
+                })?;
                 out["content"] = json!(join(&all[s..e]));
                 out["section"] = json!({"heading": h.trim(), "start_line": s + 1, "end_line": e});
             }
@@ -1300,10 +1412,16 @@ impl Coordination {
         let context = q.context_lines.unwrap_or(1).min(3);
         let scope = q.scope.as_deref().unwrap_or("all");
         if !["all", "headings", "content"].contains(&scope) {
-            return Err(CoordError::Invalid("scope must be all | headings | content".into()));
+            return Err(CoordError::Invalid(
+                "scope must be all | headings | content".into(),
+            ));
         }
         let all = lines_of(&pad.content);
-        let needle = if q.case_sensitive { needle_raw.to_owned() } else { needle_raw.to_lowercase() };
+        let needle = if q.case_sensitive {
+            needle_raw.to_owned()
+        } else {
+            needle_raw.to_lowercase()
+        };
         let mut matches = Vec::new();
         let mut total = 0usize;
         for (i, line) in all.iter().enumerate() {
@@ -1311,7 +1429,11 @@ impl Coordination {
             if (scope == "headings" && !is_heading) || (scope == "content" && is_heading) {
                 continue;
             }
-            let hay = if q.case_sensitive { (*line).to_owned() } else { line.to_lowercase() };
+            let hay = if q.case_sensitive {
+                (*line).to_owned()
+            } else {
+                line.to_lowercase()
+            };
             if !hay.contains(&needle) {
                 continue;
             }
@@ -1356,7 +1478,10 @@ fn pad_scope_sql(project_id: Option<Option<i64>>, include_global: bool) -> (Stri
     match project_id {
         None => ("1".to_owned(), vec![]),
         Some(None) => ("project_id IS NULL".to_owned(), vec![]),
-        Some(Some(p)) if include_global => ("(project_id = ?1 OR project_id IS NULL)".to_owned(), vec![p]),
+        Some(Some(p)) if include_global => (
+            "(project_id = ?1 OR project_id IS NULL)".to_owned(),
+            vec![p],
+        ),
         Some(Some(p)) => ("project_id = ?1".to_owned(), vec![p]),
     }
 }
@@ -1424,22 +1549,36 @@ pub struct TodoListQuery {
 /// `medium` is accepted as a synonym for `normal`.
 pub fn parse_priority(p: &str) -> Result<String> {
     let p = p.trim().to_lowercase();
-    let p = if p == "medium" { "normal".to_owned() } else { p };
+    let p = if p == "medium" {
+        "normal".to_owned()
+    } else {
+        p
+    };
     if PRIORITIES.contains(&p.as_str()) {
         Ok(p)
     } else {
-        Err(CoordError::Invalid(format!("priority must be one of {} (got `{p}`)", PRIORITIES.join(" | "))))
+        Err(CoordError::Invalid(format!(
+            "priority must be one of {} (got `{p}`)",
+            PRIORITIES.join(" | ")
+        )))
     }
 }
 
 /// `completed` is accepted as a synonym for `done`.
 pub fn parse_status(s: &str) -> Result<String> {
     let s = s.trim().to_lowercase();
-    let s = if s == "completed" { "done".to_owned() } else { s };
+    let s = if s == "completed" {
+        "done".to_owned()
+    } else {
+        s
+    };
     if STATUSES.contains(&s.as_str()) {
         Ok(s)
     } else {
-        Err(CoordError::Invalid(format!("status must be one of {} (got `{s}`)", STATUSES.join(" | "))))
+        Err(CoordError::Invalid(format!(
+            "status must be one of {} (got `{s}`)",
+            STATUSES.join(" | ")
+        )))
     }
 }
 
@@ -1448,7 +1587,9 @@ pub fn parse_status(s: &str) -> Result<String> {
 fn load_todo(tx: &Transaction<'_>, id: i64) -> Result<Todo> {
     let now = now_ms();
     let mut todo = tx
-        .query_row("SELECT * FROM todos WHERE id = ?1", params![id], |r| Todo::from_row(r, now))
+        .query_row("SELECT * FROM todos WHERE id = ?1", params![id], |r| {
+            Todo::from_row(r, now)
+        })
         .optional()?
         .ok_or_else(|| CoordError::NotFound(format!("no such todo: {id}")))?;
     decorate(tx, &mut todo)?;
@@ -1461,7 +1602,9 @@ fn decorate(tx: &Transaction<'_>, todo: &mut Todo) -> Result<()> {
     let mut stmt = tx.prepare(
         "SELECT b.blocked_by_todo_id, t.completed FROM todo_blockers b JOIN todos t ON t.id = b.blocked_by_todo_id WHERE b.todo_id = ?1 ORDER BY b.blocked_by_todo_id",
     )?;
-    let rows = stmt.query_map(params![todo.todo_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)))?;
+    let rows = stmt.query_map(params![todo.todo_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0))
+    })?;
     todo.blocker_ids.clear();
     todo.is_blocked = false;
     for row in rows {
@@ -1528,7 +1671,9 @@ fn commit_todo(tx: &Transaction<'_>, todo: &Todo, actor: &str) -> Result<Todo> {
 /// Ids of the todos that list `id` as a blocker (their `is_blocked` may
 /// change when `id` does).
 fn dependents(tx: &Transaction<'_>, id: i64) -> Result<Vec<i64>> {
-    let mut stmt = tx.prepare("SELECT todo_id FROM todo_blockers WHERE blocked_by_todo_id = ?1 ORDER BY todo_id")?;
+    let mut stmt = tx.prepare(
+        "SELECT todo_id FROM todo_blockers WHERE blocked_by_todo_id = ?1 ORDER BY todo_id",
+    )?;
     let rows = stmt.query_map(params![id], |r| r.get::<_, i64>(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1566,7 +1711,10 @@ fn set_blockers_in(tx: &Transaction<'_>, todo: &Todo, blockers: &[i64]) -> Resul
             wanted.push(*b);
         }
     }
-    tx.execute("DELETE FROM todo_blockers WHERE todo_id = ?1", params![todo.todo_id])?;
+    tx.execute(
+        "DELETE FROM todo_blockers WHERE todo_id = ?1",
+        params![todo.todo_id],
+    )?;
     for b in &wanted {
         let other = load_todo(tx, *b)?;
         if other.project_id != todo.project_id {
@@ -1590,9 +1738,13 @@ fn set_blockers_in(tx: &Transaction<'_>, todo: &Todo, blockers: &[i64]) -> Resul
 }
 
 fn load_comment(tx: &Transaction<'_>, id: i64) -> Result<Comment> {
-    tx.query_row("SELECT * FROM todo_comments WHERE id = ?1", params![id], Comment::from_row)
-        .optional()?
-        .ok_or_else(|| CoordError::NotFound(format!("no such comment: {id}")))
+    tx.query_row(
+        "SELECT * FROM todo_comments WHERE id = ?1",
+        params![id],
+        Comment::from_row,
+    )
+    .optional()?
+    .ok_or_else(|| CoordError::NotFound(format!("no such comment: {id}")))
 }
 
 impl Coordination {
@@ -1624,7 +1776,12 @@ impl Coordination {
         self.with_tx(|tx| load_todo(tx, id))
     }
 
-    pub fn todo_update(&self, actor: &str, id: i64, patch: &TodoPatch) -> Result<(Todo, Vec<&'static str>)> {
+    pub fn todo_update(
+        &self,
+        actor: &str,
+        id: i64,
+        patch: &TodoPatch,
+    ) -> Result<(Todo, Vec<&'static str>)> {
         let priority = patch.priority.as_deref().map(parse_priority).transpose()?;
         let status = patch.status.as_deref().map(parse_status).transpose()?;
         self.with_tx(|tx| {
@@ -1713,7 +1870,12 @@ impl Coordination {
         self.with_tx(|tx| {
             let todo = load_todo(tx, id)?;
             guard_lock(&todo, actor)?;
-            let all: Vec<i64> = todo.blocker_ids.iter().copied().filter(|b| *b != blocker).collect();
+            let all: Vec<i64> = todo
+                .blocker_ids
+                .iter()
+                .copied()
+                .filter(|b| *b != blocker)
+                .collect();
             set_blockers_in(tx, &todo, &all)?;
             commit_todo(tx, &todo, actor)
         })
@@ -1722,7 +1884,13 @@ impl Coordination {
     /// Mark complete/incomplete. Releases the caller's OWN lock unless
     /// `release_lock: false`. Returns the row and the ids of todos blocked by
     /// it (whose `is_blocked` just changed).
-    pub fn todo_complete(&self, actor: &str, id: i64, completed: bool, release_lock: bool) -> Result<(Todo, Vec<i64>)> {
+    pub fn todo_complete(
+        &self,
+        actor: &str,
+        id: i64,
+        completed: bool,
+        release_lock: bool,
+    ) -> Result<(Todo, Vec<i64>)> {
         self.with_tx(|tx| {
             let mut todo = load_todo(tx, id)?;
             guard_lock(&todo, actor)?;
@@ -1771,7 +1939,12 @@ impl Coordination {
 
     /// Move to another project: comments kept, blockers (both directions)
     /// and lock cleared. Returns the row and the formerly dependent ids.
-    pub fn todo_transfer(&self, actor: &str, id: i64, target_project_id: i64) -> Result<(Todo, Vec<i64>)> {
+    pub fn todo_transfer(
+        &self,
+        actor: &str,
+        id: i64,
+        target_project_id: i64,
+    ) -> Result<(Todo, Vec<i64>)> {
         self.with_tx(|tx| {
             let mut todo = load_todo(tx, id)?;
             guard_lock(&todo, actor)?;
@@ -1792,7 +1965,10 @@ impl Coordination {
             let todo = load_todo(tx, id)?;
             guard_lock(&todo, actor)?;
             let affected = dependents(tx, id)?;
-            tx.execute("DELETE FROM todo_blockers WHERE todo_id = ?1 OR blocked_by_todo_id = ?1", params![id])?;
+            tx.execute(
+                "DELETE FROM todo_blockers WHERE todo_id = ?1 OR blocked_by_todo_id = ?1",
+                params![id],
+            )?;
             tx.execute("DELETE FROM todo_comments WHERE todo_id = ?1", params![id])?;
             tx.execute("DELETE FROM todos WHERE id = ?1", params![id])?;
             Ok((todo, affected))
@@ -1821,7 +1997,11 @@ impl Coordination {
         };
         let status = q.status.as_deref().map(parse_status).transpose()?;
         let priority = q.priority.as_deref().map(parse_priority).transpose()?;
-        let needle = q.query.as_deref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+        let needle = q
+            .query
+            .as_deref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
 
         let mut where_sql: Vec<String> = vec!["1".into()];
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
@@ -1841,7 +2021,11 @@ impl Coordination {
             params.push(p.into());
             where_sql.push(format!("priority = ?{}", params.len()));
         }
-        let body_col = if needle.is_some() { "body" } else { "'' AS body" };
+        let body_col = if needle.is_some() {
+            "body"
+        } else {
+            "'' AS body"
+        };
         let sql = format!(
             "SELECT id, project_id, title, {body_col}, priority, status, completed, tags, revision, locked_by, lock_expires_at, \
              created_at, updated_at, updated_by, \
@@ -1903,7 +2087,8 @@ impl Coordination {
 
     pub fn todo_tags(&self, project_id: Option<i64>) -> Result<Vec<String>> {
         self.with_tx(|tx| {
-            let mut stmt = tx.prepare("SELECT tags FROM todos WHERE (?1 IS NULL OR project_id = ?1)")?;
+            let mut stmt =
+                tx.prepare("SELECT tags FROM todos WHERE (?1 IS NULL OR project_id = ?1)")?;
             let rows = stmt.query_map(params![project_id], |r| r.get::<_, String>(0))?;
             let mut out: Vec<String> = Vec::new();
             for tags in rows {
@@ -1936,7 +2121,12 @@ impl Coordination {
         })
     }
 
-    pub fn todo_comment_update(&self, _actor: &str, comment_id: i64, body: &str) -> Result<Comment> {
+    pub fn todo_comment_update(
+        &self,
+        _actor: &str,
+        comment_id: i64,
+        body: &str,
+    ) -> Result<Comment> {
         if body.trim().is_empty() {
             return Err(CoordError::Invalid("body must not be empty".into()));
         }
@@ -1953,12 +2143,20 @@ impl Coordination {
     pub fn todo_comment_delete(&self, _actor: &str, comment_id: i64) -> Result<Comment> {
         self.with_tx(|tx| {
             let c = load_comment(tx, comment_id)?;
-            tx.execute("DELETE FROM todo_comments WHERE id = ?1", params![comment_id])?;
+            tx.execute(
+                "DELETE FROM todo_comments WHERE id = ?1",
+                params![comment_id],
+            )?;
             Ok(c)
         })
     }
 
-    pub fn todo_comments(&self, todo_id: i64, offset: usize, limit: Option<usize>) -> Result<Value> {
+    pub fn todo_comments(
+        &self,
+        todo_id: i64,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Value> {
         self.with_tx(|tx| {
             load_todo(tx, todo_id)?;
             let mut stmt = tx.prepare("SELECT * FROM todo_comments WHERE todo_id = ?1 ORDER BY id")?;
@@ -2020,7 +2218,10 @@ pub fn list_scratchpads(
         limit: Some(MAX_LIST_LIMIT),
         ..Default::default()
     })?;
-    Ok(listing["scratchpads"].as_array().cloned().unwrap_or_default())
+    Ok(listing["scratchpads"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// `read_scratchpad(id)`: the full row for the modal.
@@ -2062,15 +2263,25 @@ mod tests {
     #[test]
     fn headings_skip_fences_and_resolve_sections() {
         let hs = headings("# A\n```\n# not a heading\n```\n## B\n#nospace\n");
-        assert_eq!(hs.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        assert_eq!(
+            hs.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(),
+            ["A", "B"]
+        );
         // Nested child stays inside Alpha; the section ends at Beta (same level).
         assert_eq!(section_range(DOC, "Alpha"), Some((4, 12)));
-        assert_eq!(section_range(DOC, "## Alpha"), Some((4, 12)), "full heading line matches too");
+        assert_eq!(
+            section_range(DOC, "## Alpha"),
+            Some((4, 12)),
+            "full heading line matches too"
+        );
         assert_eq!(section_range(DOC, "Alpha.child"), Some((8, 12)));
         // Last section runs to EOF; duplicates resolve to the first.
         assert_eq!(section_range(DOC, "Beta"), Some((12, 16)));
         assert!(section_range(DOC, "Gamma").is_none());
-        assert!(section_range(DOC, "alpha").is_none(), "exact after trim, not case-folded");
+        assert!(
+            section_range(DOC, "alpha").is_none(),
+            "exact after trim, not case-folded"
+        );
     }
 
     /// Indented code blocks (4 spaces / tab) are not headings,
@@ -2086,9 +2297,15 @@ mod tests {
         assert_eq!(parse_heading("## Foo\t##"), Some((2, "Foo".into())));
         assert_eq!(parse_heading("    # code"), None);
         assert_eq!(parse_heading("\t# code"), None);
-        assert_eq!(section_range("# A\n\n    # not a section\n\n# B\n", "A"), Some((0, 4)));
+        assert_eq!(
+            section_range("# A\n\n    # not a section\n\n# B\n", "A"),
+            Some((0, 4))
+        );
         assert!(section_range("# A\n\n    # not a section\n", "not a section").is_none());
-        assert_eq!(section_range("# A\n## C#\nbody\n## D\n", "C#"), Some((1, 3)));
+        assert_eq!(
+            section_range("# A\n## C#\nbody\n## D\n", "C#"),
+            Some((1, 3))
+        );
     }
 
     #[test]
@@ -2114,8 +2331,14 @@ mod tests {
     fn replace_section_keeps_or_replaces_the_heading() {
         let out = replace_section(DOC, "Alpha", "new body\n").unwrap();
         assert!(out.contains("## Alpha\nnew body\n## Beta"), "{out}");
-        assert!(!out.contains("Alpha.child"), "nested child is part of the section");
-        assert!(out.contains("\n## Alpha\n\ndup\n"), "the duplicate (second) is untouched");
+        assert!(
+            !out.contains("Alpha.child"),
+            "nested child is part of the section"
+        );
+        assert!(
+            out.contains("\n## Alpha\n\ndup\n"),
+            "the duplicate (second) is untouched"
+        );
         let out = replace_section(DOC, "Beta", "## Beta renamed\nx\n").unwrap();
         assert!(out.contains("## Beta renamed\nx\n## Alpha"), "{out}");
     }
@@ -2131,40 +2354,66 @@ mod tests {
 
     #[test]
     fn title_override_reads_a_leading_h1_only() {
-        assert_eq!(title_override("\n# Real title\nbody").as_deref(), Some("Real title"));
+        assert_eq!(
+            title_override("\n# Real title\nbody").as_deref(),
+            Some("Real title")
+        );
         assert_eq!(title_override("## not h1\n"), None);
         assert_eq!(title_override("text\n# later\n"), None);
     }
 
     #[test]
     fn edit_target_accepts_both_shapes() {
-        assert_eq!(EditTarget::parse(&json!({"heading": "A"})).unwrap(), EditTarget::Section("A".into()));
+        assert_eq!(
+            EditTarget::parse(&json!({"heading": "A"})).unwrap(),
+            EditTarget::Section("A".into())
+        );
         assert_eq!(
             EditTarget::parse(&json!({"type": "section", "section_heading": "A"})).unwrap(),
             EditTarget::Section("A".into())
         );
         assert_eq!(
             EditTarget::parse(&json!({"start_line": 2, "end_line": 3})).unwrap(),
-            EditTarget::Lines { start_line: 2, end_line: 3 }
+            EditTarget::Lines {
+                start_line: 2,
+                end_line: 3
+            }
         );
         assert_eq!(
             EditTarget::parse(&json!({"type": "line_range", "offset": 1, "limit": 2})).unwrap(),
-            EditTarget::Lines { start_line: 2, end_line: 3 }
+            EditTarget::Lines {
+                start_line: 2,
+                end_line: 3
+            }
         );
         assert!(EditTarget::parse(&json!({})).is_err());
     }
 
     #[test]
     fn errors_map_to_statuses_and_wire_words() {
-        let e = CoordError::RevisionConflict { current_revision: 4, current_content: Some("x".into()), current_content_truncated: false };
+        let e = CoordError::RevisionConflict {
+            current_revision: 4,
+            current_content: Some("x".into()),
+            current_content_truncated: false,
+        };
         assert_eq!(e.status(), 409);
         assert_eq!(e.to_json()["error"], "revision_conflict");
         assert_eq!(e.to_json()["current_revision"], 4);
         assert_eq!(e.to_json()["current_content_truncated"], false);
-        let e = CoordError::RevisionConflict { current_revision: 4, current_content: None, current_content_truncated: false };
-        assert!(e.to_json().get("current_content").is_none(), "no content key on a meta conflict");
+        let e = CoordError::RevisionConflict {
+            current_revision: 4,
+            current_content: None,
+            current_content_truncated: false,
+        };
+        assert!(
+            e.to_json().get("current_content").is_none(),
+            "no content key on a meta conflict"
+        );
         assert!(e.to_json().get("current_content_truncated").is_none());
-        let e = CoordError::Locked { locked_by: "7".into(), lock_expires_at: 99 };
+        let e = CoordError::Locked {
+            locked_by: "7".into(),
+            lock_expires_at: 99,
+        };
         assert_eq!(e.to_json()["error"], "locked");
         assert_eq!(e.to_json()["locked_by"], "7");
         assert_eq!(CoordError::NotFound("x".into()).status(), 404);

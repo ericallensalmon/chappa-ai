@@ -54,13 +54,22 @@ use crate::agents::{spawn_agent_with, SpawnAgentRequest, SpawnContext};
 use crate::projects::Projects;
 use crate::records::{Records, Scope};
 use crate::registry::{
-    actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, ExitHandler, NullSink, RecordBinding, Registry, TermId,
+    actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, ExitHandler, NullSink,
+    RecordBinding, Registry, TermId,
 };
-use project_model::records::{new_record_id, JobRecord as ProjectJobRecord, RecordKind, Run, TailKind};
 use crate::roots::{check_cwd, Root};
 use crate::settings::SettingsState;
-use crate::sources::actions::{action_verdict, check_input_values, resolve_tool, validate_env, NoteRule, SourceAction, VerdictContext};
-use crate::sources::{iso_utc, main_window_only, ActionDto, CallActor, CallTarget, JobRecord, PromptPolicy, SourceInfo, Sources, SourcesListing};
+use crate::sources::actions::{
+    action_verdict, check_input_values, resolve_tool, validate_env, NoteRule, SourceAction,
+    VerdictContext,
+};
+use crate::sources::{
+    iso_utc, main_window_only, ActionDto, CallActor, CallTarget, JobRecord, PromptPolicy,
+    SourceInfo, Sources, SourcesListing,
+};
+use project_model::records::{
+    new_record_id, JobRecord as ProjectJobRecord, RecordKind, Run, TailKind,
+};
 
 /// A run's pane dump in the exit report is capped here, with a marker.
 pub const OUTPUT_CAP_BYTES: usize = 4 * 1024 * 1024;
@@ -70,7 +79,8 @@ pub const OUTPUT_TRUNCATED_MARKER: &str = "\n[output truncated: the pane dump ex
 pub const JOB_POLL_EVERY: Duration = Duration::from_secs(1);
 pub const JOB_POLL_MAX_SILENCE: Duration = Duration::from_secs(120);
 /// What a 503 means to the user. Never auto-retried.
-pub const UNCERTAIN_MESSAGE: &str = "The action may or may not have happened; check the source before retrying.";
+pub const UNCERTAIN_MESSAGE: &str =
+    "The action may or may not have happened; check the source before retrying.";
 
 /// Everything the runner reaches for.
 #[derive(Clone)]
@@ -144,7 +154,16 @@ pub fn run_action(
     confirmed: bool,
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
-    run_action_as(deps, &CallActor::human(), source_id, view, key, action_id, confirmed, note)
+    run_action_as(
+        deps,
+        &CallActor::human(),
+        source_id,
+        view,
+        key,
+        action_id,
+        confirmed,
+        note,
+    )
 }
 
 /// What the person answered in an endpoint action's dialog besides the
@@ -157,9 +176,28 @@ pub struct Answers<'a> {
 }
 
 /// [`run_action`] with the dialog's input values.
-pub fn run_action_with(deps: &ActionDeps, source_id: &str, view: &str, key: Option<&str>, action_id: &str, answers: Answers<'_>) -> Result<ActionOutcome, String> {
-    let (action, info, target) = deps.sources.action_for_call(source_id, view, key, action_id)?;
-    run_found(deps, &CallActor::human(), source_id, view, key, action, info, target, answers)
+pub fn run_action_with(
+    deps: &ActionDeps,
+    source_id: &str,
+    view: &str,
+    key: Option<&str>,
+    action_id: &str,
+    answers: Answers<'_>,
+) -> Result<ActionOutcome, String> {
+    let (action, info, target) = deps
+        .sources
+        .action_for_call(source_id, view, key, action_id)?;
+    run_found(
+        deps,
+        &CallActor::human(),
+        source_id,
+        view,
+        key,
+        action,
+        info,
+        target,
+        answers,
+    )
 }
 
 /// [`run_item_action`] with the dialog's input values.
@@ -172,8 +210,20 @@ pub fn run_item_action_with(
     action_id: &str,
     answers: Answers<'_>,
 ) -> Result<ActionOutcome, String> {
-    let (action, info, target) = deps.sources.item_action(source_id, view, owner, key, action_id)?;
-    run_found(deps, &CallActor::human(), source_id, view, Some(key), action, info, target, answers)
+    let (action, info, target) = deps
+        .sources
+        .item_action(source_id, view, owner, key, action_id)?;
+    run_found(
+        deps,
+        &CallActor::human(),
+        source_id,
+        view,
+        Some(key),
+        action,
+        info,
+        target,
+        answers,
+    )
 }
 
 /// [`run_action`] on behalf of `caller` (sent to the source as its
@@ -189,8 +239,24 @@ pub fn run_action_as(
     confirmed: bool,
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
-    let (action, info, target) = deps.sources.action_for_call(source_id, view, key, action_id)?;
-    run_found(deps, caller, source_id, view, key, action, info, target, Answers { confirmed, note, values: None })
+    let (action, info, target) = deps
+        .sources
+        .action_for_call(source_id, view, key, action_id)?;
+    run_found(
+        deps,
+        caller,
+        source_id,
+        view,
+        key,
+        action,
+        info,
+        target,
+        Answers {
+            confirmed,
+            note,
+            values: None,
+        },
+    )
 }
 
 /// Run the item action `action_id` that `source_id` offers on the `view`
@@ -207,8 +273,24 @@ pub fn run_item_action(
     confirmed: bool,
     note: Option<&str>,
 ) -> Result<ActionOutcome, String> {
-    let (action, info, target) = deps.sources.item_action(source_id, view, owner, key, action_id)?;
-    run_found(deps, &CallActor::human(), source_id, view, Some(key), action, info, target, Answers { confirmed, note, values: None })
+    let (action, info, target) = deps
+        .sources
+        .item_action(source_id, view, owner, key, action_id)?;
+    run_found(
+        deps,
+        &CallActor::human(),
+        source_id,
+        view,
+        Some(key),
+        action,
+        info,
+        target,
+        Answers {
+            confirmed,
+            note,
+            values: None,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -223,22 +305,47 @@ fn run_found(
     target: CallTarget,
     answers: Answers<'_>,
 ) -> Result<ActionOutcome, String> {
-    let Answers { confirmed, note, values } = answers;
+    let Answers {
+        confirmed,
+        note,
+        values,
+    } = answers;
     let tools = deps.tools.list();
     let roots = roots_for(deps, &info);
-    let verdict = action_verdict(&action, &VerdictContext { tools: &tools, roots: &roots, link_hosts: &info.link_hosts });
+    let verdict = action_verdict(
+        &action,
+        &VerdictContext {
+            tools: &tools,
+            roots: &roots,
+            link_hosts: &info.link_hosts,
+        },
+    );
     if !verdict.enabled {
-        return Err(verdict.reason.unwrap_or_else(|| "the action is not available".into()));
+        return Err(verdict
+            .reason
+            .unwrap_or_else(|| "the action is not available".into()));
     }
     let actor = actor_for(&info);
     match action {
         SourceAction::Link { url, .. } => {
             deps.sources.link_check(source_id, &url)?;
-            tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("could not open {url}: {e}"))?;
+            tauri_plugin_opener::open_url(&url, None::<&str>)
+                .map_err(|e| format!("could not open {url}: {e}"))?;
             Ok(ActionOutcome::Opened { url })
         }
-        SourceAction::Panel { endpoint, .. } => Ok(ActionOutcome::Panel { payload: deps.sources.panel(source_id, &endpoint)? }),
-        SourceAction::Endpoint { id, label: action_label, mutates, confirm, params, note: rule, inputs, disabled } => {
+        SourceAction::Panel { endpoint, .. } => Ok(ActionOutcome::Panel {
+            payload: deps.sources.panel(source_id, &endpoint)?,
+        }),
+        SourceAction::Endpoint {
+            id,
+            label: action_label,
+            mutates,
+            confirm,
+            params,
+            note: rule,
+            inputs,
+            disabled,
+        } => {
             // The verdict above refuses it already; said again here, next to
             // the call, so no later change to the verdict can send it.
             if let Some(why) = disabled {
@@ -248,7 +355,9 @@ fn run_found(
                 return Err("a mutating action without a confirm text is not offered".into());
             }
             if mutates && !confirmed {
-                return Err(format!("`{id}` changes something and must be confirmed first"));
+                return Err(format!(
+                    "`{id}` changes something and must be confirmed first"
+                ));
             }
             let note = note.map(str::trim).filter(|n| !n.is_empty());
             if rule == Some(NoteRule::Required) && note.is_none() {
@@ -256,7 +365,8 @@ fn run_found(
             }
             // Values the action asks for are checked against what it
             // declared before anything is sent; the source checks again.
-            let params = check_input_values(&inputs, values, params).map_err(|why| format!("`{id}`: {why}"))?;
+            let params = check_input_values(&inputs, values, params)
+                .map_err(|why| format!("`{id}`: {why}"))?;
             let mut body = json!({ "id": id, "target": target.body(view, key) });
             if let Some(params) = params {
                 body["params"] = params;
@@ -270,12 +380,23 @@ fn run_found(
                 body["confirmed"] = Value::Bool(true);
             }
             let reply = deps.sources.call_endpoint(source_id, &body, caller)?;
-            journal_endpoint(deps, &info, &actor, &format!("action `{id}` on {view}{} → {}", key.map(|k| format!("/{k}")).unwrap_or_default(), reply.status));
+            journal_endpoint(
+                deps,
+                &info,
+                &actor,
+                &format!(
+                    "action `{id}` on {view}{} → {}",
+                    key.map(|k| format!("/{k}")).unwrap_or_default(),
+                    reply.status
+                ),
+            );
             match reply.status {
                 200 => {
                     // What the source just did may show in its views now.
                     deps.sources.refresh_soon(source_id);
-                    Ok(ActionOutcome::Done { message: reply.body["message"].as_str().map(str::to_owned) })
+                    Ok(ActionOutcome::Done {
+                        message: reply.body["message"].as_str().map(str::to_owned),
+                    })
                 }
                 202 => {
                     let job_id = reply.body["jobId"]
@@ -300,9 +421,17 @@ fn run_found(
                     deps.sources.job_started(source_id, record);
                     match run {
                         Some(run) => {
-                            let origin = JobOrigin { action_id: &id, action_label: &action_label, view, key };
-                            let term_id = spawn_job_run(deps, source_id, &info, &job_id, &origin, &run, &actor)?;
-                            deps.sources.job_update(source_id, &job_id, |j| j.term_id = Some(term_id));
+                            let origin = JobOrigin {
+                                action_id: &id,
+                                action_label: &action_label,
+                                view,
+                                key,
+                            };
+                            let term_id = spawn_job_run(
+                                deps, source_id, &info, &job_id, &origin, &run, &actor,
+                            )?;
+                            deps.sources
+                                .job_update(source_id, &job_id, |j| j.term_id = Some(term_id));
                             Ok(ActionOutcome::Run { job_id, term_id })
                         }
                         None => {
@@ -323,9 +452,19 @@ fn run_found(
                 _ => Err(reply.as_error().to_string()),
             }
         }
-        SourceAction::Agent { id, label, cwd, prompt, tool, title, env } => {
+        SourceAction::Agent {
+            id,
+            label,
+            cwd,
+            prompt,
+            tool,
+            title,
+            env,
+        } => {
             if !confirmed && deps.sources.prompt_needs_dialog(source_id, &id)? {
-                return Err(format!("the prompt of `{label}` must be shown and accepted before it runs"));
+                return Err(format!(
+                    "the prompt of `{label}` must be shown and accepted before it runs"
+                ));
             }
             let tool = resolve_tool(&tools, tool.as_deref())?;
             let cwd = check_cwd(&roots, &cwd).into_result()?;
@@ -352,13 +491,27 @@ fn run_found(
             if confirmed {
                 deps.sources.mark_prompt_shown(source_id, &id)?;
             }
-            Ok(ActionOutcome::Launched { term_id: resp.process_id, what: "agent" })
+            Ok(ActionOutcome::Launched {
+                term_id: resp.process_id,
+                what: "agent",
+            })
         }
-        SourceAction::Terminal { label, cwd, command, env, .. } => {
+        SourceAction::Terminal {
+            label,
+            cwd,
+            command,
+            env,
+            ..
+        } => {
             let cwd = check_cwd(&roots, &cwd).into_result()?;
             validate_env(&env)?;
-            let term_id = spawn_terminal_row(deps, &info, &label, &command, &cwd, &env, &actor, None, None)?;
-            Ok(ActionOutcome::Launched { term_id, what: "terminal" })
+            let term_id = spawn_terminal_row(
+                deps, &info, &label, &command, &cwd, &env, &actor, None, None,
+            )?;
+            Ok(ActionOutcome::Launched {
+                term_id,
+                what: "terminal",
+            })
         }
     }
 }
@@ -367,7 +520,14 @@ fn run_found(
 /// (a launched source); an attached source has no row, so the log gets it.
 fn journal_endpoint(deps: &ActionDeps, info: &SourceInfo, actor: &str, text: &str) {
     match info.term_id {
-        Some(term_id) => deps.registry.record_input_as(term_id, 0, text.to_owned(), false, Some(actor), Some("endpoint")),
+        Some(term_id) => deps.registry.record_input_as(
+            term_id,
+            0,
+            text.to_owned(),
+            false,
+            Some(actor),
+            Some("endpoint"),
+        ),
         None => log::info!("[sources] {actor}: {text}"),
     }
 }
@@ -424,19 +584,29 @@ fn spawn_terminal_row(
         Some(r) => (Some(r.binding), Some(r.kind)),
         None => (None, None),
     };
-    let id = deps
-        .registry
-        .create_terminal_with_exit(cfg, Arc::new(NullSink), deps.app.clone(), name.to_owned(), on_exit, binding.clone())?;
+    let id = deps.registry.create_terminal_with_exit(
+        cfg,
+        Arc::new(NullSink),
+        deps.app.clone(),
+        name.to_owned(),
+        on_exit,
+        binding.clone(),
+    )?;
     if let Some(project_id) = info.project_id {
         deps.registry.set_project_shell(id, project_id);
     }
     let launch = format!(
         "launch {} {} in {}",
         spec.command,
-        stack_core::credentials::mask_argv(&spec.args).iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
+        stack_core::credentials::mask_argv(&spec.args)
+            .iter()
+            .map(|a| project_model::words::quote_word(a))
+            .collect::<Vec<_>>()
+            .join(" "),
         crate::roots::display(cwd)
     );
-    deps.registry.record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
+    deps.registry
+        .record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
     if let Some(app) = &deps.app {
         emit_created(
             &AppCreatedBroadcast(app.clone()),
@@ -470,24 +640,47 @@ pub fn parse_run_block(run: &Value) -> Result<RunBlock, String> {
         .as_array()
         .ok_or("the job's `run.argv` must be a list")?
         .iter()
-        .map(|w| w.as_str().map(str::to_owned).ok_or_else(|| "the job's `run.argv` must hold strings".to_owned()))
+        .map(|w| {
+            w.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "the job's `run.argv` must hold strings".to_owned())
+        })
         .collect::<Result<_, _>>()?;
     if argv.first().map_or(true, |w| w.trim().is_empty()) {
         return Err("the job's `run.argv` names no program".into());
     }
-    let cwd = run["cwd"].as_str().map(str::trim).filter(|c| !c.is_empty()).ok_or("the job's `run.cwd` must be a folder")?.to_owned();
+    let cwd = run["cwd"]
+        .as_str()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .ok_or("the job's `run.cwd` must be a folder")?
+        .to_owned();
     let mut env = BTreeMap::new();
     match run.get("env") {
         None | Some(Value::Null) => {}
         Some(Value::Object(map)) => {
             for (k, v) in map {
-                env.insert(k.clone(), v.as_str().ok_or_else(|| format!("the job's env `{k}` must be a string"))?.to_owned());
+                env.insert(
+                    k.clone(),
+                    v.as_str()
+                        .ok_or_else(|| format!("the job's env `{k}` must be a string"))?
+                        .to_owned(),
+                );
             }
         }
         Some(_) => return Err("the job's `run.env` must be an object of strings".into()),
     }
     validate_env(&env)?;
-    Ok(RunBlock { argv, cwd, env, title: run["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned) })
+    Ok(RunBlock {
+        argv,
+        cwd,
+        env,
+        title: run["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
+    })
 }
 
 /// Which action of which view started a job (what its record says).
@@ -520,18 +713,45 @@ fn spawn_job_run(
     let run = parse_run_block(run)?;
     let roots = roots_for(deps, info);
     let cwd = check_cwd(&roots, &run.cwd).into_result()?;
-    let title = run.title.clone().unwrap_or_else(|| format!("{} job {job_id}", info.label));
-    let record = job_record(deps, source_id, info, job_id, origin, &title, &run.argv, &cwd);
-    let (sources, registry, source_id, job_id_owned) = (deps.sources.clone(), deps.registry.clone(), source_id.to_owned(), job_id.to_owned());
+    let title = run
+        .title
+        .clone()
+        .unwrap_or_else(|| format!("{} job {job_id}", info.label));
+    let record = job_record(
+        deps, source_id, info, job_id, origin, &title, &run.argv, &cwd,
+    );
+    let (sources, registry, source_id, job_id_owned) = (
+        deps.sources.clone(),
+        deps.registry.clone(),
+        source_id.to_owned(),
+        job_id.to_owned(),
+    );
     let on_exit: ExitHandler = Arc::new(move |term_id, exit_code, _closed| {
-        let (sources, registry, source_id, job_id) = (sources.clone(), registry.clone(), source_id.clone(), job_id_owned.clone());
+        let (sources, registry, source_id, job_id) = (
+            sources.clone(),
+            registry.clone(),
+            source_id.clone(),
+            job_id_owned.clone(),
+        );
         // Off the pump thread: a POST to the source must not stall the
         // terminal's event stream.
-        std::thread::spawn(move || report_job_exit(&sources, &registry, &source_id, &job_id, term_id, exit_code));
+        std::thread::spawn(move || {
+            report_job_exit(&sources, &registry, &source_id, &job_id, term_id, exit_code)
+        });
     });
     let record_id = record.as_ref().map(|r| r.binding.record_id.clone());
     let run_uuid = record.as_ref().map(|r| r.binding.run_uuid.clone());
-    match spawn_terminal_row(deps, info, &title, &run.argv, &cwd, &run.env, actor, Some(on_exit), record) {
+    match spawn_terminal_row(
+        deps,
+        info,
+        &title,
+        &run.argv,
+        &cwd,
+        &run.env,
+        actor,
+        Some(on_exit),
+        record,
+    ) {
         Ok(id) => Ok(id),
         Err(e) => {
             // The run began in the store but no terminal ever ran it.
@@ -574,14 +794,29 @@ fn job_record(
         };
         let record_id = record.record_id.clone();
         deps.records.add_job_record(scope, record)?;
-        let run_uuid = crate::control_http::random_hex(16).map_err(|e| format!("cannot generate a run uuid: {e}"))?;
-        deps.records.begin_run(scope, RecordKind::Job, &record_id, &Run::begin(run_uuid.clone(), epoch_ms(), TailKind::Text))?;
-        Ok(RowRecord { binding: RecordBinding { record_id, run_uuid }, kind: RecordKind::Job })
+        let run_uuid = crate::control_http::random_hex(16)
+            .map_err(|e| format!("cannot generate a run uuid: {e}"))?;
+        deps.records.begin_run(
+            scope,
+            RecordKind::Job,
+            &record_id,
+            &Run::begin(run_uuid.clone(), epoch_ms(), TailKind::Text),
+        )?;
+        Ok(RowRecord {
+            binding: RecordBinding {
+                record_id,
+                run_uuid,
+            },
+            kind: RecordKind::Job,
+        })
     })();
     match made {
         Ok(r) => Some(r),
         Err(e) => {
-            log::warn!("[sources] job {job_id} of {}: its pane leaves no record: {e}", info.label);
+            log::warn!(
+                "[sources] job {job_id} of {}: its pane leaves no record: {e}",
+                info.label
+            );
             None
         }
     }
@@ -589,8 +824,18 @@ fn job_record(
 
 /// `POST {jobs}/{id}` with `{exitCode, endedUtc, output}` once the run's
 /// pane exited, and the job record's end.
-fn report_job_exit(sources: &Sources, registry: &Registry, source_id: &str, job_id: &str, term_id: TermId, exit_code: Option<i32>) {
-    let output = registry.handle(term_id).map(|h| cap_output(&h.dump_text(10_000), OUTPUT_CAP_BYTES)).unwrap_or_default();
+fn report_job_exit(
+    sources: &Sources,
+    registry: &Registry,
+    source_id: &str,
+    job_id: &str,
+    term_id: TermId,
+    exit_code: Option<i32>,
+) {
+    let output = registry
+        .handle(term_id)
+        .map(|h| cap_output(&h.dump_text(10_000), OUTPUT_CAP_BYTES))
+        .unwrap_or_default();
     let code = exit_code.unwrap_or(-1);
     let ended = iso_utc(epoch_ms());
     let report = json!({ "exitCode": code, "endedUtc": ended, "output": output });
@@ -642,7 +887,9 @@ fn poll_job(sources: Sources, source_id: String, job_id: String) {
                         if last_answer.elapsed() >= JOB_POLL_MAX_SILENCE {
                             sources.job_update(&source_id, &job_id, |j| {
                                 j.state = "lost".into();
-                                j.log = Some(format!("the source stopped answering about this job: {e}"));
+                                j.log = Some(format!(
+                                    "the source stopped answering about this job: {e}"
+                                ));
                                 j.ended_utc = Some(iso_utc(epoch_ms()));
                             });
                             return;
@@ -696,7 +943,9 @@ pub fn source_actions(
     let info = sources.info(&source_id)?;
     let roots = projects.cwd_roots(info.project_id);
     match (owner, key) {
-        (Some(owner), Some(key)) => sources.item_actions(&source_id, &view, &owner, &key, &tools.list(), &roots),
+        (Some(owner), Some(key)) => {
+            sources.item_actions(&source_id, &view, &owner, &key, &tools.list(), &roots)
+        }
         (Some(_), None) => Err("an item action needs the row's key".into()),
         (None, key) => sources.actions(&source_id, &view, key.as_deref(), &tools.list(), &roots),
     }
@@ -725,13 +974,28 @@ pub async fn source_run_action(
     values: Option<Value>,
 ) -> Result<ActionOutcome, String> {
     main_window_only(&window)?;
-    let deps = deps_of(&registry, &tools, &settings, &projects, &records, &sources, app);
+    let deps = deps_of(
+        &registry, &tools, &settings, &projects, &records, &sources, app,
+    );
     tauri::async_runtime::spawn_blocking(move || {
-        let answers = Answers { confirmed, note: note.as_deref(), values: values.as_ref() };
+        let answers = Answers {
+            confirmed,
+            note: note.as_deref(),
+            values: values.as_ref(),
+        };
         match (owner, key) {
-            (Some(owner), Some(key)) => run_item_action_with(&deps, &source_id, &view, &owner, &key, &action_id, answers),
+            (Some(owner), Some(key)) => {
+                run_item_action_with(&deps, &source_id, &view, &owner, &key, &action_id, answers)
+            }
             (Some(_), None) => Err("an item action needs the row's key".into()),
-            (None, key) => run_action_with(&deps, &source_id, &view, key.as_deref(), &action_id, answers),
+            (None, key) => run_action_with(
+                &deps,
+                &source_id,
+                &view,
+                key.as_deref(),
+                &action_id,
+                answers,
+            ),
         }
     })
     .await
@@ -740,14 +1004,26 @@ pub async fn source_run_action(
 
 /// One job's record (as last polled or reported).
 #[tauri::command]
-pub fn source_job(window: tauri::Window, sources: State<'_, Sources>, source_id: String, job_id: String) -> Result<JobRecord, String> {
+pub fn source_job(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    source_id: String,
+    job_id: String,
+) -> Result<JobRecord, String> {
     main_window_only(&window)?;
-    sources.job(&source_id, &job_id).ok_or_else(|| format!("source {source_id} has no job {job_id}"))
+    sources
+        .job(&source_id, &job_id)
+        .ok_or_else(|| format!("source {source_id} has no job {job_id}"))
 }
 
 /// A panel's page from a payload-named path. Re-call while it is open.
 #[tauri::command]
-pub async fn source_panel(window: tauri::Window, sources: State<'_, Sources>, source_id: String, path: String) -> Result<Value, String> {
+pub async fn source_panel(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    source_id: String,
+    path: String,
+) -> Result<Value, String> {
     main_window_only(&window)?;
     let sources = sources.inner().clone();
     tauri::async_runtime::spawn_blocking(move || sources.panel(&source_id, &path))
@@ -759,12 +1035,18 @@ pub async fn source_panel(window: tauri::Window, sources: State<'_, Sources>, so
 /// or plain http to this machine). Async: a plain-http name is looked up
 /// first, which must not hold the UI thread.
 #[tauri::command]
-pub async fn open_source_link(window: tauri::Window, sources: State<'_, Sources>, source_id: String, url: String) -> Result<(), String> {
+pub async fn open_source_link(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    source_id: String,
+    url: String,
+) -> Result<(), String> {
     main_window_only(&window)?;
     let sources = sources.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         sources.link_check(&source_id, &url)?;
-        tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("could not open {url}: {e}"))
+        tauri_plugin_opener::open_url(&url, None::<&str>)
+            .map_err(|e| format!("could not open {url}: {e}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -779,7 +1061,8 @@ pub fn set_source_prompt_policy(
     policy: String,
 ) -> Result<SourcesListing, String> {
     main_window_only(&window)?;
-    let policy = PromptPolicy::parse(&policy).ok_or_else(|| format!("`{policy}` is not a prompt policy (first_time | always)"))?;
+    let policy = PromptPolicy::parse(&policy)
+        .ok_or_else(|| format!("`{policy}` is not a prompt policy (first_time | always)"))?;
     sources.set_prompt_policy(&source_id, policy)?;
     Ok(sources.listing())
 }
@@ -804,10 +1087,20 @@ mod tests {
         assert_eq!(ok.argv, ["node", "-e", "1"]);
         assert_eq!(ok.title.as_deref(), Some("Seed"));
         assert_eq!(ok.env["CHAPPA_STACK_SLOT"], "1");
-        assert!(parse_run_block(&json!({"argv": [], "cwd": "/x"})).unwrap_err().contains("no program"));
-        assert!(parse_run_block(&json!({"argv": "node x", "cwd": "/x"})).unwrap_err().contains("list"));
-        assert!(parse_run_block(&json!({"argv": ["node"]})).unwrap_err().contains("cwd"));
-        assert!(parse_run_block(&json!({"argv": ["node"], "cwd": "/x", "env": {"bad name": "1"}})).unwrap_err().contains("env name"));
+        assert!(parse_run_block(&json!({"argv": [], "cwd": "/x"}))
+            .unwrap_err()
+            .contains("no program"));
+        assert!(parse_run_block(&json!({"argv": "node x", "cwd": "/x"}))
+            .unwrap_err()
+            .contains("list"));
+        assert!(parse_run_block(&json!({"argv": ["node"]}))
+            .unwrap_err()
+            .contains("cwd"));
+        assert!(
+            parse_run_block(&json!({"argv": ["node"], "cwd": "/x", "env": {"bad name": "1"}}))
+                .unwrap_err()
+                .contains("env name")
+        );
     }
 
     #[test]

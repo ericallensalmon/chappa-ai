@@ -199,15 +199,33 @@ mod tests {
 
         // Exited-0 vs failed (nonzero / signal).
         assert_eq!(
-            transition(Running, Exited { code: Some(0), success: true }),
+            transition(
+                Running,
+                Exited {
+                    code: Some(0),
+                    success: true
+                }
+            ),
             Exited
         );
         assert_eq!(
-            transition(Running, Exited { code: Some(2), success: false }),
+            transition(
+                Running,
+                Exited {
+                    code: Some(2),
+                    success: false
+                }
+            ),
             Failed
         );
         assert_eq!(
-            transition(Starting, Exited { code: None, success: false }),
+            transition(
+                Starting,
+                Exited {
+                    code: None,
+                    success: false
+                }
+            ),
             Failed
         );
 
@@ -238,7 +256,8 @@ mod tests {
 
     #[test]
     fn snapshot_carries_exit_code_and_status_str() {
-        let failed = TerminalSnapshot::new(1, "shell".into(), ProcessStatus::Failed, Some(2), 80, 24, 7);
+        let failed =
+            TerminalSnapshot::new(1, "shell".into(), ProcessStatus::Failed, Some(2), 80, 24, 7);
         assert_eq!(failed.status_str(), "failed");
         assert_eq!(failed.exit_code, Some(2));
 
@@ -246,7 +265,8 @@ mod tests {
         assert_eq!(ok.status_str(), "exited");
         assert_eq!(ok.exit_code, Some(0));
 
-        let stopped = TerminalSnapshot::new(3, "pwsh".into(), ProcessStatus::Stopped, None, 120, 30, 0);
+        let stopped =
+            TerminalSnapshot::new(3, "pwsh".into(), ProcessStatus::Stopped, None, 120, 30, 0);
         assert_eq!(stopped.status_str(), "stopped");
         assert_eq!(stopped.exit_code, None);
     }

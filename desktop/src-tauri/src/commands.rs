@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use project_model::settings::{split_command_line, Settings};
+use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -24,8 +24,8 @@ use project_model::records::{new_record_id, RecordKind, Run, TailKind, TerminalR
 
 use crate::records::{RecordError, Records, Scope};
 use crate::registry::{
-    actor_config, emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink,
-    RailRow, RecordBinding, Registry, RunRecorder, TermId,
+    actor_config, emit_created, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink,
+    NullSink, RailRow, RecordBinding, Registry, RunRecorder, TermId,
 };
 use crate::settings::SettingsState;
 
@@ -331,12 +331,24 @@ pub fn create_terminal(
             last_run: None,
         };
         if let Err(e) = records.add_terminal_record(scope, record.clone()) {
-            log::warn!("[terminals] shell \"{}\" leaves no record: {e}", record.name);
+            log::warn!(
+                "[terminals] shell \"{}\" leaves no record: {e}",
+                record.name
+            );
             return spawn_plain_terminal(&app, &registry, &settings, spec, scrollback, frames);
         }
         let sink: Arc<dyn EventSink> = Arc::new(ChannelSink::new(frames, app.clone()));
-        return spawn_terminal_record_with(&registry, &settings, &records, scope, &record, scrollback, sink, Some(&app))
-            .map_err(String::from);
+        return spawn_terminal_record_with(
+            &registry,
+            &settings,
+            &records,
+            scope,
+            &record,
+            scrollback,
+            sink,
+            Some(&app),
+        )
+        .map_err(String::from);
     }
     spawn_plain_terminal(&app, &registry, &settings, spec, scrollback, frames)
 }
@@ -412,8 +424,13 @@ fn spawn_terminal_record_with(
     sink: Arc<dyn EventSink>,
     app: Option<&AppHandle>,
 ) -> Result<TermId, RecordError> {
-    let run_uuid = crate::control_http::random_hex(16).map_err(|e| format!("cannot generate a run uuid: {e}"))?;
-    let run = Run::begin(run_uuid.clone(), term_core::actor::epoch_ms(), TailKind::Text);
+    let run_uuid = crate::control_http::random_hex(16)
+        .map_err(|e| format!("cannot generate a run uuid: {e}"))?;
+    let run = Run::begin(
+        run_uuid.clone(),
+        term_core::actor::epoch_ms(),
+        TailKind::Text,
+    );
     records.begin_run(scope, RecordKind::Terminal, &record.record_id, &run)?;
     let spec = to_pty_spec(
         PtySpecDto {
@@ -432,7 +449,13 @@ fn spawn_terminal_record_with(
         record_id: record.record_id.clone(),
         run_uuid: run_uuid.clone(),
     };
-    let id = match registry.create_recorded_terminal(cfg, sink, app.cloned(), record.name.clone(), binding) {
+    let id = match registry.create_recorded_terminal(
+        cfg,
+        sink,
+        app.cloned(),
+        record.name.clone(),
+        binding,
+    ) {
         Ok(id) => id,
         Err(e) => {
             // The run began in the store but no terminal ever ran it.
@@ -648,7 +671,10 @@ pub async fn debug_stats(
 /// sync command would run all of that on the webview's MAIN thread, freezing
 /// the window for the duration (the `pick_directory` lesson).
 #[tauri::command]
-pub async fn close_terminal(registry: State<'_, Registry>, id: TermId) -> Result<Option<String>, String> {
+pub async fn close_terminal(
+    registry: State<'_, Registry>,
+    id: TermId,
+) -> Result<Option<String>, String> {
     let registry = registry.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || registry.close(id))
         .await
@@ -696,8 +722,7 @@ pub fn attach_terminal(
     id: TermId,
     frames: Channel<InvokeResponseBody>,
 ) -> Result<RailRow, String> {
-    let sink: Arc<dyn crate::registry::EventSink> =
-        Arc::new(ChannelSink::new(frames, app.clone()));
+    let sink: Arc<dyn crate::registry::EventSink> = Arc::new(ChannelSink::new(frames, app.clone()));
     registry.attach_terminal(id, sink)
 }
 

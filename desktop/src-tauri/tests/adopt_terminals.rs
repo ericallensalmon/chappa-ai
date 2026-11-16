@@ -203,15 +203,24 @@ fn attach_swaps_sink_delivers_subsequent_events_and_triggers_a_full() {
     let a_count = sink_a.binary.lock().unwrap().len();
 
     // Swap sink_b in; the answer carries the terminal's row facts.
-    let row = registry.attach_terminal(id, sink_b.clone()).expect("attach");
+    let row = registry
+        .attach_terminal(id, sink_b.clone())
+        .expect("attach");
     assert_eq!(row.kind, "terminal");
     assert_eq!(row.base.name, "swap");
     assert!(row.project_id.is_none() && row.agent_tool_id.is_none());
 
     // The replacement sink's FIRST frame is a FULL (the forced resync).
     let b_first = wait_until(|| sink_b.binary.lock().unwrap().first().cloned());
-    assert_eq!(frame_kind(&b_first), 0, "replacement sink starts from a FULL frame");
-    registry.handle(id).expect("handle").ack(frame_seq(&b_first));
+    assert_eq!(
+        frame_kind(&b_first),
+        0,
+        "replacement sink starts from a FULL frame"
+    );
+    registry
+        .handle(id)
+        .expect("handle")
+        .ack(frame_seq(&b_first));
 
     // The later 'b' output reaches the NEW sink, and the OLD one sees nothing
     // new after the swap.
@@ -235,8 +244,13 @@ fn attach_swaps_sink_delivers_subsequent_events_and_triggers_a_full() {
 #[test]
 fn attach_to_a_missing_id_is_a_clean_error_and_re_attach_is_idempotent() {
     let registry = Registry::default();
-    let err = registry.attach_terminal(42, Arc::new(MockSink::default())).unwrap_err();
-    assert!(err.contains("no such terminal"), "clear error naming the id, got: {err}");
+    let err = registry
+        .attach_terminal(42, Arc::new(MockSink::default()))
+        .unwrap_err();
+    assert!(
+        err.contains("no such terminal"),
+        "clear error naming the id, got: {err}"
+    );
 
     let id = registry
         .create_terminal(cfg(), Arc::new(MockSink::default()), None, "t".into())

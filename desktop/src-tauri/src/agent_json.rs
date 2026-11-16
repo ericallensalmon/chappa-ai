@@ -251,7 +251,10 @@ impl Adapter {
         let mut out = Vec::new();
         if self.in_turn {
             self.in_turn = false;
-            out.push((AgentEventKind::TurnEnded, json!({"reason": "exit", "exit_code": status.code})));
+            out.push((
+                AgentEventKind::TurnEnded,
+                json!({"reason": "exit", "exit_code": status.code}),
+            ));
         }
         if !status.success {
             out.push((
@@ -260,7 +263,10 @@ impl Adapter {
             ));
         }
         if !persistent {
-            out.push((AgentEventKind::AwaitingInput, json!({"after": "exit", "exit_code": status.code})));
+            out.push((
+                AgentEventKind::AwaitingInput,
+                json!({"after": "exit", "exit_code": status.code}),
+            ));
         }
         out
     }
@@ -304,14 +310,19 @@ impl Adapter {
         let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
         // A nested (subagent) event carries a `parent_tool_use_id`; its
         // session line is NOT ours.
-        let nested = value.get("parent_tool_use_id").is_some_and(|p| !p.is_null());
+        let nested = value
+            .get("parent_tool_use_id")
+            .is_some_and(|p| !p.is_null());
         match (ty, subtype) {
             ("system", "init") if nested => out.push((AgentEventKind::Raw, value)),
             ("system", "init") => {
                 if let Some(session) = value.get("session_id").and_then(Value::as_str) {
                     self.session_id = Some(session.to_owned());
                 }
-                self.model = value.get("model").and_then(Value::as_str).map(str::to_owned);
+                self.model = value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 let payload = json!({
                     "session_id": self.session_id,
                     "model": self.model,
@@ -336,7 +347,10 @@ impl Adapter {
                 out.push((AgentEventKind::Compaction, value));
             }
             ("assistant", _) => {
-                self.start_turn(&mut out, json!({"session_id": self.session_id, "model": self.model, "implicit": true}));
+                self.start_turn(
+                    &mut out,
+                    json!({"session_id": self.session_id, "model": self.model, "implicit": true}),
+                );
                 let blocks = value
                     .pointer("/message/content")
                     .and_then(Value::as_array)
@@ -344,10 +358,13 @@ impl Adapter {
                     .unwrap_or_default();
                 for block in blocks {
                     match block.get("type").and_then(Value::as_str) {
-                        Some("text") => out.push((AgentEventKind::Text, json!({"text": block.get("text")}))),
-                        Some("thinking") => {
-                            out.push((AgentEventKind::Text, json!({"text": block.get("thinking"), "thinking": true})))
+                        Some("text") => {
+                            out.push((AgentEventKind::Text, json!({"text": block.get("text")})))
                         }
+                        Some("thinking") => out.push((
+                            AgentEventKind::Text,
+                            json!({"text": block.get("thinking"), "thinking": true}),
+                        )),
                         Some("tool_use") => out.push((
                             AgentEventKind::ToolCall,
                             json!({
@@ -388,7 +405,11 @@ impl Adapter {
             }
             ("result", _) => {
                 out.push((AgentEventKind::Usage, claude_usage(&value)));
-                let is_error = value.get("is_error").and_then(Value::as_bool).unwrap_or(false) || subtype != "success";
+                let is_error = value
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || subtype != "success";
                 if is_error {
                     out.push((
                         AgentEventKind::Error,
@@ -439,24 +460,46 @@ impl Adapter {
                 // The run's own session is announced by its FIRST step;
                 // later steps with another id are a subagent's.
                 if self.session_id.is_none() {
-                    self.session_id = value.get("sessionID").and_then(Value::as_str).map(str::to_owned);
+                    self.session_id = value
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                 }
                 self.in_turn = false;
-                self.start_turn(&mut out, json!({"session_id": self.session_id, "message_id": part.get("messageID")}));
+                self.start_turn(
+                    &mut out,
+                    json!({"session_id": self.session_id, "message_id": part.get("messageID")}),
+                );
             }
             "text" => {
-                self.start_turn(&mut out, json!({"session_id": self.session_id, "implicit": true}));
+                self.start_turn(
+                    &mut out,
+                    json!({"session_id": self.session_id, "implicit": true}),
+                );
                 out.push((AgentEventKind::Text, json!({"text": part.get("text")})));
             }
             "reasoning" => {
-                self.start_turn(&mut out, json!({"session_id": self.session_id, "implicit": true}));
-                out.push((AgentEventKind::Text, json!({"text": part.get("text"), "thinking": true})));
+                self.start_turn(
+                    &mut out,
+                    json!({"session_id": self.session_id, "implicit": true}),
+                );
+                out.push((
+                    AgentEventKind::Text,
+                    json!({"text": part.get("text"), "thinking": true}),
+                ));
             }
             "tool_use" | "tool" => {
-                self.start_turn(&mut out, json!({"session_id": self.session_id, "implicit": true}));
+                self.start_turn(
+                    &mut out,
+                    json!({"session_id": self.session_id, "implicit": true}),
+                );
                 let state = part.get("state").cloned().unwrap_or(Value::Null);
                 let status = state.get("status").and_then(Value::as_str).unwrap_or("");
-                let phase = if matches!(status, "completed" | "error") { "result" } else { "call" };
+                let phase = if matches!(status, "completed" | "error") {
+                    "result"
+                } else {
+                    "call"
+                };
                 out.push((
                     AgentEventKind::ToolCall,
                     json!({
@@ -473,7 +516,10 @@ impl Adapter {
             "step_finish" => {
                 let tokens = part.get("tokens").cloned().unwrap_or(Value::Null);
                 let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-                let cache_read = tokens.pointer("/cache/read").and_then(Value::as_u64).unwrap_or(0);
+                let cache_read = tokens
+                    .pointer("/cache/read")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 out.push((
                     AgentEventKind::Usage,
                     json!({
@@ -490,7 +536,10 @@ impl Adapter {
                     }),
                 ));
                 self.in_turn = false;
-                out.push((AgentEventKind::TurnEnded, json!({"reason": part.get("reason"), "message_id": part.get("messageID")})));
+                out.push((
+                    AgentEventKind::TurnEnded,
+                    json!({"reason": part.get("reason"), "message_id": part.get("messageID")}),
+                ));
             }
             "error" => out.push((
                 AgentEventKind::Error,
@@ -511,7 +560,8 @@ impl Adapter {
 fn claude_usage(value: &Value) -> Value {
     let usage = value.get("usage").cloned().unwrap_or(Value::Null);
     let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
-    let context_tokens = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+    let context_tokens =
+        n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
     let context_window = value
         .get("modelUsage")
         .and_then(Value::as_object)
@@ -594,7 +644,9 @@ pub struct JsonHooks {
 
 impl JsonHooks {
     pub fn none() -> Self {
-        Self { emit: Arc::new(|_| {}) }
+        Self {
+            emit: Arc::new(|_| {}),
+        }
     }
 }
 
@@ -636,7 +688,13 @@ pub struct JsonAgent {
 }
 
 impl JsonAgent {
-    pub fn new(id: TermId, handle: TermHandle, recipe: SpawnRecipe, mode: MachineMode, hooks: JsonHooks) -> Arc<Self> {
+    pub fn new(
+        id: TermId,
+        handle: TermHandle,
+        recipe: SpawnRecipe,
+        mode: MachineMode,
+        hooks: JsonHooks,
+    ) -> Arc<Self> {
         Self::with_clock(id, handle, recipe, mode, hooks, Arc::new(epoch_ms))
     }
 
@@ -790,7 +848,11 @@ impl JsonAgent {
         let stderr = child.stderr.take();
         // Per-turn CLIs read their message from argv; their stdin is closed
         // at once so a CLI that also polls stdin sees EOF instead of hanging.
-        let stdin = if self.mode.persistent { child.stdin.take() } else { None };
+        let stdin = if self.mode.persistent {
+            child.stdin.take()
+        } else {
+            None
+        };
         let me = self.clone();
         let stderr_reader = std::thread::spawn(move || me.read_stderr(stderr));
         drop(stderr_reader);
@@ -864,7 +926,9 @@ impl JsonAgent {
     /// not stall a concurrent send or a snapshot read.
     pub fn on_line(&self, line: &str) {
         self.handle.note_output(line.len() + 1);
-        let Some(parsed) = Adapter::parse_line(line) else { return };
+        let Some(parsed) = Adapter::parse_line(line) else {
+            return;
+        };
         let mapped = self.lock().adapter.map_parsed(parsed);
         self.push(mapped);
     }
@@ -872,7 +936,10 @@ impl JsonAgent {
     /// A per-turn agent spawned with no prompt: nothing runs yet, it is
     /// waiting for its first message.
     pub fn mark_awaiting(&self) {
-        self.push(vec![(AgentEventKind::AwaitingInput, json!({"after": "spawn"}))]);
+        self.push(vec![(
+            AgentEventKind::AwaitingInput,
+            json!({"after": "spawn"}),
+        )]);
     }
 
     /// The child exited (tests feed this directly too). Persistent: the
@@ -1045,7 +1112,13 @@ impl JsonAgent {
     /// Park on the turn signal until `turns_started` moves past
     /// `turns_before`, the child dies first (reason `exited`, with the CLI's
     /// error when it pushed one), or the clock passes `started + wait`.
-    fn wait_for_turn(&self, turns_before: u64, seq_before: u64, started: u64, wait: Duration) -> TurnReceipt {
+    fn wait_for_turn(
+        &self,
+        turns_before: u64,
+        seq_before: u64,
+        started: u64,
+        wait: Duration,
+    ) -> TurnReceipt {
         let wait_ms = wait.as_millis() as u64;
         let deadline = started + wait_ms;
         let mut inner = self.lock();
@@ -1150,7 +1223,6 @@ impl Drop for JsonAgent {
     }
 }
 
-
 /// The `agent://event` wire object.
 pub fn event_json(event: &AgentEvent) -> Map<String, Value> {
     let mut map = Map::new();
@@ -1171,7 +1243,9 @@ mod tests {
     use term_core::actor::{spawn_actor_nopty, ActorConfig};
 
     fn fixture(name: &str) -> Vec<String> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
             .lines()
@@ -1213,27 +1287,48 @@ mod tests {
         // result → usage, turn_ended, awaiting_input. Turn 2 repeats.
         let turn1 = &ks[..ks.iter().position(|k| *k == "awaiting_input").unwrap() + 1];
         assert_eq!(turn1[0], "turn_started");
-        assert!(turn1.contains(&"raw"), "thinking_tokens / rate_limit pass through as raw: {turn1:?}");
-        let texts: Vec<&Value> = all.iter().filter(|(k, _)| *k == AgentEventKind::Text).map(|(_, p)| p).collect();
+        assert!(
+            turn1.contains(&"raw"),
+            "thinking_tokens / rate_limit pass through as raw: {turn1:?}"
+        );
+        let texts: Vec<&Value> = all
+            .iter()
+            .filter(|(k, _)| *k == AgentEventKind::Text)
+            .map(|(_, p)| p)
+            .collect();
         assert_eq!(texts.len(), 4, "two thinking + two text blocks: {texts:?}");
         assert_eq!(texts[0]["thinking"], true);
         assert_eq!(texts[1]["text"], "ok");
         assert_eq!(texts[3]["text"], "bye");
-        assert_eq!(&turn1[turn1.len() - 3..], ["usage", "turn_ended", "awaiting_input"]);
+        assert_eq!(
+            &turn1[turn1.len() - 3..],
+            ["usage", "turn_ended", "awaiting_input"]
+        );
         assert_eq!(ks.iter().filter(|k| **k == "turn_started").count(), 2);
         assert_eq!(ks.iter().filter(|k| **k == "awaiting_input").count(), 2);
         assert!(!ks.contains(&"error"));
         // Usage: context = input + cache read + cache creation, pct against
         // the 200k window from modelUsage.
-        let usage = all.iter().find(|(k, _)| *k == AgentEventKind::Usage).map(|(_, p)| p).unwrap();
+        let usage = all
+            .iter()
+            .find(|(k, _)| *k == AgentEventKind::Usage)
+            .map(|(_, p)| p)
+            .unwrap();
         assert_eq!(usage["context_tokens"], 10 + 6871);
         assert_eq!(usage["context_window"], 200_000);
         assert_eq!(usage["context_pct"], 3.4);
         assert_eq!(usage["output_tokens"], 64);
-        let ended = all.iter().find(|(k, _)| *k == AgentEventKind::TurnEnded).map(|(_, p)| p).unwrap();
+        let ended = all
+            .iter()
+            .find(|(k, _)| *k == AgentEventKind::TurnEnded)
+            .map(|(_, p)| p)
+            .unwrap();
         assert_eq!(ended["result"], "ok");
         assert_eq!(ended["subtype"], "success");
-        assert_eq!(adapter.session_id.as_deref(), Some("f1c70000-0000-4000-8000-000000000000"));
+        assert_eq!(
+            adapter.session_id.as_deref(),
+            Some("f1c70000-0000-4000-8000-000000000000")
+        );
         assert!(!adapter.in_turn);
     }
 
@@ -1244,7 +1339,11 @@ mod tests {
     fn claude_tool_calls_compaction_errors_and_garbage() {
         let mut a = Adapter::new(AdapterKind::ClaudeStreamJson);
         let call = a.map_line(r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]},"session_id":"s1"}"#);
-        assert_eq!(kinds(&call), ["turn_started", "tool_call"], "implicit turn start before the first block");
+        assert_eq!(
+            kinds(&call),
+            ["turn_started", "tool_call"],
+            "implicit turn start before the first block"
+        );
         assert_eq!(call[0].1["implicit"], true);
         assert_eq!(call[1].1["phase"], "call");
         assert_eq!(call[1].1["name"], "Bash");
@@ -1256,18 +1355,24 @@ mod tests {
         let compact = a.map_line(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":150000},"session_id":"s1"}"#);
         assert_eq!(kinds(&compact), ["compaction"]);
         let err = a.map_line(r#"{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":2,"duration_ms":5,"usage":{"input_tokens":1,"output_tokens":1},"session_id":"s1"}"#);
-        assert_eq!(kinds(&err), ["usage", "error", "turn_ended", "awaiting_input"]);
+        assert_eq!(
+            kinds(&err),
+            ["usage", "error", "turn_ended", "awaiting_input"]
+        );
         assert_eq!(err[1].1["subtype"], "error_max_turns");
         let garbage = a.map_line("not json at all");
         assert_eq!(kinds(&garbage), ["raw"]);
         assert_eq!(garbage[0].1["line"], "not json at all");
         assert!(a.map_line("   ").is_empty());
         // An unknown typed event keeps its whole object.
-        let unknown = a.map_line(r#"{"type":"stream_event","event":{"type":"content_block_delta"}}"#);
+        let unknown =
+            a.map_line(r#"{"type":"stream_event","event":{"type":"content_block_delta"}}"#);
         assert_eq!(kinds(&unknown), ["raw"]);
         assert_eq!(unknown[0].1["event"]["type"], "content_block_delta");
         // A user message that is not a tool result is raw, not dropped.
-        let plain_user = a.map_line(r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#);
+        let plain_user = a.map_line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+        );
         assert_eq!(kinds(&plain_user), ["raw"]);
     }
 
@@ -1286,12 +1391,27 @@ mod tests {
         assert_eq!(all[2].1["context_tokens"], 26832);
         assert_eq!(all[2].1["total_cost_usd"], 0);
         assert_eq!(all[3].1["reason"], "stop");
-        assert_eq!(a.session_id.as_deref(), Some("ses_fixture000000000000000001"));
+        assert_eq!(
+            a.session_id.as_deref(),
+            Some("ses_fixture000000000000000001")
+        );
         // Per-turn: the exit is what makes it awaiting_input (no error on 0).
-        let exit = a.on_exit(ExitStatus { code: Some(0), success: true }, false);
+        let exit = a.on_exit(
+            ExitStatus {
+                code: Some(0),
+                success: true,
+            },
+            false,
+        );
         assert_eq!(kinds(&exit), ["awaiting_input"]);
         // A failed run: error first, still awaiting (the session is intact).
-        let failed = a.on_exit(ExitStatus { code: Some(1), success: false }, false);
+        let failed = a.on_exit(
+            ExitStatus {
+                code: Some(1),
+                success: false,
+            },
+            false,
+        );
         assert_eq!(kinds(&failed), ["error", "awaiting_input"]);
         // Hand-written (documented shapes): tool_use running → call, completed → result.
         let running = a.map_line(r#"{"type":"tool_use","sessionID":"ses_1","part":{"type":"tool","callID":"call_1","tool":"bash","state":{"status":"running","input":{"command":"ls"}}}}"#);
@@ -1305,13 +1425,20 @@ mod tests {
         let err = a.map_line(r#"{"type":"error","sessionID":"ses_1","error":{"name":"ProviderError","data":{"message":"boom"}}}"#);
         assert_eq!(kinds(&err), ["error"]);
         assert_eq!(err[0].1["message"], "boom");
-        let unknown = a.map_line(r#"{"type":"session_status","sessionID":"ses_1","status":"idle"}"#);
+        let unknown =
+            a.map_line(r#"{"type":"session_status","sessionID":"ses_1","status":"idle"}"#);
         assert_eq!(kinds(&unknown), ["raw"]);
         assert_eq!(unknown[0].1["status"], "idle");
         // Persistent-mode exit with an error code: turn_ended + error, no awaiting.
         let mut p = Adapter::new(AdapterKind::ClaudeStreamJson);
         p.map_line(r#"{"type":"system","subtype":"init","session_id":"x","model":"m"}"#);
-        let died = p.on_exit(ExitStatus { code: Some(2), success: false }, true);
+        let died = p.on_exit(
+            ExitStatus {
+                code: Some(2),
+                success: false,
+            },
+            true,
+        );
         assert_eq!(kinds(&died), ["turn_ended", "error"]);
         assert_eq!(died[0].1["reason"], "exit");
     }
@@ -1319,25 +1446,47 @@ mod tests {
     #[test]
     fn machine_modes_and_input_lines() {
         let claude = machine_mode(ToolType::Claude).unwrap();
-        assert_eq!(claude.args, ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"]);
+        assert_eq!(
+            claude.args,
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
+                "--verbose"
+            ]
+        );
         assert!(claude.persistent);
         let oc = machine_mode(ToolType::Opencode).unwrap();
         assert_eq!(oc.args, ["run", "--format", "json"]);
         assert!(!oc.persistent);
-        for t in [ToolType::Codex, ToolType::Gemini, ToolType::Custom, ToolType::Kimi] {
+        for t in [
+            ToolType::Codex,
+            ToolType::Gemini,
+            ToolType::Custom,
+            ToolType::Kimi,
+        ] {
             assert!(machine_mode(t).is_none(), "{t:?}");
             assert!(!MACHINE_MODE_TYPES.contains(&t));
         }
         for t in MACHINE_MODE_TYPES {
-            assert!(machine_mode(*t).is_some(), "MACHINE_MODE_TYPES is the one source: {t:?}");
+            assert!(
+                machine_mode(*t).is_some(),
+                "MACHINE_MODE_TYPES is the one source: {t:?}"
+            );
         }
-        let line = Adapter::new(AdapterKind::ClaudeStreamJson).input_line("hi \"there\"").unwrap();
+        let line = Adapter::new(AdapterKind::ClaudeStreamJson)
+            .input_line("hi \"there\"")
+            .unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["text"], "hi \"there\"");
         assert!(!line.contains('\n'));
-        assert!(Adapter::new(AdapterKind::OpencodeJson).input_line("x").is_none());
+        assert!(Adapter::new(AdapterKind::OpencodeJson)
+            .input_line("x")
+            .is_none());
         for k in [
             AgentEventKind::TurnStarted,
             AgentEventKind::ToolCall,
@@ -1405,7 +1554,14 @@ mod tests {
             },
         };
         let c = clock.clone();
-        let agent = JsonAgent::with_clock(7, handle.clone(), recipe, mode, hooks, Arc::new(move || c.load(Ordering::Relaxed)));
+        let agent = JsonAgent::with_clock(
+            7,
+            handle.clone(),
+            recipe,
+            mode,
+            hooks,
+            Arc::new(move || c.load(Ordering::Relaxed)),
+        );
         Harness {
             agent,
             handle,
@@ -1415,7 +1571,12 @@ mod tests {
     }
 
     fn kinds_of(h: &Harness) -> Vec<&'static str> {
-        h.emitted.lock().unwrap().iter().map(|e| e.kind.as_str()).collect()
+        h.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect()
     }
 
     /// A fake CLI that prints `lines` to stdout, then exits with `code` (a
@@ -1430,7 +1591,10 @@ mod tests {
             }
             body.push_str(&format!("exit /b {code}\r\n"));
             std::fs::write(&script, body).unwrap();
-            ("cmd".to_owned(), vec!["/C".to_owned(), script.to_string_lossy().into_owned()])
+            (
+                "cmd".to_owned(),
+                vec!["/C".to_owned(), script.to_string_lossy().into_owned()],
+            )
         } else {
             let script = dir.join(format!("{name}.sh"));
             let mut body = String::from("#!/bin/sh\n");
@@ -1455,16 +1619,29 @@ mod tests {
     #[test]
     fn awaiting_input_sets_and_the_next_send_clears() {
         let h = harness(machine_mode(ToolType::Opencode).unwrap());
-        h.agent.on_line(r#"{"type":"step_start","sessionID":"ses_1","part":{}}"#);
+        h.agent
+            .on_line(r#"{"type":"step_start","sessionID":"ses_1","part":{}}"#);
         h.agent.on_line(r#"{"type":"step_finish","sessionID":"ses_1","part":{"reason":"stop","tokens":{"input":1,"output":1}}}"#);
         assert!(!h.agent.awaiting_input());
-        h.agent.on_exit(ExitStatus { code: Some(0), success: true });
+        h.agent.on_exit(ExitStatus {
+            code: Some(0),
+            success: true,
+        });
         assert!(h.agent.awaiting_input());
-        assert_eq!(kinds_of(&h), ["turn_started", "usage", "turn_ended", "awaiting_input"]);
+        assert_eq!(
+            kinds_of(&h),
+            ["turn_started", "usage", "turn_ended", "awaiting_input"]
+        );
         assert_eq!(h.agent.session_id().as_deref(), Some("ses_1"));
-        assert!(h.handle.io().child_alive(), "a per-turn agent is alive between turns");
+        assert!(
+            h.handle.io().child_alive(),
+            "a per-turn agent is alive between turns"
+        );
         // The continuation argv carries -s <session> and the message LAST.
-        assert_eq!(h.agent.child_args(Some("ses_1"), Some("two words")), ["-s", "ses_1", "two words"]);
+        assert_eq!(
+            h.agent.child_args(Some("ses_1"), Some("two words")),
+            ["-s", "ses_1", "two words"]
+        );
         // A resumed per-turn agent is seeded with the saved id, so its FIRST
         // child already continues that session; the CLI's own step_start
         // does not overwrite a seeded id.
@@ -1472,16 +1649,22 @@ mod tests {
         seeded.agent.seed_session("ses_saved");
         assert_eq!(seeded.agent.session_id().as_deref(), Some("ses_saved"));
         assert_eq!(
-            seeded.agent.child_args(seeded.agent.session_id().as_deref(), Some("hello")),
+            seeded
+                .agent
+                .child_args(seeded.agent.session_id().as_deref(), Some("hello")),
             ["-s", "ses_saved", "hello"]
         );
-        seeded.agent.on_line(r#"{"type":"step_start","sessionID":"ses_saved","part":{}}"#);
+        seeded
+            .agent
+            .on_line(r#"{"type":"step_start","sessionID":"ses_saved","part":{}}"#);
         assert_eq!(seeded.agent.session_id().as_deref(), Some("ses_saved"));
         // A persistent agent: feed awaiting, then a send with no stdin →
         // exited; the flag drop happens only on a successful write.
         let p = harness(machine_mode(ToolType::Claude).unwrap());
-        p.agent.on_line(r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#);
-        p.agent.on_line(r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#);
+        p.agent
+            .on_line(r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#);
+        p.agent
+            .on_line(r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#);
         assert!(p.agent.awaiting_input());
         let r = p.agent.send_input("hi", Duration::from_millis(10));
         assert_eq!(r.reason.as_deref(), Some("exited"));
@@ -1490,17 +1673,31 @@ mod tests {
         assert!(p.agent.awaiting_input(), "no write happened: still waiting");
         // turn_started after an awaiting clears the flag too (an MCP send
         // whose receipt raced).
-        p.agent.on_line(r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#);
+        p.agent
+            .on_line(r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#);
         assert!(!p.agent.awaiting_input());
         // Waiting again, then the persistent child dies: a dead agent is
         // never waiting, and the fronting actor sees the exit.
-        p.agent.on_line(r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#);
+        p.agent
+            .on_line(r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#);
         assert!(p.agent.awaiting_input());
-        p.agent.on_exit(ExitStatus { code: Some(1), success: false });
-        assert!(!p.agent.awaiting_input(), "review fix: exit clears awaiting_input");
+        p.agent.on_exit(ExitStatus {
+            code: Some(1),
+            success: false,
+        });
+        assert!(
+            !p.agent.awaiting_input(),
+            "review fix: exit clears awaiting_input"
+        );
         assert!(p.agent.exited());
         assert!(!p.handle.io().child_alive());
-        assert_eq!(p.agent.send_input("late", Duration::from_millis(10)).reason.as_deref(), Some("exited"));
+        assert_eq!(
+            p.agent
+                .send_input("late", Duration::from_millis(10))
+                .reason
+                .as_deref(),
+            Some("exited")
+        );
     }
 
     /// Review fix: a per-turn continuation that cannot spawn RETIRES the
@@ -1519,19 +1716,43 @@ mod tests {
         );
         h.agent.mark_awaiting();
         assert!(h.agent.awaiting_input());
-        assert!(h.handle.io().has_output(), "a ring event ends 'booting' (has_output)");
+        assert!(
+            h.handle.io().has_output(),
+            "a ring event ends 'booting' (has_output)"
+        );
         assert!(h.handle.io().child_alive());
         let r = h.agent.send_input("go", Duration::from_millis(10));
         assert!(!r.delivered);
-        assert!(r.reason.as_deref().unwrap().starts_with("exited: cannot spawn"), "{r:?}");
+        assert!(
+            r.reason
+                .as_deref()
+                .unwrap()
+                .starts_with("exited: cannot spawn"),
+            "{r:?}"
+        );
         assert!(!h.agent.awaiting_input(), "retired: not waiting");
         assert!(h.agent.exited());
-        assert!(!h.handle.io().child_alive(), "the fronting actor saw the exit");
+        assert!(
+            !h.handle.io().child_alive(),
+            "the fronting actor saw the exit"
+        );
         let ks = kinds_of(&h);
         assert_eq!(ks, ["awaiting_input", "error"]);
         let err = h.emitted.lock().unwrap()[1].clone();
-        assert!(err.payload["message"].as_str().unwrap().contains("cannot spawn"), "{err:?}");
-        assert_eq!(h.agent.send_input("again", Duration::from_millis(10)).reason.as_deref(), Some("exited"));
+        assert!(
+            err.payload["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot spawn"),
+            "{err:?}"
+        );
+        assert_eq!(
+            h.agent
+                .send_input("again", Duration::from_millis(10))
+                .reason
+                .as_deref(),
+            Some("exited")
+        );
     }
 
     /// Review fix: a per-turn send JOINS the previous child's reader
@@ -1556,12 +1777,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
             agent.on_line(r#"{"type":"step_start","sessionID":"ses_1","part":{"messageID":"m1"}}"#);
             agent.on_line(r#"{"type":"step_finish","sessionID":"ses_1","part":{"reason":"stop","tokens":{"input":1,"output":1}}}"#);
-            agent.on_exit(ExitStatus { code: Some(0), success: true });
+            agent.on_exit(ExitStatus {
+                code: Some(0),
+                success: true,
+            });
         });
         h.agent.lock().reader = Some(slow_reader);
         let started = std::time::Instant::now();
         let r = h.agent.send_input("second", Duration::from_secs(10));
-        assert!(started.elapsed() >= Duration::from_millis(150), "the send waited for the reader");
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "the send waited for the reader"
+        );
         assert!(r.delivered, "{r:?}");
         // The receipt answers under the lock; the emit hook runs after it.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1570,7 +1797,13 @@ mod tests {
         }
         let ks = kinds_of(&h);
         assert!(
-            ks.starts_with(&["turn_started", "usage", "turn_ended", "awaiting_input", "turn_started"]),
+            ks.starts_with(&[
+                "turn_started",
+                "usage",
+                "turn_ended",
+                "awaiting_input",
+                "turn_started"
+            ]),
             "turn 1's tail lands before turn 2 starts: {ks:?}"
         );
         assert_eq!(r.turn_started_seq, Some(5));
@@ -1582,7 +1815,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(h.agent.awaiting_input());
-        assert_eq!(kinds_of(&h).iter().filter(|k| **k == "awaiting_input").count(), 2);
+        assert_eq!(
+            kinds_of(&h)
+                .iter()
+                .filter(|k| **k == "awaiting_input")
+                .count(),
+            2
+        );
         assert!(h.handle.io().child_alive(), "alive between turns");
     }
 
@@ -1596,18 +1835,27 @@ mod tests {
         let recipe = fake_script(
             dir.path(),
             "dies",
-            &[r#"{"type":"error","sessionID":"ses_1","error":{"name":"ProviderError","data":{"message":"boom"}}}"#],
+            &[
+                r#"{"type":"error","sessionID":"ses_1","error":{"name":"ProviderError","data":{"message":"boom"}}}"#,
+            ],
             1,
         );
         let h = harness_with(machine_mode(ToolType::Opencode).unwrap(), recipe);
         let started = std::time::Instant::now();
         let r = h.agent.send_input("go", Duration::from_secs(20));
-        assert!(started.elapsed() < Duration::from_secs(15), "short-circuited: {r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "short-circuited: {r:?}"
+        );
         assert!(!r.delivered);
         assert_eq!(r.reason.as_deref(), Some("exited: boom"), "{r:?}");
         assert_eq!(r.wait_ms, 20_000);
         let ks = kinds_of(&h);
-        assert_eq!(ks, ["error", "error", "awaiting_input"], "the CLI's error, the exit error, then waiting: {ks:?}");
+        assert_eq!(
+            ks,
+            ["error", "error", "awaiting_input"],
+            "the CLI's error, the exit error, then waiting: {ks:?}"
+        );
         // A failed RUN keeps the session: the agent waits for the next
         // message (per-turn semantics) and is still alive.
         assert!(h.agent.awaiting_input());
@@ -1623,14 +1871,19 @@ mod tests {
         let h = harness(machine_mode(ToolType::Claude).unwrap());
         assert!(!h.handle.io().has_output());
         h.agent.expect_ready_as_awaiting();
-        h.agent.on_line(r#"{"type":"system","subtype":"init","session_id":"s1","model":"m"}"#);
+        h.agent
+            .on_line(r#"{"type":"system","subtype":"init","session_id":"s1","model":"m"}"#);
         assert_eq!(kinds_of(&h), ["awaiting_input"]);
         assert_eq!(h.emitted.lock().unwrap()[0].payload["after"], "init");
         assert!(h.agent.awaiting_input());
         assert!(h.handle.io().has_output());
         assert_eq!(h.agent.session_id().as_deref(), Some("s1"));
         // Attach a stdin so the send writes, then the CLI's init is a turn.
-        let (cmd, args): (&str, &[&str]) = if cfg!(windows) { ("cmd", &["/C", "more"]) } else { ("cat", &[]) };
+        let (cmd, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "more"])
+        } else {
+            ("cat", &[])
+        };
         let mut child = Command::new(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -1670,7 +1923,11 @@ mod tests {
         assert_eq!(a.session_id.as_deref(), Some("top"));
         a.map_line(r#"{"type":"assistant","session_id":"other","message":{"content":[{"type":"text","text":"x"}]}}"#);
         a.map_line(r#"{"type":"result","subtype":"success","session_id":"other","usage":{}}"#);
-        assert_eq!(a.session_id.as_deref(), Some("top"), "only system/init carries the session");
+        assert_eq!(
+            a.session_id.as_deref(),
+            Some("top"),
+            "only system/init carries the session"
+        );
         let mut o = Adapter::new(AdapterKind::OpencodeJson);
         o.map_line(r#"{"type":"text","sessionID":"early","part":{"text":"hi"}}"#);
         assert_eq!(o.session_id, None, "only step_start announces the session");
@@ -1688,7 +1945,11 @@ mod tests {
         // Attach a stdin the agent can write to: a pipe whose read end we
         // drain on a thread (any Write works; ChildStdin is just the type).
         // Use a real child that sleeps: `cmd /C more` / `cat` reads stdin.
-        let (cmd, args): (&str, &[&str]) = if cfg!(windows) { ("cmd", &["/C", "more"]) } else { ("cat", &[]) };
+        let (cmd, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "more"])
+        } else {
+            ("cat", &[])
+        };
         let mut child = Command::new(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -1702,8 +1963,10 @@ mod tests {
             inner.stdin = Some(stdin);
             inner.child = Some(child);
         }
-        h.agent.on_line(r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#);
-        h.agent.on_line(r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#);
+        h.agent
+            .on_line(r#"{"type":"system","subtype":"init","session_id":"s","model":"m"}"#);
+        h.agent
+            .on_line(r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#);
         let seq_at_send = h.agent.last_seq();
         // Frozen clock: the send blocks until the turn_started line lands.
         let agent = h.agent.clone();
@@ -1716,7 +1979,11 @@ mod tests {
         feeder.join().unwrap();
         assert!(receipt.delivered, "{receipt:?}");
         assert_eq!(receipt.seq_before, seq_at_send);
-        assert_eq!(receipt.turn_started_seq, Some(seq_at_send + 2), "the raw line before it does not count");
+        assert_eq!(
+            receipt.turn_started_seq,
+            Some(seq_at_send + 2),
+            "the raw line before it does not count"
+        );
         assert_eq!(receipt.waited_ms, 0, "frozen clock");
         assert!(!h.agent.awaiting_input());
         // Clock jumps past the deadline, no turn_started → timeout (the
@@ -1762,10 +2029,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (command, args) = if cfg!(windows) {
             let script = dir.path().join("fake_cli.cmd");
-            std::fs::write(&script, format!("@echo off\r\necho {line1}\r\necho {line2}\r\necho oops 1>&2\r\n")).unwrap();
-            ("cmd".to_owned(), vec!["/C".to_owned(), script.to_string_lossy().into_owned()])
+            std::fs::write(
+                &script,
+                format!("@echo off\r\necho {line1}\r\necho {line2}\r\necho oops 1>&2\r\n"),
+            )
+            .unwrap();
+            (
+                "cmd".to_owned(),
+                vec!["/C".to_owned(), script.to_string_lossy().into_owned()],
+            )
         } else {
-            ("sh".to_owned(), vec!["-c".to_owned(), format!("echo '{line1}'; echo '{line2}'; echo oops 1>&2")])
+            (
+                "sh".to_owned(),
+                vec![
+                    "-c".to_owned(),
+                    format!("echo '{line1}'; echo '{line2}'; echo oops 1>&2"),
+                ],
+            )
         };
         let recipe = SpawnRecipe {
             command,
@@ -1773,7 +2053,13 @@ mod tests {
             cwd: None,
             env: IndexMap::new(),
         };
-        let agent = JsonAgent::new(3, handle.clone(), recipe, machine_mode(ToolType::Claude).unwrap(), hooks);
+        let agent = JsonAgent::new(
+            3,
+            handle.clone(),
+            recipe,
+            machine_mode(ToolType::Claude).unwrap(),
+            hooks,
+        );
         agent.spawn_child(None).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while handle.io().child_alive() && std::time::Instant::now() < deadline {
@@ -1781,15 +2067,27 @@ mod tests {
         }
         assert!(!handle.io().child_alive(), "exit reported to the actor");
         assert!(handle.io().has_output(), "bytes were noted, never parsed");
-        let ks: Vec<&str> = emitted.lock().unwrap().iter().map(|e| e.kind.as_str()).collect();
-        assert!(ks.starts_with(&["turn_started", "usage", "turn_ended", "awaiting_input"]), "{ks:?}");
+        let ks: Vec<&str> = emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert!(
+            ks.starts_with(&["turn_started", "usage", "turn_ended", "awaiting_input"]),
+            "{ks:?}"
+        );
         let stderr = emitted
             .lock()
             .unwrap()
             .iter()
             .find(|e| e.kind == AgentEventKind::Raw && e.payload.get("stderr").is_some())
             .map(|e| e.payload["stderr"].clone());
-        assert_eq!(stderr, Some(json!("oops")), "stderr lines pass through as raw");
+        assert_eq!(
+            stderr,
+            Some(json!("oops")),
+            "stderr lines pass through as raw"
+        );
         assert_eq!(agent.events_since(0).len(), ks.len());
         // The actor reported the exit through the normal event path.
         let mut saw_exit = false;

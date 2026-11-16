@@ -37,7 +37,11 @@ pub enum SourceError {
     Untrusted(String),
     /// The source answered with an error status. `kind`/`message` are the
     /// contract's error body when it sent one.
-    Http { status: u16, kind: String, message: String },
+    Http {
+        status: u16,
+        kind: String,
+        message: String,
+    },
     /// A 2xx body that is not JSON.
     Malformed(String),
 }
@@ -47,10 +51,18 @@ impl std::fmt::Display for SourceError {
         match self {
             SourceError::Unreachable(why) => write!(f, "unreachable: {why}"),
             SourceError::Untrusted(why) => write!(f, "identity check failed: {why}"),
-            SourceError::Http { status, kind, message } if kind.is_empty() => {
+            SourceError::Http {
+                status,
+                kind,
+                message,
+            } if kind.is_empty() => {
                 write!(f, "the source answered {status}: {message}")
             }
-            SourceError::Http { status, kind, message } => write!(f, "the source answered {status} ({kind}): {message}"),
+            SourceError::Http {
+                status,
+                kind,
+                message,
+            } => write!(f, "the source answered {status} ({kind}): {message}"),
             SourceError::Malformed(why) => write!(f, "malformed reply: {why}"),
         }
     }
@@ -60,7 +72,9 @@ impl From<HttpError> for SourceError {
     fn from(e: HttpError) -> Self {
         match e {
             HttpError::Malformed(why) => SourceError::Malformed(why),
-            HttpError::TooLarge { limit } => SourceError::Malformed(format!("reply larger than the {limit}-byte cap")),
+            HttpError::TooLarge { limit } => {
+                SourceError::Malformed(format!("reply larger than the {limit}-byte cap"))
+            }
             other => SourceError::Unreachable(other.to_string()),
         }
     }
@@ -81,7 +95,8 @@ impl SourceClient {
     /// before anything is connected.
     pub fn new(addr_text: &str, token_hex: &str) -> Result<Self, String> {
         let addr = parse_loopback_addr(addr_text)?;
-        let token = identity::decode_token(token_hex).ok_or_else(|| "the token is not 32 bytes of lowercase hex".to_owned())?;
+        let token = identity::decode_token(token_hex)
+            .ok_or_else(|| "the token is not 32 bytes of lowercase hex".to_owned())?;
         Ok(Self {
             addr,
             addr_text: addr_text.trim().to_owned(),
@@ -100,8 +115,9 @@ impl SourceClient {
     /// succeeding.
     pub fn verify(&mut self) -> Result<(), SourceError> {
         self.conn = None;
-        let mut conn = Connection::connect(self.addr, &self.addr_text, CONNECT_TIMEOUT, READ_TIMEOUT)
-            .map_err(|e| SourceError::Unreachable(e.to_string()))?;
+        let mut conn =
+            Connection::connect(self.addr, &self.addr_text, CONNECT_TIMEOUT, READ_TIMEOUT)
+                .map_err(|e| SourceError::Unreachable(e.to_string()))?;
         self.handshake(&mut conn)?;
         self.conn = Some(conn);
         Ok(())
@@ -119,7 +135,11 @@ impl SourceClient {
         let path = format!("{IDENTITY_PATH}?challenge={challenge}");
         let reply = conn
             .request("GET", &path, &[], None, MAX_IDENTITY_REPLY)
-            .map_err(|e| SourceError::Untrusted(format!("the program at {peer} did not answer the identity check ({e})")))?;
+            .map_err(|e| {
+                SourceError::Untrusted(format!(
+                    "the program at {peer} did not answer the identity check ({e})"
+                ))
+            })?;
         let _ = conn.set_read_timeout(Some(READ_TIMEOUT));
         if reply.status != 200 {
             return Err(SourceError::Untrusted(format!(
@@ -127,9 +147,11 @@ impl SourceClient {
                 reply.status
             )));
         }
-        let value: Value = reply
-            .json()
-            .ok_or_else(|| SourceError::Untrusted(format!("the program at {peer} sent a malformed identity answer")))?;
+        let value: Value = reply.json().ok_or_else(|| {
+            SourceError::Untrusted(format!(
+                "the program at {peer} sent a malformed identity answer"
+            ))
+        })?;
         let proof = value["proof"].as_str().unwrap_or("");
         let want = identity::source_proof(&self.token, &challenge, &self.addr_text);
         if !identity::constant_time_eq(want.as_bytes(), proof.as_bytes()) {
@@ -138,7 +160,9 @@ impl SourceClient {
             )));
         }
         if !conn.pending().is_empty() {
-            return Err(SourceError::Untrusted(format!("the program at {peer} sent bytes past its identity answer")));
+            return Err(SourceError::Untrusted(format!(
+                "the program at {peer} sent bytes past its identity answer"
+            )));
         }
         Ok(())
     }
@@ -152,9 +176,9 @@ impl SourceClient {
         if !reply.is_success() {
             return Err(http_error(&reply));
         }
-        reply
-            .json()
-            .ok_or_else(|| SourceError::Malformed(format!("{} did not answer JSON", endpoint.path())))
+        reply.json().ok_or_else(|| {
+            SourceError::Malformed(format!("{} did not answer JSON", endpoint.path()))
+        })
     }
 
     /// `POST` a JSON body to a declared endpoint (an action call, a job's
@@ -164,30 +188,49 @@ impl SourceClient {
     /// source's `{kind, message}`. Only a transport failure is an `Err`.
     /// A POST is never retried on a dropped connection: the source may have
     /// acted on the first one.
-    pub fn post(&mut self, endpoint: &Endpoint, extra_headers: &[(&str, &str)], body: &Value) -> Result<PostReply, SourceError> {
+    pub fn post(
+        &mut self,
+        endpoint: &Endpoint,
+        extra_headers: &[(&str, &str)],
+        body: &Value,
+    ) -> Result<PostReply, SourceError> {
         let text = body.to_string();
         let mut headers = vec![("Content-Type", "application/json")];
         headers.extend_from_slice(extra_headers);
         let reply = self.send_once("POST", endpoint, &headers, Some(text.as_bytes()))?;
         let body = reply.json().unwrap_or(Value::Null);
-        Ok(PostReply { status: reply.status, body })
+        Ok(PostReply {
+            status: reply.status,
+            body,
+        })
     }
 
     /// One request with the token on a verified connection, retried once
     /// on a connection the source dropped between calls (GET only).
-    fn send(&mut self, method: &str, endpoint: &Endpoint, extra: &[(&str, &str)], body: Option<&[u8]>) -> Result<chappa_ai_mcp::http::Response, SourceError> {
+    fn send(
+        &mut self,
+        method: &str,
+        endpoint: &Endpoint,
+        extra: &[(&str, &str)],
+        body: Option<&[u8]>,
+    ) -> Result<chappa_ai_mcp::http::Response, SourceError> {
         let reusable = self.conn.as_ref().is_some_and(Connection::is_reusable);
         if !reusable {
             self.verify()?;
         }
         let auth = format!("Bearer {}", self.token_hex);
-        let mut headers = vec![("Authorization", auth.as_str()), ("Accept", "application/json")];
+        let mut headers = vec![
+            ("Authorization", auth.as_str()),
+            ("Accept", "application/json"),
+        ];
         headers.extend_from_slice(extra);
-        let outcome = self
-            .conn
-            .as_mut()
-            .expect("verified above")
-            .request(method, endpoint.path(), &headers, body, MAX_PAYLOAD_BYTES);
+        let outcome = self.conn.as_mut().expect("verified above").request(
+            method,
+            endpoint.path(),
+            &headers,
+            body,
+            MAX_PAYLOAD_BYTES,
+        );
         match outcome {
             Ok(reply) => Ok(reply),
             // A keep-alive connection the source dropped between polls reads
@@ -195,11 +238,13 @@ impl SourceClient {
             // connection and one retry, then the error stands.
             Err(HttpError::Closed) | Err(HttpError::Io(_)) if reusable => {
                 self.verify()?;
-                Ok(self
-                    .conn
-                    .as_mut()
-                    .expect("verified above")
-                    .request(method, endpoint.path(), &headers, body, MAX_PAYLOAD_BYTES)?)
+                Ok(self.conn.as_mut().expect("verified above").request(
+                    method,
+                    endpoint.path(),
+                    &headers,
+                    body,
+                    MAX_PAYLOAD_BYTES,
+                )?)
             }
             Err(e) => Err(e.into()),
         }
@@ -207,16 +252,27 @@ impl SourceClient {
 
     /// One request, no retry: always on a connection verified for this
     /// call, so a stale keep-alive cannot swallow a POST.
-    fn send_once(&mut self, method: &str, endpoint: &Endpoint, extra: &[(&str, &str)], body: Option<&[u8]>) -> Result<chappa_ai_mcp::http::Response, SourceError> {
+    fn send_once(
+        &mut self,
+        method: &str,
+        endpoint: &Endpoint,
+        extra: &[(&str, &str)],
+        body: Option<&[u8]>,
+    ) -> Result<chappa_ai_mcp::http::Response, SourceError> {
         self.verify()?;
         let auth = format!("Bearer {}", self.token_hex);
-        let mut headers = vec![("Authorization", auth.as_str()), ("Accept", "application/json")];
+        let mut headers = vec![
+            ("Authorization", auth.as_str()),
+            ("Accept", "application/json"),
+        ];
         headers.extend_from_slice(extra);
-        Ok(self
-            .conn
-            .as_mut()
-            .expect("verified above")
-            .request(method, endpoint.path(), &headers, body, MAX_PAYLOAD_BYTES)?)
+        Ok(self.conn.as_mut().expect("verified above").request(
+            method,
+            endpoint.path(),
+            &headers,
+            body,
+            MAX_PAYLOAD_BYTES,
+        )?)
     }
 
     /// The manifest.
@@ -236,7 +292,11 @@ impl PostReply {
     /// The source's `{kind, message}` error body as a [`SourceError::Http`].
     pub fn as_error(&self) -> SourceError {
         let text = |k: &str| self.body[k].as_str().unwrap_or("").to_owned();
-        SourceError::Http { status: self.status, kind: text("kind"), message: text("message") }
+        SourceError::Http {
+            status: self.status,
+            kind: text("kind"),
+            message: text("message"),
+        }
     }
 }
 
@@ -248,5 +308,9 @@ fn http_error(reply: &chappa_ai_mcp::http::Response) -> SourceError {
     } else {
         String::from_utf8_lossy(&reply.body).trim().to_owned()
     };
-    SourceError::Http { status: reply.status, kind: text("kind"), message }
+    SourceError::Http {
+        status: reply.status,
+        kind: text("kind"),
+        message,
+    }
 }

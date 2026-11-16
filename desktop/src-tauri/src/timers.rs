@@ -225,9 +225,12 @@ pub fn is_idle(live: &Liveness, now_ms: u64, idle_ms: u64) -> bool {
 /// The live row for `id` IF it is still the spawn the timer pinned. `None`
 /// when the id is gone or (when pinned) belongs to a different spawn now —
 /// a reused number is not the process the timer was set against.
-fn pinned<'a>(live: &'a BTreeMap<u32, Liveness>, id: u32, uuid: Option<&str>) -> Option<&'a Liveness> {
-    live.get(&id)
-        .filter(|l| uuid.map_or(true, |u| l.uuid == u))
+fn pinned<'a>(
+    live: &'a BTreeMap<u32, Liveness>,
+    id: u32,
+    uuid: Option<&str>,
+) -> Option<&'a Liveness> {
+    live.get(&id).filter(|l| uuid.map_or(true, |u| l.uuid == u))
 }
 
 // ---- timer model -------------------------------------------------------------
@@ -409,7 +412,13 @@ pub struct Timer {
 
 impl Timer {
     /// A `timer_set` timer.
-    pub fn delay(owner: &str, delivery_process_id: u32, body: String, delay_ms: u64, now: u64) -> Self {
+    pub fn delay(
+        owner: &str,
+        delivery_process_id: u32,
+        body: String,
+        delay_ms: u64,
+        now: u64,
+    ) -> Self {
         Self {
             id: 0,
             name: None,
@@ -595,7 +604,8 @@ impl<C: Clock> Scheduler<C> {
     pub fn has_live_idle_timers(&self) -> bool {
         self.timers.values().any(|t| {
             t.missed.is_some()
-                || (t.kind.is_idle() && matches!(t.status, TimerStatus::Pending | TimerStatus::Confirming))
+                || (t.kind.is_idle()
+                    && matches!(t.status, TimerStatus::Pending | TimerStatus::Confirming))
         })
     }
 
@@ -728,7 +738,9 @@ impl<C: Clock> Scheduler<C> {
         let ids: Vec<u32> = {
             let mut set = BTreeSet::new();
             for t in self.timers.values() {
-                if t.missed.is_some() || matches!(t.status, TimerStatus::Pending | TimerStatus::Confirming) {
+                if t.missed.is_some()
+                    || matches!(t.status, TimerStatus::Pending | TimerStatus::Confirming)
+                {
                     set.extend(t.probe_ids());
                 }
             }
@@ -741,7 +753,11 @@ impl<C: Clock> Scheduler<C> {
             // for the grace window to close; the shell then records
             // `process gone` without typing anywhere.
             if let Some(missed) = timer.missed {
-                let target = pinned(&live, timer.delivery_process_id, timer.delivery_uuid.as_deref());
+                let target = pinned(
+                    &live,
+                    timer.delivery_process_id,
+                    timer.delivery_uuid.as_deref(),
+                );
                 if target.is_some_and(|l| l.child_alive) || now >= missed.until {
                     actions.push(Action::Fire {
                         id: timer.id,
@@ -758,8 +774,12 @@ impl<C: Clock> Scheduler<C> {
             // fire time expires the timer (a repeating one included) — there
             // is no one left to deliver to, ever.
             let target_gone = timer.delivery_uuid.is_some()
-                && !pinned(&live, timer.delivery_process_id, timer.delivery_uuid.as_deref())
-                    .is_some_and(|l| l.child_alive);
+                && !pinned(
+                    &live,
+                    timer.delivery_process_id,
+                    timer.delivery_uuid.as_deref(),
+                )
+                .is_some_and(|l| l.child_alive);
             if timer.kind == TimerKind::Delay {
                 if timer.next_fire_at.is_some_and(|at| now >= at) {
                     if target_gone {
@@ -872,7 +892,10 @@ impl<C: Clock> Scheduler<C> {
                             .collect();
                         timer.updated_at = now;
                         let until = timer.confirm_until.unwrap_or(now);
-                        actions.push(Action::Confirm { id: timer.id, until });
+                        actions.push(Action::Confirm {
+                            id: timer.id,
+                            until,
+                        });
                     }
                 }
             }
@@ -884,7 +907,12 @@ impl<C: Clock> Scheduler<C> {
 /// `any`: at least one watched process idle. `all`: every watched process
 /// idle (a process that has gone away counts as satisfied for `all` — there
 /// is nothing left to wait for from it).
-fn condition_met(kind: TimerKind, rows: &[(u32, Option<&Liveness>)], now: u64, idle_ms: u64) -> bool {
+fn condition_met(
+    kind: TimerKind,
+    rows: &[(u32, Option<&Liveness>)],
+    now: u64,
+    idle_ms: u64,
+) -> bool {
     match kind {
         TimerKind::IdleAny => rows
             .iter()
@@ -1051,7 +1079,13 @@ pub struct Firing {
 }
 
 impl Firing {
-    fn new(timer: &Timer, at: u64, reason: FireReason, state: DeliveryState, detail: Option<String>) -> Self {
+    fn new(
+        timer: &Timer,
+        at: u64,
+        reason: FireReason,
+        state: DeliveryState,
+        detail: Option<String>,
+    ) -> Self {
         Self {
             id: 0,
             timer_id: timer.id,
@@ -1096,7 +1130,10 @@ fn from_json_text<T: serde::de::DeserializeOwned + Default>(text: &str) -> T {
 }
 
 fn placeholders(n: usize) -> String {
-    (1..=n).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
+    (1..=n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// INSERT (id 0) or UPDATE inside an open transaction. Returns the row id.
@@ -1107,13 +1144,30 @@ fn write_timer(tx: &rusqlite::Transaction<'_>, timer: &Timer) -> Result<i64> {
     let kind = timer.kind.as_str();
     let status = timer.status.as_str();
     let params = rusqlite::params![
-        timer.id, timer.name, kind, timer.owner, timer.project_id, timer.delivery_process_id, timer.body,
-        watch, ignored, timer.delay_ms as i64,
-        timer.repeat_every_ms.map(|v| v as i64), timer.next_fire_at.map(|v| v as i64),
-        timer.deadline_at.map(|v| v as i64), timer.idle_ms as i64, timer.confirm_ms as i64,
-        timer.rearm as i64, timer.armed as i64, status, timer.fired_count as i64,
-        timer.remaining_ms.map(|v| v as i64), timer.created_at as i64, timer.updated_at as i64,
-        timer.delivery_uuid, watch_uuids,
+        timer.id,
+        timer.name,
+        kind,
+        timer.owner,
+        timer.project_id,
+        timer.delivery_process_id,
+        timer.body,
+        watch,
+        ignored,
+        timer.delay_ms as i64,
+        timer.repeat_every_ms.map(|v| v as i64),
+        timer.next_fire_at.map(|v| v as i64),
+        timer.deadline_at.map(|v| v as i64),
+        timer.idle_ms as i64,
+        timer.confirm_ms as i64,
+        timer.rearm as i64,
+        timer.armed as i64,
+        status,
+        timer.fired_count as i64,
+        timer.remaining_ms.map(|v| v as i64),
+        timer.created_at as i64,
+        timer.updated_at as i64,
+        timer.delivery_uuid,
+        watch_uuids,
     ];
     if timer.id == 0 {
         tx.execute(
@@ -1400,7 +1454,9 @@ impl Deliverer for PromptDeliverer {
         let detail = match receipt.reason.as_deref() {
             Some("exited") => Some(PROCESS_GONE.to_owned()),
             Some("not-ready") => Some(format!("not ready within {timeout_ms} ms")),
-            Some("blocked") => Some(format!("held: the process reported blocked for {timeout_ms} ms")),
+            Some("blocked") => Some(format!(
+                "held: the process reported blocked for {timeout_ms} ms"
+            )),
             _ => None,
         };
         Delivery {
@@ -1467,22 +1523,44 @@ impl Waker {
 pub trait TimerHold: Send + Sync {
     fn hold_reason(&self, process_id: u32) -> Option<String>;
     /// `from` names the sender (`timer <id>`), for a list of what is held.
-    fn hold(&self, process_id: u32, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize;
+    fn hold(
+        &self,
+        process_id: u32,
+        from: String,
+        text: String,
+        deliver: Box<dyn FnOnce() + Send>,
+    ) -> usize;
 }
 
 impl TimerHold for Registry {
     fn hold_reason(&self, process_id: u32) -> Option<String> {
         Registry::hold_reason(self, process_id as TermId)
     }
-    fn hold(&self, process_id: u32, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+    fn hold(
+        &self,
+        process_id: u32,
+        from: String,
+        text: String,
+        deliver: Box<dyn FnOnce() + Send>,
+    ) -> usize {
         self.hold_delivery(process_id as TermId, from, text, deliver)
     }
 }
 
 /// Record a delivery's outcome on its firing.
 fn finish_job(store: &TimerStore, job: &Job, out: &Delivery) {
-    let state = if out.delivered { DeliveryState::Delivered } else { DeliveryState::Failed };
-    if let Err(err) = store.finish_firing(job.firing_row, state, out.detail.as_deref(), out.receipt.as_ref(), None) {
+    let state = if out.delivered {
+        DeliveryState::Delivered
+    } else {
+        DeliveryState::Failed
+    };
+    if let Err(err) = store.finish_firing(
+        job.firing_row,
+        state,
+        out.detail.as_deref(),
+        out.receipt.as_ref(),
+        None,
+    ) {
         log::warn!("[timers] timer {} firing not recorded: {err}", job.timer_id);
     }
 }
@@ -1643,10 +1721,16 @@ impl TimerService {
                         let (deliverer, store) = (deliverer.clone(), deliver_store.clone());
                         let (process_id, body) = (job.process_id, job.body.clone());
                         let from = format!("timer {}", job.timer_id);
-                        gate.hold(process_id, from, body, Box::new(move || {
-                            let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
-                            finish_job(&store, &job, &out);
-                        }));
+                        gate.hold(
+                            process_id,
+                            from,
+                            body,
+                            Box::new(move || {
+                                let out =
+                                    deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
+                                finish_job(&store, &job, &out);
+                            }),
+                        );
                         continue;
                     }
                 }
@@ -1709,7 +1793,9 @@ impl TimerService {
             }
         };
         match self.inner.store.close_interrupted() {
-            Ok(n) if n > 0 => log::warn!("[timers] {n} in-flight firing(s) interrupted by the last shutdown"),
+            Ok(n) if n > 0 => {
+                log::warn!("[timers] {n} in-flight firing(s) interrupted by the last shutdown")
+            }
             Ok(_) => {}
             Err(err) => log::warn!("[timers] cannot close interrupted firings: {err}"),
         }
@@ -1725,11 +1811,19 @@ impl TimerService {
         };
         for id in missed {
             let snapshot = {
-                let Ok(sched) = self.inner.sched.lock() else { return };
+                let Ok(sched) = self.inner.sched.lock() else {
+                    return;
+                };
                 sched.get(id).cloned()
             };
             let Some(timer) = snapshot else { continue };
-            let firing = Firing::new(&timer, now, FireReason::Missed, DeliveryState::InFlight, None);
+            let firing = Firing::new(
+                &timer,
+                now,
+                FireReason::Missed,
+                DeliveryState::InFlight,
+                None,
+            );
             match self.inner.store.begin_firing(&timer, &firing) {
                 Ok(row) => {
                     if let Ok(mut sched) = self.inner.sched.lock() {
@@ -1752,7 +1846,12 @@ impl TimerService {
                 let actions = sched.tick(self.inner.probe.as_ref());
                 let retention = self.knobs().retention_ms;
                 let doomed = sched.prune(retention);
-                (actions, sched.plan_wait(), doomed, sched.now().saturating_sub(retention))
+                (
+                    actions,
+                    sched.plan_wait(),
+                    doomed,
+                    sched.now().saturating_sub(retention),
+                )
             };
             if !doomed.is_empty() {
                 if let Err(err) = self.inner.store.delete(&doomed) {
@@ -1780,7 +1879,9 @@ impl TimerService {
             let id = action.id();
             // Copy the row out under a short guard; everything below is I/O.
             let snapshot = {
-                let Ok(sched) = self.inner.sched.lock() else { return };
+                let Ok(sched) = self.inner.sched.lock() else {
+                    return;
+                };
                 sched.get(id).cloned()
             };
             let Some(timer) = snapshot else { continue };
@@ -1814,11 +1915,17 @@ impl TimerService {
     /// already know about.
     fn dispatch(&self, timer: &Timer, reason: FireReason, knobs: Knobs) {
         let now = {
-            let Ok(sched) = self.inner.sched.lock() else { return };
+            let Ok(sched) = self.inner.sched.lock() else {
+                return;
+            };
             sched.now()
         };
         let missed = if reason == FireReason::Missed {
-            self.inner.sched.lock().ok().and_then(|mut s| s.take_missed(timer.id))
+            self.inner
+                .sched
+                .lock()
+                .ok()
+                .and_then(|mut s| s.take_missed(timer.id))
         } else {
             None
         };
@@ -1829,14 +1936,21 @@ impl TimerService {
                 match self.inner.store.begin_firing(timer, &firing) {
                     Ok(row) => row,
                     Err(err) => {
-                        log::warn!("[timers] timer {} firing not recorded; NOT delivered: {err}", timer.id);
+                        log::warn!(
+                            "[timers] timer {} firing not recorded; NOT delivered: {err}",
+                            timer.id
+                        );
                         return;
                     }
                 }
             }
         };
         let finish = |state: DeliveryState, detail: &str, coalesced: Option<i64>| {
-            if let Err(err) = self.inner.store.finish_firing(row, state, Some(detail), None, coalesced) {
+            if let Err(err) =
+                self.inner
+                    .store
+                    .finish_firing(row, state, Some(detail), None, coalesced)
+            {
                 log::warn!("[timers] timer {} firing not recorded: {err}", timer.id);
             }
         };
@@ -1888,7 +2002,11 @@ impl TimerService {
             .ok()
             .and_then(|g| g.as_ref().map(|tx| tx.send(job)));
         if !matches!(sent, Some(Ok(()))) {
-            finish(DeliveryState::Failed, "the delivery thread is not running", None);
+            finish(
+                DeliveryState::Failed,
+                "the delivery thread is not running",
+                None,
+            );
         }
     }
 
@@ -2154,7 +2272,9 @@ impl TimerService {
     /// thing on its own schedule).
     pub fn tick_now(&self) {
         let actions = {
-            let Ok(mut sched) = self.inner.sched.lock() else { return };
+            let Ok(mut sched) = self.inner.sched.lock() else {
+                return;
+            };
             sched.tick(self.inner.probe.as_ref())
         };
         self.execute(actions);
@@ -2164,8 +2284,13 @@ impl TimerService {
     pub fn prune_now(&self) {
         let retention = self.knobs().retention_ms;
         let (doomed, cutoff) = {
-            let Ok(mut sched) = self.inner.sched.lock() else { return };
-            (sched.prune(retention), sched.now().saturating_sub(retention))
+            let Ok(mut sched) = self.inner.sched.lock() else {
+                return;
+            };
+            (
+                sched.prune(retention),
+                sched.now().saturating_sub(retention),
+            )
         };
         let _ = self.inner.store.delete(&doomed);
         let _ = self.inner.store.prune_firings(cutoff);
@@ -2224,11 +2349,17 @@ pub fn resolve_processes(
             None => {
                 let mut named: Vec<&ProcessRow> = live.iter().filter(|p| p.name == token).collect();
                 if named.is_empty() {
-                    named = live.iter().filter(|p| p.name.eq_ignore_ascii_case(token)).collect();
+                    named = live
+                        .iter()
+                        .filter(|p| p.name.eq_ignore_ascii_case(token))
+                        .collect();
                 }
                 if scope.is_some() {
-                    let in_scope: Vec<&ProcessRow> =
-                        named.iter().copied().filter(|p| p.project_id == scope).collect();
+                    let in_scope: Vec<&ProcessRow> = named
+                        .iter()
+                        .copied()
+                        .filter(|p| p.project_id == scope)
+                        .collect();
                     if !in_scope.is_empty() {
                         named = in_scope;
                     }
@@ -2332,13 +2463,25 @@ mod tests {
     fn a_pinned_lookup_refuses_a_reused_id() {
         let mut table = BTreeMap::new();
         table.insert(7, live("spawn-b", Some(0), true));
-        assert!(pinned(&table, 7, Some("spawn-a")).is_none(), "7 belongs to another spawn now");
+        assert!(
+            pinned(&table, 7, Some("spawn-a")).is_none(),
+            "7 belongs to another spawn now"
+        );
         assert!(pinned(&table, 7, Some("spawn-b")).is_some());
-        assert!(pinned(&table, 7, None).is_some(), "unpinned = any spawn under that id");
+        assert!(
+            pinned(&table, 7, None).is_some(),
+            "unpinned = any spawn under that id"
+        );
         assert!(pinned(&table, 8, None).is_none());
     }
 
-    fn recent(firing_id: i64, timer_id: i64, body: &str, at: u64, in_flight: bool) -> RecentDelivery {
+    fn recent(
+        firing_id: i64,
+        timer_id: i64,
+        body: &str,
+        at: u64,
+        in_flight: bool,
+    ) -> RecentDelivery {
         RecentDelivery {
             firing_id,
             timer_id,
@@ -2352,18 +2495,38 @@ mod tests {
     #[test]
     fn dedupe_window_is_exclusive_at_the_edge() {
         let log = vec![recent(40, 4, "go", 1_000, false)];
-        assert_eq!(coalesced_with(&log, 9, false, 1, "go", 4_000, 5_000), Some(40));
+        assert_eq!(
+            coalesced_with(&log, 9, false, 1, "go", 4_000, 5_000),
+            Some(40)
+        );
         assert_eq!(coalesced_with(&log, 9, false, 1, "go", 6_000, 5_000), None);
         assert_eq!(coalesced_with(&log, 9, false, 2, "go", 4_000, 5_000), None);
-        assert_eq!(coalesced_with(&log, 9, false, 1, "other", 4_000, 5_000), None);
-        assert_eq!(coalesced_with(&log, 9, false, 1, "go", 1_001, 0), None, "0 disables");
+        assert_eq!(
+            coalesced_with(&log, 9, false, 1, "other", 4_000, 5_000),
+            None
+        );
+        assert_eq!(
+            coalesced_with(&log, 9, false, 1, "go", 1_001, 0),
+            None,
+            "0 disables"
+        );
         // A repeating timer's own COMPLETED firing never coalesces it…
         assert_eq!(coalesced_with(&log, 4, true, 1, "go", 2_000, 5_000), None);
         // …but its own IN-FLIGHT firing always does, window or not.
         let inflight = vec![recent(41, 4, "go", 1_000, true)];
-        assert_eq!(coalesced_with(&inflight, 4, true, 1, "go", 60_000, 0), Some(41));
+        assert_eq!(
+            coalesced_with(&inflight, 4, true, 1, "go", 60_000, 0),
+            Some(41)
+        );
         // An in-flight identical body from another timer coalesces too.
-        assert_eq!(coalesced_with(&inflight, 9, false, 1, "go", 60_000, 5_000), Some(41));
-        assert_eq!(coalesced_with(&inflight, 9, false, 1, "go", 60_000, 0), None, "0 disables the body rule");
+        assert_eq!(
+            coalesced_with(&inflight, 9, false, 1, "go", 60_000, 5_000),
+            Some(41)
+        );
+        assert_eq!(
+            coalesced_with(&inflight, 9, false, 1, "go", 60_000, 0),
+            None,
+            "0 disables the body rule"
+        );
     }
 }

@@ -35,17 +35,17 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use project_model::backoff::RestartBackoff;
 #[cfg(test)]
 use project_model::hash;
 use project_model::projects::{ProcessOverride, ProjectStore};
 use project_model::records::{RecordKind, Run, RunHead, TailKind};
-use project_model::writeback;
 use project_model::settings::{split_command_line, Settings, EXEC_PROFILE_CMD, EXEC_PROFILE_SH};
 use project_model::status::{Lifecycle, ProcessEvent, RUNNING_AFTER_MS};
 use project_model::watcher::{ChangeMatcher, RecursiveMode, RestartWatcher};
+use project_model::writeback;
 use project_model::yml::{CommandLine, ProcessDef, ProjectYml};
+use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
 use term_core::actor::epoch_ms;
@@ -281,7 +281,13 @@ impl Projects {
             guard.settings = settings;
             guard.ledger = RunLedger::new(coordination);
             guard.sources = sources;
-            sweep_scan_scratch(guard.store.as_ref().map(|s| s.list().iter().map(|p| p.path.clone()).collect()).unwrap_or_default());
+            sweep_scan_scratch(
+                guard
+                    .store
+                    .as_ref()
+                    .map(|s| s.list().iter().map(|p| p.path.clone()).collect())
+                    .unwrap_or_default(),
+            );
         }
         spawn_ticker(inner);
     }
@@ -298,7 +304,10 @@ impl Projects {
     /// The source registry these projects launch their sources into (and
     /// whose data-safety blocks every agent spawn checks).
     pub fn sources(&self) -> Sources {
-        self.inner.lock().map(|inner| inner.sources.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .map(|inner| inner.sources.clone())
+            .unwrap_or_default()
     }
 
     /// Point a store-only projects state (tests, headless services) at a
@@ -387,19 +396,27 @@ impl Projects {
     pub fn cwd_roots(&self, project_id: Option<u32>) -> Vec<Root> {
         // Pass 1, under the lock: the directories and which caches are stale.
         let (mut roots, stale, sources): (Vec<Root>, Vec<(u32, PathBuf)>, Sources) = {
-            let Ok(inner) = self.inner.lock() else { return Vec::new() };
+            let Ok(inner) = self.inner.lock() else {
+                return Vec::new();
+            };
             let mut roots = Vec::new();
             let mut stale = Vec::new();
-            let mut consider = |id: u32, root: &Path, runtime: Option<&ProjectRuntime>, name: String| {
-                roots.push(Root::new(root, RootKind::Project { id, name }));
-                match runtime.and_then(|r| r.worktrees.as_ref()) {
-                    Some(cache) if cache.listed_at.elapsed() < WORKTREE_CACHE_TTL => {
-                        roots.extend(cache.paths.iter().map(|p| Root::new(p, RootKind::Worktree { project_id: id })));
+            let mut consider =
+                |id: u32, root: &Path, runtime: Option<&ProjectRuntime>, name: String| {
+                    roots.push(Root::new(root, RootKind::Project { id, name }));
+                    match runtime.and_then(|r| r.worktrees.as_ref()) {
+                        Some(cache) if cache.listed_at.elapsed() < WORKTREE_CACHE_TTL => {
+                            roots.extend(
+                                cache
+                                    .paths
+                                    .iter()
+                                    .map(|p| Root::new(p, RootKind::Worktree { project_id: id })),
+                            );
+                        }
+                        _ if runtime.is_some() => stale.push((id, root.to_path_buf())),
+                        _ => {}
                     }
-                    _ if runtime.is_some() => stale.push((id, root.to_path_buf())),
-                    _ => {}
-                }
-            };
+                };
             match project_id {
                 Some(id) => {
                     if let Some(p) = inner.store.as_ref().and_then(|s| s.get(id)) {
@@ -422,11 +439,20 @@ impl Projects {
         };
         // Pass 2, off the lock: list the stale ones and store the result.
         for (id, root) in stale {
-            let Some(paths) = crate::roots::git_worktrees(&root) else { continue };
-            roots.extend(paths.iter().map(|p| Root::new(p, RootKind::Worktree { project_id: id })));
+            let Some(paths) = crate::roots::git_worktrees(&root) else {
+                continue;
+            };
+            roots.extend(
+                paths
+                    .iter()
+                    .map(|p| Root::new(p, RootKind::Worktree { project_id: id })),
+            );
             if let Ok(mut inner) = self.inner.lock() {
                 if let Some(runtime) = inner.runtimes.get_mut(&id) {
-                    runtime.worktrees = Some(WorktreeCache { paths, listed_at: Instant::now() });
+                    runtime.worktrees = Some(WorktreeCache {
+                        paths,
+                        listed_at: Instant::now(),
+                    });
                 }
             }
         }
@@ -575,15 +601,16 @@ fn build_spec(def: &ProcessDef, root: &Path, settings: &Settings) -> Result<PtyS
 /// plain `/C <command>` form (identical behaviour to before).
 pub const CMD_INDIRECTION_VAR: &str = "CHAPPA_CMD";
 
-pub(crate) fn cmd_quote_indirection(program: &str, args: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
+pub(crate) fn cmd_quote_indirection(
+    program: &str,
+    args: Vec<String>,
+) -> (Vec<String>, Vec<(String, String)>) {
     let is_cmd = Path::new(program)
         .file_stem()
         .map(|s| s.to_string_lossy().eq_ignore_ascii_case("cmd"))
         .unwrap_or(false);
-    let needs = is_cmd
-        && args.len() == 2
-        && args[0].eq_ignore_ascii_case("/c")
-        && args[1].contains('"');
+    let needs =
+        is_cmd && args.len() == 2 && args[0].eq_ignore_ascii_case("/c") && args[1].contains('"');
     if !needs {
         return (args, Vec::new());
     }
@@ -648,10 +675,16 @@ fn begin_command_run(inner: &mut Inner, id: u32, name: &str) -> Option<RecordBin
         log::warn!("`{name}`: run {run_uuid} not recorded: {e}");
         return None;
     }
-    if let Err(e) = inner.ledger.insert(&record_id, Some(id), RecordKind::Command, &run) {
+    if let Err(e) = inner
+        .ledger
+        .insert(&record_id, Some(id), RecordKind::Command, &run)
+    {
         log::warn!("`{name}`: ledger row for run {run_uuid} not written: {e}");
     }
-    Some(RecordBinding { record_id, run_uuid })
+    Some(RecordBinding {
+        record_id,
+        run_uuid,
+    })
 }
 
 /// Wire one process's terminal spawn up with its auto_restart / watcher hooks.
@@ -678,7 +711,10 @@ fn spawn_process(
     // command line; it runs nothing under any other.
     let mut spec = if crate::stack_trust::is_stack_serve(&proc.def) {
         build_spec(
-            &crate::stack_trust::with_trusted_definition(&proc.def, proc.trusted_definition.as_deref()),
+            &crate::stack_trust::with_trusted_definition(
+                &proc.def,
+                proc.trusted_definition.as_deref(),
+            ),
             &root,
             settings,
         )?
@@ -694,7 +730,11 @@ fn spawn_process(
         let launch = sources.prepare_launch(project_id, &root, name)?;
         spec.env.extend(launch.env());
         let cwd = spec.cwd.clone().unwrap_or_else(|| root.clone());
-        sources.set_launch_folder(&root, name, crate::sources::launch_folder_of(&cwd, &spec.args));
+        sources.set_launch_folder(
+            &root,
+            name,
+            crate::sources::launch_folder_of(&cwd, &spec.args),
+        );
     }
     let channel = proc
         .channel
@@ -1273,7 +1313,11 @@ pub fn set_project_identity(
     color: Option<String>,
 ) -> Result<(), String> {
     let mut inner = projects.store()?;
-    inner.store.as_mut().unwrap().set_identity(id, initials, color)
+    inner
+        .store
+        .as_mut()
+        .unwrap()
+        .set_identity(id, initials, color)
 }
 
 /// Forget a project. Never touches the directory; stops any live processes.
@@ -1288,8 +1332,19 @@ pub fn remove_project(
     // for its sources goes with it at once (open or not, a saved verdict
     // would block its folder forever otherwise), including the records of
     // sources an untrusted edit had already stopped declaring.
-    let mut root = inner.store.as_ref().unwrap().get(id).map(|p| p.path.clone());
-    let mut declared: Vec<(String, ProcessDef)> = inner.store.as_ref().unwrap().process_defs(id).into_iter().collect();
+    let mut root = inner
+        .store
+        .as_ref()
+        .unwrap()
+        .get(id)
+        .map(|p| p.path.clone());
+    let mut declared: Vec<(String, ProcessDef)> = inner
+        .store
+        .as_ref()
+        .unwrap()
+        .process_defs(id)
+        .into_iter()
+        .collect();
     if let Some(mut runtime) = inner.runtimes.remove(&id) {
         for (name, proc) in runtime.processes.iter_mut() {
             proc.generation += 1; // cancels any scheduled respawn
@@ -1297,7 +1352,13 @@ pub fn remove_project(
             proc.watcher_rx = None;
             if let Some(term_id) = proc.term_id.take() {
                 registry.close(term_id);
-                source_gone(&inner.sources, &runtime.root, name, &proc.def, "was stopped with its project");
+                source_gone(
+                    &inner.sources,
+                    &runtime.root,
+                    name,
+                    &proc.def,
+                    "was stopped with its project",
+                );
             }
             declared.push((name.clone(), proc.def.clone()));
         }
@@ -1380,7 +1441,9 @@ pub fn open_project(
         // chappa.yml is committed: a credential written into it is named
         // (file, command, field; never the value) so it can move to the
         // environment.
-        for warning in inline_credential_warnings(processes.iter().map(|(n, p)| (n.as_str(), &p.def))) {
+        for warning in
+            inline_credential_warnings(processes.iter().map(|(n, p)| (n.as_str(), &p.def)))
+        {
             log::warn!("{warning}");
         }
         let name = yml.name.clone().unwrap_or(stored.name.clone());
@@ -1393,7 +1456,11 @@ pub fn open_project(
     // terminals are closed here — the reopen owns the project view, and
     // leaving them running would orphan the process (nothing references it).
     let still_source = |name: &str| processes.get(name).is_some_and(|p| p.def.is_source());
-    let declared: Vec<String> = processes.iter().filter(|(_, p)| p.def.is_source()).map(|(n, _)| n.clone()).collect();
+    let declared: Vec<String> = processes
+        .iter()
+        .filter(|(_, p)| p.def.is_source())
+        .map(|(n, _)| n.clone())
+        .collect();
     // No file at all is not content anyone trusted.
     let content_trusted = project_file.exists() && !trust_pending;
     if let Some(mut old) = inner.runtimes.remove(&id) {
@@ -1403,10 +1470,19 @@ pub fn open_project(
             proc.watcher_rx = None;
             if let Some(term_id) = proc.term_id.take() {
                 registry.close(term_id);
-                source_gone(&inner.sources, &old.root, name, &proc.def, "was stopped when the project reopened");
+                source_gone(
+                    &inner.sources,
+                    &old.root,
+                    name,
+                    &proc.def,
+                    "was stopped when the project reopened",
+                );
             }
         }
-        let gone = undeclared_sources(old.processes.iter().map(|(n, p)| (n.as_str(), &p.def)), still_source);
+        let gone = undeclared_sources(
+            old.processes.iter().map(|(n, p)| (n.as_str(), &p.def)),
+            still_source,
+        );
         settle_undeclared(&inner.sources, &old.root, gone, content_trusted, &declared);
     } else {
         // First open this run: what the file declared when the app last
@@ -1437,7 +1513,12 @@ pub fn open_project(
     // Every command is a durable record from the moment it is opened, so
     // the rows carry a record id before their first start.
     let names: Vec<String> = processes.keys().cloned().collect();
-    if let Err(e) = inner.store.as_mut().unwrap().ensure_command_record_ids(id, &names) {
+    if let Err(e) = inner
+        .store
+        .as_mut()
+        .unwrap()
+        .ensure_command_record_ids(id, &names)
+    {
         log::warn!("open project {id}: command record ids not assigned: {e}");
     }
     inner.runtimes.insert(
@@ -1456,7 +1537,12 @@ pub fn open_project(
     inner.notify_changed();
     // The notification fields come off the STORED row (projects.json),
     // never the yml — "chappa.yml is NEVER touched for this".
-    let overrides = inner.store.as_ref().unwrap().get(id).and_then(|p| p.process_overrides.clone());
+    let overrides = inner
+        .store
+        .as_ref()
+        .unwrap()
+        .get(id)
+        .and_then(|p| p.process_overrides.clone());
     Ok(OpenProjectResult {
         project: ProjectInfoDto {
             id,
@@ -1517,24 +1603,32 @@ pub fn confirm_project_trust(
         })
         .ok_or_else(|| format!("no such project: {id}"))?;
     if run {
-        let hash = crate::stack_trust::trust_hash_on_disk(&root)
-            .ok_or_else(|| {
-                format!(
-                    "cannot hash {} in {}",
-                    project_model::yml::CHAPPA_YML_NAME,
-                    root.display()
-                )
-            })?;
+        let hash = crate::stack_trust::trust_hash_on_disk(&root).ok_or_else(|| {
+            format!(
+                "cannot hash {} in {}",
+                project_model::yml::CHAPPA_YML_NAME,
+                root.display()
+            )
+        })?;
         let loaded = inner.runtimes.get(&id).map(|r| r.yml_hash.as_str());
         trust_answer_matches(shown.as_deref(), loaded, &hash)?;
-        inner.store.as_mut().unwrap().mark_trusted(id, hash.clone())?;
+        inner
+            .store
+            .as_mut()
+            .unwrap()
+            .mark_trusted(id, hash.clone())?;
         // The sources this content stopped declaring may let go of their
         // kept records now; read the declared ones from exactly what was
         // trusted.
         if let Ok((yml, read)) = ProjectYml::load_result_with_hash(&root) {
             let stacks = crate::stack_trust::stack_sources(&root, &yml.processes);
             if crate::stack_trust::project_trust_hash(&read, &stacks) == hash {
-                let declared: Vec<String> = yml.processes.iter().filter(|(_, d)| d.is_source()).map(|(n, _)| n.clone()).collect();
+                let declared: Vec<String> = yml
+                    .processes
+                    .iter()
+                    .filter(|(_, d)| d.is_source())
+                    .map(|(n, _)| n.clone())
+                    .collect();
                 inner.sources.content_trusted(&root, &declared);
                 // The stack runners start again under what was just trusted.
                 let relaunch = match inner.runtimes.get_mut(&id) {
@@ -1554,7 +1648,11 @@ pub fn confirm_project_trust(
 /// prompt showed (`shown`, when the caller sent it) and the content the open
 /// runtime has loaded (`loaded`, when the project is open), since those are
 /// the definitions the frontend is about to auto-start.
-fn trust_answer_matches(shown: Option<&str>, loaded: Option<&str>, on_disk: &str) -> Result<(), String> {
+fn trust_answer_matches(
+    shown: Option<&str>,
+    loaded: Option<&str>,
+    on_disk: &str,
+) -> Result<(), String> {
     let stale = shown.is_some_and(|h| h != on_disk) || loaded.is_some_and(|h| h != on_disk);
     if stale {
         return Err(format!(
@@ -1695,7 +1793,9 @@ pub const UNCHANGED: &str = "\u{1}chappa:unchanged";
 /// The command line as rows and the editor show it: secrets masked.
 pub fn shown_command(command: &CommandLine) -> String {
     match command {
-        CommandLine::Argv(words) => project_model::words::join_words(&stack_core::credentials::mask_argv(words)),
+        CommandLine::Argv(words) => {
+            project_model::words::join_words(&stack_core::credentials::mask_argv(words))
+        }
         CommandLine::Shell(text) => stack_core::credentials::mask_line(text),
     }
 }
@@ -1703,7 +1803,9 @@ pub fn shown_command(command: &CommandLine) -> String {
 /// One warning per command field of `chappa.yml` that looks like a
 /// credential written inline: the file, the command and the field, never
 /// the value.
-pub fn inline_credential_warnings<'a>(defs: impl IntoIterator<Item = (&'a str, &'a ProcessDef)>) -> Vec<String> {
+pub fn inline_credential_warnings<'a>(
+    defs: impl IntoIterator<Item = (&'a str, &'a ProcessDef)>,
+) -> Vec<String> {
     defs.into_iter()
         .flat_map(|(name, def)| {
             masked_fields(def).into_iter().map(move |field| {
@@ -1733,14 +1835,22 @@ pub fn masked_fields(def: &ProcessDef) -> Vec<String> {
 }
 
 /// Put the stored originals back where the editor sent [`UNCHANGED`].
-pub(crate) fn resolve_unchanged(def: &mut ProcessDef, existing: Option<&ProcessDef>) -> Result<(), String> {
-    let missing = || "a masked value was kept, but the command it belongs to is gone; enter it again".to_owned();
+pub(crate) fn resolve_unchanged(
+    def: &mut ProcessDef,
+    existing: Option<&ProcessDef>,
+) -> Result<(), String> {
+    let missing = || {
+        "a masked value was kept, but the command it belongs to is gone; enter it again".to_owned()
+    };
     if def.command == CommandLine::Shell(UNCHANGED.to_owned()) {
         def.command = existing.ok_or_else(missing)?.command.clone();
     }
     for (k, v) in def.env.iter_mut() {
         if v == UNCHANGED {
-            *v = existing.and_then(|e| e.env.get(k)).cloned().ok_or_else(missing)?;
+            *v = existing
+                .and_then(|e| e.env.get(k))
+                .cloned()
+                .ok_or_else(missing)?;
         }
     }
     Ok(())
@@ -1772,18 +1882,17 @@ pub fn save_project_process(
     // the WHOLE mutation with the store untouched (`mutate`), and `refused_write`
     // reloads the project when the refusal was a concurrent disk change.
     let was_trusted = currently_trusted(&inner, id);
-    project_model::native::mutate(
-        inner.store.as_mut().unwrap(),
-        id,
-        |defs| {
-            let mut def = def;
-            resolve_unchanged(&mut def, original_name.as_deref().and_then(|old| defs.get(old)))?;
-            match &original_name {
-                Some(old) => project_model::native::edit_process(defs, old, &name, def),
-                None => project_model::native::add_process(defs, &name, def),
-            }
-        },
-    )
+    project_model::native::mutate(inner.store.as_mut().unwrap(), id, |defs| {
+        let mut def = def;
+        resolve_unchanged(
+            &mut def,
+            original_name.as_deref().and_then(|old| defs.get(old)),
+        )?;
+        match &original_name {
+            Some(old) => project_model::native::edit_process(defs, old, &name, def),
+            None => project_model::native::add_process(defs, &name, def),
+        }
+    })
     .map_err(|e| refused_write(&mut inner, &registry, &app, projects.arc(), id, e))?;
     // A rename is a key move in the file, so it is a key move
     // in the runtime too — the live terminal, panel and status carry across
@@ -1838,7 +1947,12 @@ impl Projects {
                 log::warn!("delete `{name}`: run history not pruned: {e}");
             }
         }
-        if let Err(e) = inner.store.as_mut().unwrap().remove_process_override(id, name) {
+        if let Err(e) = inner
+            .store
+            .as_mut()
+            .unwrap()
+            .remove_process_override(id, name)
+        {
             log::warn!("delete `{name}`: override record not pruned: {e}");
         }
         after_own_write(&mut inner, registry, app, self.arc(), id, was_trusted);
@@ -1910,7 +2024,14 @@ pub fn duplicate_project_processes(
         Ok(())
     })
     .map_err(|e| refused_write(&mut inner, &registry, &app, projects.arc(), target_id, e))?;
-    after_own_write(&mut inner, &registry, &app, projects.arc(), target_id, was_trusted);
+    after_own_write(
+        &mut inner,
+        &registry,
+        &app,
+        projects.arc(),
+        target_id,
+        was_trusted,
+    );
     Ok(process_dtos(&inner, target_id))
 }
 
@@ -1951,9 +2072,17 @@ pub fn set_process_auto_rename(
 /// The project's override of "scan for secrets before launching an agent":
 /// `true` / `false`, or `null` to follow the app setting. projects.json only.
 #[tauri::command]
-pub fn set_project_secret_scan(projects: State<'_, Projects>, project_id: u32, enabled: Option<bool>) -> Result<(), String> {
+pub fn set_project_secret_scan(
+    projects: State<'_, Projects>,
+    project_id: u32,
+    enabled: Option<bool>,
+) -> Result<(), String> {
     let mut inner = projects.store()?;
-    inner.store.as_mut().unwrap().set_secret_scan(project_id, enabled)
+    inner
+        .store
+        .as_mut()
+        .unwrap()
+        .set_secret_scan(project_id, enabled)
 }
 
 /// "Never write while a load error is outstanding." The write-back re-checks
@@ -2111,7 +2240,13 @@ fn undeclared_sources<'a>(
 /// that was trusted before), the records of every source it does not
 /// declare go now ([`Sources::content_trusted`]; `declared` = its `source:`
 /// commands); otherwise they wait for the trust answer.
-fn settle_undeclared(sources: &Sources, root: &Path, gone: Vec<String>, trusted: bool, declared: &[String]) {
+fn settle_undeclared(
+    sources: &Sources,
+    root: &Path,
+    gone: Vec<String>,
+    trusted: bool,
+    declared: &[String],
+) {
     for name in gone {
         sources.undeclare_launched(root, &name);
     }
@@ -2164,9 +2299,14 @@ fn sweep_scan_scratch(roots: Vec<PathBuf>) {
     std::thread::spawn(move || {
         for root in roots {
             let work = root.join(crate::secret_scan::WORK_DIR);
-            let removed = stack_core::workdir::sweep_stale_scratch(&work, stack_core::workdir::STALE_AFTER);
+            let removed =
+                stack_core::workdir::sweep_stale_scratch(&work, stack_core::workdir::STALE_AFTER);
             if !removed.is_empty() {
-                log::info!("[secret-scan] removed {} stale scratch entries under {}", removed.len(), work.display());
+                log::info!(
+                    "[secret-scan] removed {} stale scratch entries under {}",
+                    removed.len(),
+                    work.display()
+                );
             }
         }
     });
@@ -2187,7 +2327,10 @@ fn trust_stack_definitions(
         let hash = s.runnable_hash();
         if proc.trusted_definition != hash {
             let live = proc.term_id.is_some()
-                && matches!(proc.lifecycle.status(), ProcessStatus::Starting | ProcessStatus::Running);
+                && matches!(
+                    proc.lifecycle.status(),
+                    ProcessStatus::Starting | ProcessStatus::Running
+                );
             if live {
                 relaunch.push(s.name.clone());
             }
@@ -2214,13 +2357,30 @@ fn relaunch_locked(
     for name in names {
         let record = begin_command_run(inner, id, name);
         let sources = inner.sources.clone();
-        let Some(proc) = inner.runtimes.get_mut(&id).and_then(|r| r.processes.get_mut(name)) else {
+        let Some(proc) = inner
+            .runtimes
+            .get_mut(&id)
+            .and_then(|r| r.processes.get_mut(name))
+        else {
             continue;
         };
         proc.lifecycle.on(ProcessEvent::Stop, now_ms());
         proc.generation += 1;
-        if let Err(e) = spawn_process(registry, app, projects.clone(), &sources, id, name, root.clone(), &settings, proc, record) {
-            log::warn!("`{name}` did not start again under its newly trusted stack definition: {e}");
+        if let Err(e) = spawn_process(
+            registry,
+            app,
+            projects.clone(),
+            &sources,
+            id,
+            name,
+            root.clone(),
+            &settings,
+            proc,
+            record,
+        ) {
+            log::warn!(
+                "`{name}` did not start again under its newly trusted stack definition: {e}"
+            );
             proc.lifecycle.on(ProcessEvent::SpawnFailed, now_ms());
             emit_status(app, id, name, ProcessStatus::Failed, None, proc.term_id);
         }
@@ -2311,13 +2471,19 @@ fn reload_locked(
     runtime.load_error = None;
     runtime.yml_hash = new_hash;
     let mut old = std::mem::take(&mut runtime.processes);
-    let old_defs: IndexMap<String, ProcessDef> =
-        old.iter().map(|(n, p)| (n.clone(), p.def.clone())).collect();
+    let old_defs: IndexMap<String, ProcessDef> = old
+        .iter()
+        .map(|(n, p)| (n.clone(), p.def.clone()))
+        .collect();
     let diff = writeback::diff_processes(&old_defs, &new_defs);
     let undeclared = undeclared_sources(old_defs.iter().map(|(n, d)| (n.as_str(), d)), |name| {
         new_defs.get(name).is_some_and(ProcessDef::is_source)
     });
-    let declared: Vec<String> = new_defs.iter().filter(|(_, d)| d.is_source()).map(|(n, _)| n.clone()).collect();
+    let declared: Vec<String> = new_defs
+        .iter()
+        .filter(|(_, d)| d.is_source())
+        .map(|(n, _)| n.clone())
+        .collect();
 
     let mut processes = IndexMap::new();
     for (name, def) in new_defs {
@@ -2349,7 +2515,13 @@ fn reload_locked(
                         proc.generation += 1;
                         if let Some(term_id) = proc.term_id.take() {
                             registry.close(term_id);
-                            source_gone(&inner.sources, &root, &name, &proc.def, "was stopped until its new definition is trusted");
+                            source_gone(
+                                &inner.sources,
+                                &root,
+                                &name,
+                                &proc.def,
+                                "was stopped until its new definition is trusted",
+                            );
                         }
                         emit_status(app, id, &name, status, proc.exit_code, None);
                     } else if live {
@@ -2382,7 +2554,14 @@ fn reload_locked(
                                 ) {
                                     log::warn!("reload: restart of `{name}` failed: {e}");
                                     proc.lifecycle.on(ProcessEvent::SpawnFailed, now_ms());
-                                    emit_status(app, id, &name, ProcessStatus::Failed, None, proc.term_id);
+                                    emit_status(
+                                        app,
+                                        id,
+                                        &name,
+                                        ProcessStatus::Failed,
+                                        None,
+                                        proc.term_id,
+                                    );
                                 }
                             }
                         }
@@ -2402,7 +2581,13 @@ fn reload_locked(
         proc.watcher_rx = None;
         if let Some(term_id) = proc.term_id.take() {
             registry.close(term_id);
-            source_gone(&inner.sources, &root, &name, &proc.def, "was removed from chappa.yml");
+            source_gone(
+                &inner.sources,
+                &root,
+                &name,
+                &proc.def,
+                "was removed from chappa.yml",
+            );
         }
     }
     settle_undeclared(&inner.sources, &root, undeclared, trusted, &declared);
@@ -2423,7 +2608,12 @@ fn reload_locked(
     };
     // Commands the file added are records too (no write when nothing is new).
     let names: Vec<String> = processes.keys().cloned().collect();
-    if let Err(e) = inner.store.as_mut().unwrap().ensure_command_record_ids(id, &names) {
+    if let Err(e) = inner
+        .store
+        .as_mut()
+        .unwrap()
+        .ensure_command_record_ids(id, &names)
+    {
         log::warn!("reload project {id}: command record ids not assigned: {e}");
     }
     inner.runtimes.get_mut(&id).unwrap().processes = processes;
@@ -2476,7 +2666,10 @@ fn trust_line(def: &ProcessDef) -> String {
         line.push_str(&format!("\n    in {}", dir.display()));
     }
     for (key, value) in &def.env {
-        line.push_str(&format!("\n    env {}", stack_core::credentials::shown_env(key, value)));
+        line.push_str(&format!(
+            "\n    env {}",
+            stack_core::credentials::shown_env(key, value)
+        ));
     }
     // A source also receives two variables the yml does not spell out; the
     // prompt names them so what it lists is everything the process gets.
@@ -2497,8 +2690,7 @@ fn trust_line(def: &ProcessDef) -> String {
 /// edits never hot-reloaded).
 fn yml_watcher_for(root: &Path) -> Option<(RestartWatcher, Receiver<()>)> {
     let matcher = ChangeMatcher::for_chappa_yml(root.to_path_buf());
-    RestartWatcher::start_with_mode(root.to_path_buf(), matcher, RecursiveMode::NonRecursive)
-        .ok()
+    RestartWatcher::start_with_mode(root.to_path_buf(), matcher, RecursiveMode::NonRecursive).ok()
 }
 
 /// Per open project: each debounced `chappa.yml` change reloads it. Ends when
@@ -2525,7 +2717,8 @@ fn start_yml_reload_consumer(
             // A load error keeps the runtime hash stale, so retries still run.
             let same_content = inner.runtimes.get(&id).is_some_and(|r| {
                 r.load_error.is_none()
-                    && crate::stack_trust::trust_hash_on_disk(&r.root).is_some_and(|h| h == r.yml_hash)
+                    && crate::stack_trust::trust_hash_on_disk(&r.root)
+                        .is_some_and(|h| h == r.yml_hash)
             });
             if same_content {
                 continue;
@@ -2732,9 +2925,7 @@ impl Projects {
             let changed = inner.changed.clone();
             inner = match changed.wait_timeout(inner, remaining) {
                 Ok((inner, _)) => inner,
-                Err(_) => {
-                    return Err(ControlError::Internal("projects state poisoned".to_owned()))
-                }
+                Err(_) => return Err(ControlError::Internal("projects state poisoned".to_owned())),
             };
         }
     }
@@ -2806,7 +2997,12 @@ impl Projects {
 
 /// The lifecycle answer for a process the caller already holds a reference
 /// to (no locking — see `control_start`).
-fn lifecycle_dto_of(id: u32, name: &str, proc: &ProcessRuntime, pending: bool) -> ControlLifecycleDto {
+fn lifecycle_dto_of(
+    id: u32,
+    name: &str,
+    proc: &ProcessRuntime,
+    pending: bool,
+) -> ControlLifecycleDto {
     ControlLifecycleDto {
         project_id: id,
         name: name.to_owned(),
@@ -3097,7 +3293,12 @@ impl ProjectProcessDto {
             exit_code: p.exit_code,
             notification_level: record.and_then(|r| r.notification_level.clone()),
             working_dir: p.def.working_dir.as_ref().map(|d| d.display().to_string()),
-            env: p.def.env.iter().map(|(k, v)| (k.clone(), stack_core::credentials::mask_env(k, v))).collect(),
+            env: p
+                .def
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), stack_core::credentials::mask_env(k, v)))
+                .collect(),
             favorite: record.map_or(false, |r| r.favorite),
             disable_auto_rename: record.map_or(false, |r| r.disable_auto_rename),
             record_id: record.and_then(|r| r.record_id.clone()),
@@ -3149,19 +3350,27 @@ mod tests {
     fn builtin_exec_profiles_keep_their_shell_semantics() {
         let (args, env) = cmd_quote_indirection(
             "cmd",
-            vec!["/C".to_owned(), r#"py -c "import time; time.sleep(999)""#.to_owned()],
+            vec![
+                "/C".to_owned(),
+                r#"py -c "import time; time.sleep(999)""#.to_owned(),
+            ],
         );
         assert_eq!(args, vec!["/C", "call", "%CHAPPA_CMD%"]);
         assert_eq!(
             env,
-            vec![("CHAPPA_CMD".to_owned(), r#"py -c "import time; time.sleep(999)""#.to_owned())]
+            vec![(
+                "CHAPPA_CMD".to_owned(),
+                r#"py -c "import time; time.sleep(999)""#.to_owned()
+            )]
         );
         // No quotes → untouched (byte-identical behaviour to before).
-        let (args, env) = cmd_quote_indirection("cmd", vec!["/C".to_owned(), "py app/x.py".to_owned()]);
+        let (args, env) =
+            cmd_quote_indirection("cmd", vec!["/C".to_owned(), "py app/x.py".to_owned()]);
         assert_eq!(args, vec!["/C", "py app/x.py"]);
         assert!(env.is_empty());
         // Not cmd → untouched.
-        let (args, env) = cmd_quote_indirection("sh", vec!["-c".to_owned(), r#"echo "hi""#.to_owned()]);
+        let (args, env) =
+            cmd_quote_indirection("sh", vec!["-c".to_owned(), r#"echo "hi""#.to_owned()]);
         assert_eq!(args, vec!["-c", r#"echo "hi""#]);
         assert!(env.is_empty());
         let (program, args) = execution_command("py app/x.py", &settings_with("cmd", vec![]));
@@ -3196,17 +3405,28 @@ mod tests {
         let mut processes = IndexMap::new();
         // Stopped, auto-start, unchanged by this reload: still listed — the
         // next open would start it.
-        processes.insert("web".to_owned(), fresh_runtime(root.path(), def("npm run dev", true)));
+        processes.insert(
+            "web".to_owned(),
+            fresh_runtime(root.path(), def("npm run dev", true)),
+        );
         // Not auto-start, not running: nothing runs it without a click.
-        processes.insert("lint".to_owned(), fresh_runtime(root.path(), def("npm run lint", false)));
+        processes.insert(
+            "lint".to_owned(),
+            fresh_runtime(root.path(), def("npm run lint", false)),
+        );
         // Not auto-start but was running and got held back: listed.
-        processes.insert("watch".to_owned(), fresh_runtime(root.path(), def("npm run watch", false)));
+        processes.insert(
+            "watch".to_owned(),
+            fresh_runtime(root.path(), def("npm run watch", false)),
+        );
         let listed = reload_trust_commands(&processes, &["watch".to_owned()]);
         assert_eq!(listed, vec!["npm run dev", "npm run watch"]);
         // The environment and working dir are part of what gets trusted.
         let mut sneaky = def("npm test", true);
         sneaky.working_dir = Some(PathBuf::from("tools"));
-        sneaky.env.insert("NODE_OPTIONS".to_owned(), "--require ./x.js".to_owned());
+        sneaky
+            .env
+            .insert("NODE_OPTIONS".to_owned(), "--require ./x.js".to_owned());
         assert_eq!(
             trust_line(&sneaky),
             "npm test\n    in tools\n    env NODE_OPTIONS=--require ./x.js"
@@ -3230,10 +3450,19 @@ mod tests {
             .unwrap()
             .processes;
         let still = |name: &str| after.get(name).is_some_and(ProcessDef::is_source);
-        assert_eq!(undeclared_sources(before.iter().map(|(n, d)| (n.as_str(), d)), still), vec!["stack", "feed"]);
+        assert_eq!(
+            undeclared_sources(before.iter().map(|(n, d)| (n.as_str(), d)), still),
+            vec!["stack", "feed"]
+        );
         // A removed project declares nothing: every source goes, each once.
-        let twice = before.iter().chain(before.iter()).map(|(n, d)| (n.as_str(), d));
-        assert_eq!(undeclared_sources(twice, |_| false), vec!["stack", "feed", "kept"]);
+        let twice = before
+            .iter()
+            .chain(before.iter())
+            .map(|(n, d)| (n.as_str(), d));
+        assert_eq!(
+            undeclared_sources(twice, |_| false),
+            vec!["stack", "feed", "kept"]
+        );
         // Nothing changed: nothing to forget.
         let same = |name: &str| before.get(name).is_some_and(ProcessDef::is_source);
         assert!(undeclared_sources(before.iter().map(|(n, d)| (n.as_str(), d)), same).is_empty());
@@ -3247,10 +3476,16 @@ mod tests {
     fn def_with_secrets(pw: &str) -> ProcessDef {
         let mut env = IndexMap::new();
         env.insert("DB_PASSWORD".to_owned(), pw.to_owned());
-        env.insert("DATABASE_URL".to_owned(), format!("postgresql://app:{pw}@db:5432/x"));
+        env.insert(
+            "DATABASE_URL".to_owned(),
+            format!("postgresql://app:{pw}@db:5432/x"),
+        );
         env.insert("NODE_ENV".to_owned(), "development".to_owned());
         ProcessDef {
-            command: CommandLine::Argv(vec!["psql".into(), format!("postgresql://app:{pw}@db:5432/x")]),
+            command: CommandLine::Argv(vec![
+                "psql".into(),
+                format!("postgresql://app:{pw}@db:5432/x"),
+            ]),
             env,
             ..ProcessDef::default()
         }
@@ -3271,12 +3506,18 @@ mod tests {
         let dto = ProjectProcessDto::from_process("db", &proc, None);
         let wire = serde_json::to_string(&dto).unwrap();
         assert!(!wire.contains(&pw), "{wire}");
-        assert_eq!(dto.masked, ["command", "env.DB_PASSWORD", "env.DATABASE_URL"]);
+        assert_eq!(
+            dto.masked,
+            ["command", "env.DB_PASSWORD", "env.DATABASE_URL"]
+        );
         assert_eq!(dto.env["NODE_ENV"], "development");
         assert_eq!(dto.env["DB_PASSWORD"], "•••• (set inline)");
         let warnings = inline_credential_warnings([("db", &def)]);
         assert_eq!(warnings.len(), 3, "{warnings:?}");
-        assert!(warnings[0].starts_with("chappa.yml: command `db` field `command`"), "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("chappa.yml: command `db` field `command`"),
+            "{warnings:?}"
+        );
         assert!(warnings.iter().all(|w| !w.contains(&pw)));
     }
 
@@ -3287,10 +3528,14 @@ mod tests {
         // Untouched: the editor sends the markers back.
         let mut kept = ProcessDef {
             command: CommandLine::Shell(UNCHANGED.to_owned()),
-            env: [("DB_PASSWORD", UNCHANGED), ("DATABASE_URL", UNCHANGED), ("NODE_ENV", "production")]
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect(),
+            env: [
+                ("DB_PASSWORD", UNCHANGED),
+                ("DATABASE_URL", UNCHANGED),
+                ("NODE_ENV", "production"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
             ..ProcessDef::default()
         };
         resolve_unchanged(&mut kept, Some(&stored)).unwrap();
@@ -3301,14 +3546,22 @@ mod tests {
         // Replaced: the new value wins.
         let mut replaced = ProcessDef {
             command: CommandLine::Shell("psql $DATABASE_URL".into()),
-            env: [("DB_PASSWORD".to_owned(), "${DB_PASSWORD}".to_owned())].into_iter().collect(),
+            env: [("DB_PASSWORD".to_owned(), "${DB_PASSWORD}".to_owned())]
+                .into_iter()
+                .collect(),
             ..ProcessDef::default()
         };
         resolve_unchanged(&mut replaced, Some(&stored)).unwrap();
-        assert_eq!(replaced.command, CommandLine::Shell("psql $DATABASE_URL".into()));
+        assert_eq!(
+            replaced.command,
+            CommandLine::Shell("psql $DATABASE_URL".into())
+        );
         assert_eq!(replaced.env["DB_PASSWORD"], "${DB_PASSWORD}");
         // A marker with nothing behind it is refused, never written.
-        let mut orphan = ProcessDef { command: CommandLine::Shell(UNCHANGED.to_owned()), ..ProcessDef::default() };
+        let mut orphan = ProcessDef {
+            command: CommandLine::Shell(UNCHANGED.to_owned()),
+            ..ProcessDef::default()
+        };
         assert!(resolve_unchanged(&mut orphan, None).is_err());
     }
 
@@ -3331,7 +3584,13 @@ mod tests {
         store.mark_trusted(pid, hash.clone()).unwrap();
         assert!(store.is_trusted(pid, &hash));
         let persisted = std::fs::read_to_string(dir.path().join("projects.json")).unwrap();
-        for text in ["marker-up.js", "marker-env-value", "chappa-stack", "MARKER_ENV", pw.as_str()] {
+        for text in [
+            "marker-up.js",
+            "marker-env-value",
+            "chappa-stack",
+            "MARKER_ENV",
+            pw.as_str(),
+        ] {
             assert!(!persisted.contains(text), "{text} in {persisted}");
         }
     }
@@ -3344,13 +3603,25 @@ mod tests {
         std::fs::write(root.join(project_model::yml::CHAPPA_YML_NAME), yml).unwrap();
         std::fs::write(root.join("chappa.stack.yml"), "stacks:\n  app:\n    components:\n      web:\n        driver: script\n        up: [node, scripts/up.js]\n").unwrap();
         let mut store = ProjectStore::new(dir.path().join("projects.json"));
-        let pid = store.add(root.to_path_buf(), "app".into(), None).unwrap().id;
-        store.mark_trusted(pid, crate::stack_trust::trust_hash_on_disk(root).unwrap()).unwrap();
+        let pid = store
+            .add(root.to_path_buf(), "app".into(), None)
+            .unwrap()
+            .id;
+        store
+            .mark_trusted(pid, crate::stack_trust::trust_hash_on_disk(root).unwrap())
+            .unwrap();
         let loaded = ProjectYml::load_result(root).unwrap();
         let stacks = crate::stack_trust::stack_sources(root, &loaded.processes);
-        let mut processes: IndexMap<String, ProcessRuntime> =
-            loaded.processes.clone().into_iter().map(|(n, d)| (n, fresh_runtime(root, d))).collect();
-        assert!(trust_stack_definitions(&mut processes, &stacks).is_empty(), "nothing live yet");
+        let mut processes: IndexMap<String, ProcessRuntime> = loaded
+            .processes
+            .clone()
+            .into_iter()
+            .map(|(n, d)| (n, fresh_runtime(root, d)))
+            .collect();
+        assert!(
+            trust_stack_definitions(&mut processes, &stacks).is_empty(),
+            "nothing live yet"
+        );
         let first = processes["stack"].trusted_definition.clone().unwrap();
         // Only chappa.stack.yml changes: the project is no longer trusted.
         std::fs::write(root.join("chappa.stack.yml"), "stacks:\n  app:\n    components:\n      web:\n        driver: script\n        up: [node, scripts/other.js]\n").unwrap();
@@ -3360,11 +3631,26 @@ mod tests {
         let lines = crate::stack_trust::prompt_lines(&stacks).join("\n");
         assert!(lines.contains("up: [node, scripts/other.js]"), "{lines}");
         // While it waits, the runner keeps the old hash: a restart runs nothing new.
-        let launched = crate::stack_trust::with_trusted_definition(&processes["stack"].def, processes["stack"].trusted_definition.as_deref());
-        assert_eq!(launched.command, CommandLine::Argv(vec!["chappa-stack".into(), "serve".into(), "--trusted-definition".into(), first.clone()]));
+        let launched = crate::stack_trust::with_trusted_definition(
+            &processes["stack"].def,
+            processes["stack"].trusted_definition.as_deref(),
+        );
+        assert_eq!(
+            launched.command,
+            CommandLine::Argv(vec![
+                "chappa-stack".into(),
+                "serve".into(),
+                "--trusted-definition".into(),
+                first.clone()
+            ])
+        );
         // Trusted: the live runner is named for a relaunch with the new hash.
         processes.get_mut("stack").unwrap().term_id = Some(7);
-        processes.get_mut("stack").unwrap().lifecycle.on(ProcessEvent::Spawned, 1);
+        processes
+            .get_mut("stack")
+            .unwrap()
+            .lifecycle
+            .on(ProcessEvent::Spawned, 1);
         assert_eq!(trust_stack_definitions(&mut processes, &stacks), ["stack"]);
         let second = processes["stack"].trusted_definition.clone().unwrap();
         assert_ne!(first, second);
@@ -3390,11 +3676,24 @@ mod tests {
             "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }],
         }}));
         VerdictStore::beside(&sources_file)
-            .put(&id, SavedVerdict { block, secret_scan: None, source_label: "Stack app".into(), manifest_id: "stack:app".into(), fallback: Some(root.clone()), saved_ms: 1 })
+            .put(
+                &id,
+                SavedVerdict {
+                    block,
+                    secret_scan: None,
+                    source_label: "Stack app".into(),
+                    manifest_id: "stack:app".into(),
+                    fallback: Some(root.clone()),
+                    saved_ms: 1,
+                },
+            )
             .unwrap();
         let start = || {
             let sources = Sources::default();
-            sources.init_with(SourceStore::new(sources_file.clone()), Arc::new(crate::sources::NullEmitter));
+            sources.init_with(
+                SourceStore::new(sources_file.clone()),
+                Arc::new(crate::sources::NullEmitter),
+            );
             sources
         };
         let sources = start();
@@ -3415,7 +3714,9 @@ mod tests {
         std::fs::write(&yml, "processes: {}\n").unwrap();
         let mut store = ProjectStore::new(dir.path().join("projects.json"));
         let pid = store.add(root.clone(), "app".into(), None).unwrap().id;
-        store.mark_trusted(pid, hash::file_content_hash(&yml).unwrap()).unwrap();
+        store
+            .mark_trusted(pid, hash::file_content_hash(&yml).unwrap())
+            .unwrap();
         std::fs::write(&yml, "processes:\n  web:\n    command: npm run dev\n").unwrap();
         trust_own_write(&mut store, pid, true);
         assert!(store.is_trusted(pid, &hash::file_content_hash(&yml).unwrap()));
@@ -3430,11 +3731,18 @@ mod tests {
         let argv = CommandLine::Argv(vec!["py".into(), "-c".into(), r#"print("a & b")"#.into()]);
         let (program, args, env) = process_command(&argv, &settings).unwrap();
         assert_eq!(program, "py");
-        assert_eq!(args, vec!["-c", r#"print("a & b")"#], "words pass through untouched");
+        assert_eq!(
+            args,
+            vec!["-c", r#"print("a & b")"#],
+            "words pass through untouched"
+        );
         assert!(env.is_empty(), "no cmd quote indirection for a list");
         // A shell line still goes through the profile.
         let (program, args, _) = process_command(&"py app/x.py".into(), &settings).unwrap();
-        assert_eq!((program.as_str(), args), ("cmd", vec!["/C".to_owned(), "py app/x.py".to_owned()]));
+        assert_eq!(
+            (program.as_str(), args),
+            ("cmd", vec!["/C".to_owned(), "py app/x.py".to_owned()])
+        );
         // An empty list is refused rather than panicking.
         assert!(process_command(&CommandLine::Argv(vec![]), &settings).is_err());
     }
@@ -3525,13 +3833,26 @@ mod tests {
         assert_eq!(json["notificationLevel"], "important");
         assert!(json.get("notification_level").is_none());
         // The wire DTO is exactly these eight keys — no sync flag.
-        let keys: std::collections::BTreeSet<&str> =
-            json.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             keys,
-            ["id", "name", "path", "icon", "initials", "color", "notificationLevel", "secretScan"]
-                .into_iter()
-                .collect::<std::collections::BTreeSet<&str>>()
+            [
+                "id",
+                "name",
+                "path",
+                "icon",
+                "initials",
+                "color",
+                "notificationLevel",
+                "secretScan"
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<&str>>()
         );
         // The pre-keys are untouched by the added rename_all.
         assert_eq!(json["id"], 1);
@@ -3681,8 +4002,7 @@ mod tests {
         let root = project_root(dir.path(), "chappa-ai", None);
         let path = root.display().to_string();
 
-        let first =
-            add_to_store(&mut store, &path, Some("old name".to_owned())).unwrap();
+        let first = add_to_store(&mut store, &path, Some("old name".to_owned())).unwrap();
         assert_eq!(first.name, "old name");
 
         // Untouched field (None) — the existing row comes back unrenamed.
@@ -3692,19 +4012,21 @@ mod tests {
 
         // Dirty explicit name — the stored row is renamed and persisted, and
         // the answer carries the NEW name (the frontend adopts it verbatim).
-        let renamed =
-            add_to_store(&mut store, &path, Some("new name".to_owned())).unwrap();
+        let renamed = add_to_store(&mut store, &path, Some("new name".to_owned())).unwrap();
         assert_eq!(renamed.id, first.id);
         assert_eq!(renamed.name, "new name");
-        assert_eq!(store.list().len(), 1, "a rename must never duplicate the row");
+        assert_eq!(
+            store.list().len(),
+            1,
+            "a rename must never duplicate the row"
+        );
         assert_eq!(
             ProjectStore::new(store_path).get(first.id).unwrap().name,
             "new name"
         );
 
         // Re-typing the CURRENT name is a no-op, not an error.
-        let unchanged =
-            add_to_store(&mut store, &path, Some("new name".to_owned())).unwrap();
+        let unchanged = add_to_store(&mut store, &path, Some("new name".to_owned())).unwrap();
         assert_eq!(unchanged.name, "new name");
     }
 
@@ -3724,10 +4046,16 @@ mod tests {
     fn picker_gate_admits_one_picker_at_a_time() {
         let gate = PickerGate::new();
         let first = gate.claim().expect("gate starts open");
-        assert!(gate.claim().is_none(), "a second picker is refused while one is up");
+        assert!(
+            gate.claim().is_none(),
+            "a second picker is refused while one is up"
+        );
         drop(first);
         let again = gate.claim();
-        assert!(again.is_some(), "the slot frees itself when the first pick returns");
+        assert!(
+            again.is_some(),
+            "the slot frees itself when the first pick returns"
+        );
         drop(again);
         // A pick that unwinds still releases the slot: the guard is a Drop.
         let unwound = std::panic::catch_unwind(|| {

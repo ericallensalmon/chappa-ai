@@ -19,8 +19,12 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use app_lib::agent_tools::{AgentTool, AgentToolsState, Runtime, SessionCapture, ToolType, Transport};
-use app_lib::agents::{spawn_agent_headless, AgentMeta, Bridge, NsPid, SpawnAgentRequest, SpawnContext};
+use app_lib::agent_tools::{
+    AgentTool, AgentToolsState, Runtime, SessionCapture, ToolType, Transport,
+};
+use app_lib::agents::{
+    spawn_agent_headless, AgentMeta, Bridge, NsPid, SpawnAgentRequest, SpawnContext,
+};
 use app_lib::control_http::{self, ControlState};
 use app_lib::coordination::Coordination;
 use app_lib::projects::Projects;
@@ -56,7 +60,10 @@ fn exiting_tool() -> (String, Vec<String>) {
 
 #[cfg(not(windows))]
 fn exiting_tool() -> (String, Vec<String>) {
-    ("sh".into(), vec!["-c".into(), "echo \"$1\"".into(), "sh".into()])
+    (
+        "sh".into(),
+        vec!["-c".into(), "echo \"$1\"".into(), "sh".into()],
+    )
 }
 
 /// A tool program that prints its last argument and stays alive.
@@ -67,21 +74,34 @@ fn lingering_tool() -> (String, Vec<String>) {
 
 #[cfg(not(windows))]
 fn lingering_tool() -> (String, Vec<String>) {
-    ("sh".into(), vec!["-c".into(), "echo \"$1\"; exec sh".into(), "sh".into()])
+    (
+        "sh".into(),
+        vec!["-c".into(), "echo \"$1\"; exec sh".into(), "sh".into()],
+    )
 }
 
 /// A program whose whole command line is the resume template: the shell,
 /// with the template supplying what it runs.
 fn shell_program() -> String {
-    if cfg!(windows) { "cmd".into() } else { "sh".into() }
+    if cfg!(windows) {
+        "cmd".into()
+    } else {
+        "sh".into()
+    }
 }
 
 /// A resume template that prints the provider's refusal and exits.
 fn rejecting_resume_argv() -> Vec<String> {
     if cfg!(windows) {
-        vec!["/C".into(), "echo No conversation found with session ID: {session_id}".into()]
+        vec![
+            "/C".into(),
+            "echo No conversation found with session ID: {session_id}".into(),
+        ]
     } else {
-        vec!["-c".into(), "echo \"No conversation found with session ID: {session_id}\"".into()]
+        vec![
+            "-c".into(),
+            "echo \"No conversation found with session ID: {session_id}\"".into(),
+        ]
     }
 }
 
@@ -99,9 +119,21 @@ fn accepting_resume_argv() -> Vec<String> {
 /// one printed on the way out.
 fn two_ids_program() -> (String, Vec<String>) {
     if cfg!(windows) {
-        ("cmd".into(), vec!["/C".into(), "echo session: ses-first & echo session: ses-last".into()])
+        (
+            "cmd".into(),
+            vec![
+                "/C".into(),
+                "echo session: ses-first & echo session: ses-last".into(),
+            ],
+        )
     } else {
-        ("sh".into(), vec!["-c".into(), "echo 'session: ses-first'; echo 'session: ses-last'".into()])
+        (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "echo 'session: ses-first'; echo 'session: ses-last'".into(),
+            ],
+        )
     }
 }
 
@@ -125,7 +157,10 @@ fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
         ]
         .join("\r\n");
         std::fs::write(&script, body).unwrap();
-        ("cmd".into(), vec!["/C".into(), script.to_string_lossy().into_owned()])
+        (
+            "cmd".into(),
+            vec!["/C".into(), script.to_string_lossy().into_owned()],
+        )
     } else {
         let script = dir.join("fake_json_cli.sh");
         let body = [
@@ -166,18 +201,39 @@ struct World {
 fn world() -> World {
     let dir = tempfile::tempdir().unwrap();
     let mut store = ProjectStore::new(dir.path().join("projects.json"));
-    store.add(dir.path().join("proj"), "proj".into(), None).unwrap();
+    store
+        .add(dir.path().join("proj"), "proj".into(), None)
+        .unwrap();
     let projects = Projects::with_store(store);
     let workspace = Workspace::with_store(WorkspaceStore::new(dir.path().join("workspace.json")));
-    let records = Records::new(projects.clone(), workspace.clone(), Coordination::in_memory().unwrap());
+    let records = Records::new(
+        projects.clone(),
+        workspace.clone(),
+        Coordination::in_memory().unwrap(),
+    );
     let registry = Registry::default();
     registry.set_run_recorder(Arc::new(records.clone()));
     let tools = AgentToolsState::with_path(dir.path().join("agent_tools.json"));
-    World { dir, registry, records, projects, workspace, tools, settings: SettingsState::default() }
+    World {
+        dir,
+        registry,
+        records,
+        projects,
+        workspace,
+        tools,
+        settings: SettingsState::default(),
+    }
 }
 
 impl World {
-    fn tool(&self, name: &str, program: String, args: Vec<String>, capture: SessionCapture, resume_argv: Vec<String>) -> AgentTool {
+    fn tool(
+        &self,
+        name: &str,
+        program: String,
+        args: Vec<String>,
+        capture: SessionCapture,
+        resume_argv: Vec<String>,
+    ) -> AgentTool {
         self.tools
             .upsert(AgentTool {
                 id: 0,
@@ -211,7 +267,12 @@ impl World {
     }
 
     fn deps(&self) -> StartDeps<'_> {
-        StartDeps { registry: &self.registry, tools: &self.tools, settings: &self.settings, app: None }
+        StartDeps {
+            registry: &self.registry,
+            tools: &self.tools,
+            settings: &self.settings,
+            app: None,
+        }
     }
 
     fn last_run(&self, record_id: &str) -> Option<Run> {
@@ -223,7 +284,10 @@ impl World {
     }
 
     fn screen(&self, id: u32) -> String {
-        self.registry.handle(id).map(|h| h.dump_text(50).join("\n")).unwrap_or_default()
+        self.registry
+            .handle(id)
+            .map(|h| h.dump_text(50).join("\n"))
+            .unwrap_or_default()
     }
 }
 
@@ -246,7 +310,12 @@ fn host_meta(tool_id: u32, tool_type: ToolType, uuid: &str) -> AgentMeta {
 }
 
 /// A no-pty agent entry bound to an agent record, driven by hand.
-fn announcing_entry(w: &World, record_id: &str, run_uuid: &str, sink: Arc<MockSink>) -> (u32, term_core::actor::TermHandle) {
+fn announcing_entry(
+    w: &World,
+    record_id: &str,
+    run_uuid: &str,
+    sink: Arc<MockSink>,
+) -> (u32, term_core::actor::TermHandle) {
     w.records
         .add_agent_record(
             Scope::Workspace,
@@ -266,17 +335,38 @@ fn announcing_entry(w: &World, record_id: &str, run_uuid: &str, sink: Arc<MockSi
         )
         .unwrap();
     w.records
-        .begin_run(Scope::Workspace, project_model::records::RecordKind::Agent, record_id, &Run::begin(run_uuid, 1, TailKind::Text))
+        .begin_run(
+            Scope::Workspace,
+            project_model::records::RecordKind::Agent,
+            record_id,
+            &Run::begin(run_uuid, 1, TailKind::Text),
+        )
         .unwrap();
     let id = w.registry.reserve_id();
     let cfg = ActorConfig {
-        spec: PtySpec { command: String::new(), args: vec![], cwd: None, env: vec![], cols: 40, rows: 6 },
+        spec: PtySpec {
+            command: String::new(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+            cols: 40,
+            rows: 6,
+        },
         scrollback_lines: 100,
         ..ActorConfig::default()
     };
     let handle = w
         .registry
-        .create_json_agent_terminal(cfg, sink, None, "announcer".into(), id, host_meta(1, ToolType::Custom, run_uuid), false, Some(record_id.into()))
+        .create_json_agent_terminal(
+            cfg,
+            sink,
+            None,
+            "announcer".into(),
+            id,
+            host_meta(1, ToolType::Custom, run_uuid),
+            false,
+            Some(record_id.into()),
+        )
         .expect("entry");
     (id, handle)
 }
@@ -294,13 +384,33 @@ fn an_announced_session_lands_on_the_run_and_a_later_one_replaces_it() {
     let session = wait_until(|| w.session("a-announce"));
     assert_eq!(session.session_id, "ses-one");
     assert_eq!(session.source, SessionSource::Announced);
-    assert_eq!(session.provider, "custom", "filed under the agent's tool type");
+    assert_eq!(
+        session.provider, "custom",
+        "filed under the agent's tool type"
+    );
     assert_eq!(session.resumed_from, None);
     // The live row's head and the control row carry it.
     let row = w.registry.control_snapshot(id).unwrap();
-    assert_eq!(row.last_run.as_ref().unwrap().session.as_ref().unwrap().session_id, "ses-one");
-    let listed = w.records.list(&w.registry).into_iter().find(|r| r.record_id == "a-announce").unwrap();
-    assert_eq!(listed.last_run.unwrap().session.unwrap().session_id, "ses-one");
+    assert_eq!(
+        row.last_run
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .session_id,
+        "ses-one"
+    );
+    let listed = w
+        .records
+        .list(&w.registry)
+        .into_iter()
+        .find(|r| r.record_id == "a-announce")
+        .unwrap();
+    assert_eq!(
+        listed.last_run.unwrap().session.unwrap().session_id,
+        "ses-one"
+    );
     // The ledger row too.
     let runs = w.records.runs("a-announce", 20).unwrap();
     assert_eq!(runs[0].session.as_ref().unwrap().session_id, "ses-one");
@@ -321,22 +431,48 @@ fn an_announced_session_lands_on_the_run_and_a_later_one_replaces_it() {
 
     // A later announcement wins; a repeat of the same id is not news.
     handle.feed(b"\x1b]777;session;ses-two\x1b\\");
-    wait_until(|| w.session("a-announce").filter(|s| s.session_id == "ses-two"));
+    wait_until(|| {
+        w.session("a-announce")
+            .filter(|s| s.session_id == "ses-two")
+    });
     handle.feed(b"\x1b]777;session;ses-two\x07");
     std::thread::sleep(Duration::from_millis(100));
-    let announcements = sink.events.lock().unwrap().iter().filter(|e| e.event == TERM_SESSION).count();
+    let announcements = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.event == TERM_SESSION)
+        .count();
     assert_eq!(announcements, 2, "the repeat emitted nothing");
 
     // The run-uuid rule: a fact for an older run never touches the head.
-    w.records.run_session("a-announce", "run-stale", Session::new("custom", "ses-stale", SessionSource::Mcp, 9));
+    w.records.run_session(
+        "a-announce",
+        "run-stale",
+        Session::new("custom", "ses-stale", SessionSource::Mcp, 9),
+    );
     assert_eq!(w.session("a-announce").unwrap().session_id, "ses-two");
     w.registry.close(id);
-    wait_until(|| (w.last_run("a-announce").map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(()));
+    wait_until(|| {
+        (w.last_run("a-announce").map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(())
+    });
     // After the run ended its head is closed to late session facts too;
     // the ledger row still takes the id (it is that run's own history).
-    w.records.run_session("a-announce", "run-a", Session::new("custom", "ses-late", SessionSource::Mcp, 10));
+    w.records.run_session(
+        "a-announce",
+        "run-a",
+        Session::new("custom", "ses-late", SessionSource::Mcp, 10),
+    );
     assert_eq!(w.session("a-announce").unwrap().session_id, "ses-two");
-    assert_eq!(w.records.runs("a-announce", 20).unwrap()[0].session.as_ref().unwrap().session_id, "ses-late");
+    assert_eq!(
+        w.records.runs("a-announce", 20).unwrap()[0]
+            .session
+            .as_ref()
+            .unwrap()
+            .session_id,
+        "ses-late"
+    );
 }
 
 /// A tty tool with a regex capture: the id is the LAST match in the output,
@@ -346,17 +482,45 @@ fn an_announced_session_lands_on_the_run_and_a_later_one_replaces_it() {
 fn a_regex_capture_keeps_the_latest_printed_id() {
     let w = world();
     let (program, args) = two_ids_program();
-    let tool = w.tool("two-ids", program, args, SessionCapture::Regex { pattern: r"session: (\S+)".into() }, vec![]);
-    let spawned = spawn_agent_headless(w.ctx(), SpawnAgentRequest { agent_tool_id: tool.id, ..SpawnAgentRequest::default() }).unwrap();
+    let tool = w.tool(
+        "two-ids",
+        program,
+        args,
+        SessionCapture::Regex {
+            pattern: r"session: (\S+)".into(),
+        },
+        vec![],
+    );
+    let spawned = spawn_agent_headless(
+        w.ctx(),
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .unwrap();
     let record_id = spawned.record_id.clone().unwrap();
     let run = wait_until(|| w.last_run(&record_id).filter(|r| !r.is_open()));
     let session = run.session.expect("captured");
     assert_eq!(session.session_id, "ses-last", "the later match wins");
     assert_eq!(session.source, SessionSource::Regex);
-    assert_eq!(w.records.runs(&record_id, 20).unwrap()[0].session.as_ref().unwrap().session_id, "ses-last");
+    assert_eq!(
+        w.records.runs(&record_id, 20).unwrap()[0]
+            .session
+            .as_ref()
+            .unwrap()
+            .session_id,
+        "ses-last"
+    );
     // The tool has no resume command: a resume is unavailable, not a fresh start.
-    let err = w.records.resume(w.deps(), &record_id, None, None).unwrap_err();
-    assert!(matches!(&err, ResumeFailure::Unavailable { message, .. } if message.contains("no resume command")), "{err:?}");
+    let err = w
+        .records
+        .resume(w.deps(), &record_id, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, ResumeFailure::Unavailable { message, .. } if message.contains("no resume command")),
+        "{err:?}"
+    );
     assert_eq!(err.status(), 409);
     assert_eq!(err.to_json()["error"], json!("resume_unavailable"));
     w.registry.close(spawned.process_id);
@@ -390,17 +554,32 @@ fn a_json_agent_copies_its_session_from_the_event_stream() {
         .unwrap();
     let spawned = spawn_agent_headless(
         w.ctx(),
-        SpawnAgentRequest { agent_tool_id: tool.id, prompt: Some("ping".into()), ..SpawnAgentRequest::default() },
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            prompt: Some("ping".into()),
+            ..SpawnAgentRequest::default()
+        },
     )
     .expect("json spawn");
     let record_id = spawned.record_id.clone().unwrap();
     let session = wait_until(|| w.session(&record_id));
-    assert_eq!((session.session_id.as_str(), session.source, session.provider.as_str()), ("ses-json", SessionSource::Json, "claude"));
+    assert_eq!(
+        (
+            session.session_id.as_str(),
+            session.source,
+            session.provider.as_str()
+        ),
+        ("ses-json", SessionSource::Json, "claude")
+    );
     let head = w.registry.run_head(spawned.process_id).unwrap();
     assert_eq!(head.session.unwrap().session_id, "ses-json");
     w.registry.close(spawned.process_id);
     let run = wait_until(|| w.last_run(&record_id).filter(|r| !r.is_open()));
-    assert_eq!(run.session.unwrap().session_id, "ses-json", "the id outlives the run");
+    assert_eq!(
+        run.session.unwrap().session_id,
+        "ses-json",
+        "the id outlives the run"
+    );
 }
 
 /// The resume outcomes, in order: nothing saved → the distinct no-session
@@ -413,29 +592,76 @@ fn resume_distinguishes_no_session_rejection_and_acceptance() {
     let w = world();
     // A record whose runs never learned a session.
     let (program, args) = exiting_tool();
-    let plain = w.tool("plain", program, [args, vec!["probe".into()]].concat(), SessionCapture::None, vec![]);
-    let spawned = spawn_agent_headless(w.ctx(), SpawnAgentRequest { agent_tool_id: plain.id, ..SpawnAgentRequest::default() }).unwrap();
+    let plain = w.tool(
+        "plain",
+        program,
+        [args, vec!["probe".into()]].concat(),
+        SessionCapture::None,
+        vec![],
+    );
+    let spawned = spawn_agent_headless(
+        w.ctx(),
+        SpawnAgentRequest {
+            agent_tool_id: plain.id,
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .unwrap();
     let plain_record = spawned.record_id.clone().unwrap();
     wait_until(|| w.last_run(&plain_record).filter(|r| !r.is_open()));
-    let err = w.records.resume(w.deps(), &plain_record, None, None).unwrap_err();
+    let err = w
+        .records
+        .resume(w.deps(), &plain_record, None, None)
+        .unwrap_err();
     assert!(matches!(err, ResumeFailure::NoSession { .. }), "{err:?}");
     assert_eq!(err.to_json()["error"], json!("no_session"));
-    assert!(matches!(w.records.resume(w.deps(), "no-such", None, None).unwrap_err(), ResumeFailure::NotFound { .. }));
+    assert!(matches!(
+        w.records
+            .resume(w.deps(), "no-such", None, None)
+            .unwrap_err(),
+        ResumeFailure::NotFound { .. }
+    ));
 
     // A record whose run learned a session while it was live (the announce
     // path through the registry), then was closed.
     let (program, args) = lingering_tool();
-    let mut tool = w.tool("resumable", program, [args, vec!["probe".into()]].concat(), SessionCapture::Announced, vec![]);
-    let spawned = spawn_agent_headless(w.ctx(), SpawnAgentRequest { agent_tool_id: tool.id, ..SpawnAgentRequest::default() }).unwrap();
+    let mut tool = w.tool(
+        "resumable",
+        program,
+        [args, vec!["probe".into()]].concat(),
+        SessionCapture::Announced,
+        vec![],
+    );
+    let spawned = spawn_agent_headless(
+        w.ctx(),
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .unwrap();
     let record_id = spawned.record_id.clone().unwrap();
     wait_until(|| w.screen(spawned.process_id).contains("probe").then_some(()));
-    w.registry.record_session(spawned.process_id, Session::new("custom", "ses-saved", SessionSource::Mcp, 5)).unwrap();
+    w.registry
+        .record_session(
+            spawned.process_id,
+            Session::new("custom", "ses-saved", SessionSource::Mcp, 5),
+        )
+        .unwrap();
     assert_eq!(w.session(&record_id).unwrap().session_id, "ses-saved");
     // Running: not resumable.
-    let err = w.records.resume(w.deps(), &record_id, None, None).unwrap_err();
-    assert!(matches!(&err, ResumeFailure::Unavailable { message, .. } if message.contains("running")), "{err:?}");
+    let err = w
+        .records
+        .resume(w.deps(), &record_id, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, ResumeFailure::Unavailable { message, .. } if message.contains("running")),
+        "{err:?}"
+    );
     w.registry.close(spawned.process_id);
-    wait_until(|| (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(()));
+    wait_until(|| {
+        (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(())
+    });
 
     // The provider refuses: the child prints its refusal and exits before
     // it is ready. The record's tool now runs the template as its whole
@@ -444,19 +670,36 @@ fn resume_distinguishes_no_session_rejection_and_acceptance() {
     tool.args = vec![];
     tool.resume_argv = rejecting_resume_argv();
     w.tools.upsert(tool.clone()).unwrap();
-    let err = w.records.resume(w.deps(), &record_id, None, None).unwrap_err();
-    let ResumeFailure::Rejected { record_id: rid, run_uuid, term_id, exit_code, provider_text, message } = &err else {
+    let err = w
+        .records
+        .resume(w.deps(), &record_id, None, None)
+        .unwrap_err();
+    let ResumeFailure::Rejected {
+        record_id: rid,
+        run_uuid,
+        term_id,
+        exit_code,
+        provider_text,
+        message,
+    } = &err
+    else {
         panic!("expected a rejection: {err:?}");
     };
     assert_eq!(rid, &record_id);
-    assert!(provider_text.contains("No conversation found with session ID: ses-saved"), "{provider_text}");
+    assert!(
+        provider_text.contains("No conversation found with session ID: ses-saved"),
+        "{provider_text}"
+    );
     assert!(message.contains(provider_text), "{message}");
     assert_eq!(*exit_code, Some(0));
     assert_eq!(err.status(), 409);
     let body = err.to_json();
     assert_eq!(body["error"], json!("resume_rejected"));
     assert_eq!(body["provider_text"], json!(provider_text));
-    assert!(body.get("kind").is_none(), "the tag is spelled `error` on the wire");
+    assert!(
+        body.get("kind").is_none(),
+        "the tag is spelled `error` on the wire"
+    );
     // The failed run is the record's head, still asking for the id it was
     // given, and its output stays readable; the terminal stayed attached
     // like any exited run (a fresh start replaces it).
@@ -464,32 +707,72 @@ fn resume_distinguishes_no_session_rejection_and_acceptance() {
     assert_eq!(run.run_uuid, *run_uuid);
     assert_eq!(run.status, ProcessStatus::Exited);
     let session = run.session.unwrap();
-    assert_eq!((session.source, session.resumed_from.as_deref()), (SessionSource::Resume, Some("ses-saved")));
-    assert_eq!(w.registry.term_of_record(&record_id).map(|(t, _)| t), Some(*term_id));
+    assert_eq!(
+        (session.source, session.resumed_from.as_deref()),
+        (SessionSource::Resume, Some("ses-saved"))
+    );
+    assert_eq!(
+        w.registry.term_of_record(&record_id).map(|(t, _)| t),
+        Some(*term_id)
+    );
     let runs = w.records.runs(&record_id, 20).unwrap();
     assert_eq!(runs.len(), 2);
-    assert!(runs[0].tail.iter().any(|l| l.as_str().is_some_and(|s| s.contains("No conversation found"))), "{:?}", runs[0].tail);
+    assert!(
+        runs[0].tail.iter().any(|l| l
+            .as_str()
+            .is_some_and(|s| s.contains("No conversation found"))),
+        "{:?}",
+        runs[0].tail
+    );
 
     // The provider takes the session: the resume words ran (substituted,
     // on the command line), the run names what it continued.
     tool.resume_argv = accepting_resume_argv();
     w.tools.upsert(tool.clone()).unwrap();
-    let ok = w.records.resume(w.deps(), &record_id, None, None).expect("accepted");
+    let ok = w
+        .records
+        .resume(w.deps(), &record_id, None, None)
+        .expect("accepted");
     assert_eq!(ok.session_id, "ses-saved");
     assert_eq!(ok.check, ResumeCheck::Quiet);
     assert_ne!(ok.term_id, *term_id, "the rejected terminal was replaced");
     assert!(w.registry.handle(*term_id).is_none());
-    assert!(w.screen(ok.term_id).contains("resumed ses-saved"), "{}", w.screen(ok.term_id));
+    assert!(
+        w.screen(ok.term_id).contains("resumed ses-saved"),
+        "{}",
+        w.screen(ok.term_id)
+    );
     let head = w.registry.run_head(ok.term_id).unwrap();
     let session = head.session.unwrap();
-    assert_eq!((session.session_id.as_str(), session.source, session.resumed_from.as_deref()), ("ses-saved", SessionSource::Resume, Some("ses-saved")));
-    assert_eq!(w.session(&record_id).unwrap().resumed_from.as_deref(), Some("ses-saved"));
-    assert_eq!(w.records.runs(&record_id, 20).unwrap()[0].run_uuid, ok.run_uuid);
-    assert!(w.registry.input_journal(ok.term_id).unwrap().is_empty(), "nothing was typed into the resumed agent");
+    assert_eq!(
+        (
+            session.session_id.as_str(),
+            session.source,
+            session.resumed_from.as_deref()
+        ),
+        ("ses-saved", SessionSource::Resume, Some("ses-saved"))
+    );
+    assert_eq!(
+        w.session(&record_id).unwrap().resumed_from.as_deref(),
+        Some("ses-saved")
+    );
+    assert_eq!(
+        w.records.runs(&record_id, 20).unwrap()[0].run_uuid,
+        ok.run_uuid
+    );
+    assert!(
+        w.registry.input_journal(ok.term_id).unwrap().is_empty(),
+        "nothing was typed into the resumed agent"
+    );
     // An explicit id from an earlier run is honoured over the saved one.
     w.registry.close(ok.term_id);
-    wait_until(|| (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(()));
-    let chosen = w.records.resume(w.deps(), &record_id, Some("ses-older".into()), None).expect("accepted");
+    wait_until(|| {
+        (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(())
+    });
+    let chosen = w
+        .records
+        .resume(w.deps(), &record_id, Some("ses-older".into()), None)
+        .expect("accepted");
     assert_eq!(chosen.session_id, "ses-older");
     assert!(w.screen(chosen.term_id).contains("resumed ses-older"));
     w.registry.close(chosen.term_id);
@@ -498,10 +781,21 @@ fn resume_distinguishes_no_session_rejection_and_acceptance() {
 
 // ---- control routes ----------------------------------------------------------
 
-fn http(addr: &str, method: &str, path: &str, token: &str, actor: Option<&str>, body: &str) -> (u16, Value) {
+fn http(
+    addr: &str,
+    method: &str,
+    path: &str,
+    token: &str,
+    actor: Option<&str>,
+    body: &str,
+) -> (u16, Value) {
     let mut stream = TcpStream::connect(addr).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    let actor = actor.map(|a| format!("X-Chappa-Actor: {a}\r\n")).unwrap_or_default();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let actor = actor
+        .map(|a| format!("X-Chappa-Actor: {a}\r\n"))
+        .unwrap_or_default();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{actor}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -510,7 +804,11 @@ fn http(addr: &str, method: &str, path: &str, token: &str, actor: Option<&str>, 
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
     let text = String::from_utf8_lossy(&raw);
-    let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("status line");
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status line");
     let payload = text.split("\r\n\r\n").nth(1).unwrap_or("");
     (status, serde_json::from_str(payload).unwrap_or(Value::Null))
 }
@@ -522,7 +820,13 @@ fn http(addr: &str, method: &str, path: &str, token: &str, actor: Option<&str>, 
 fn session_and_resume_routes_answer_typed_outcomes() {
     let w = world();
     let (program, args) = lingering_tool();
-    let tool = w.tool("routed", program, [args, vec!["probe".into()]].concat(), SessionCapture::Announced, vec![]);
+    let tool = w.tool(
+        "routed",
+        program,
+        [args, vec!["probe".into()]].concat(),
+        SessionCapture::Announced,
+        vec![],
+    );
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
     let addr = server.server_addr().to_string();
     let token = "t0ken-for-tests".to_owned();
@@ -537,54 +841,135 @@ fn session_and_resume_routes_answer_typed_outcomes() {
     let t = token.clone();
     std::thread::spawn(move || control_http::serve(server, state, t));
 
-    let (status, spawned) = http(&addr, "POST", "/agents", &token, None, &json!({"agent_tool_id": tool.id, "name": "routed"}).to_string());
+    let (status, spawned) = http(
+        &addr,
+        "POST",
+        "/agents",
+        &token,
+        None,
+        &json!({"agent_tool_id": tool.id, "name": "routed"}).to_string(),
+    );
     assert_eq!(status, 200, "{spawned}");
     let record_id = spawned["record_id"].as_str().unwrap().to_owned();
     let term = spawned["process_id"].as_u64().unwrap();
     let actor = term.to_string();
 
     // Nothing saved yet: the resume route says so.
-    let (status, body) = http(&addr, "POST", &format!("/records/{record_id}/resume"), &token, None, "{}");
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/resume"),
+        &token,
+        None,
+        "{}",
+    );
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"], json!("no_session"));
 
     // set_session, self-targeted: the actor header names the row.
-    let (status, body) = http(&addr, "POST", &format!("/processes/{term}/session"), &token, Some(&actor), r#"{"session_id": " ses-mcp "}"#);
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{term}/session"),
+        &token,
+        Some(&actor),
+        r#"{"session_id": " ses-mcp "}"#,
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["id"], json!(term));
     assert_eq!(body["record_id"], json!(record_id));
     assert_eq!(body["durable"], json!(true));
     assert_eq!(body["session"]["session_id"], json!("ses-mcp"), "trimmed");
     assert_eq!(body["session"]["source"], json!("mcp"));
-    let (status, row) = http(&addr, "GET", &format!("/processes/{term}"), &token, None, "");
+    let (status, row) = http(
+        &addr,
+        "GET",
+        &format!("/processes/{term}"),
+        &token,
+        None,
+        "",
+    );
     assert_eq!(status, 200);
     assert_eq!(row["last_run"]["session"]["session_id"], json!("ses-mcp"));
     assert_eq!(w.session(&record_id).unwrap().session_id, "ses-mcp");
-    let (status, body) = http(&addr, "POST", &format!("/processes/{term}/session"), &token, Some(&actor), "{}");
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{term}/session"),
+        &token,
+        Some(&actor),
+        "{}",
+    );
     assert_eq!(status, 400, "{body}");
-    let (status, _) = http(&addr, "POST", "/processes/999999/session", &token, None, r#"{"session_id": "x"}"#);
+    let (status, _) = http(
+        &addr,
+        "POST",
+        "/processes/999999/session",
+        &token,
+        None,
+        r#"{"session_id": "x"}"#,
+    );
     assert_eq!(status, 404);
     // A running record is not resumable.
-    let (status, body) = http(&addr, "POST", &format!("/records/{record_id}/resume"), &token, None, "{}");
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/resume"),
+        &token,
+        None,
+        "{}",
+    );
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"], json!("resume_unavailable"));
 
     // Stop it, make its tool refuse, resume: the rejection travels whole.
-    let (status, _) = http(&addr, "POST", &format!("/processes/{term}/close"), &token, None, r#"{"confirm": true}"#);
+    let (status, _) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{term}/close"),
+        &token,
+        None,
+        r#"{"confirm": true}"#,
+    );
     assert_eq!(status, 200);
-    wait_until(|| (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(()));
+    wait_until(|| {
+        (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(())
+    });
     let mut refusing = tool.clone();
     refusing.program = shell_program();
     refusing.args = vec![];
     refusing.resume_argv = rejecting_resume_argv();
     w.tools.upsert(refusing).unwrap();
-    let (status, body) = http(&addr, "POST", &format!("/records/{record_id}/resume"), &token, None, "{}");
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/resume"),
+        &token,
+        None,
+        "{}",
+    );
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"], json!("resume_rejected"));
     assert_eq!(body["record_id"], json!(record_id));
-    assert!(body["provider_text"].as_str().unwrap().contains("No conversation found with session ID: ses-mcp"), "{body}");
-    assert!(body["run_uuid"].is_string() && body["term_id"].is_number(), "{body}");
-    let (status, _) = http(&addr, "POST", "/records/no-such-record/resume", &token, None, "{}");
+    assert!(
+        body["provider_text"]
+            .as_str()
+            .unwrap()
+            .contains("No conversation found with session ID: ses-mcp"),
+        "{body}"
+    );
+    assert!(
+        body["run_uuid"].is_string() && body["term_id"].is_number(),
+        "{body}"
+    );
+    let (status, _) = http(
+        &addr,
+        "POST",
+        "/records/no-such-record/resume",
+        &token,
+        None,
+        "{}",
+    );
     assert_eq!(status, 404);
     // A session named explicitly on the route.
     let mut accepting = tool.clone();
@@ -592,7 +977,14 @@ fn session_and_resume_routes_answer_typed_outcomes() {
     accepting.args = vec![];
     accepting.resume_argv = accepting_resume_argv();
     w.tools.upsert(accepting).unwrap();
-    let (status, body) = http(&addr, "POST", &format!("/records/{record_id}/resume"), &token, None, r#"{"session_id": "ses-named"}"#);
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/resume"),
+        &token,
+        None,
+        r#"{"session_id": "ses-named"}"#,
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["session_id"], json!("ses-named"));
     assert_eq!(body["check"], json!("quiet"));

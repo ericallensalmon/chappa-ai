@@ -27,14 +27,13 @@ use app_lib::control_http::{self, ControlState};
 use app_lib::coordination::Coordination;
 use app_lib::projects::Projects;
 use app_lib::records::{Records, Scope, StartDeps};
-use app_lib::registry::{
-    EventSink, JsonEvent, RecordBinding, Registry, RunExit, RunRecorder,
-};
+use app_lib::registry::{EventSink, JsonEvent, RecordBinding, Registry, RunExit, RunRecorder};
 use app_lib::settings::SettingsState;
 use app_lib::workspace::Workspace;
 use project_model::projects::ProjectStore;
 use project_model::records::{
-    AgentRecord, AgentRecordPatch, RecordKind, Run, TailKind, TerminalRecord, RUNS_RETAINED, TAIL_LINES,
+    AgentRecord, AgentRecordPatch, RecordKind, Run, TailKind, TerminalRecord, RUNS_RETAINED,
+    TAIL_LINES,
 };
 use project_model::workspace::WorkspaceStore;
 use serde_json::{json, Value};
@@ -84,7 +83,11 @@ fn echo_exit_spec() -> PtySpec {
 fn lingering_spec() -> PtySpec {
     PtySpec {
         command: "powershell.exe".into(),
-        args: vec!["-NoProfile".into(), "-Command".into(), "Start-Sleep -Seconds 30".into()],
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 30".into(),
+        ],
         cwd: None,
         env: Vec::new(),
         cols: 20,
@@ -112,7 +115,10 @@ fn exiting_tool() -> (String, Vec<String>) {
 
 #[cfg(not(windows))]
 fn exiting_tool() -> (String, Vec<String>) {
-    ("sh".into(), vec!["-c".into(), "echo \"$1\"".into(), "sh".into()])
+    (
+        "sh".into(),
+        vec!["-c".into(), "echo \"$1\"".into(), "sh".into()],
+    )
 }
 
 fn cfg(spec: PtySpec) -> ActorConfig {
@@ -149,10 +155,16 @@ struct World {
 fn world() -> World {
     let dir = tempfile::tempdir().unwrap();
     let mut store = ProjectStore::new(dir.path().join("projects.json"));
-    store.add(dir.path().join("proj"), "proj".into(), None).unwrap();
+    store
+        .add(dir.path().join("proj"), "proj".into(), None)
+        .unwrap();
     let projects = Projects::with_store(store);
     let workspace = Workspace::with_store(WorkspaceStore::new(dir.path().join("workspace.json")));
-    let records = Records::new(projects.clone(), workspace.clone(), Coordination::in_memory().unwrap());
+    let records = Records::new(
+        projects.clone(),
+        workspace.clone(),
+        Coordination::in_memory().unwrap(),
+    );
     let registry = Registry::default();
     registry.set_run_recorder(Arc::new(records.clone()));
     let tools = AgentToolsState::with_path(dir.path().join("agent_tools.json"));
@@ -181,7 +193,12 @@ fn terminal_record(id: &str) -> TerminalRecord {
 /// in the store first, binding passed into the spawn.
 fn spawn_for(w: &World, record_id: &str, run_uuid: &str, spec: PtySpec) -> u32 {
     w.records
-        .begin_run(Scope::Workspace, RecordKind::Terminal, record_id, &Run::begin(run_uuid, 1, TailKind::Text))
+        .begin_run(
+            Scope::Workspace,
+            RecordKind::Terminal,
+            record_id,
+            &Run::begin(run_uuid, 1, TailKind::Text),
+        )
         .unwrap();
     w.registry
         .create_recorded_terminal(
@@ -189,13 +206,18 @@ fn spawn_for(w: &World, record_id: &str, run_uuid: &str, spec: PtySpec) -> u32 {
             Arc::new(MockSink::default()),
             None,
             "shell".into(),
-            RecordBinding { record_id: record_id.into(), run_uuid: run_uuid.into() },
+            RecordBinding {
+                record_id: record_id.into(),
+                run_uuid: run_uuid.into(),
+            },
         )
         .expect("spawn")
 }
 
 fn head_status(w: &World, record_id: &str) -> Option<ProcessStatus> {
-    w.records.get(record_id).and_then(|(_, r)| r.last_run.map(|run| run.status))
+    w.records
+        .get(record_id)
+        .and_then(|(_, r)| r.last_run.map(|run| run.status))
 }
 
 fn host_tool(tools: &AgentToolsState, name: &str) -> AgentTool {
@@ -256,7 +278,9 @@ fn exit_writes_the_tail_onto_the_record_and_the_ledger() {
     assert!(run.ended_at_ms.is_some());
     assert_eq!(run.tail_kind, TailKind::Text);
     assert!(
-        run.tail.iter().any(|line| line.as_str().is_some_and(|s| s.contains("hello"))),
+        run.tail
+            .iter()
+            .any(|line| line.as_str().is_some_and(|s| s.contains("hello"))),
         "tail must hold the output: {:?}",
         run.tail
     );
@@ -281,7 +305,10 @@ fn exit_writes_the_tail_onto_the_record_and_the_ledger() {
     assert_eq!(head.exit_code, Some(0));
     let control = w.registry.control_snapshot(id).unwrap();
     assert_eq!(control.record_id.as_deref(), Some("t-exit"));
-    assert_eq!(control.last_run.as_ref().unwrap().status, ProcessStatus::Exited);
+    assert_eq!(
+        control.last_run.as_ref().unwrap().status,
+        ProcessStatus::Exited
+    );
     // The record list shows the exited terminal still attached.
     let listed = w.records.list(&w.registry);
     let entry = listed.iter().find(|r| r.record_id == "t-exit").unwrap();
@@ -301,10 +328,20 @@ fn a_late_fact_for_a_stale_run_is_dropped_from_the_head() {
         .add_terminal_record(Scope::Workspace, terminal_record("t-stale"))
         .unwrap();
     w.records
-        .begin_run(Scope::Workspace, RecordKind::Terminal, "t-stale", &Run::begin("old", 1, TailKind::Text))
+        .begin_run(
+            Scope::Workspace,
+            RecordKind::Terminal,
+            "t-stale",
+            &Run::begin("old", 1, TailKind::Text),
+        )
         .unwrap();
     w.records
-        .begin_run(Scope::Workspace, RecordKind::Terminal, "t-stale", &Run::begin("new", 2, TailKind::Text))
+        .begin_run(
+            Scope::Workspace,
+            RecordKind::Terminal,
+            "t-stale",
+            &Run::begin("new", 2, TailKind::Text),
+        )
         .unwrap();
     assert_eq!(head_status(&w, "t-stale"), Some(ProcessStatus::Running));
 
@@ -312,13 +349,26 @@ fn a_late_fact_for_a_stale_run_is_dropped_from_the_head() {
     w.records.run_exited(
         "t-stale",
         "old",
-        RunExit { ended_at_ms: 3, exit_code: Some(1), success: false, tail_kind: TailKind::Text, tail: vec![json!("late")] },
+        RunExit {
+            ended_at_ms: 3,
+            exit_code: Some(1),
+            success: false,
+            tail_kind: TailKind::Text,
+            tail: vec![json!("late")],
+        },
     );
     let (_, record) = w.records.get("t-stale").unwrap();
     let head = record.last_run.unwrap();
-    assert_eq!((head.run_uuid.as_str(), head.status), ("new", ProcessStatus::Running));
+    assert_eq!(
+        (head.run_uuid.as_str(), head.status),
+        ("new", ProcessStatus::Running)
+    );
     let runs = w.records.runs("t-stale", 20).unwrap();
-    assert_eq!(runs.iter().map(|r| r.run_uuid.as_str()).collect::<Vec<_>>(), vec!["new", "old"], "newest first");
+    assert_eq!(
+        runs.iter().map(|r| r.run_uuid.as_str()).collect::<Vec<_>>(),
+        vec!["new", "old"],
+        "newest first"
+    );
     assert_eq!(runs[1].status, ProcessStatus::Failed);
     assert_eq!(runs[1].tail, vec![json!("late")]);
 
@@ -328,11 +378,21 @@ fn a_late_fact_for_a_stale_run_is_dropped_from_the_head() {
     w.records.run_exited(
         "t-stale",
         "new",
-        RunExit { ended_at_ms: 5, exit_code: Some(0), success: true, tail_kind: TailKind::Text, tail: vec![] },
+        RunExit {
+            ended_at_ms: 5,
+            exit_code: Some(0),
+            success: true,
+            tail_kind: TailKind::Text,
+            tail: vec![],
+        },
     );
     assert_eq!(head_status(&w, "t-stale"), Some(ProcessStatus::Stopped));
     let runs = w.records.runs("t-stale", 20).unwrap();
-    assert_eq!(runs[0].status, ProcessStatus::Stopped, "the ledger row keeps the first ending too");
+    assert_eq!(
+        runs[0].status,
+        ProcessStatus::Stopped,
+        "the ledger row keeps the first ending too"
+    );
     assert_eq!(runs[0].ended_at_ms, Some(4));
     // Facts for an unknown record are ignored, never an error.
     w.records.run_stopped("nobody", "x", 1);
@@ -347,7 +407,10 @@ fn close_leaves_the_record_stopped_and_remove_deletes_its_history() {
         .add_terminal_record(Scope::Workspace, terminal_record("t-close"))
         .unwrap();
     let id = spawn_for(&w, "t-close", "run-1", lingering_spec());
-    assert_eq!(w.registry.term_of_record("t-close").map(|(t, _)| t), Some(id));
+    assert_eq!(
+        w.registry.term_of_record("t-close").map(|(t, _)| t),
+        Some(id)
+    );
     w.registry.close(id);
     let run = wait_until(|| {
         w.records
@@ -361,13 +424,25 @@ fn close_leaves_the_record_stopped_and_remove_deletes_its_history() {
     assert!(w.registry.term_of_record("t-close").is_none());
     let listed = w.records.list(&w.registry);
     let entry = listed.iter().find(|r| r.record_id == "t-close").unwrap();
-    assert_eq!((entry.status, entry.term_id), (ProcessStatus::Stopped, None));
-    assert_eq!(w.records.runs("t-close", 20).unwrap()[0].status, ProcessStatus::Stopped);
+    assert_eq!(
+        (entry.status, entry.term_id),
+        (ProcessStatus::Stopped, None)
+    );
+    assert_eq!(
+        w.records.runs("t-close", 20).unwrap()[0].status,
+        ProcessStatus::Stopped
+    );
 
     let removed = w.records.remove(&w.registry, None, "t-close").unwrap();
-    assert_eq!((removed.removed, removed.runs_deleted, removed.kind), (true, 1, RecordKind::Terminal));
+    assert_eq!(
+        (removed.removed, removed.runs_deleted, removed.kind),
+        (true, 1, RecordKind::Terminal)
+    );
     assert!(w.records.get("t-close").is_none());
-    assert!(w.records.runs("t-close", 20).is_err(), "no record, no history");
+    assert!(
+        w.records.runs("t-close", 20).is_err(),
+        "no record, no history"
+    );
     assert!(w.records.remove(&w.registry, None, "t-close").is_err());
     // Removing a record whose terminal is LIVE closes it first.
     w.records
@@ -375,7 +450,10 @@ fn close_leaves_the_record_stopped_and_remove_deletes_its_history() {
         .unwrap();
     let live = spawn_for(&w, "t-live", "run-l", lingering_spec());
     w.records.remove(&w.registry, None, "t-live").unwrap();
-    assert!(w.registry.handle(live).is_none(), "the live terminal was closed");
+    assert!(
+        w.registry.handle(live).is_none(),
+        "the live terminal was closed"
+    );
 }
 
 /// `start` on a stopped record spawns a new terminal under a NEW run uuid
@@ -397,12 +475,27 @@ fn start_assigns_a_new_run_uuid_and_a_new_terminal() {
     let (t1, u1) = (first.term_id.unwrap(), first.run_uuid.clone().unwrap());
     assert_eq!(first.kind, RecordKind::Terminal);
     assert!(!first.pending);
-    assert_eq!(w.registry.term_of_record("t-start").map(|(t, _)| t), Some(t1));
-    assert_eq!(w.records.get("t-start").unwrap().1.last_run.unwrap().run_uuid, u1);
+    assert_eq!(
+        w.registry.term_of_record("t-start").map(|(t, _)| t),
+        Some(t1)
+    );
+    assert_eq!(
+        w.records
+            .get("t-start")
+            .unwrap()
+            .1
+            .last_run
+            .unwrap()
+            .run_uuid,
+        u1
+    );
 
     // Live: idempotent, the same terminal and run.
     let again = w.records.start(deps(), "t-start", None, 0).unwrap();
-    assert_eq!((again.term_id, again.run_uuid.as_deref()), (Some(t1), Some(u1.as_str())));
+    assert_eq!(
+        (again.term_id, again.run_uuid.as_deref()),
+        (Some(t1), Some(u1.as_str()))
+    );
 
     w.registry.close(t1);
     wait_until(|| (head_status(&w, "t-start") == Some(ProcessStatus::Stopped)).then_some(()));
@@ -411,8 +504,15 @@ fn start_assigns_a_new_run_uuid_and_a_new_terminal() {
     assert_ne!(t2, t1, "a fresh terminal id");
     assert_ne!(u2, u1, "a fresh run uuid");
     let runs = w.records.runs("t-start", 20).unwrap();
-    assert_eq!(runs.iter().map(|r| r.run_uuid.clone()).collect::<Vec<_>>(), vec![u2.clone(), u1.clone()]);
-    assert_eq!(runs[1].status, ProcessStatus::Stopped, "the previous run is history, untouched");
+    assert_eq!(
+        runs.iter().map(|r| r.run_uuid.clone()).collect::<Vec<_>>(),
+        vec![u2.clone(), u1.clone()]
+    );
+    assert_eq!(
+        runs[1].status,
+        ProcessStatus::Stopped,
+        "the previous run is history, untouched"
+    );
     w.registry.close(t2);
     assert!(w.records.start(deps(), "no-such", None, 0).is_err());
 }
@@ -427,26 +527,48 @@ fn a_project_shell_record_lives_with_its_project() {
         .add_terminal_record(Scope::Project(1), terminal_record("t-proj"))
         .unwrap();
     let (scope, stored) = w.records.get("t-proj").unwrap();
-    assert_eq!((scope, stored.kind), (Scope::Project(1), RecordKind::Terminal));
+    assert_eq!(
+        (scope, stored.kind),
+        (Scope::Project(1), RecordKind::Terminal)
+    );
     let projects_file = std::fs::read_to_string(w._dir.path().join("projects.json")).unwrap();
     assert!(projects_file.contains("t-proj"), "{projects_file}");
-    let workspace_file = std::fs::read_to_string(w._dir.path().join("workspace.json")).unwrap_or_default();
+    let workspace_file =
+        std::fs::read_to_string(w._dir.path().join("workspace.json")).unwrap_or_default();
     assert!(!workspace_file.contains("t-proj"), "{workspace_file}");
 
     let started = w
         .records
         .start(
-            StartDeps { registry: &w.registry, tools: &w.tools, settings: &w.settings, app: None },
+            StartDeps {
+                registry: &w.registry,
+                tools: &w.tools,
+                settings: &w.settings,
+                app: None,
+            },
             "t-proj",
             None,
             0,
         )
         .unwrap();
     let term_id = started.term_id.unwrap();
-    let row = w.registry.list_rows().into_iter().find(|r| r.base.id == term_id).expect("a live row");
+    let row = w
+        .registry
+        .list_rows()
+        .into_iter()
+        .find(|r| r.base.id == term_id)
+        .expect("a live row");
     assert_eq!((row.kind, row.project_id), ("terminal", Some(1)));
-    let listed = w.records.list(&w.registry).into_iter().find(|r| r.record_id == "t-proj").unwrap();
-    assert_eq!((listed.project_id, listed.term_id), (Some(1), Some(term_id)));
+    let listed = w
+        .records
+        .list(&w.registry)
+        .into_iter()
+        .find(|r| r.record_id == "t-proj")
+        .unwrap();
+    assert_eq!(
+        (listed.project_id, listed.term_id),
+        (Some(1), Some(term_id))
+    );
     w.registry.close(term_id);
 }
 
@@ -472,27 +594,51 @@ fn agent_record(id: &str, name: &str) -> AgentRecord {
 #[test]
 fn an_agent_record_row_state_edit_reaches_the_store_and_the_live_row() {
     let w = world();
-    w.records.add_agent_record(Scope::Project(1), agent_record("a-proj", "claude")).unwrap();
-    w.records.add_agent_record(Scope::Workspace, agent_record("a-ws", "codex")).unwrap();
-    w.records.add_terminal_record(Scope::Workspace, terminal_record("t-shell")).unwrap();
+    w.records
+        .add_agent_record(Scope::Project(1), agent_record("a-proj", "claude"))
+        .unwrap();
+    w.records
+        .add_agent_record(Scope::Workspace, agent_record("a-ws", "codex"))
+        .unwrap();
+    w.records
+        .add_terminal_record(Scope::Workspace, terminal_record("t-shell"))
+        .unwrap();
 
-    let fav = AgentRecordPatch { favorite: Some(true), ..Default::default() };
+    let fav = AgentRecordPatch {
+        favorite: Some(true),
+        ..Default::default()
+    };
     let dto = w.records.update_agent(&w.registry, "a-proj", &fav).unwrap();
     assert_eq!(dto.project_id, Some(1));
     assert!(dto.agent.as_ref().unwrap().favorite);
     assert!(w.records.get("a-proj").unwrap().1.agent.unwrap().favorite);
 
     let level: AgentRecordPatch =
-        serde_json::from_value(json!({"notification_level": "none", "disable_auto_rename": true})).unwrap();
+        serde_json::from_value(json!({"notification_level": "none", "disable_auto_rename": true}))
+            .unwrap();
     let dto = w.records.update_agent(&w.registry, "a-ws", &level).unwrap();
     let facts = dto.agent.unwrap();
-    assert_eq!((facts.notification_level.as_deref(), facts.disable_auto_rename), (Some("none"), true));
+    assert_eq!(
+        (
+            facts.notification_level.as_deref(),
+            facts.disable_auto_rename
+        ),
+        (Some("none"), true)
+    );
     let workspace_file = std::fs::read_to_string(w._dir.path().join("workspace.json")).unwrap();
-    assert!(workspace_file.contains("\"notification_level\": \"none\""), "{workspace_file}");
+    assert!(
+        workspace_file.contains("\"notification_level\": \"none\""),
+        "{workspace_file}"
+    );
 
     // A live agent: the rename lands on the record AND its terminal.
     w.records
-        .begin_run(Scope::Workspace, RecordKind::Agent, "a-ws", &Run::begin("run-1", 1, TailKind::Text))
+        .begin_run(
+            Scope::Workspace,
+            RecordKind::Agent,
+            "a-ws",
+            &Run::begin("run-1", 1, TailKind::Text),
+        )
         .unwrap();
     let term_id = w
         .registry
@@ -501,21 +647,49 @@ fn an_agent_record_row_state_edit_reaches_the_store_and_the_live_row() {
             Arc::new(MockSink::default()),
             None,
             "codex".into(),
-            RecordBinding { record_id: "a-ws".into(), run_uuid: "run-1".into() },
+            RecordBinding {
+                record_id: "a-ws".into(),
+                run_uuid: "run-1".into(),
+            },
         )
         .expect("spawn");
-    let rename = AgentRecordPatch { name: Some("reviewer".into()), ..Default::default() };
-    let dto = w.records.update_agent(&w.registry, "a-ws", &rename).unwrap();
-    assert_eq!((dto.name.as_str(), dto.term_id), ("reviewer", Some(term_id)));
-    let row = w.registry.list_rows().into_iter().find(|r| r.base.id == term_id).expect("a live row");
+    let rename = AgentRecordPatch {
+        name: Some("reviewer".into()),
+        ..Default::default()
+    };
+    let dto = w
+        .records
+        .update_agent(&w.registry, "a-ws", &rename)
+        .unwrap();
+    assert_eq!(
+        (dto.name.as_str(), dto.term_id),
+        ("reviewer", Some(term_id))
+    );
+    let row = w
+        .registry
+        .list_rows()
+        .into_iter()
+        .find(|r| r.base.id == term_id)
+        .expect("a live row");
     assert_eq!(row.base.name, "reviewer");
     assert_eq!(w.records.get("a-ws").unwrap().1.name, "reviewer");
     w.registry.close(term_id);
 
-    assert!(w.records.update_agent(&w.registry, "t-shell", &fav).is_err(), "not an agent");
+    assert!(
+        w.records
+            .update_agent(&w.registry, "t-shell", &fav)
+            .is_err(),
+        "not an agent"
+    );
     assert!(w.records.update_agent(&w.registry, "nope", &fav).is_err());
-    let blank = AgentRecordPatch { name: Some(" ".into()), ..Default::default() };
-    assert!(w.records.update_agent(&w.registry, "a-proj", &blank).is_err());
+    let blank = AgentRecordPatch {
+        name: Some(" ".into()),
+        ..Default::default()
+    };
+    assert!(w
+        .records
+        .update_agent(&w.registry, "a-proj", &blank)
+        .is_err());
     assert_eq!(w.records.get("a-proj").unwrap().1.name, "claude");
 }
 
@@ -559,15 +733,31 @@ fn a_run_left_open_by_a_crash_is_reconciled_at_launch() {
     .unwrap();
     // The ledger rows a previous session left behind.
     {
-        let first = Records::new(Projects::default(), Workspace::default(), coordination.clone());
-        first.ledger().insert("a-crash", Some(1), RecordKind::Agent, &open).unwrap();
+        let first = Records::new(
+            Projects::default(),
+            Workspace::default(),
+            coordination.clone(),
+        );
         first
             .ledger()
-            .insert("t-crash", None, RecordKind::Terminal, &Run::begin("crashed-too", 1, TailKind::Text))
+            .insert("a-crash", Some(1), RecordKind::Agent, &open)
+            .unwrap();
+        first
+            .ledger()
+            .insert(
+                "t-crash",
+                None,
+                RecordKind::Terminal,
+                &Run::begin("crashed-too", 1, TailKind::Text),
+            )
             .unwrap();
     }
 
-    let records = Records::new(Projects::with_store(store), Workspace::with_store(ws), coordination);
+    let records = Records::new(
+        Projects::with_store(store),
+        Workspace::with_store(ws),
+        coordination,
+    );
     let (_, agent) = records.get("a-crash").unwrap();
     let run = agent.last_run.unwrap();
     assert_eq!(run.status, ProcessStatus::Exited);
@@ -585,7 +775,9 @@ fn a_run_left_open_by_a_crash_is_reconciled_at_launch() {
     let registry = Registry::default();
     let listed = records.list(&registry);
     assert_eq!(listed.len(), 2);
-    assert!(listed.iter().all(|r| r.status == ProcessStatus::Exited && r.term_id.is_none()));
+    assert!(listed
+        .iter()
+        .all(|r| r.status == ProcessStatus::Exited && r.term_id.is_none()));
 }
 
 /// The ledger keeps the newest [`RUNS_RETAINED`] runs per record.
@@ -606,9 +798,21 @@ fn the_ledger_keeps_the_newest_twenty_runs() {
             .unwrap();
     }
     let runs = w.records.runs("t-prune", 50).unwrap();
-    assert_eq!(runs.len(), RUNS_RETAINED, "the limit is clamped to the retention");
-    assert_eq!(runs[0].run_uuid, format!("run-{:02}", RUNS_RETAINED + 4), "newest first");
-    assert_eq!(runs[RUNS_RETAINED - 1].run_uuid, "run-05", "the five oldest are gone");
+    assert_eq!(
+        runs.len(),
+        RUNS_RETAINED,
+        "the limit is clamped to the retention"
+    );
+    assert_eq!(
+        runs[0].run_uuid,
+        format!("run-{:02}", RUNS_RETAINED + 4),
+        "newest first"
+    );
+    assert_eq!(
+        runs[RUNS_RETAINED - 1].run_uuid,
+        "run-05",
+        "the five oldest are gone"
+    );
     assert_eq!(w.records.runs("t-prune", 3).unwrap().len(), 3);
 }
 
@@ -632,11 +836,18 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
     .expect("parent spawn");
     let parent_record = parent.record_id.clone().expect("a record");
     let (scope, stored) = w.records.get(&parent_record).unwrap();
-    assert_eq!(scope, Scope::Workspace, "project-less agents live in the workspace bucket");
+    assert_eq!(
+        scope,
+        Scope::Workspace,
+        "project-less agents live in the workspace bucket"
+    );
     let facts = stored.agent.clone().unwrap();
     assert_eq!(facts.prompt.as_deref(), Some("remember me"));
     assert_eq!(facts.tool_id, tool.id);
-    assert_eq!(stored.last_run.as_ref().unwrap().run_uuid, parent.agent.spawn_uuid);
+    assert_eq!(
+        stored.last_run.as_ref().unwrap().run_uuid,
+        parent.agent.spawn_uuid
+    );
     let workspace_file = std::fs::read_to_string(w._dir.path().join("workspace.json")).unwrap();
     assert!(workspace_file.contains("\"agents\""), "{workspace_file}");
 
@@ -653,27 +864,48 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
     .expect("child spawn");
     let child_record = child.record_id.clone().unwrap();
     let (scope, stored) = w.records.get(&child_record).unwrap();
-    assert_eq!(scope, Scope::Project(1), "a project-bound agent lives on its project row");
-    assert_eq!(stored.agent.unwrap().parent_record_id.as_deref(), Some(parent_record.as_str()));
+    assert_eq!(
+        scope,
+        Scope::Project(1),
+        "a project-bound agent lives on its project row"
+    );
+    assert_eq!(
+        stored.agent.unwrap().parent_record_id.as_deref(),
+        Some(parent_record.as_str())
+    );
     // The row surfaces carry the record.
     let row = w.registry.control_snapshot(child.process_id).unwrap();
     assert_eq!(row.record_id.as_deref(), Some(child_record.as_str()));
-    assert_eq!(row.last_run.as_ref().unwrap().run_uuid, child.agent.spawn_uuid);
+    assert_eq!(
+        row.last_run.as_ref().unwrap().run_uuid,
+        child.agent.spawn_uuid
+    );
 
     // Opt-outs leave no record; a child of a record-less parent has no parent record.
     let ephemeral = spawn_agent_headless(
         spawn_ctx(&w),
-        SpawnAgentRequest { agent_tool_id: tool.id, ephemeral: true, ..SpawnAgentRequest::default() },
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            ephemeral: true,
+            ..SpawnAgentRequest::default()
+        },
     )
     .unwrap();
     assert_eq!(ephemeral.record_id, None);
     assert_eq!(w.registry.record_of(ephemeral.process_id), None);
     let self_reaping = spawn_agent_headless(
         spawn_ctx(&w),
-        SpawnAgentRequest { agent_tool_id: tool.id, close_on_exit: true, ..SpawnAgentRequest::default() },
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            close_on_exit: true,
+            ..SpawnAgentRequest::default()
+        },
     )
     .unwrap();
-    assert_eq!(self_reaping.record_id, None, "close_on_exit implies ephemeral");
+    assert_eq!(
+        self_reaping.record_id, None,
+        "close_on_exit implies ephemeral"
+    );
     let orphan = spawn_agent_headless(
         spawn_ctx(&w),
         SpawnAgentRequest {
@@ -694,14 +926,25 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
             .filter(|run| !run.is_open())
     });
     assert_eq!(run.status, ProcessStatus::Exited);
-    assert!(run.tail.iter().any(|l| l.as_str().is_some_and(|s| s.contains("probe"))), "{:?}", run.tail);
+    assert!(
+        run.tail
+            .iter()
+            .any(|l| l.as_str().is_some_and(|s| s.contains("probe"))),
+        "{:?}",
+        run.tail
+    );
 
     // Start the stopped record again: a fresh session (new run, new
     // terminal), the stored prompt kept for display and NOT replayed.
     let started = w
         .records
         .start(
-            StartDeps { registry: &w.registry, tools: &w.tools, settings: &w.settings, app: None },
+            StartDeps {
+                registry: &w.registry,
+                tools: &w.tools,
+                settings: &w.settings,
+                app: None,
+            },
             &parent_record,
             None,
             0,
@@ -710,29 +953,52 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
     assert_eq!(started.kind, RecordKind::Agent);
     let new_term = started.term_id.unwrap();
     assert_ne!(new_term, parent.process_id);
-    assert_ne!(started.run_uuid.as_deref(), Some(parent.agent.spawn_uuid.as_str()));
-    assert_eq!(w.registry.record_of(new_term).as_deref(), Some(parent_record.as_str()));
+    assert_ne!(
+        started.run_uuid.as_deref(),
+        Some(parent.agent.spawn_uuid.as_str())
+    );
+    assert_eq!(
+        w.registry.record_of(new_term).as_deref(),
+        Some(parent_record.as_str())
+    );
     assert!(
         w.registry.input_journal(new_term).unwrap().is_empty(),
         "nothing was typed into the new session"
     );
     let (_, stored) = w.records.get(&parent_record).unwrap();
-    assert_eq!(stored.agent.unwrap().prompt.as_deref(), Some("remember me"), "kept for display");
+    assert_eq!(
+        stored.agent.unwrap().prompt.as_deref(),
+        Some("remember me"),
+        "kept for display"
+    );
     wait_until(|| (head_status(&w, &parent_record) == Some(ProcessStatus::Exited)).then_some(()));
     assert_eq!(w.records.runs(&parent_record, 20).unwrap().len(), 2);
     // The exited-but-attached terminal goes when the record starts again.
     let third = w
         .records
         .start(
-            StartDeps { registry: &w.registry, tools: &w.tools, settings: &w.settings, app: None },
+            StartDeps {
+                registry: &w.registry,
+                tools: &w.tools,
+                settings: &w.settings,
+                app: None,
+            },
             &parent_record,
             None,
             0,
         )
         .unwrap();
-    assert!(w.registry.handle(new_term).is_none(), "one terminal per record");
+    assert!(
+        w.registry.handle(new_term).is_none(),
+        "one terminal per record"
+    );
     wait_until(|| (head_status(&w, &parent_record) == Some(ProcessStatus::Exited)).then_some(()));
-    for id in [child.process_id, ephemeral.process_id, orphan.process_id, third.term_id.unwrap()] {
+    for id in [
+        child.process_id,
+        ephemeral.process_id,
+        orphan.process_id,
+        third.term_id.unwrap(),
+    ] {
         w.registry.close(id);
     }
 }
@@ -741,7 +1007,9 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
 
 fn http(addr: &str, method: &str, path: &str, token: &str, body: &str) -> (u16, Value) {
     let mut stream = TcpStream::connect(addr).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -750,7 +1018,11 @@ fn http(addr: &str, method: &str, path: &str, token: &str, body: &str) -> (u16, 
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
     let text = String::from_utf8_lossy(&raw);
-    let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("status line");
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status line");
     let payload = text.split("\r\n\r\n").nth(1).unwrap_or("");
     (status, serde_json::from_str(payload).unwrap_or(Value::Null))
 }
@@ -781,19 +1053,40 @@ fn record_routes_answer_history_start_and_remove() {
         ..ControlState::default()
     });
 
-    let (status, spawned) = http(&addr, "POST", "/agents", &token, &json!({"agent_tool_id": tool.id, "name": "routed"}).to_string());
+    let (status, spawned) = http(
+        &addr,
+        "POST",
+        "/agents",
+        &token,
+        &json!({"agent_tool_id": tool.id, "name": "routed"}).to_string(),
+    );
     assert_eq!(status, 200, "{spawned}");
-    let record_id = spawned["record_id"].as_str().expect("record_id on the spawn reply").to_owned();
+    let record_id = spawned["record_id"]
+        .as_str()
+        .expect("record_id on the spawn reply")
+        .to_owned();
     let term = spawned["process_id"].as_u64().unwrap();
     let (status, row) = http(&addr, "GET", &format!("/processes/{term}"), &token, "");
     assert_eq!(status, 200);
     assert_eq!(row["record_id"], json!(record_id));
-    assert_eq!(row["last_run"]["run_uuid"], row["uuid"], "the run uuid IS the spawn uuid");
-    assert!(row["last_run"].get("tail").is_none(), "rows carry the head, never the tail");
+    assert_eq!(
+        row["last_run"]["run_uuid"], row["uuid"],
+        "the run uuid IS the spawn uuid"
+    );
+    assert!(
+        row["last_run"].get("tail").is_none(),
+        "rows carry the head, never the tail"
+    );
 
     // The echo tool exits; the history route answers the finished run with its tail.
     let runs = wait_until(|| {
-        let (status, body) = http(&addr, "GET", &format!("/records/{record_id}/runs"), &token, "");
+        let (status, body) = http(
+            &addr,
+            "GET",
+            &format!("/records/{record_id}/runs"),
+            &token,
+            "",
+        );
         assert_eq!(status, 200, "{body}");
         let runs = body["runs"].as_array().unwrap().clone();
         (runs[0]["status"] != "running").then_some(runs)
@@ -801,8 +1094,22 @@ fn record_routes_answer_history_start_and_remove() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["status"], "exited");
     assert_eq!(runs[0]["tail_kind"], "text");
-    assert!(runs[0]["tail"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("probe")), "{}", runs[0]);
-    let (status, limited) = http(&addr, "GET", &format!("/records/{record_id}/runs?limit=1"), &token, "");
+    assert!(
+        runs[0]["tail"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("probe")),
+        "{}",
+        runs[0]
+    );
+    let (status, limited) = http(
+        &addr,
+        "GET",
+        &format!("/records/{record_id}/runs?limit=1"),
+        &token,
+        "",
+    );
     assert_eq!(status, 200);
     assert_eq!(limited["record_id"], json!(record_id));
     assert_eq!(limited["runs"].as_array().unwrap().len(), 1);
@@ -810,7 +1117,13 @@ fn record_routes_answer_history_start_and_remove() {
     assert_eq!(status, 404);
 
     // Start: a fresh run on a new terminal; the previous run stays.
-    let (status, started) = http(&addr, "POST", &format!("/records/{record_id}/start"), &token, "{}");
+    let (status, started) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/start"),
+        &token,
+        "{}",
+    );
     assert_eq!(status, 200, "{started}");
     assert_eq!(started["kind"], "agent");
     assert_eq!(started["pending"], false);
@@ -818,7 +1131,13 @@ fn record_routes_answer_history_start_and_remove() {
     assert_ne!(new_term, term);
     assert_ne!(started["run_uuid"], row["uuid"]);
     wait_until(|| {
-        let (_, body) = http(&addr, "GET", &format!("/records/{record_id}/runs"), &token, "");
+        let (_, body) = http(
+            &addr,
+            "GET",
+            &format!("/records/{record_id}/runs"),
+            &token,
+            "",
+        );
         let runs = body["runs"].as_array().unwrap();
         (runs.len() == 2 && runs[0]["status"] == "exited").then_some(())
     });
@@ -826,16 +1145,43 @@ fn record_routes_answer_history_start_and_remove() {
     assert_eq!(status, 404);
 
     // Remove: confirm-gated; the record and its runs are gone afterwards.
-    let (status, refused) = http(&addr, "POST", &format!("/records/{record_id}/remove"), &token, "{}");
+    let (status, refused) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/remove"),
+        &token,
+        "{}",
+    );
     assert_eq!(status, 400, "{refused}");
-    let (status, removed) = http(&addr, "POST", &format!("/records/{record_id}/remove"), &token, r#"{"confirm": true}"#);
+    let (status, removed) = http(
+        &addr,
+        "POST",
+        &format!("/records/{record_id}/remove"),
+        &token,
+        r#"{"confirm": true}"#,
+    );
     assert_eq!(status, 200, "{removed}");
     assert_eq!(removed["removed"], true);
     assert_eq!(removed["runs_deleted"], 2);
-    assert!(w.registry.handle(new_term as u32).is_none(), "the attached terminal was closed");
-    let (status, _) = http(&addr, "GET", &format!("/records/{record_id}/runs"), &token, "");
+    assert!(
+        w.registry.handle(new_term as u32).is_none(),
+        "the attached terminal was closed"
+    );
+    let (status, _) = http(
+        &addr,
+        "GET",
+        &format!("/records/{record_id}/runs"),
+        &token,
+        "",
+    );
     assert_eq!(status, 404);
-    let (status, _) = http(&addr, "POST", "/records/no-such-record/remove", &token, r#"{"confirm": true}"#);
+    let (status, _) = http(
+        &addr,
+        "POST",
+        "/records/no-such-record/remove",
+        &token,
+        r#"{"confirm": true}"#,
+    );
     assert_eq!(status, 404);
     assert!(w.records.list(&w.registry).is_empty());
     let _ = &w.workspace;

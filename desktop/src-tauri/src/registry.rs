@@ -21,10 +21,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use project_model::records::{
+    RecordKind, RunHead, Session, SessionSource, SummarySource, TailKind, TAIL_LINES,
+};
+use project_model::settings::Settings;
 use serde::Serialize;
 use serde_json::{json, Value};
-use project_model::records::{RecordKind, RunHead, Session, SessionSource, SummarySource, TailKind, TAIL_LINES};
-use project_model::settings::Settings;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use term_core::actor::{
@@ -73,8 +75,9 @@ pub fn actor_config(
     ActorConfig {
         spec,
         scrollback_lines: scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK_LINES),
-        synthetic_prompt_marks: settings
-            .map_or(defaults.synthetic_prompt_marks, |s| s.synthetic_prompt_marks),
+        synthetic_prompt_marks: settings.map_or(defaults.synthetic_prompt_marks, |s| {
+            s.synthetic_prompt_marks
+        }),
         wheel_speed: settings.map_or(defaults.wheel_speed, |s| s.scroll_wheel_speed),
         session_matcher: None,
     }
@@ -298,7 +301,10 @@ pub enum SummaryOutcome {
     Ended,
     /// Stored on the live row (and, with a binding, on the record's run).
     /// `changed` is false for a repeat of the same text.
-    Stored { binding: Option<RecordBinding>, changed: bool },
+    Stored {
+        binding: Option<RecordBinding>,
+        changed: bool,
+    },
 }
 
 /// The byte-stream liveness of one entry, read for many ids under ONE
@@ -631,7 +637,9 @@ impl Registry {
             docker,
             spawn_guard: Arc::default(),
             json_agents: Arc::default(),
-            closed_broadcast: Arc::new(Mutex::new(Arc::new(NullClosedBroadcast) as Arc<dyn ClosedBroadcast>)),
+            closed_broadcast: Arc::new(Mutex::new(
+                Arc::new(NullClosedBroadcast) as Arc<dyn ClosedBroadcast>
+            )),
             run_recorder: Arc::default(),
             holds: DeliveryHolds::default(),
         }
@@ -651,7 +659,11 @@ impl Registry {
     fn agent_cwd(&self, id: TermId) -> Option<Option<PathBuf>> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = inner.entries.get(&id)?;
-        Some(if entry.agent.is_some() { entry.cwd.clone() } else { None })
+        Some(if entry.agent.is_some() {
+            entry.cwd.clone()
+        } else {
+            None
+        })
     }
 
     /// Why a delivery from the control surface or a timer to `id` must wait
@@ -664,7 +676,13 @@ impl Registry {
 
     /// Queue a delivery for `id`, made by `deliver` once the hold lifts.
     /// Answers how many are held for it now.
-    pub fn hold_delivery(&self, id: TermId, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
+    pub fn hold_delivery(
+        &self,
+        id: TermId,
+        from: String,
+        text: String,
+        deliver: Box<dyn FnOnce() + Send>,
+    ) -> usize {
         self.holds.hold(id, from, text, deliver)
     }
 
@@ -697,7 +715,10 @@ impl Registry {
     /// Called once in `lib.rs` setup; everything afterwards (manual closes,
     /// project stop, `close_on_exit`) broadcasts through it automatically.
     pub fn set_closed_broadcast(&self, broadcast: Arc<dyn ClosedBroadcast>) {
-        *self.closed_broadcast.lock().unwrap_or_else(|e| e.into_inner()) = broadcast;
+        *self
+            .closed_broadcast
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = broadcast;
     }
 
     /// Point run reporting at the records service (once, at setup).
@@ -706,7 +727,10 @@ impl Registry {
     }
 
     pub fn run_recorder(&self) -> Option<Arc<dyn RunRecorder>> {
-        self.run_recorder.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.run_recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn docker(&self) -> Arc<dyn DockerCli> {
@@ -747,7 +771,18 @@ impl Registry {
     ) -> Result<TermId, String> {
         let docker = meta.runtime.is_docker();
         let binding = agent_binding(&meta, record);
-        let id = self.create_terminal_full(cfg, sink, on_notify, name, Some(id), None, Some(meta), false, close_on_exit, binding)?;
+        let id = self.create_terminal_full(
+            cfg,
+            sink,
+            on_notify,
+            name,
+            Some(id),
+            None,
+            Some(meta),
+            false,
+            close_on_exit,
+            binding,
+        )?;
         if docker {
             self.bridge_waker.wake();
         }
@@ -772,17 +807,20 @@ impl Registry {
     /// and whether anything changed (a repeat of the same id is not news).
     /// Does NOT emit `term://session`; the caller owns the event seam it
     /// has (the pump's sink, an app handle).
-    pub fn record_session(&self, id: TermId, mut session: Session) -> Option<(Option<RecordBinding>, bool)> {
+    pub fn record_session(
+        &self,
+        id: TermId,
+        mut session: Session,
+    ) -> Option<(Option<RecordBinding>, bool)> {
         let (binding, changed) = {
             let mut inner = self.inner.lock().ok()?;
             let entry = inner.entries.get_mut(&id)?;
             if session.resumed_from.is_none() {
                 session.resumed_from = entry.session.as_ref().and_then(|s| s.resumed_from.clone());
             }
-            let changed = entry
-                .session
-                .as_ref()
-                .map_or(true, |s| s.session_id != session.session_id || s.source != session.source);
+            let changed = entry.session.as_ref().map_or(true, |s| {
+                s.session_id != session.session_id || s.source != session.source
+            });
             entry.session = Some(session.clone());
             let binding = entry.record.clone().map(|record_id| RecordBinding {
                 record_id,
@@ -805,7 +843,12 @@ impl Registry {
     /// it before the exit. A repeat of the same text is not news (the
     /// recorder is not called again). Does NOT emit `term://summary`; the
     /// caller owns the event seam it has.
-    pub fn record_summary(&self, id: TermId, text: String, source: SummarySource) -> SummaryOutcome {
+    pub fn record_summary(
+        &self,
+        id: TermId,
+        text: String,
+        source: SummarySource,
+    ) -> SummaryOutcome {
         let (binding, changed) = {
             let Ok(mut inner) = self.inner.lock() else {
                 return SummaryOutcome::Unknown;
@@ -813,10 +856,16 @@ impl Registry {
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return SummaryOutcome::Unknown;
             };
-            if !matches!(entry.status, ProcessStatus::Starting | ProcessStatus::Running) {
+            if !matches!(
+                entry.status,
+                ProcessStatus::Starting | ProcessStatus::Running
+            ) {
                 return SummaryOutcome::Ended;
             }
-            let changed = entry.summary.as_ref().map_or(true, |(t, s)| *t != text || *s != source);
+            let changed = entry
+                .summary
+                .as_ref()
+                .map_or(true, |(t, s)| *t != text || *s != source);
             entry.summary = Some((text.clone(), source));
             let binding = entry.record.clone().map(|record_id| RecordBinding {
                 record_id,
@@ -838,7 +887,10 @@ impl Registry {
     pub fn record_program_status(&self, id: TermId, state: ProgramStatus) -> Option<bool> {
         let mut inner = self.inner.lock().ok()?;
         let entry = inner.entries.get_mut(&id)?;
-        if !matches!(entry.status, ProcessStatus::Starting | ProcessStatus::Running) {
+        if !matches!(
+            entry.status,
+            ProcessStatus::Starting | ProcessStatus::Running
+        ) {
             return None;
         }
         let changed = entry.program_status != Some(state);
@@ -884,20 +936,39 @@ impl Registry {
     ) -> Result<TermHandle, String> {
         let docker = meta.runtime.is_docker();
         let binding = agent_binding(&meta, record);
-        let id = self.create_terminal_full(cfg, sink, on_notify, name, Some(id), None, Some(meta), true, close_on_exit, binding)?;
+        let id = self.create_terminal_full(
+            cfg,
+            sink,
+            on_notify,
+            name,
+            Some(id),
+            None,
+            Some(meta),
+            true,
+            close_on_exit,
+            binding,
+        )?;
         if docker {
             self.bridge_waker.wake();
         }
-        self.handle(id).ok_or_else(|| "entry vanished during spawn".to_owned())
+        self.handle(id)
+            .ok_or_else(|| "entry vanished during spawn".to_owned())
     }
 
     pub fn attach_json_agent(&self, id: TermId, agent: Arc<JsonAgent>) {
-        self.json_agents.lock().unwrap_or_else(|e| e.into_inner()).insert(id, agent);
+        self.json_agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, agent);
     }
 
     /// The json agent behind `id`, if the entry is a json-transport agent.
     pub fn json_agent(&self, id: TermId) -> Option<Arc<JsonAgent>> {
-        self.json_agents.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()
+        self.json_agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
     }
 
     /// Forget the json agent behind `id` and mark it closing (no more
@@ -905,7 +976,11 @@ impl Registry {
     /// close path kills the container side first (the host client must
     /// still be alive for that), then calls `kill` on what this returns.
     fn detach_json_agent(&self, id: TermId) -> Option<Arc<JsonAgent>> {
-        let agent = self.json_agents.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        let agent = self
+            .json_agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         if let Some(agent) = &agent {
             agent.begin_close();
         }
@@ -917,7 +992,10 @@ impl Registry {
     /// cannot go stale — and gated on the entry being alive: a dead agent
     /// is never "waiting".
     fn derive_awaiting(&self, id: TermId, meta: &mut AgentMeta, child_alive: bool) {
-        meta.awaiting_input = child_alive && self.json_agent(id).is_some_and(|agent| agent.awaiting_input());
+        meta.awaiting_input = child_alive
+            && self
+                .json_agent(id)
+                .is_some_and(|agent| agent.awaiting_input());
     }
     /// Spawn a terminal actor plus its event pump and register it. `name` is
     /// the display/debug label. Errors propagate from the pty spawn and leave
@@ -993,7 +1071,9 @@ impl Registry {
         on_exit: Option<ExitHandler>,
         record: Option<RecordBinding>,
     ) -> Result<TermId, String> {
-        self.create_terminal_full(cfg, sink, on_notify, name, at, on_exit, None, false, false, record)
+        self.create_terminal_full(
+            cfg, sink, on_notify, name, at, on_exit, None, false, false, record,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1085,7 +1165,10 @@ impl Registry {
             self.inner.clone(),
             on_notify,
             self.clone(),
-            record.map(|record_id| RecordBinding { record_id, run_uuid: uuid }),
+            record.map(|record_id| RecordBinding {
+                record_id,
+                run_uuid: uuid,
+            }),
         ));
         drop(inner);
         // There is something to sample now: release a parked stats poller.
@@ -1168,10 +1251,13 @@ impl Registry {
     /// The current run of entry `id` minus its tail; `None` for an unknown
     /// id or an ephemeral row.
     pub fn run_head(&self, id: TermId) -> Option<RunHead> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|inner| inner.entries.get(&id).filter(|e| e.record.is_some()).map(run_head))
+        self.inner.lock().ok().and_then(|inner| {
+            inner
+                .entries
+                .get(&id)
+                .filter(|e| e.record.is_some())
+                .map(run_head)
+        })
     }
 
     /// Every record-bound entry whose run is still open: `(record_id,
@@ -1239,7 +1325,12 @@ impl Registry {
         self.close_inner(id, CloseReason::Closed, false)
     }
 
-    fn close_inner(&self, id: TermId, reason: CloseReason, broadcast: bool) -> Option<CloseOutcome> {
+    fn close_inner(
+        &self,
+        id: TermId,
+        reason: CloseReason,
+        broadcast: bool,
+    ) -> Option<CloseOutcome> {
         let entry = self.inner.lock().unwrap().entries.remove(&id)?;
         // The json agent is marked closing (no more events) but its
         // piped child — for docker, the host `docker exec -i` client — stays
@@ -1266,7 +1357,10 @@ impl Registry {
         }
         if let Some(v) = verification {
             if v != CloseVerification::Gone {
-                eprintln!("[agents] close: agent {id} container-side verification = {}", v.as_str());
+                eprintln!(
+                    "[agents] close: agent {id} container-side verification = {}",
+                    v.as_str()
+                );
             }
         }
         // Announce the close LAST — the entry is already gone and
@@ -1276,8 +1370,18 @@ impl Registry {
         if broadcast {
             // Clone the Arc out from under the lock so the broadcast itself
             // (which may re-enter the app handle) never runs while holding it.
-            let broadcast = self.closed_broadcast.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            emit_closed(broadcast.as_ref(), ClosedEvent { term_id: id, reason: reason.as_str() });
+            let broadcast = self
+                .closed_broadcast
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            emit_closed(
+                broadcast.as_ref(),
+                ClosedEvent {
+                    term_id: id,
+                    reason: reason.as_str(),
+                },
+            );
         }
         Some(CloseOutcome { verification })
     }
@@ -1375,7 +1479,10 @@ impl Registry {
         }
         for (id, verdict) in &results {
             if *verdict != CloseVerification::Gone {
-                eprintln!("[agents] shutdown: agent {id} container-side verification = {}", verdict.as_str());
+                eprintln!(
+                    "[agents] shutdown: agent {id} container-side verification = {}",
+                    verdict.as_str()
+                );
             }
         }
         results
@@ -1456,10 +1563,11 @@ impl Registry {
 
     pub fn agent_meta(&self, id: TermId) -> Option<AgentMeta> {
         let (mut meta, alive) = self.inner.lock().ok().and_then(|inner| {
-            inner
-                .entries
-                .get(&id)
-                .and_then(|e| e.agent.clone().map(|meta| (meta, e.handle.io().child_alive())))
+            inner.entries.get(&id).and_then(|e| {
+                e.agent
+                    .clone()
+                    .map(|meta| (meta, e.handle.io().child_alive()))
+            })
         })?;
         self.derive_awaiting(id, &mut meta, alive);
         Some(meta)
@@ -1589,7 +1697,15 @@ impl Registry {
     /// [`Registry::record_input`] with attribution: `actor` names who caused
     /// it (`source:<id>`), `via` how it travelled when not through the pty
     /// (`argv`, `launch`).
-    pub fn record_input_as(&self, id: TermId, bytes_len: usize, text: String, submit: bool, actor: Option<&str>, via: Option<&str>) {
+    pub fn record_input_as(
+        &self,
+        id: TermId,
+        bytes_len: usize,
+        text: String,
+        submit: bool,
+        actor: Option<&str>,
+        via: Option<&str>,
+    ) {
         let record = InputRecord {
             ts: epoch_ms(),
             bytes_len,
@@ -1878,9 +1994,18 @@ fn spawn_pump(
                     };
                     let provider = registry_owned.session_provider(term_id).unwrap_or_default();
                     let session = Session::new(provider, id, source, epoch_ms());
-                    if let Some((binding, changed)) = registry_owned.record_session(term_id, session.clone()) {
+                    if let Some((binding, changed)) =
+                        registry_owned.record_session(term_id, session.clone())
+                    {
                         if changed {
-                            push(term_id, seq, TERM_SESSION, &sink, &registry, session_map(binding.as_ref(), &session));
+                            push(
+                                term_id,
+                                seq,
+                                TERM_SESSION,
+                                &sink,
+                                &registry,
+                                session_map(binding.as_ref(), &session),
+                            );
                         }
                     }
                 }
@@ -1888,10 +2013,19 @@ fn spawn_pump(
                     // The child posted a summary of its run. Handled before
                     // the exit that may follow it in the same flush, so one
                     // printed on the way out still lands on the open run.
-                    if let SummaryOutcome::Stored { binding, changed: true } =
-                        registry_owned.record_summary(term_id, text.clone(), SummarySource::Osc)
+                    if let SummaryOutcome::Stored {
+                        binding,
+                        changed: true,
+                    } = registry_owned.record_summary(term_id, text.clone(), SummarySource::Osc)
                     {
-                        push(term_id, seq, TERM_SUMMARY, &sink, &registry, summary_map(binding.as_ref(), &text, SummarySource::Osc));
+                        push(
+                            term_id,
+                            seq,
+                            TERM_SUMMARY,
+                            &sink,
+                            &registry,
+                            summary_map(binding.as_ref(), &text, SummarySource::Osc),
+                        );
                     }
                 }
                 TermEvent::Status(state) => {
@@ -1937,7 +2071,11 @@ fn spawn_pump(
                                 // An ended run reports nothing: a `blocked`
                                 // left behind would hold deliveries forever.
                                 entry.program_status = None;
-                                (entry.on_exit.clone(), entry.close_on_exit, Some(entry.handle.clone()))
+                                (
+                                    entry.on_exit.clone(),
+                                    entry.close_on_exit,
+                                    Some(entry.handle.clone()),
+                                )
                             } else {
                                 (None, false, None)
                             }
@@ -1957,15 +2095,34 @@ fn spawn_pump(
                             // session id: copied onto the run once more at
                             // exit, so a run that ended before its hooks
                             // caught up still resumes.
-                            if let Some(session_id) = json_agent.as_ref().and_then(|agent| agent.session_id()) {
-                                let provider = registry_owned.session_provider(term_id).unwrap_or_default();
-                                let session = Session::new(provider, session_id, SessionSource::Json, ended_at_ms);
-                                if let Some((binding, true)) = registry_owned.record_session(term_id, session.clone()) {
-                                    push(term_id, seq, TERM_SESSION, &sink, &registry, session_map(binding.as_ref(), &session));
+                            if let Some(session_id) =
+                                json_agent.as_ref().and_then(|agent| agent.session_id())
+                            {
+                                let provider =
+                                    registry_owned.session_provider(term_id).unwrap_or_default();
+                                let session = Session::new(
+                                    provider,
+                                    session_id,
+                                    SessionSource::Json,
+                                    ended_at_ms,
+                                );
+                                if let Some((binding, true)) =
+                                    registry_owned.record_session(term_id, session.clone())
+                                {
+                                    push(
+                                        term_id,
+                                        seq,
+                                        TERM_SESSION,
+                                        &sink,
+                                        &registry,
+                                        session_map(binding.as_ref(), &session),
+                                    );
                                 }
                             }
                             let (tail_kind, tail) = match json_agent {
-                                Some(agent) => (TailKind::Events, events_tail(agent.events_since(0))),
+                                Some(agent) => {
+                                    (TailKind::Events, events_tail(agent.events_since(0)))
+                                }
                                 None => (TailKind::Text, text_tail(handle.dump_text(TAIL_LINES))),
                             };
                             recorder.run_exited(
@@ -2051,7 +2208,10 @@ pub fn events_tail(events: Vec<crate::agent_json::AgentEvent>) -> Vec<Value> {
 }
 
 /// The `term://session` payload: which run, and the session it learned.
-pub fn session_map(binding: Option<&RecordBinding>, session: &Session) -> serde_json::Map<String, Value> {
+pub fn session_map(
+    binding: Option<&RecordBinding>,
+    session: &Session,
+) -> serde_json::Map<String, Value> {
     json_map(&[
         ("record_id", json!(binding.map(|b| b.record_id.as_str()))),
         ("run_uuid", json!(binding.map(|b| b.run_uuid.as_str()))),
@@ -2060,7 +2220,11 @@ pub fn session_map(binding: Option<&RecordBinding>, session: &Session) -> serde_
 }
 
 /// The `term://summary` payload: which run, and the summary it was given.
-pub fn summary_map(binding: Option<&RecordBinding>, text: &str, source: SummarySource) -> serde_json::Map<String, Value> {
+pub fn summary_map(
+    binding: Option<&RecordBinding>,
+    text: &str,
+    source: SummarySource,
+) -> serde_json::Map<String, Value> {
     json_map(&[
         ("record_id", json!(binding.map(|b| b.record_id.as_str()))),
         ("run_uuid", json!(binding.map(|b| b.run_uuid.as_str()))),
@@ -2072,7 +2236,13 @@ pub fn summary_map(binding: Option<&RecordBinding>, text: &str, source: SummaryS
 /// Broadcast `term://summary` off an app handle — for a summary posted
 /// outside the pump (`set_summary` over the control surface). `seq` is 0,
 /// as for [`emit_session`].
-pub fn emit_summary(app: &AppHandle, term_id: TermId, binding: Option<&RecordBinding>, text: &str, source: SummarySource) {
+pub fn emit_summary(
+    app: &AppHandle,
+    term_id: TermId,
+    binding: Option<&RecordBinding>,
+    text: &str,
+    source: SummarySource,
+) {
     let event = JsonEvent {
         event: TERM_SUMMARY,
         term_id,
@@ -2086,7 +2256,12 @@ pub fn emit_summary(app: &AppHandle, term_id: TermId, binding: Option<&RecordBin
 /// arrive outside the pump (a json agent's typed event, a `set_session`
 /// over the control surface). `seq` is 0: these are not in the frame
 /// stream.
-pub fn emit_session(app: &AppHandle, term_id: TermId, binding: Option<&RecordBinding>, session: &Session) {
+pub fn emit_session(
+    app: &AppHandle,
+    term_id: TermId,
+    binding: Option<&RecordBinding>,
+    session: &Session,
+) {
     let event = JsonEvent {
         event: TERM_SESSION,
         term_id,
@@ -2222,7 +2397,11 @@ fn control_snapshot(id: TermId, entry: &Entry) -> ControlSnapshot {
         last_output_at: io.last_output_ms(),
         has_output: io.has_output(),
         child_alive: io.child_alive(),
-        kind: if entry.agent.is_some() { "agent" } else { "shell" },
+        kind: if entry.agent.is_some() {
+            "agent"
+        } else {
+            "shell"
+        },
         agent: entry.agent.clone(),
         uuid: entry.uuid.clone(),
         project_id: entry_project(entry),
@@ -2325,14 +2504,23 @@ mod tests {
     /// end (the newest lines win).
     #[test]
     fn text_tail_trims_trailing_blanks_and_keeps_the_newest_lines() {
-        let rows: Vec<String> = ["one", "", "three", "   ", ""].iter().map(|s| s.to_string()).collect();
-        assert_eq!(text_tail(rows), vec![json!("one"), json!(""), json!("three")]);
+        let rows: Vec<String> = ["one", "", "three", "   ", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            text_tail(rows),
+            vec![json!("one"), json!(""), json!("three")]
+        );
         assert!(text_tail(vec![String::new(); 5]).is_empty());
 
         let many: Vec<String> = (0..TAIL_LINES + 5).map(|i| format!("line {i}")).collect();
         let tail = text_tail(many);
         assert_eq!(tail.len(), TAIL_LINES);
         assert_eq!(tail[0], json!("line 5"));
-        assert_eq!(tail[TAIL_LINES - 1], json!(format!("line {}", TAIL_LINES + 4)));
+        assert_eq!(
+            tail[TAIL_LINES - 1],
+            json!(format!("line {}", TAIL_LINES + 4))
+        );
     }
 }

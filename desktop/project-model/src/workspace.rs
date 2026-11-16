@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use crate::atomic;
 use crate::projects::ProcessOverride;
 use crate::records::{
-    new_record_id, prune_job_records, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, JobRecord,
-    RecordKind, RecordRef, Run, RunUpdate, StoredRecord, TerminalRecord,
+    new_record_id, prune_job_records, reconcile_runs, update_run, AgentRecord, AgentRecordPatch,
+    JobRecord, RecordKind, RecordRef, Run, RunUpdate, StoredRecord, TerminalRecord,
 };
 use crate::yml::ProcessDef;
 
@@ -97,7 +97,11 @@ impl WorkspaceFile {
             job: None,
         });
         let jobs = self.jobs.iter().map(StoredRecord::of_job);
-        commands.chain(agents).chain(terminals).chain(jobs).collect()
+        commands
+            .chain(agents)
+            .chain(terminals)
+            .chain(jobs)
+            .collect()
     }
 
     /// The `last_run` slot of `record_id`, whatever its kind.
@@ -122,9 +126,15 @@ impl WorkspaceFile {
     }
 
     fn runs_mut(&mut self) -> impl Iterator<Item = &mut Run> {
-        let commands = self.process_overrides.values_mut().filter_map(|o| o.last_run.as_mut());
+        let commands = self
+            .process_overrides
+            .values_mut()
+            .filter_map(|o| o.last_run.as_mut());
         let agents = self.agents.iter_mut().filter_map(|a| a.last_run.as_mut());
-        let terminals = self.terminals.iter_mut().filter_map(|t| t.last_run.as_mut());
+        let terminals = self
+            .terminals
+            .iter_mut()
+            .filter_map(|t| t.last_run.as_mut());
         let jobs = self.jobs.iter_mut().filter_map(|j| j.last_run.as_mut());
         commands.chain(agents).chain(terminals).chain(jobs)
     }
@@ -296,7 +306,11 @@ impl WorkspaceStore {
         if !file.commands.contains_key(name) {
             return Err(format!("no command named `{name}`"));
         }
-        if let Some(id) = file.process_overrides.get(name).and_then(|o| o.record_id.clone()) {
+        if let Some(id) = file
+            .process_overrides
+            .get(name)
+            .and_then(|o| o.record_id.clone())
+        {
             return Ok(id);
         }
         let record_id = new_record_id()?;
@@ -348,12 +362,18 @@ impl WorkspaceStore {
             .records()
             .into_iter()
             .find(|r| r.record_id == record_id)
-            .map(|r| RecordRef { kind: r.kind, name: r.name })
+            .map(|r| RecordRef {
+                kind: r.kind,
+                name: r.name,
+            })
     }
 
     /// One record with its full state.
     pub fn record(&self, record_id: &str) -> Option<StoredRecord> {
-        self.load().records().into_iter().find(|r| r.record_id == record_id)
+        self.load()
+            .records()
+            .into_iter()
+            .find(|r| r.record_id == record_id)
     }
 
     /// Every workspace record.
@@ -497,7 +517,8 @@ mod tests {
         );
 
         // Rename "watch" -> "watching": position preserved, siblings stable.
-        s.save_command(Some("watch"), "watching", def("npm run watch")).unwrap();
+        s.save_command(Some("watch"), "watching", def("npm run watch"))
+            .unwrap();
         assert_eq!(
             s.commands().keys().cloned().collect::<Vec<_>>(),
             vec!["server", "watching", "audit"]
@@ -578,8 +599,8 @@ mod tests {
         assert!(s.save_command(None, "abs", wd(abs_dir)).is_ok());
         assert!(s.save_command(None, "rel", wd("relative/dir")).is_err());
         assert!(s.save_command(None, "none", def("echo home")).is_ok()); // None = home
-        // The OTHER platform's absolute spelling is not absolute here and
-        // must be refused too.
+                                                                         // The OTHER platform's absolute spelling is not absolute here and
+                                                                         // must be refused too.
         assert!(s.save_command(None, "win", wd(foreign)).is_err());
     }
 
@@ -587,8 +608,7 @@ mod tests {
     /// guarantee the yml editor gives; here it is moot but harmless, and it
     /// must not warn the write).
     #[test]
-    fn unknown_keys_are_preserved() {
-}
+    fn unknown_keys_are_preserved() {}
 
     /// Records in workspace.json: a command's record id is assigned once and
     /// travels with a rename; agent and terminal records are their own
@@ -606,28 +626,47 @@ mod tests {
         assert!(s.ensure_command_record_id("ghost").is_err());
 
         let id = s.ensure_command_record_id("build").unwrap();
-        assert_eq!(s.ensure_command_record_id("build").unwrap(), id, "assigned once");
+        assert_eq!(
+            s.ensure_command_record_id("build").unwrap(),
+            id,
+            "assigned once"
+        );
         assert_eq!(s.command_record_id("build").as_deref(), Some(id.as_str()));
         assert_eq!(
             s.find_record(&id),
-            Some(RecordRef { kind: RecordKind::Command, name: "build".into() })
+            Some(RecordRef {
+                kind: RecordKind::Command,
+                name: "build".into()
+            })
         );
 
         // A rename keeps the record (and so its history).
-        s.save_command(Some("build"), "compile", def("make")).unwrap();
+        s.save_command(Some("build"), "compile", def("make"))
+            .unwrap();
         assert_eq!(s.command_record_id("build"), None);
         assert_eq!(s.command_record_id("compile").as_deref(), Some(id.as_str()));
 
         // Runs: begin replaces the head, a stale fact is dropped, a current
         // one applies and persists.
-        assert!(s.begin_run(&id, Run::begin("run-1", 10, Default::default())).unwrap());
-        assert!(!s.begin_run("nope", Run::begin("x", 1, Default::default())).unwrap());
-        assert_eq!(s.update_run(&id, "run-0", |r| r.stop(11)).unwrap(), RunUpdate::Stale);
+        assert!(s
+            .begin_run(&id, Run::begin("run-1", 10, Default::default()))
+            .unwrap());
+        assert!(!s
+            .begin_run("nope", Run::begin("x", 1, Default::default()))
+            .unwrap());
         assert_eq!(
-            s.update_run(&id, "run-1", |r| r.finish(12, Some(0), true, vec![])).unwrap(),
+            s.update_run(&id, "run-0", |r| r.stop(11)).unwrap(),
+            RunUpdate::Stale
+        );
+        assert_eq!(
+            s.update_run(&id, "run-1", |r| r.finish(12, Some(0), true, vec![]))
+                .unwrap(),
             RunUpdate::Applied
         );
-        assert_eq!(s.update_run("nope", "run-1", |_| {}).unwrap(), RunUpdate::NotFound);
+        assert_eq!(
+            s.update_run("nope", "run-1", |_| {}).unwrap(),
+            RunUpdate::NotFound
+        );
         let head = s.record(&id).unwrap().last_run.unwrap();
         assert_eq!(head.status, term_core::status::ProcessStatus::Exited);
         assert_eq!(head.ended_at_ms, Some(12));
@@ -656,9 +695,17 @@ mod tests {
         })
         .unwrap();
         let kinds: Vec<RecordKind> = s.records().iter().map(|r| r.kind).collect();
-        assert_eq!(kinds, vec![RecordKind::Command, RecordKind::Agent, RecordKind::Terminal]);
         assert_eq!(
-            s.record("agent-1").unwrap().agent.unwrap().parent_record_id.as_deref(),
+            kinds,
+            vec![RecordKind::Command, RecordKind::Agent, RecordKind::Terminal]
+        );
+        assert_eq!(
+            s.record("agent-1")
+                .unwrap()
+                .agent
+                .unwrap()
+                .parent_record_id
+                .as_deref(),
             Some(id.as_str())
         );
 
@@ -673,16 +720,31 @@ mod tests {
         let agent = s.update_agent_record("agent-1", &patch).unwrap().unwrap();
         assert_eq!((agent.name.as_str(), agent.favorite), ("reviewer", true));
         assert_eq!(s.record("agent-1").unwrap().name, "reviewer");
-        assert_eq!(s.update_agent_record("term-1", &patch).unwrap(), None, "not an agent");
-        let bad = AgentRecordPatch { notification_level: Some(Some("loud".into())), ..Default::default() };
+        assert_eq!(
+            s.update_agent_record("term-1", &patch).unwrap(),
+            None,
+            "not an agent"
+        );
+        let bad = AgentRecordPatch {
+            notification_level: Some(Some("loud".into())),
+            ..Default::default()
+        };
         assert!(s.update_agent_record("agent-1", &bad).is_err());
         assert_eq!(
-            s.record("agent-1").unwrap().agent.unwrap().notification_level.as_deref(),
+            s.record("agent-1")
+                .unwrap()
+                .agent
+                .unwrap()
+                .notification_level
+                .as_deref(),
             Some("none")
         );
 
         // Crash reconcile: the open agent run closes as exited/null.
-        assert_eq!(s.reconcile_crashed_runs().unwrap(), vec!["run-a".to_owned()]);
+        assert_eq!(
+            s.reconcile_crashed_runs().unwrap(),
+            vec!["run-a".to_owned()]
+        );
         let run = s.record("agent-1").unwrap().last_run.unwrap();
         assert_eq!(run.status, term_core::status::ProcessStatus::Exited);
         assert_eq!(run.exit_code, None);
@@ -691,7 +753,10 @@ mod tests {
         // Remove: agents and terminals go; a command id is not a record to
         // remove here (its definition is); the delete prunes its state.
         assert_eq!(s.remove_record("agent-1").unwrap(), Some(RecordKind::Agent));
-        assert_eq!(s.remove_record("term-1").unwrap(), Some(RecordKind::Terminal));
+        assert_eq!(
+            s.remove_record("term-1").unwrap(),
+            Some(RecordKind::Terminal)
+        );
         assert_eq!(s.remove_record("term-1").unwrap(), None);
         assert_eq!(s.remove_record(&id).unwrap(), None);
         assert!(s.record(&id).is_some());
@@ -739,13 +804,23 @@ mod tests {
             })
             .unwrap();
         assert!(dropped.is_empty());
-        assert_eq!(s.find_record("job-1"), Some(RecordRef { kind: RecordKind::Job, name: "Seed data".into() }));
         assert_eq!(
-            s.update_run("job-1", "run-j", |r| r.finish(3, Some(1), false, vec![])).unwrap(),
+            s.find_record("job-1"),
+            Some(RecordRef {
+                kind: RecordKind::Job,
+                name: "Seed data".into()
+            })
+        );
+        assert_eq!(
+            s.update_run("job-1", "run-j", |r| r.finish(3, Some(1), false, vec![]))
+                .unwrap(),
             RunUpdate::Applied
         );
         let rec = s.record("job-1").unwrap();
-        assert_eq!((rec.kind, rec.job.unwrap().job_id.as_str()), (RecordKind::Job, "job-7"));
+        assert_eq!(
+            (rec.kind, rec.job.unwrap().job_id.as_str()),
+            (RecordKind::Job, "job-7")
+        );
         assert_eq!(rec.last_run.unwrap().exit_code, Some(1));
         assert_eq!(s.remove_record("job-1").unwrap(), Some(RecordKind::Job));
         let text = std::fs::read_to_string(dir.path().join("workspace.json")).unwrap();

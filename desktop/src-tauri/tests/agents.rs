@@ -130,10 +130,27 @@ fn wait_until<T>(mut pred: impl FnMut() -> Option<T>) -> T {
 fn close_kills_the_container_side_first_and_the_client_last() {
     let docker = FakeDocker::new();
     docker.ok(&["inspect"], "running 2026-01-01T00:00:00Z");
-    docker.ok(&["exec", "dev-worker", "cat", "/tmp/.chappa-ai/u1.pid"], "4242\n");
-    docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -TERM \"$1\"", "kill", "4242"], "");
+    docker.ok(
+        &["exec", "dev-worker", "cat", "/tmp/.chappa-ai/u1.pid"],
+        "4242\n",
+    );
+    docker.ok(
+        &[
+            "exec",
+            "dev-worker",
+            "sh",
+            "-c",
+            "kill -TERM \"$1\"",
+            "kill",
+            "4242",
+        ],
+        "",
+    );
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/4242"], ""); // gone after TERM
-    docker.ok(&["exec", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/u1.pid"], "");
+    docker.ok(
+        &["exec", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/u1.pid"],
+        "",
+    );
     let registry = Registry::with_docker(docker.clone());
     let id = agent_entry(&registry, docker_meta(NsPid::PidFile));
     let handle = registry.handle(id).unwrap();
@@ -155,18 +172,27 @@ fn close_kills_the_container_side_first_and_the_client_last() {
     let rows = registry.list_control();
     assert_eq!(rows[0].kind, "agent");
     assert_eq!(rows[0].agent.as_ref().unwrap().tool_id, 1);
-    assert_eq!(registry.agent_rows()[0].container.as_deref(), Some("dev-worker"));
+    assert_eq!(
+        registry.agent_rows()[0].container.as_deref(),
+        Some("dev-worker")
+    );
 
     let outcome = registry.close(id).expect("closed");
     assert_eq!(outcome.verification, Some(CloseVerification::Gone));
-    assert!(!handle.io().child_alive(), "host client is dead after close");
+    assert!(
+        !handle.io().child_alive(),
+        "host client is dead after close"
+    );
     let calls = docker.calls();
-    assert!(calls.iter().all(|c| c[0] != "top"), "docker top must never be consulted: {calls:?}");
-    assert_eq!(calls.last().unwrap()[2..], ["rm", "-f", "/tmp/.chappa-ai/u1.pid"].map(String::from));
-    let order: Vec<&str> = calls
-        .iter()
-        .map(|c| call_kind(c))
-        .collect();
+    assert!(
+        calls.iter().all(|c| c[0] != "top"),
+        "docker top must never be consulted: {calls:?}"
+    );
+    assert_eq!(
+        calls.last().unwrap()[2..],
+        ["rm", "-f", "/tmp/.chappa-ai/u1.pid"].map(String::from)
+    );
+    let order: Vec<&str> = calls.iter().map(|c| call_kind(c)).collect();
     assert_eq!(order, vec!["inspect", "cat", "kill", "test", "rm"]);
     assert!(registry.handle(id).is_none());
 }
@@ -184,7 +210,11 @@ fn close_short_circuits_on_a_down_container() {
     let outcome = registry.close(id).unwrap();
     assert_eq!(outcome.verification, Some(CloseVerification::ContainerDown));
     assert!(!handle.io().child_alive());
-    assert!(docker.calls_with(&["exec"]).is_empty(), "{:?}", docker.calls());
+    assert!(
+        docker.calls_with(&["exec"]).is_empty(),
+        "{:?}",
+        docker.calls()
+    );
 
     let plain = registry
         .create_terminal(
@@ -218,10 +248,21 @@ fn shutdown_all_is_bounded_when_docker_hangs() {
     let started = Instant::now();
     let results = registry.shutdown_all();
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_secs(5), "shutdown_all took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "shutdown_all took {elapsed:?}"
+    );
     assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|(_, v)| *v == CloseVerification::Unresolved), "{results:?}");
-    assert!(handles.iter().all(|h| !h.io().child_alive()), "clients killed regardless");
+    assert!(
+        results
+            .iter()
+            .all(|(_, v)| *v == CloseVerification::Unresolved),
+        "{results:?}"
+    );
+    assert!(
+        handles.iter().all(|h| !h.io().child_alive()),
+        "clients killed regardless"
+    );
     assert!(registry.list().is_empty());
 }
 
@@ -293,7 +334,9 @@ fn spawn_agent_passes_extra_args_verbatim_and_delivers_the_prompt_when_ready() {
     assert_eq!(resp.term_id, id);
     assert_eq!(resp.name, "argv probe");
     assert!(resp.agent_instructions.contains(&format!("process {id}")));
-    assert!(resp.agent_instructions.contains("chappa-ai MCP tools: list_processes"));
+    assert!(resp
+        .agent_instructions
+        .contains("chappa-ai MCP tools: list_processes"));
     assert_eq!(resp.agent.tool_id, tool.id);
     assert_eq!(resp.agent.model.as_deref(), Some("fake-model"));
     assert!(resp.container.is_none(), "host runtime: no container block");
@@ -305,7 +348,10 @@ fn spawn_agent_passes_extra_args_verbatim_and_delivers_the_prompt_when_ready() {
     // with submit, and the echo shows on screen.
     let receipt = resp.prompt_receipt.expect("prompt receipt");
     assert!(receipt.delivered, "{receipt:?}");
-    assert!(receipt.waited_ms.unwrap() >= 750, "waited for the quiet window: {receipt:?}");
+    assert!(
+        receipt.waited_ms.unwrap() >= 750,
+        "waited for the quiet window: {receipt:?}"
+    );
     wait_until(|| screen_contains(&registry, id, "hi-from-prompt").then_some(()));
     let journal = registry.input_journal(id).unwrap();
     assert_eq!(journal.len(), 1, "exactly one delivery");
@@ -347,13 +393,23 @@ fn control_routes_list_tools_and_guard_spawns() {
     assert_eq!(list[0]["container"], Value::Null);
     assert_eq!(list[0]["command"], tool.command_line());
 
-    let (status, first) = http(&addr, "POST", "/agents", &json!({"agent_tool_id": tool.id, "name": "first"}).to_string());
+    let (status, first) = http(
+        &addr,
+        "POST",
+        "/agents",
+        &json!({"agent_tool_id": tool.id, "name": "first"}).to_string(),
+    );
     assert_eq!(status, 200, "{first}");
     let first_id = first["process_id"].as_u64().unwrap() as u32;
     wait_until(|| screen_contains(&registry, first_id, "probe").then_some(()));
 
     // Busy (output within 120 s) + max_busy 1 → refused, naming "first".
-    let (status, refused) = http(&addr, "POST", "/agents", &json!({"agent_tool_id": tool.id}).to_string());
+    let (status, refused) = http(
+        &addr,
+        "POST",
+        "/agents",
+        &json!({"agent_tool_id": tool.id}).to_string(),
+    );
     assert_eq!(status, 409, "{refused}");
     let err = refused["error"].as_str().unwrap();
     assert!(err.contains("first (process"), "{err}");
@@ -361,9 +417,17 @@ fn control_routes_list_tools_and_guard_spawns() {
     assert_eq!(registry.list().len(), 1, "nothing spawned");
 
     // force → spawns, and says it was forced.
-    let (status, forced) = http(&addr, "POST", "/agents", &json!({"agent_tool_id": tool.id, "force": true}).to_string());
+    let (status, forced) = http(
+        &addr,
+        "POST",
+        "/agents",
+        &json!({"agent_tool_id": tool.id, "force": true}).to_string(),
+    );
     assert_eq!(status, 200, "{forced}");
-    assert!(forced["forced"].as_str().unwrap().contains("forced past busy guard"));
+    assert!(forced["forced"]
+        .as_str()
+        .unwrap()
+        .contains("forced past busy guard"));
     assert_eq!(registry.list().len(), 2);
 
     // Unknown tool / disabled tool.
@@ -372,15 +436,29 @@ fn control_routes_list_tools_and_guard_spawns() {
     let mut disabled = tool.clone();
     disabled.enabled = false;
     tools.upsert(disabled).unwrap();
-    let (status, body) = http(&addr, "POST", "/agents", &json!({"agent_tool_id": tool.id, "force": true}).to_string());
+    let (status, body) = http(
+        &addr,
+        "POST",
+        "/agents",
+        &json!({"agent_tool_id": tool.id, "force": true}).to_string(),
+    );
     assert_eq!(status, 409, "{body}");
 
     // Delete refusal names the live process; close, then it goes.
     let err = app_lib::agent_tools::delete_refusal(tool.id, &registry.agent_rows()).unwrap();
     assert!(err.contains("first (process"), "{err}");
-    let (status, closed) = http(&addr, "POST", &format!("/processes/{first_id}/close"), r#"{"confirm": true}"#);
+    let (status, closed) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{first_id}/close"),
+        r#"{"confirm": true}"#,
+    );
     assert_eq!(status, 200);
-    assert_eq!(closed["verification"], Value::Null, "host agent: nothing to verify");
+    assert_eq!(
+        closed["verification"],
+        Value::Null,
+        "host agent: nothing to verify"
+    );
     for row in registry.list() {
         registry.close(row.id);
     }
@@ -389,7 +467,9 @@ fn control_routes_list_tools_and_guard_spawns() {
 
 fn http(addr: &str, method: &str, path: &str, body: &str) -> (u16, Value) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(40))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(40)))
+        .unwrap();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -410,7 +490,8 @@ fn http(addr: &str, method: &str, path: &str, body: &str) -> (u16, Value) {
 /// claude does per user message), and exits on EOF. A batch file on
 /// Windows, a `sh` script elsewhere.
 fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
-    let init = r#"{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-model"}"#;
+    let init =
+        r#"{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-model"}"#;
     let result = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"fake-model":{"contextWindow":1000}},"result":"pong"}"#;
     if cfg!(windows) {
         let script = dir.join("fake_json_cli.cmd");
@@ -428,7 +509,10 @@ fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
         ]
         .join("\r\n");
         std::fs::write(&script, body).unwrap();
-        ("cmd".into(), vec!["/C".into(), script.to_string_lossy().into_owned()])
+        (
+            "cmd".into(),
+            vec!["/C".into(), script.to_string_lossy().into_owned()],
+        )
     } else {
         let script = dir.join("fake_json_cli.sh");
         let body = [
@@ -503,27 +587,66 @@ fn json_transport_spawns_over_pipes_and_flips_awaiting_input() {
     assert_eq!(resp["agent"]["transport"], "json");
     let receipt = &resp["prompt_receipt"];
     assert_eq!(receipt["delivered"], true, "{receipt}");
-    assert!(receipt["seq_after"].as_u64().is_some(), "turn_started seq: {receipt}");
+    assert!(
+        receipt["seq_after"].as_u64().is_some(),
+        "turn_started seq: {receipt}"
+    );
 
     // The child ran with the machine-mode flags FIRST, then the tool's args.
     let agent = registry.json_agent(id).expect("json agent attached");
     let recipe = agent.recipe();
     let flags: Vec<&str> = recipe.args.iter().map(String::as_str).collect();
     let first = flags.iter().position(|a| *a == "-p").unwrap();
-    assert_eq!(&flags[first..first + 6], &["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"]);
-    assert!(flags.ends_with(&args.iter().map(String::as_str).collect::<Vec<_>>()), "{flags:?}");
+    assert_eq!(
+        &flags[first..first + 6],
+        &[
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--input-format",
+            "stream-json",
+            "--verbose"
+        ]
+    );
+    assert!(
+        flags.ends_with(&args.iter().map(String::as_str).collect::<Vec<_>>()),
+        "{flags:?}"
+    );
 
     // The fake answered: text + result → awaiting_input on the record.
-    wait_until(|| registry.agent_meta(id).filter(|m| m.awaiting_input).map(|_| ()));
+    wait_until(|| {
+        registry
+            .agent_meta(id)
+            .filter(|m| m.awaiting_input)
+            .map(|_| ())
+    });
     let row = registry.control_snapshot(id).unwrap();
     assert_eq!(row.kind, "agent");
     assert!(row.has_output, "bytes were noted on the no-pty actor");
     assert!(row.child_alive);
     let (status, events) = http(&addr, "GET", &format!("/processes/{id}/agent_events"), "");
     assert_eq!(status, 200);
-    let kinds: Vec<&str> = events["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["turn_started", "text", "usage", "turn_ended", "awaiting_input"], "{events}");
-    assert_eq!(events["events"][1]["payload"]["text"], "got", "the stream-json user line reached the child");
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "turn_started",
+            "text",
+            "usage",
+            "turn_ended",
+            "awaiting_input"
+        ],
+        "{events}"
+    );
+    assert_eq!(
+        events["events"][1]["payload"]["text"], "got",
+        "the stream-json user line reached the child"
+    );
     assert_eq!(events["events"][2]["payload"]["context_pct"], 0.5);
     let last_seq = events["events"][4]["seq"].as_u64().unwrap();
     // Journaled once, as a submit.
@@ -532,35 +655,73 @@ fn json_transport_spawns_over_pipes_and_flips_awaiting_input() {
     assert_eq!(journal[0].text, "ping");
 
     // send_input over the control route: json receipt, awaiting cleared.
-    let (status, sent) = http(&addr, "POST", &format!("/processes/{id}/input"), r#"{"text": "again", "wait_ms": 5000}"#);
+    let (status, sent) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{id}/input"),
+        r#"{"text": "again", "wait_ms": 5000}"#,
+    );
     assert_eq!(status, 200, "{sent}");
     assert_eq!(sent["transport"], "json");
     assert_eq!(sent["delivered"], true, "{sent}");
     assert_eq!(sent["written"], true);
     assert_eq!(sent["seq_before"], last_seq);
     assert!(sent["turn_started_seq"].as_u64().unwrap() > last_seq);
-    let (status, since) = http(&addr, "GET", &format!("/processes/{id}/agent_events?since={last_seq}"), "");
+    let (status, since) = http(
+        &addr,
+        "GET",
+        &format!("/processes/{id}/agent_events?since={last_seq}"),
+        "",
+    );
     assert_eq!(status, 200);
     assert_eq!(since["events"][0]["kind"], "turn_started");
-    assert_eq!(sent["wait_ms"], 5000, "the receipt carries the effective wait");
-    wait_until(|| registry.agent_meta(id).filter(|m| m.awaiting_input).map(|_| ()));
+    assert_eq!(
+        sent["wait_ms"], 5000,
+        "the receipt carries the effective wait"
+    );
+    wait_until(|| {
+        registry
+            .agent_meta(id)
+            .filter(|m| m.awaiting_input)
+            .map(|_| ())
+    });
     assert_eq!(registry.input_journal(id).unwrap().len(), 2);
     // A json agent takes whole messages: `submit: false` and empty text are
     // caller errors (400), and neither reaches the journal.
-    let (status, refused) = http(&addr, "POST", &format!("/processes/{id}/input"), r#"{"text": "x", "submit": false}"#);
+    let (status, refused) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{id}/input"),
+        r#"{"text": "x", "submit": false}"#,
+    );
     assert_eq!(status, 400, "{refused}");
-    let (status, refused) = http(&addr, "POST", &format!("/processes/{id}/input"), r#"{"text": "   "}"#);
+    let (status, refused) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{id}/input"),
+        r#"{"text": "   "}"#,
+    );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(registry.input_journal(id).unwrap().len(), 2);
     // Raw bytes are refused on a json agent; an unknown id is 404 on the
     // events route.
-    let (status, _) = http(&addr, "POST", &format!("/processes/{id}/bytes"), r#"{"bytes": [3]}"#);
+    let (status, _) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{id}/bytes"),
+        r#"{"bytes": [3]}"#,
+    );
     assert_eq!(status, 409);
     let (status, _) = http(&addr, "GET", "/processes/9999/agent_events", "");
     assert_eq!(status, 404);
 
     // Close: the child is gone, the agent with it.
-    let (status, closed) = http(&addr, "POST", &format!("/processes/{id}/close"), r#"{"confirm": true}"#);
+    let (status, closed) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{id}/close"),
+        r#"{"confirm": true}"#,
+    );
     assert_eq!(status, 200, "{closed}");
     assert!(registry.json_agent(id).is_none());
     assert!(registry.handle(id).is_none());
@@ -584,7 +745,11 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             id: 0,
             name: "missing".into(),
             tool_type: ToolType::Claude,
-            program: dir.path().join("no-such-program").to_string_lossy().into_owned(),
+            program: dir
+                .path()
+                .join("no-such-program")
+                .to_string_lossy()
+                .into_owned(),
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             prompt_argv: Vec::new(),
@@ -611,14 +776,21 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
     )
     .unwrap_err();
     assert!(err.contains("cannot spawn"), "{err}");
-    assert!(registry.list().is_empty(), "no entry for a child that never started");
+    assert!(
+        registry.list().is_empty(),
+        "no entry for a child that never started"
+    );
 
     let per_turn = tools
         .upsert(AgentTool {
             id: 0,
             name: "opencode-shaped".into(),
             tool_type: ToolType::Opencode,
-            program: dir.path().join("no-such-program").to_string_lossy().into_owned(),
+            program: dir
+                .path()
+                .join("no-such-program")
+                .to_string_lossy()
+                .into_owned(),
             transport: app_lib::agent_tools::Transport::Json,
             resume_argv: Vec::new(),
             prompt_argv: Vec::new(),
@@ -641,7 +813,10 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
     assert!(meta.awaiting_input, "idle from the start");
     let events = app_lib::agents::agent_events(&registry, resp.process_id, 0).unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, app_lib::agent_json::AgentEventKind::AwaitingInput);
+    assert_eq!(
+        events[0].kind,
+        app_lib::agent_json::AgentEventKind::AwaitingInput
+    );
     let row = registry.control_snapshot(resp.process_id).unwrap();
     assert!(row.has_output, "review fix: a ring event ends 'booting'");
     assert!(row.child_alive, "alive between turns");
@@ -649,21 +824,51 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
     // program is missing so the receipt says so — and (review fix) the
     // entry is RETIRED: not waiting, not alive, the reason in the ring;
     // (review fix) a refused send is NOT journaled.
-    let receipt = app_lib::agents::json_send_input(&registry, resp.process_id, "hello", Some(100)).unwrap();
+    let receipt =
+        app_lib::agents::json_send_input(&registry, resp.process_id, "hello", Some(100)).unwrap();
     assert!(!receipt.delivered);
-    assert!(receipt.reason.as_deref().unwrap().starts_with("exited: cannot spawn"), "{receipt:?}");
+    assert!(
+        receipt
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("exited: cannot spawn"),
+        "{receipt:?}"
+    );
     assert_eq!(receipt.wait_ms, 100);
-    assert!(registry.input_journal(resp.process_id).unwrap().is_empty(), "refused send: no submit record");
+    assert!(
+        registry.input_journal(resp.process_id).unwrap().is_empty(),
+        "refused send: no submit record"
+    );
     let meta = registry.agent_meta(resp.process_id).unwrap();
     assert!(!meta.awaiting_input, "a retired agent is never waiting");
-    wait_until(|| (!registry.control_snapshot(resp.process_id).unwrap().child_alive).then_some(()));
-    assert!(registry.agent_rows().iter().all(|r| !r.child_alive), "busy guard sees it retired");
+    wait_until(|| {
+        (!registry
+            .control_snapshot(resp.process_id)
+            .unwrap()
+            .child_alive)
+            .then_some(())
+    });
+    assert!(
+        registry.agent_rows().iter().all(|r| !r.child_alive),
+        "busy guard sees it retired"
+    );
     let events = app_lib::agents::agent_events(&registry, resp.process_id, 0).unwrap();
-    assert_eq!(events.last().unwrap().kind, app_lib::agent_json::AgentEventKind::Error);
+    assert_eq!(
+        events.last().unwrap().kind,
+        app_lib::agent_json::AgentEventKind::Error
+    );
     let agent = registry.json_agent(resp.process_id).unwrap();
-    assert_eq!(agent.child_args(None, Some("hello")), ["run", "--format", "json", "hello"]);
-    assert_eq!(agent.child_args(Some("ses"), Some("hello")), ["run", "--format", "json", "-s", "ses", "hello"]);
-    let again = app_lib::agents::json_send_input(&registry, resp.process_id, "again", Some(100)).unwrap();
+    assert_eq!(
+        agent.child_args(None, Some("hello")),
+        ["run", "--format", "json", "hello"]
+    );
+    assert_eq!(
+        agent.child_args(Some("ses"), Some("hello")),
+        ["run", "--format", "json", "-s", "ses", "hello"]
+    );
+    let again =
+        app_lib::agents::json_send_input(&registry, resp.process_id, "again", Some(100)).unwrap();
     assert_eq!(again.reason.as_deref(), Some("exited"));
     assert!(registry.input_journal(resp.process_id).unwrap().is_empty());
     registry.close(resp.process_id);
@@ -673,7 +878,8 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
 /// BEFORE any input, then behaves like [`fake_json_cli`].
 fn fake_json_cli_ready(dir: &std::path::Path) -> (String, Vec<String>) {
     let (program, args) = fake_json_cli(dir);
-    let init = r#"{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-model"}"#;
+    let init =
+        r#"{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-model"}"#;
     let script = std::path::PathBuf::from(args.last().unwrap());
     let body = std::fs::read_to_string(&script).unwrap();
     let body = if cfg!(windows) {
@@ -731,16 +937,31 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
     .unwrap();
     let id = resp.process_id;
     assert!(resp.prompt_receipt.is_none());
-    wait_until(|| registry.agent_meta(id).filter(|m| m.awaiting_input).map(|_| ()));
+    wait_until(|| {
+        registry
+            .agent_meta(id)
+            .filter(|m| m.awaiting_input)
+            .map(|_| ())
+    });
     let row = registry.control_snapshot(id).unwrap();
     assert!(row.has_output, "ready = not booting");
     assert!(row.child_alive);
-    assert!(row.agent.as_ref().unwrap().awaiting_input, "the control row derives it too");
+    assert!(
+        row.agent.as_ref().unwrap().awaiting_input,
+        "the control row derives it too"
+    );
     let events = app_lib::agents::agent_events(&registry, id, 0).unwrap();
     let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
-    assert_eq!(kinds, [app_lib::agent_json::AgentEventKind::AwaitingInput], "{events:?}");
+    assert_eq!(
+        kinds,
+        [app_lib::agent_json::AgentEventKind::AwaitingInput],
+        "{events:?}"
+    );
     assert_eq!(events[0].payload["after"], "init");
-    assert!(registry.input_journal(id).unwrap().is_empty(), "nothing sent yet");
+    assert!(
+        registry.input_journal(id).unwrap().is_empty(),
+        "nothing sent yet"
+    );
     // The first send: the CLI's next init is turn 1, journaled once.
     let receipt = app_lib::agents::json_send_input(&registry, id, "ping", Some(5000)).unwrap();
     assert!(receipt.delivered, "{receipt:?}");
@@ -750,13 +971,28 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
     assert_eq!(journal.len(), 1);
     assert_eq!(journal[0].text, "ping");
     assert!(journal[0].submit);
-    wait_until(|| registry.agent_meta(id).filter(|m| m.awaiting_input).map(|_| ()));
+    wait_until(|| {
+        registry
+            .agent_meta(id)
+            .filter(|m| m.awaiting_input)
+            .map(|_| ())
+    });
     let kinds: Vec<_> = app_lib::agents::agent_events(&registry, id, 0)
         .unwrap()
         .iter()
         .map(|e| e.kind.as_str())
         .collect();
-    assert_eq!(kinds, ["awaiting_input", "turn_started", "text", "usage", "turn_ended", "awaiting_input"]);
+    assert_eq!(
+        kinds,
+        [
+            "awaiting_input",
+            "turn_started",
+            "text",
+            "usage",
+            "turn_ended",
+            "awaiting_input"
+        ]
+    );
     // Close: the child dies with the entry; the agent is gone.
     registry.close(id);
     assert!(registry.json_agent(id).is_none());
@@ -807,7 +1043,12 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
     )
     .unwrap();
     let id = resp.process_id;
-    wait_until(|| registry.agent_meta(id).filter(|m| m.awaiting_input).map(|_| ()));
+    wait_until(|| {
+        registry
+            .agent_meta(id)
+            .filter(|m| m.awaiting_input)
+            .map(|_| ())
+    });
     // Kill the child from outside (the CLI crashes): EOF on the reader.
     let agent = registry.json_agent(id).unwrap();
     agent.kill_child();
@@ -819,7 +1060,11 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
     assert!(!rows[0].agent.as_ref().unwrap().awaiting_input);
     let receipt = app_lib::agents::json_send_input(&registry, id, "late", Some(100)).unwrap();
     assert_eq!(receipt.reason.as_deref(), Some("exited"));
-    assert_eq!(registry.input_journal(id).unwrap().len(), 1, "the refused send was not journaled");
+    assert_eq!(
+        registry.input_journal(id).unwrap().len(),
+        1,
+        "the refused send was not journaled"
+    );
     registry.close(id);
 }
 
@@ -831,10 +1076,27 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
 fn json_docker_agent_close_kills_the_container_side_before_the_piped_client() {
     let docker = FakeDocker::new();
     docker.ok(&["inspect"], "running 2026-01-01T00:00:00Z");
-    docker.ok(&["exec", "dev-worker", "cat", "/tmp/.chappa-ai/u1.pid"], "4242\n");
-    docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -TERM \"$1\"", "kill", "4242"], "");
+    docker.ok(
+        &["exec", "dev-worker", "cat", "/tmp/.chappa-ai/u1.pid"],
+        "4242\n",
+    );
+    docker.ok(
+        &[
+            "exec",
+            "dev-worker",
+            "sh",
+            "-c",
+            "kill -TERM \"$1\"",
+            "kill",
+            "4242",
+        ],
+        "",
+    );
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/4242"], "");
-    docker.ok(&["exec", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/u1.pid"], "");
+    docker.ok(
+        &["exec", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/u1.pid"],
+        "",
+    );
     let registry = Registry::with_docker(docker.clone());
     let dir = tempfile::tempdir().unwrap();
     let (command, args) = fake_json_cli(dir.path());
@@ -875,14 +1137,24 @@ fn json_docker_agent_close_kills_the_container_side_before_the_piped_client() {
     assert!(agent.child_alive());
     let receipt = app_lib::agents::json_send_input(&registry, id, "ping", Some(5000)).unwrap();
     assert!(receipt.delivered, "{receipt:?}");
-    wait_until(|| registry.agent_meta(id).filter(|m| m.awaiting_input).map(|_| ()));
+    wait_until(|| {
+        registry
+            .agent_meta(id)
+            .filter(|m| m.awaiting_input)
+            .map(|_| ())
+    });
 
     // Every docker call except the final `rm` must find the piped client
     // still alive — that IS "client killed last".
     let probe = agent.clone();
     docker.set_on_call(move |args| {
         let is_rm = args.get(2).map(String::as_str) == Some("rm");
-        assert_eq!(probe.child_alive(), !is_rm, "piped client alive during {args:?}? expected {}", !is_rm);
+        assert_eq!(
+            probe.child_alive(),
+            !is_rm,
+            "piped client alive during {args:?}? expected {}",
+            !is_rm
+        );
     });
     let outcome = registry.close(id).expect("closed");
     assert_eq!(outcome.verification, Some(CloseVerification::Gone));
@@ -892,15 +1164,20 @@ fn json_docker_agent_close_kills_the_container_side_before_the_piped_client() {
     assert!(registry.handle(id).is_none());
     let calls = docker.calls();
     assert!(calls.iter().all(|c| c[0] != "top"), "{calls:?}");
-    let order: Vec<&str> = calls
-        .iter()
-        .map(|c| call_kind(c))
-        .collect();
+    let order: Vec<&str> = calls.iter().map(|c| call_kind(c)).collect();
     assert_eq!(order, vec!["inspect", "cat", "kill", "test", "rm"]);
     // The close was quiet: no `awaiting_input` / exit events after it began.
-    let kinds: Vec<&str> = agent.events_since(0).iter().map(|e| e.kind.as_str()).collect();
+    let kinds: Vec<&str> = agent
+        .events_since(0)
+        .iter()
+        .map(|e| e.kind.as_str())
+        .collect();
     assert_eq!(kinds.last(), Some(&"awaiting_input"));
-    assert_eq!(kinds.iter().filter(|k| **k == "error").count(), 0, "{kinds:?}");
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "error").count(),
+        0,
+        "{kinds:?}"
+    );
 }
 
 // ---- the docker orphan reaper ----------------------------------------
@@ -950,9 +1227,17 @@ fn docker_tools(dir: &std::path::Path, extra_container: Option<&str>) -> AgentTo
 
 /// One scan call's argv for dev-worker as the tool user.
 fn scan_call() -> Vec<String> {
-    ["exec", "-u", "dev", "dev-worker", "sh", "-c", ORPHAN_SCAN_SCRIPT]
-        .map(String::from)
-        .to_vec()
+    [
+        "exec",
+        "-u",
+        "dev",
+        "dev-worker",
+        "sh",
+        "-c",
+        ORPHAN_SCAN_SCRIPT,
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// `FakeDocker` matches prefixes as `&[&str]`, but the argv helpers below
@@ -964,9 +1249,19 @@ fn strs(argv: &[String]) -> Vec<&str> {
 
 /// A reap signal argv as the tool user.
 fn signal_call(pid: u32, signal: &str) -> Vec<String> {
-    ["exec", "-u", "dev", "dev-worker", "sh", "-c", &format!("kill -{signal} \"$1\""), "kill", &pid.to_string()]
-        .map(String::from)
-        .to_vec()
+    [
+        "exec",
+        "-u",
+        "dev",
+        "dev-worker",
+        "sh",
+        "-c",
+        &format!("kill -{signal} \"$1\""),
+        "kill",
+        &pid.to_string(),
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// The full sweep against FakeDocker: EXACTLY ONE scan per container, the
@@ -992,20 +1287,47 @@ fn sweep_reaps_orphans_one_scan_per_container_and_skips_a_down_one() {
 
     // The scan sees orphan orph1 as two pids (532 root + 6927 child) and
     // orph2 as one; all spawned long ago (outside the busy window).
-    docker.ok(&strs(&scan_call()), "532 orph1 0\n6927 orph1 0\n8875 orph2 0\n");
+    docker.ok(
+        &strs(&scan_call()),
+        "532 orph1 0\n6927 orph1 0\n8875 orph2 0\n",
+    );
     // 532 obeys TERM: poll gone → Gone, pid file removed.
     docker.ok(&strs(&signal_call(532, "TERM")), "");
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/532"], "");
-    docker.ok(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph1.pid"], "");
+    docker.ok(
+        &[
+            "exec",
+            "-u",
+            "dev",
+            "dev-worker",
+            "rm",
+            "-f",
+            "/tmp/.chappa-ai/orph1.pid",
+        ],
+        "",
+    );
     // 8875 too.
     docker.ok(&strs(&signal_call(8875, "TERM")), "");
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/8875"], "");
-    docker.ok(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph2.pid"], "");
+    docker.ok(
+        &[
+            "exec",
+            "-u",
+            "dev",
+            "dev-worker",
+            "rm",
+            "-f",
+            "/tmp/.chappa-ai/orph2.pid",
+        ],
+        "",
+    );
 
     let reaped_notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
     let emit: Arc<dyn Fn(&str, usize) + Send + Sync> = {
         let log = reaped_notifications.clone();
-        Arc::new(move |container: &str, count: usize| log.lock().unwrap().push((container.to_owned(), count)))
+        Arc::new(move |container: &str, count: usize| {
+            log.lock().unwrap().push((container.to_owned(), count))
+        })
     };
     let results = reap_orphans(&registry, &tools, None, Some(&*emit));
     assert_eq!(results.len(), 2, "{results:?}");
@@ -1021,16 +1343,71 @@ fn sweep_reaps_orphans_one_scan_per_container_and_skips_a_down_one() {
     );
 
     // Exactly one scan per container, as the tool user.
-    assert_eq!(docker.calls_with(&["exec", "-u", "dev", "dev-worker", "sh", "-c", ORPHAN_SCAN_SCRIPT]).len(), 1);
+    assert_eq!(
+        docker
+            .calls_with(&[
+                "exec",
+                "-u",
+                "dev",
+                "dev-worker",
+                "sh",
+                "-c",
+                ORPHAN_SCAN_SCRIPT
+            ])
+            .len(),
+        1
+    );
     // The root's sibling (6927) is never signalled.
-    assert!(docker.calls_with(&strs(&signal_call(6927, "TERM"))).is_empty(), "{:?}", docker.calls());
+    assert!(
+        docker
+            .calls_with(&strs(&signal_call(6927, "TERM")))
+            .is_empty(),
+        "{:?}",
+        docker.calls()
+    );
     // Each reaped uuid's pid file is removed.
-    assert_eq!(docker.calls_with(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph1.pid"]).len(), 1);
-    assert_eq!(docker.calls_with(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph2.pid"]).len(), 1);
+    assert_eq!(
+        docker
+            .calls_with(&[
+                "exec",
+                "-u",
+                "dev",
+                "dev-worker",
+                "rm",
+                "-f",
+                "/tmp/.chappa-ai/orph1.pid"
+            ])
+            .len(),
+        1
+    );
+    assert_eq!(
+        docker
+            .calls_with(&[
+                "exec",
+                "-u",
+                "dev",
+                "dev-worker",
+                "rm",
+                "-f",
+                "/tmp/.chappa-ai/orph2.pid"
+            ])
+            .len(),
+        1
+    );
     // Down container: inspected but never scanned.
-    assert!(docker.calls_with(&["exec", "-u", "dev", "down-box"]).is_empty(), "{:?}", docker.calls());
+    assert!(
+        docker
+            .calls_with(&["exec", "-u", "dev", "down-box"])
+            .is_empty(),
+        "{:?}",
+        docker.calls()
+    );
     // docker top is never consulted.
-    assert!(docker.calls().iter().all(|c| c[0] != "top"), "{:?}", docker.calls());
+    assert!(
+        docker.calls().iter().all(|c| c[0] != "top"),
+        "{:?}",
+        docker.calls()
+    );
 }
 
 /// A sweep with the setting OFF still works through the EXPLICIT path — the
@@ -1044,7 +1421,18 @@ fn reap_route_is_not_gated_by_the_setting() {
     docker.ok(&strs(&scan_call()), "532 orph1 0\n");
     docker.ok(&strs(&signal_call(532, "TERM")), "");
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/532"], "");
-    docker.ok(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph1.pid"], "");
+    docker.ok(
+        &[
+            "exec",
+            "-u",
+            "dev",
+            "dev-worker",
+            "rm",
+            "-f",
+            "/tmp/.chappa-ai/orph1.pid",
+        ],
+        "",
+    );
     let registry = Registry::with_docker(docker.clone());
 
     // The control route calls reap_orphans unconditionally (no perishable
@@ -1072,10 +1460,32 @@ fn control_reap_route_returns_per_orphan_verdicts() {
     docker.ok(&strs(&scan_call()), "532 orph1 0\n8875 orph2 0\n");
     docker.ok(&strs(&signal_call(532, "TERM")), "");
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/532"], "");
-    docker.ok(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph1.pid"], "");
+    docker.ok(
+        &[
+            "exec",
+            "-u",
+            "dev",
+            "dev-worker",
+            "rm",
+            "-f",
+            "/tmp/.chappa-ai/orph1.pid",
+        ],
+        "",
+    );
     docker.ok(&strs(&signal_call(8875, "TERM")), "");
     docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/8875"], "");
-    docker.ok(&["exec", "-u", "dev", "dev-worker", "rm", "-f", "/tmp/.chappa-ai/orph2.pid"], "");
+    docker.ok(
+        &[
+            "exec",
+            "-u",
+            "dev",
+            "dev-worker",
+            "rm",
+            "-f",
+            "/tmp/.chappa-ai/orph2.pid",
+        ],
+        "",
+    );
     let registry = Registry::with_docker(docker.clone());
     let state = ControlState {
         registry: registry.clone(),
@@ -1090,13 +1500,15 @@ fn control_reap_route_returns_per_orphan_verdicts() {
     assert_eq!(status, 200, "{body}");
     let results = body["results"].as_array().expect("results array");
     assert_eq!(results.len(), 2);
-    let verdicts: Vec<&str> = results.iter().map(|r| r["verdict"].as_str().unwrap()).collect();
+    let verdicts: Vec<&str> = results
+        .iter()
+        .map(|r| r["verdict"].as_str().unwrap())
+        .collect();
     assert_eq!(verdicts, ["gone", "gone"]);
     assert_eq!(results[0]["container"], "dev-worker");
     assert_eq!(results[0]["uuid"], "orph1");
     assert_eq!(results[0]["pid"], 532);
 }
-
 
 /// A first prompt is HELD while a known startup question is on screen: the
 /// gate reads the grid, sees the folder-trust question the fake prints, and
@@ -1124,16 +1536,34 @@ fn a_prompt_is_held_while_a_startup_question_is_on_screen_and_never_typed() {
     let question = "Do you trust the files in this folder? 1. Yes, proceed 2. No, exit";
     let resp = app_lib::agents::spawn_agent_headless(
         ctx,
-        SpawnAgentRequest { agent_tool_id: tool.id, extra_args: vec![question.into()], ..SpawnAgentRequest::default() },
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            extra_args: vec![question.into()],
+            ..SpawnAgentRequest::default()
+        },
     )
     .expect("spawn");
     let id = resp.process_id;
     wait_until(|| screen_contains(&registry, id, "trust the files").then_some(()));
-    let receipt = deliver_prompt_when_ready(&registry, id, "echo answered", DeliveryPolicy::quiet_only(100, Duration::from_secs(2)));
+    let receipt = deliver_prompt_when_ready(
+        &registry,
+        id,
+        "echo answered",
+        DeliveryPolicy::quiet_only(100, Duration::from_secs(2)),
+    );
     assert!(!receipt.delivered, "{receipt:?}");
-    assert_eq!(receipt.reason.as_deref(), Some("held: waiting on the folder-trust question"));
-    assert!(receipt.waited_ms.unwrap() >= 2_000, "held until the cap: {receipt:?}");
-    assert!(registry.input_journal(id).unwrap().is_empty(), "nothing was typed");
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("held: waiting on the folder-trust question")
+    );
+    assert!(
+        receipt.waited_ms.unwrap() >= 2_000,
+        "held until the cap: {receipt:?}"
+    );
+    assert!(
+        registry.input_journal(id).unwrap().is_empty(),
+        "nothing was typed"
+    );
     assert!(!screen_contains(&registry, id, "answered"));
     registry.close(id);
 }
@@ -1173,12 +1603,23 @@ fn a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing() {
     let id = resp.process_id;
     let receipt = resp.prompt_receipt.expect("receipt");
     assert!(receipt.delivered);
-    assert_eq!(receipt.reason.as_deref(), Some(app_lib::agents::PROMPT_VIA_ARGV));
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some(app_lib::agents::PROMPT_VIA_ARGV)
+    );
     // The prompt is the LAST argument, after the extra args: the echo of the
     // last argument is the prompt itself.
     wait_until(|| screen_contains(&registry, id, "fix the failing test").then_some(()));
     let journal = registry.input_journal(id).unwrap();
     assert_eq!(journal.len(), 1);
-    assert_eq!((journal[0].text.as_str(), journal[0].bytes_len, journal[0].submit, journal[0].via.as_deref()), ("fix the failing test", 0, true, Some("argv")));
+    assert_eq!(
+        (
+            journal[0].text.as_str(),
+            journal[0].bytes_len,
+            journal[0].submit,
+            journal[0].via.as_deref()
+        ),
+        ("fix the failing test", 0, true, Some("argv"))
+    );
     registry.close(id);
 }

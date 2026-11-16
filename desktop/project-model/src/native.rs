@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 
 use crate::projects::ProjectStore;
-use crate::yml::{CHAPPA_YML_NAME, ProcessDef, ProjectYml};
+use crate::yml::{ProcessDef, ProjectYml, CHAPPA_YML_NAME};
 
 fn no_project(id: u32) -> String {
     format!("no such project: {id}")
@@ -138,7 +138,6 @@ pub fn import(store: &mut ProjectStore, id: u32) -> Result<(ProjectYml, String),
     store.set_processes(id, yml.processes.clone())?;
     Ok((yml, hash))
 }
-
 
 /// Run one mutation against project `id`'s process definitions. The mutation
 /// drafts from the store's defs, then backwrites the WHOLE store map to
@@ -450,7 +449,10 @@ processes:
         );
         // Store untouched, disk untouched.
         assert_eq!(store.process_defs(id), before_defs);
-        assert_eq!(fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(), broken);
+        assert_eq!(
+            fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(),
+            broken
+        );
 
         // A validation failure (blank command) also refuses with nothing
         // persisted.
@@ -481,7 +483,10 @@ processes:
         // The watcher fires: import replaces the store wholesale.
         let (yml, _hash) = import(&mut store, id).unwrap();
         assert_eq!(yml.processes.keys().collect::<Vec<_>>(), vec!["added"]);
-        assert_eq!(store.process_defs(id).keys().collect::<Vec<_>>(), vec!["added"]);
+        assert_eq!(
+            store.process_defs(id).keys().collect::<Vec<_>>(),
+            vec!["added"]
+        );
 
         // A store edit no longer competes with an earlier import.
         let committed = mutate(&mut store, id, |defs| {
@@ -522,7 +527,10 @@ processes:
         fs::create_dir_all(&empty).unwrap();
 
         let mut store = ProjectStore::new(dir.path().join("projects.json"));
-        let a = store.add(with_defs.clone(), "with-defs".into(), None).unwrap().id;
+        let a = store
+            .add(with_defs.clone(), "with-defs".into(), None)
+            .unwrap()
+            .id;
         store
             .set_processes(a, ProjectYml::from_str(FIXTURE).unwrap().processes)
             .unwrap();
@@ -535,11 +543,17 @@ processes:
         // A project with defs gained chappa.yml, carrying the same defs.
         assert!(with_defs.join(CHAPPA_YML_NAME).exists());
         let materialized = ProjectYml::load_result(&with_defs).unwrap();
-        assert_eq!(materialized.processes, ProjectYml::from_str(FIXTURE).unwrap().processes);
+        assert_eq!(
+            materialized.processes,
+            ProjectYml::from_str(FIXTURE).unwrap().processes
+        );
         // An empty project wrote no file.
         assert!(!empty.join(CHAPPA_YML_NAME).exists());
         // The bystander is byte-identical — migration writes its own file only.
-        assert_eq!(fs::read(with_defs.join("processes.yml")).unwrap(), bystander_before);
+        assert_eq!(
+            fs::read(with_defs.join("processes.yml")).unwrap(),
+            bystander_before
+        );
     }
 
     /// Migration is idempotent: a second migrate never rewrites an existing
@@ -582,8 +596,14 @@ processes:
         // Second launch: the file is NOT rewritten (an external edit would
         // otherwise be lost).
         migrate(&mut store).unwrap();
-        assert_eq!(fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(), first);
-        assert_eq!(store.process_defs(id).keys().collect::<Vec<_>>(), vec!["app"]);
+        assert_eq!(
+            fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(),
+            first
+        );
+        assert_eq!(
+            store.process_defs(id).keys().collect::<Vec<_>>(),
+            vec!["app"]
+        );
     }
 
     /// An un-touched row (`processes: None`) adopts an existing chappa.yml's
@@ -662,7 +682,10 @@ processes:
         let mut store = ProjectStore::new(dir.path().join("projects.json"));
         let id = store.add(root.clone(), "proj".into(), None).unwrap().id;
         let hash = crate::hash::file_content_hash(&root.join(CHAPPA_YML_NAME)).unwrap();
-        assert!(!store.is_trusted(id, &hash), "unapproved hash arms the gate");
+        assert!(
+            !store.is_trusted(id, &hash),
+            "unapproved hash arms the gate"
+        );
         store.mark_trusted(id, hash.clone()).unwrap();
         assert!(store.is_trusted(id, &hash), "approval clears the gate");
         // An edit outside the app changes the hash → the gate re-arms.
@@ -738,15 +761,24 @@ processes:
         let mut store = ProjectStore::new(dir.path().join("projects.json"));
         let id = store.add(root.clone(), "bare".into(), None).unwrap().id;
 
-        mutate(&mut store, id, |defs| add_process(defs, "app", def("py app.py"))).unwrap();
+        mutate(&mut store, id, |defs| {
+            add_process(defs, "app", def("py app.py"))
+        })
+        .unwrap();
         assert_eq!(store.process_defs(id)["app"].command, "py app.py");
-        assert!(root.join(CHAPPA_YML_NAME).exists(), "first command created it");
+        assert!(
+            root.join(CHAPPA_YML_NAME).exists(),
+            "first command created it"
+        );
 
         mutate(&mut store, id, |defs| {
             edit_process(defs, "app", "server", def("py server.py"))
         })
         .unwrap();
-        assert_eq!(store.process_defs(id).keys().collect::<Vec<_>>(), vec!["server"]);
+        assert_eq!(
+            store.process_defs(id).keys().collect::<Vec<_>>(),
+            vec!["server"]
+        );
 
         mutate(&mut store, id, |defs| {
             duplicate_process(defs, "server", def("py server.py")).map(|_| ())
@@ -762,4 +794,3 @@ processes:
         assert_eq!(fs::read(root.join(CHAPPA_YML_NAME)).unwrap(), file_before);
     }
 }
-

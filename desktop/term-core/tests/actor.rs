@@ -1343,11 +1343,15 @@ fn seed_numbered_lines(
     loop {
         let frame = next_frame(rx);
         handle.ack(frame.seq);
-        if frame
-            .rows
-            .iter()
-            .any(|patch| patch.cells.iter().map(|c| c.ch).collect::<String>().trim_end() == last)
-        {
+        if frame.rows.iter().any(|patch| {
+            patch
+                .cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim_end()
+                == last
+        }) {
             return;
         }
     }
@@ -1455,7 +1459,10 @@ fn input_after_exit_is_refused_and_never_written() {
     seed_numbered_lines(&handle, &rx, 3);
     exit_and_ack(&handle, &rx);
 
-    assert!(!handle.io().child_alive(), "liveness flips at exit, not at close");
+    assert!(
+        !handle.io().child_alive(),
+        "liveness flips at exit, not at close"
+    );
     assert_eq!(handle.write_input(b"after"), Err(Dead));
     handle.write_key(KeyEvent {
         key: Key::Enter,
@@ -1471,7 +1478,10 @@ fn input_after_exit_is_refused_and_never_written() {
     });
     // A synchronous round trip after the input requests: the control channel
     // is FIFO, so by the time it answers every input above was handled.
-    assert!(!handle.dump_text(0).is_empty(), "the actor is still answering");
+    assert!(
+        !handle.dump_text(0).is_empty(),
+        "the actor is still answering"
+    );
     assert_eq!(
         sink.lock().unwrap().as_slice(),
         b"before",
@@ -1502,7 +1512,10 @@ fn resize_after_exit_reflows_and_emits_a_frame() {
     handle.ack(frame.seq);
     assert_eq!(frame.kind, FrameKind::Full);
     assert!(frame.rows.iter().all(|patch| patch.cells.len() == 4));
-    assert_eq!(frame.history_len, 15, "10 lines x 2 rows, minus the 5-row screen");
+    assert_eq!(
+        frame.history_len, 15,
+        "10 lines x 2 rows, minus the 5-row screen"
+    );
     assert_eq!(trimmed_row(&frame, 3), "line");
     assert_eq!(trimmed_row(&frame, 4), "09");
 
@@ -1869,7 +1882,10 @@ fn wait_for_output_wakes_on_bytes_and_honours_the_deadline() {
     assert_eq!(io.wait_for_output(0, Duration::from_millis(120)), 0);
     let quiet = started.elapsed();
     assert!(quiet >= Duration::from_millis(100), "waited {quiet:?}");
-    assert!(quiet < Duration::from_secs(3), "must not overshoot: {quiet:?}");
+    assert!(
+        quiet < Duration::from_secs(3),
+        "must not overshoot: {quiet:?}"
+    );
 
     // Bytes from another thread wake it immediately (the timeout is 10s: a
     // sleep-poll or a lost wakeup would blow the assert below).
@@ -1883,12 +1899,18 @@ fn wait_for_output_wakes_on_bytes_and_honours_the_deadline() {
     let woke = started.elapsed();
     feeder.join().unwrap();
     assert_eq!(seen, 11, "returns the counter it observed");
-    assert!(woke < Duration::from_secs(5), "woke on the signal, not the deadline: {woke:?}");
+    assert!(
+        woke < Duration::from_secs(5),
+        "woke on the signal, not the deadline: {woke:?}"
+    );
 
     // Already moved: returns without parking at all.
     let started = Instant::now();
     assert_eq!(handle.io().wait_for_output(0, Duration::from_secs(10)), 11);
-    assert!(started.elapsed() < Duration::from_secs(1), "no park when the answer is already there");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "no park when the answer is already there"
+    );
 
     handle.shutdown();
 }
@@ -1946,7 +1968,11 @@ fn poke_makes_an_idle_shell_talk() {
     // Quiet now. A same-size resize is a no-op (must NOT produce bytes)…
     handle.resize(80, 24);
     std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(handle.io().output_bytes(), last, "same-size resize must be a no-op");
+    assert_eq!(
+        handle.io().output_bytes(),
+        last,
+        "same-size resize must be a no-op"
+    );
     // …and the poke does.
     handle.poke();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1959,7 +1985,11 @@ fn poke_makes_an_idle_shell_talk() {
     // 2026-08-31, first Linux run of this suite), so there the poke's
     // delivery is exercised but the byte assertion cannot hold.
     if cfg!(windows) {
-        assert_ne!(handle.io().output_bytes(), last, "poke produced no output from an idle shell");
+        assert_ne!(
+            handle.io().output_bytes(),
+            last,
+            "poke produced no output from an idle shell"
+        );
     }
     handle.kill();
 }
@@ -1985,31 +2015,54 @@ fn next_session(rx: &Receiver<TermEvent>) -> (String, SessionSource) {
 fn session_ids_are_announced_or_matched_in_stream_order() {
     // No matcher: the announcement alone is honoured.
     let (handle, rx, _sink) = test_actor(40, 5);
-    handle.feed(b"Session ID: not-matched
-]777;session;ses_announced");
-    assert_eq!(next_session(&rx), ("ses_announced".to_owned(), SessionSource::Announced));
-    assert!(rx.try_iter().all(|e| !matches!(e, TermEvent::Session { .. })), "a plain line is not inspected");
+    handle.feed(
+        b"Session ID: not-matched
+]777;session;ses_announced",
+    );
+    assert_eq!(
+        next_session(&rx),
+        ("ses_announced".to_owned(), SessionSource::Announced)
+    );
+    assert!(
+        rx.try_iter()
+            .all(|e| !matches!(e, TermEvent::Session { .. })),
+        "a plain line is not inspected"
+    );
 
     // A matcher: the printed line is recognized even through colour codes and
     // a split chunk; a later id (printed as the child exits) still arrives.
     let (events, rx) = std::sync::mpsc::channel();
     let cfg = ActorConfig {
         session_matcher: Some(SessionMatcher::new(|line| {
-            line.strip_prefix("Session ID: ").map(|rest| rest.trim().to_owned())
+            line.strip_prefix("Session ID: ")
+                .map(|rest| rest.trim().to_owned())
         })),
         ..cfg(40, 5)
     };
     let (handle, _sink) = spawn_actor_nopty(cfg, events);
     handle.feed(b"[1mSession ID: [0mses_");
-    handle.feed(b"first
+    handle.feed(
+        b"first
 working...
-");
-    assert_eq!(next_session(&rx), ("ses_first".to_owned(), SessionSource::Matched));
-    handle.feed(b"Session ID: ses_final
-");
-    assert_eq!(next_session(&rx), ("ses_final".to_owned(), SessionSource::Matched));
+",
+    );
+    assert_eq!(
+        next_session(&rx),
+        ("ses_first".to_owned(), SessionSource::Matched)
+    );
+    handle.feed(
+        b"Session ID: ses_final
+",
+    );
+    assert_eq!(
+        next_session(&rx),
+        ("ses_final".to_owned(), SessionSource::Matched)
+    );
     handle.feed(b"]777;session;ses_said\\");
-    assert_eq!(next_session(&rx), ("ses_said".to_owned(), SessionSource::Announced));
+    assert_eq!(
+        next_session(&rx),
+        ("ses_said".to_owned(), SessionSource::Announced)
+    );
 }
 
 /// Each `OSC 777;summary` post reaches the embedder exactly once, in order,
@@ -2020,7 +2073,10 @@ fn summary_posts_are_emitted_once_each_and_before_the_exit() {
     let (handle, rx, _sink) = test_actor(40, 5);
     handle.feed(b"working\r\n\x1b]777;summary;first draft\x07");
     handle.feed(b"\x1b]777;summary;## Final\nall green\x1b\\");
-    handle.note_child_exit(ExitStatus { code: Some(0), success: true });
+    handle.note_child_exit(ExitStatus {
+        code: Some(0),
+        success: true,
+    });
     let mut seen = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -2032,8 +2088,15 @@ fn summary_posts_are_emitted_once_each_and_before_the_exit() {
             Err(e) => panic!("no Exited event: {e}"),
         }
     }
-    assert_eq!(seen, vec!["first draft".to_owned(), "## Final\nall green".to_owned()]);
-    assert!(rx.try_iter().all(|e| !matches!(e, TermEvent::Summary { .. })), "nothing after the exit");
+    assert_eq!(
+        seen,
+        vec!["first draft".to_owned(), "## Final\nall green".to_owned()]
+    );
+    assert!(
+        rx.try_iter()
+            .all(|e| !matches!(e, TermEvent::Summary { .. })),
+        "nothing after the exit"
+    );
 }
 
 /// Each `OSC 777;status` report reaches the embedder once, in order, and a
@@ -2044,7 +2107,10 @@ fn status_reports_are_emitted_in_order_and_before_the_exit() {
     handle.feed(b"\x1b]777;status;working\x07step 1\r\n");
     handle.feed(b"\x1b]777;status;Blocked\x07\x1b]777;status;blocked\x1b\\");
     handle.feed(b"\x1b]777;status;done\x07");
-    handle.note_child_exit(ExitStatus { code: Some(0), success: true });
+    handle.note_child_exit(ExitStatus {
+        code: Some(0),
+        success: true,
+    });
     let mut seen = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -2056,5 +2122,12 @@ fn status_reports_are_emitted_in_order_and_before_the_exit() {
             Err(e) => panic!("no Exited event: {e}"),
         }
     }
-    assert_eq!(seen, vec![ProgramStatus::Working, ProgramStatus::Blocked, ProgramStatus::Done]);
+    assert_eq!(
+        seen,
+        vec![
+            ProgramStatus::Working,
+            ProgramStatus::Blocked,
+            ProgramStatus::Done
+        ]
+    );
 }

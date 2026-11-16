@@ -30,7 +30,7 @@ use std::path::Path;
 use indexmap::IndexMap;
 
 use crate::projects::ProjectStore;
-use crate::yml::{CHAPPA_YML_NAME, ProcessDef, ProjectYml};
+use crate::yml::{ProcessDef, ProjectYml, CHAPPA_YML_NAME};
 
 /// The backup file name, next to the project file.
 pub const BACKUP_NAME: &str = "chappa.yml.chappa-bak";
@@ -72,12 +72,8 @@ where
     {
         return Err(CHANGED_ON_DISK.to_owned());
     }
-    yml.write(&root).map_err(|e| {
-        format!(
-            "cannot write {}: {e}",
-            root.join(CHAPPA_YML_NAME).display()
-        )
-    })?;
+    yml.write(&root)
+        .map_err(|e| format!("cannot write {}: {e}", root.join(CHAPPA_YML_NAME).display()))?;
     Ok(yml)
 }
 
@@ -95,7 +91,11 @@ fn ensure_backup(store: &mut ProjectStore, id: u32, root: &Path) -> Result<(), S
     }
     let src = root.join(CHAPPA_YML_NAME);
     let dst = root.join(BACKUP_NAME);
-    match fs::OpenOptions::new().write(true).create_new(true).open(&dst) {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dst)
+    {
         Ok(mut out) => {
             let mut input = fs::File::open(&src)
                 .map_err(|e| format!("cannot back up {}: {e}", src.display()))?;
@@ -238,10 +238,7 @@ processes:
             vec!["theme", "plugins", "notes"]
         );
         // …the multi-line scalar is verbatim…
-        assert_eq!(
-            after.unknown["notes"].as_str(),
-            Some("keep me\nverbatim\n")
-        );
+        assert_eq!(after.unknown["notes"].as_str(), Some("keep me\nverbatim\n"));
         // …process order is untouched, and env order is the FILE order, not
         // alphabetical.
         assert_eq!(
@@ -254,8 +251,14 @@ processes:
         );
         // Known fields of the untouched processes are unchanged.
         assert!(!after.processes["alpha"].auto_start);
-        assert_eq!(after.processes["beta"].working_dir, Some(PathBuf::from("sub")));
-        assert_eq!(after.processes["beta"].restart_when_changed, vec!["**/*.py"]);
+        assert_eq!(
+            after.processes["beta"].working_dir,
+            Some(PathBuf::from("sub"))
+        );
+        assert_eq!(
+            after.processes["beta"].restart_when_changed,
+            vec!["**/*.py"]
+        );
     }
 
     #[test]
@@ -288,7 +291,10 @@ processes:
         })
         .unwrap_err();
         assert!(err.contains("already exists"), "{err}");
-        assert_eq!(fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -306,13 +312,34 @@ processes:
             )
         })
         .unwrap();
-        assert_eq!(written.processes.keys().last().map(String::as_str), Some("delta"));
+        assert_eq!(
+            written.processes.keys().last().map(String::as_str),
+            Some("delta")
+        );
         // Duplicate name, blank name, blank command, escaping working_dir:
         // every one refused.
         for (name, def) in [
-            ("alpha", ProcessDef { command: "x".into(), ..Default::default() }),
-            ("   ", ProcessDef { command: "x".into(), ..Default::default() }),
-            ("ok", ProcessDef { command: "  ".into(), ..Default::default() }),
+            (
+                "alpha",
+                ProcessDef {
+                    command: "x".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "   ",
+                ProcessDef {
+                    command: "x".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ok",
+                ProcessDef {
+                    command: "  ".into(),
+                    ..Default::default()
+                },
+            ),
             (
                 "ok",
                 ProcessDef {
@@ -328,8 +355,10 @@ processes:
             );
         }
         // Remove shifts the tail up.
-        let written = apply(&mut store, id, |_, yml| yml.remove_process("alpha").map(|_| ()))
-            .unwrap();
+        let written = apply(&mut store, id, |_, yml| {
+            yml.remove_process("alpha").map(|_| ())
+        })
+        .unwrap();
         assert_eq!(
             written.processes.keys().collect::<Vec<_>>(),
             vec!["beta", "gamma", "delta"]
@@ -371,7 +400,10 @@ processes:
             vec!["alpha", "alpha copy", "beta", "gamma"]
         );
         assert_eq!(written.processes["alpha"].command, "py already.py");
-        assert_eq!(written.processes["alpha copy"].unknown["priority"], serde_yaml::Value::from(7));
+        assert_eq!(
+            written.processes["alpha copy"].unknown["priority"],
+            serde_yaml::Value::from(7)
+        );
         // Source untouched, byte for byte; no backup appeared beside it.
         assert_eq!(
             fs::read_to_string(source_root.join(CHAPPA_YML_NAME)).unwrap(),
@@ -396,15 +428,25 @@ processes:
         let bak = root.join(BACKUP_NAME);
         assert!(!bak.exists());
 
-        apply(&mut store, id, |_, yml| yml.remove_process("gamma").map(|_| ())).unwrap();
-        assert_eq!(fs::read_to_string(&bak).unwrap(), FIXTURE, "bak = pre-chappa original");
+        apply(&mut store, id, |_, yml| {
+            yml.remove_process("gamma").map(|_| ())
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&bak).unwrap(),
+            FIXTURE,
+            "bak = pre-chappa original"
+        );
         let first_mtime = fs::metadata(&bak).unwrap().modified().unwrap();
         assert!(store.is_yml_backed_up(id));
 
         // Second write: the backup is NOT refreshed (it would lose the
         // comments the first copy preserved).
         std::thread::sleep(std::time::Duration::from_millis(30));
-        apply(&mut store, id, |_, yml| yml.remove_process("beta").map(|_| ())).unwrap();
+        apply(&mut store, id, |_, yml| {
+            yml.remove_process("beta").map(|_| ())
+        })
+        .unwrap();
         assert_eq!(fs::read_to_string(&bak).unwrap(), FIXTURE);
         assert_eq!(fs::metadata(&bak).unwrap().modified().unwrap(), first_mtime);
 
@@ -422,11 +464,18 @@ processes:
         let (_dir, mut store, id) = project(FIXTURE);
         let root = store.get(id).unwrap().path.clone();
         let bak = root.join(BACKUP_NAME);
-        fs::write(&bak, "# the original, with comments
-").unwrap();
+        fs::write(
+            &bak,
+            "# the original, with comments
+",
+        )
+        .unwrap();
         assert!(!store.is_yml_backed_up(id), "flag lags the disk");
 
-        apply(&mut store, id, |_, yml| yml.remove_process("gamma").map(|_| ())).unwrap();
+        apply(&mut store, id, |_, yml| {
+            yml.remove_process("gamma").map(|_| ())
+        })
+        .unwrap();
         assert_eq!(
             fs::read_to_string(&bak).unwrap(),
             "# the original, with comments
@@ -434,7 +483,9 @@ processes:
             "an existing backup must survive"
         );
         // The write itself went through, and the flag caught up.
-        assert!(!fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap().contains("gamma"));
+        assert!(!fs::read_to_string(root.join(CHAPPA_YML_NAME))
+            .unwrap()
+            .contains("gamma"));
         assert!(store.is_yml_backed_up(id));
     }
 
@@ -444,11 +495,21 @@ processes:
         let root = store.get(id).unwrap().path.clone();
         let before = fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap();
         let err = apply(&mut store, id, |root, yml| {
-            yml.add_process(root, "y", ProcessDef { command: "z".into(), ..Default::default() })
+            yml.add_process(
+                root,
+                "y",
+                ProcessDef {
+                    command: "z".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap_err();
         assert!(err.contains("refusing to write"), "{err}");
-        assert_eq!(fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(),
+            before
+        );
         assert!(!root.join(BACKUP_NAME).exists());
         assert!(!store.is_yml_backed_up(id));
         // Unknown project: also an error, nothing touched.
@@ -513,12 +574,16 @@ processes:
         .unwrap_err();
         assert_eq!(err, CHANGED_ON_DISK);
         // The external change survives byte-identical — never last-writer-wins.
-        assert_eq!(fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(), external);
+        assert_eq!(
+            fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap(),
+            external
+        );
 
         // The next apply loads the external content fresh and goes through.
-        let written =
-            apply(&mut store, id, |_, yml| yml.remove_process("ext-added").map(|_| ()))
-                .unwrap();
+        let written = apply(&mut store, id, |_, yml| {
+            yml.remove_process("ext-added").map(|_| ())
+        })
+        .unwrap();
         assert!(written.processes.is_empty());
     }
 
@@ -528,7 +593,9 @@ processes:
     fn favorites_and_renaming_toggles_never_appear_in_yml_output() {
         let (_dir, mut store, id) = project(FIXTURE);
         store.set_process_favorite(id, "alpha", true).unwrap();
-        store.set_process_auto_rename_disabled(id, "beta", true).unwrap();
+        store
+            .set_process_auto_rename_disabled(id, "beta", true)
+            .unwrap();
         store
             .set_notification_level(id, Some("gamma"), Some("none".into()))
             .unwrap();
@@ -540,7 +607,10 @@ processes:
         let root = store.get(id).unwrap().path.clone();
         let text = fs::read_to_string(root.join(CHAPPA_YML_NAME)).unwrap();
         for needle in ["favorite", "auto_rename", "notification", "lesser_used"] {
-            assert!(!text.contains(needle), "`{needle}` leaked into the project file:\n{text}");
+            assert!(
+                !text.contains(needle),
+                "`{needle}` leaked into the project file:\n{text}"
+            );
         }
         // …while projects.json carries all three.
         let json = fs::read_to_string(store.path()).unwrap();

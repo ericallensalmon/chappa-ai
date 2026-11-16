@@ -69,7 +69,11 @@ pub struct HeldEntry {
 
 /// The first non-empty line of `text`, trimmed and capped.
 pub fn first_line(text: &str) -> String {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if line.chars().count() <= FIRST_LINE_CAP {
         line.to_owned()
     } else {
@@ -81,7 +85,13 @@ pub fn first_line(text: &str) -> String {
 
 impl Held {
     fn entry(&self, pane: u32) -> HeldEntry {
-        HeldEntry { id: self.id, pane, from: self.from.clone(), queued_ms: self.queued_ms, first_line: first_line(&self.text) }
+        HeldEntry {
+            id: self.id,
+            pane,
+            from: self.from.clone(),
+            queued_ms: self.queued_ms,
+            first_line: first_line(&self.text),
+        }
     }
 }
 
@@ -131,15 +141,30 @@ impl DeliveryHolds {
         }
         let inner = self.lock();
         let q = inner.panes.get(&id)?;
-        Some(format!("held behind {} earlier message(s) for this agent", q.items.len().max(1)))
+        Some(format!(
+            "held behind {} earlier message(s) for this agent",
+            q.items.len().max(1)
+        ))
     }
 
     /// Queue `run` for pane `id`, sent by `from`. Answers how many
     /// deliveries are now held for it.
-    pub fn hold(&self, id: u32, from: String, text: String, run: Box<dyn FnOnce() + Send>) -> usize {
+    pub fn hold(
+        &self,
+        id: u32,
+        from: String,
+        text: String,
+        run: Box<dyn FnOnce() + Send>,
+    ) -> usize {
         let mut inner = self.lock();
         inner.next_id += 1;
-        let held = Held { id: inner.next_id, from, text, queued_ms: epoch_ms(), run };
+        let held = Held {
+            id: inner.next_id,
+            from,
+            text,
+            queued_ms: epoch_ms(),
+            run,
+        };
         let q = inner.panes.entry(id).or_default();
         q.items.push_back(held);
         q.items.len()
@@ -147,7 +172,12 @@ impl DeliveryHolds {
 
     /// How many deliveries are held per pane (panes with none are left out).
     pub fn counts(&self) -> Vec<(u32, usize)> {
-        self.lock().panes.iter().filter(|(_, q)| !q.items.is_empty()).map(|(id, q)| (*id, q.items.len())).collect()
+        self.lock()
+            .panes
+            .iter()
+            .filter(|(_, q)| !q.items.is_empty())
+            .map(|(id, q)| (*id, q.items.len()))
+            .collect()
     }
 
     /// What is held, oldest first per pane: for pane `pane`, or for every
@@ -166,17 +196,23 @@ impl DeliveryHolds {
     /// delivered, discarded already, or its pane went).
     pub fn discard(&self, entry_id: u64) -> Option<HeldEntry> {
         let mut inner = self.lock();
-        let (pane, at) = inner
-            .panes
-            .iter()
-            .find_map(|(pane, q)| q.items.iter().position(|h| h.id == entry_id).map(|at| (*pane, at)))?;
+        let (pane, at) = inner.panes.iter().find_map(|(pane, q)| {
+            q.items
+                .iter()
+                .position(|h| h.id == entry_id)
+                .map(|at| (*pane, at))
+        })?;
         let q = inner.panes.get_mut(&pane)?;
         let held = q.items.remove(at)?;
         if q.items.is_empty() && !q.releasing {
             inner.panes.remove(&pane);
         }
         let entry = held.entry(pane);
-        log::info!("[holds] held message {} for pane {pane} from {} discarded", entry.id, entry.from);
+        log::info!(
+            "[holds] held message {} for pane {pane} from {} discarded",
+            entry.id,
+            entry.from
+        );
         Some(entry)
     }
 
@@ -187,12 +223,21 @@ impl DeliveryHolds {
     /// deliveries were made.
     pub fn release(&self, cwd_of: &dyn Fn(u32) -> Option<Option<std::path::PathBuf>>) -> usize {
         let gate = self.gate();
-        let ids: Vec<u32> = self.lock().panes.iter().filter(|(_, q)| !q.releasing).map(|(id, _)| *id).collect();
+        let ids: Vec<u32> = self
+            .lock()
+            .panes
+            .iter()
+            .filter(|(_, q)| !q.releasing)
+            .map(|(id, _)| *id)
+            .collect();
         let mut delivered = 0;
         for id in ids {
             let Some(cwd) = cwd_of(id) else {
                 if let Some(q) = self.lock().panes.remove(&id) {
-                    log::info!("[holds] pane {id} is gone; {} held message(s) dropped", q.items.len());
+                    log::info!(
+                        "[holds] pane {id} is gone; {} held message(s) dropped",
+                        q.items.len()
+                    );
                 }
                 continue;
             };
@@ -210,7 +255,9 @@ impl DeliveryHolds {
             loop {
                 let next = {
                     let mut inner = self.lock();
-                    let Some(q) = inner.panes.get_mut(&id) else { break };
+                    let Some(q) = inner.panes.get_mut(&id) else {
+                        break;
+                    };
                     match q.items.pop_front() {
                         Some(h) => h,
                         None => {
@@ -253,11 +300,20 @@ mod tests {
         holds.set_gate(gate.clone());
         let cwd = PathBuf::from("/srv/example");
         assert_eq!(holds.reason_for(1, Some(&cwd)).as_deref(), Some("blocked"));
-        assert_eq!(holds.reason_for(1, None), None, "a pane with no folder is never held");
+        assert_eq!(
+            holds.reason_for(1, None),
+            None,
+            "a pane with no folder is never held"
+        );
         let out = Arc::new(Mutex::new(Vec::<&str>::new()));
         for text in ["one", "two", "three"] {
             let out = out.clone();
-            holds.hold(1, "user".into(), text.into(), Box::new(move || out.lock().unwrap().push(text)));
+            holds.hold(
+                1,
+                "user".into(),
+                text.into(),
+                Box::new(move || out.lock().unwrap().push(text)),
+            );
         }
         assert_eq!(holds.counts(), vec![(1, 3)]);
         let cwd_of = |_: u32| Some(Some(cwd.clone()));
@@ -265,7 +321,10 @@ mod tests {
         assert!(out.lock().unwrap().is_empty());
         gate.0.store(false, Ordering::SeqCst);
         // Queued ones make a new delivery wait behind them, gate open or not.
-        assert!(holds.reason_for(1, Some(&cwd)).unwrap().contains("behind 3"));
+        assert!(holds
+            .reason_for(1, Some(&cwd))
+            .unwrap()
+            .contains("behind 3"));
         assert_eq!(holds.release(&cwd_of), 3);
         assert_eq!(*out.lock().unwrap(), ["one", "two", "three"]);
         assert!(holds.counts().is_empty());
@@ -278,13 +337,34 @@ mod tests {
         let gate = Arc::new(Switch(AtomicBool::new(false)));
         holds.set_gate(gate.clone());
         let g = gate.clone();
-        holds.hold(1, "user".into(), "closes the gate".into(), Box::new(move || g.0.store(true, Ordering::SeqCst)));
+        holds.hold(
+            1,
+            "user".into(),
+            "closes the gate".into(),
+            Box::new(move || g.0.store(true, Ordering::SeqCst)),
+        );
         holds.hold(1, "user".into(), "waits".into(), Box::new(|| {}));
-        holds.hold(2, "user".into(), "orphan".into(), Box::new(|| panic!("a gone pane gets nothing")));
+        holds.hold(
+            2,
+            "user".into(),
+            "orphan".into(),
+            Box::new(|| panic!("a gone pane gets nothing")),
+        );
         let cwd_of = |id: u32| (id == 1).then(|| Some(PathBuf::from("/srv/example")));
         assert_eq!(holds.release(&cwd_of), 1);
-        assert_eq!(holds.list(Some(1)).iter().map(|e| e.first_line.as_str()).collect::<Vec<_>>(), ["waits"]);
-        assert_eq!(holds.counts(), vec![(1, 1)], "pane 2 is gone, its queue with it");
+        assert_eq!(
+            holds
+                .list(Some(1))
+                .iter()
+                .map(|e| e.first_line.as_str())
+                .collect::<Vec<_>>(),
+            ["waits"]
+        );
+        assert_eq!(
+            holds.counts(),
+            vec![(1, 1)],
+            "pane 2 is gone, its queue with it"
+        );
         gate.0.store(false, Ordering::SeqCst);
         assert_eq!(holds.release(&cwd_of), 1);
         assert!(holds.counts().is_empty());
@@ -299,11 +379,21 @@ mod tests {
             let out = out.clone();
             Box::new(move || out.lock().unwrap().push(text)) as Box<dyn FnOnce() + Send>
         };
-        holds.hold(1, "agent:7".into(), "\n  first: please rerun the tests  \nsecond line".into(), push("a"));
+        holds.hold(
+            1,
+            "agent:7".into(),
+            "\n  first: please rerun the tests  \nsecond line".into(),
+            push("a"),
+        );
         holds.hold(2, "timer 4".into(), "check the build".into(), push("b"));
         holds.hold(1, "user".into(), "x".repeat(300), push("c"));
         let all = holds.list(None);
-        assert_eq!(all.iter().map(|e| (e.id, e.pane, e.from.as_str())).collect::<Vec<_>>(), [(1, 1, "agent:7"), (3, 1, "user"), (2, 2, "timer 4")]);
+        assert_eq!(
+            all.iter()
+                .map(|e| (e.id, e.pane, e.from.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, 1, "agent:7"), (3, 1, "user"), (2, 2, "timer 4")]
+        );
         assert_eq!(all[0].first_line, "first: please rerun the tests");
         assert_eq!(all[1].first_line.chars().count(), FIRST_LINE_CAP);
         assert!(all[1].first_line.ends_with('…'));
@@ -316,7 +406,10 @@ mod tests {
         assert_eq!((gone.pane, gone.from.as_str()), (1, "user"));
         assert_eq!(holds.discard(3), None, "an id is discarded once");
         assert_eq!(holds.discard(99), None);
-        assert_eq!(holds.list(None).iter().map(|e| e.id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(
+            holds.list(None).iter().map(|e| e.id).collect::<Vec<_>>(),
+            [1, 2]
+        );
         // The last one of a pane takes the pane's queue with it.
         holds.discard(2).unwrap();
         assert_eq!(holds.counts(), vec![(1, 1)]);
@@ -327,6 +420,10 @@ mod tests {
         holds.set_gate(Arc::new(Switch(AtomicBool::new(false))));
         let cwd_of = |_: u32| Some(Some(PathBuf::from("/srv/example")));
         assert_eq!(holds.release(&cwd_of), 2);
-        assert_eq!(*out.lock().unwrap(), ["a", "d"], "the discarded ones are never made");
+        assert_eq!(
+            *out.lock().unwrap(),
+            ["a", "d"],
+            "the discarded ones are never made"
+        );
     }
 }

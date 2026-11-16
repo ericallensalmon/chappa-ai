@@ -45,12 +45,20 @@ pub fn is_stack_serve(def: &ProcessDef) -> bool {
             .file_stem()
             .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("chappa-stack"))
     });
-    named.is_some_and(|i| w[i + 1..].iter().any(|x| x.trim_matches(['"', '\'']) == "serve"))
+    named.is_some_and(|i| {
+        w[i + 1..]
+            .iter()
+            .any(|x| x.trim_matches(['"', '\'']) == "serve")
+    })
 }
 
 /// The folder whose stack definition `def` serves.
 pub fn served_folder(root: &Path, def: &ProcessDef) -> PathBuf {
-    let cwd = def.resolve_working_dir(root).ok().flatten().unwrap_or_else(|| root.to_path_buf());
+    let cwd = def
+        .resolve_working_dir(root)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| root.to_path_buf());
     crate::sources::launch_folder_of(&cwd, &words(def))
 }
 
@@ -69,7 +77,10 @@ impl StackSource {
         match &self.definition {
             Ok(Some(t)) => t.hash.clone(),
             Ok(None) => "no-stack".into(),
-            Err(e) => format!("unreadable:{}", project_model::hash::content_hash(e.as_bytes())),
+            Err(e) => format!(
+                "unreadable:{}",
+                project_model::hash::content_hash(e.as_bytes())
+            ),
         }
     }
 
@@ -83,13 +94,20 @@ impl StackSource {
 }
 
 /// The stack-runner commands of a project, in file order.
-pub fn stack_sources<'a>(root: &Path, processes: impl IntoIterator<Item = (&'a String, &'a ProcessDef)>) -> Vec<StackSource> {
+pub fn stack_sources<'a>(
+    root: &Path,
+    processes: impl IntoIterator<Item = (&'a String, &'a ProcessDef)>,
+) -> Vec<StackSource> {
     processes
         .into_iter()
         .filter(|(_, d)| is_stack_serve(d))
         .map(|(name, d)| {
             let folder = served_folder(root, d);
-            StackSource { name: name.clone(), definition: definition_trust(&folder).map_err(|e| e.to_string()), folder }
+            StackSource {
+                name: name.clone(),
+                definition: definition_trust(&folder).map_err(|e| e.to_string()),
+                folder,
+            }
         })
         .collect()
 }
@@ -113,7 +131,10 @@ pub fn project_trust_hash(file_hash: &str, stacks: &[StackSource]) -> String {
 /// `chappa.yml`.
 pub fn trust_hash_on_disk(root: &Path) -> Option<String> {
     let (yml, file_hash) = ProjectYml::load_result_with_hash(root).ok()?;
-    Some(project_trust_hash(&file_hash, &stack_sources(root, &yml.processes)))
+    Some(project_trust_hash(
+        &file_hash,
+        &stack_sources(root, &yml.processes),
+    ))
 }
 
 /// The trust prompt's entries for the stack definitions: one header per
@@ -131,7 +152,11 @@ pub fn prompt_lines(stacks: &[StackSource]) -> Vec<String> {
                 ));
                 out.extend(t.commands.iter().cloned());
             }
-            Ok(None) => out.push(format!("`{}` serves {}, which defines no stack", s.name, s.folder.display())),
+            Ok(None) => out.push(format!(
+                "`{}` serves {}, which defines no stack",
+                s.name,
+                s.folder.display()
+            )),
             Err(e) => out.push(format!(
                 "`{}` serves {}, whose stack definition does not load ({}); nothing in it will run",
                 s.name,
@@ -156,7 +181,9 @@ pub fn with_trusted_definition(def: &ProcessDef, hash: Option<&str>) -> ProcessD
             w.push(value.into());
             CommandLine::Argv(w)
         }
-        CommandLine::Shell(line) => CommandLine::Shell(format!("{line} {TRUSTED_DEFINITION_ARG} {value}")),
+        CommandLine::Shell(line) => {
+            CommandLine::Shell(format!("{line} {TRUSTED_DEFINITION_ARG} {value}"))
+        }
     };
     out
 }
@@ -176,15 +203,24 @@ mod tests {
     #[test]
     fn the_runner_is_recognised_in_its_usual_spellings_only_as_a_source() {
         let def = |cmd: &str, source: bool| {
-            let mut d = ProcessDef { command: CommandLine::Shell(cmd.into()), ..ProcessDef::default() };
+            let mut d = ProcessDef {
+                command: CommandLine::Shell(cmd.into()),
+                ..ProcessDef::default()
+            };
             if source {
                 d.source = Some(Default::default());
             }
             d
         };
         assert!(is_stack_serve(&def("chappa-stack serve --slot 1", true)));
-        assert!(is_stack_serve(&def("C:\\tools\\chappa-stack.exe serve", true)));
-        assert!(is_stack_serve(&def("cargo run -p chappa-stack -- serve", true)));
+        assert!(is_stack_serve(&def(
+            "C:\\tools\\chappa-stack.exe serve",
+            true
+        )));
+        assert!(is_stack_serve(&def(
+            "cargo run -p chappa-stack -- serve",
+            true
+        )));
         assert!(!is_stack_serve(&def("chappa-stack serve", false)));
         assert!(!is_stack_serve(&def("chappa-stack run-job 1", true)));
         assert!(!is_stack_serve(&def("node sources/github/index.mjs", true)));
@@ -202,12 +238,23 @@ mod tests {
         std::fs::write(root.join("chappa.yml"), yml_with_runner("")).unwrap();
         std::fs::write(root.join("chappa.stack.yml"), STACK).unwrap();
         let split = trust_hash_on_disk(root).unwrap();
-        std::fs::write(root.join("chappa.stack.yml"), STACK.replace("status.js", "evil.js")).unwrap();
+        std::fs::write(
+            root.join("chappa.stack.yml"),
+            STACK.replace("status.js", "evil.js"),
+        )
+        .unwrap();
         let changed = trust_hash_on_disk(root).unwrap();
-        assert_ne!(split, changed, "an edit of chappa.stack.yml alone asks again");
+        assert_ne!(
+            split, changed,
+            "an edit of chappa.stack.yml alone asks again"
+        );
         // A project without a runner keeps the plain file hash.
         let plain = tempfile::tempdir().unwrap();
-        std::fs::write(plain.path().join("chappa.yml"), "processes:\n  web:\n    command: npm run dev\n").unwrap();
+        std::fs::write(
+            plain.path().join("chappa.yml"),
+            "processes:\n  web:\n    command: npm run dev\n",
+        )
+        .unwrap();
         assert_eq!(
             trust_hash_on_disk(plain.path()).unwrap(),
             project_model::hash::file_content_hash(&plain.path().join("chappa.yml")).unwrap()
@@ -226,16 +273,31 @@ mod tests {
         assert_eq!(stacks.len(), 1);
         let lines = prompt_lines(&stacks).join("\n");
         assert!(lines.contains("up: [node, scripts/up.js]"), "{lines}");
-        assert!(lines.contains("status: [node, scripts/status.js]"), "{lines}");
+        assert!(
+            lines.contains("status: [node, scripts/status.js]"),
+            "{lines}"
+        );
         assert!(lines.contains("DB_PASSWORD=•••• (set inline)"), "{lines}");
         assert!(!lines.contains(&pw), "{lines}");
         let hash = stacks[0].runnable_hash().unwrap();
         let launched = with_trusted_definition(&yml.processes["stack"], Some(&hash));
         match &launched.command {
-            CommandLine::Argv(w) => assert_eq!(&w[w.len() - 2..], [TRUSTED_DEFINITION_ARG.to_string(), hash.clone()]),
+            CommandLine::Argv(w) => assert_eq!(
+                &w[w.len() - 2..],
+                [TRUSTED_DEFINITION_ARG.to_string(), hash.clone()]
+            ),
             other => panic!("{other:?}"),
         }
-        let none = with_trusted_definition(&ProcessDef { command: CommandLine::Shell("chappa-stack serve".into()), ..ProcessDef::default() }, None);
-        assert_eq!(none.command, CommandLine::Shell("chappa-stack serve --trusted-definition none".into()));
+        let none = with_trusted_definition(
+            &ProcessDef {
+                command: CommandLine::Shell("chappa-stack serve".into()),
+                ..ProcessDef::default()
+            },
+            None,
+        );
+        assert_eq!(
+            none.command,
+            CommandLine::Shell("chappa-stack serve --trusted-definition none".into())
+        );
     }
 }

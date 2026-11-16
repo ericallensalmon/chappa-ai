@@ -85,7 +85,9 @@ fn fake_source(token_hex: &str, identity: Identity, chunked: bool) -> (String, A
             std::thread::spawn(move || {
                 while let Some(head) = read_request(&mut stream) {
                     let line = head.lines().next().unwrap_or("").to_owned();
-                    let authorized = head.lines().any(|l| l.to_ascii_lowercase().starts_with("authorization:"));
+                    let authorized = head
+                        .lines()
+                        .any(|l| l.to_ascii_lowercase().starts_with("authorization:"));
                     {
                         let mut s = seen.lock().unwrap();
                         s.requests.push(line.clone());
@@ -94,14 +96,28 @@ fn fake_source(token_hex: &str, identity: Identity, chunked: bool) -> (String, A
                     let path = line.split(' ').nth(1).unwrap_or("");
                     if let Some(challenge) = path.strip_prefix("/chappa/v1/identity?challenge=") {
                         match identity {
-                            Identity::Honest => reply(&mut stream, 200, &json!({"proof": source_proof(&token, challenge, &addr)}).to_string()),
-                            Identity::Impostor => reply(&mut stream, 200, &json!({"proof": source_proof(&other, challenge, &addr)}).to_string()),
+                            Identity::Honest => reply(
+                                &mut stream,
+                                200,
+                                &json!({"proof": source_proof(&token, challenge, &addr)})
+                                    .to_string(),
+                            ),
+                            Identity::Impostor => reply(
+                                &mut stream,
+                                200,
+                                &json!({"proof": source_proof(&other, challenge, &addr)})
+                                    .to_string(),
+                            ),
                             Identity::NotASource => reply(&mut stream, 404, "{}"),
                         }
                         continue;
                     }
                     if !authorized {
-                        reply(&mut stream, 401, r#"{"kind":"unauthorized","message":"A bearer token is required"}"#);
+                        reply(
+                            &mut stream,
+                            401,
+                            r#"{"kind":"unauthorized","message":"A bearer token is required"}"#,
+                        );
                         continue;
                     }
                     if path == "/chappa/v1/manifest" {
@@ -113,7 +129,8 @@ fn fake_source(token_hex: &str, identity: Identity, chunked: bool) -> (String, A
                         })
                         .to_string();
                         if chunked {
-                            let mut out = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+                            let mut out =
+                                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
                             for piece in body.as_bytes().chunks(13) {
                                 out.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
                                 out.extend_from_slice(piece);
@@ -127,7 +144,11 @@ fn fake_source(token_hex: &str, identity: Identity, chunked: bool) -> (String, A
                         continue;
                     }
                     if path == "/w" {
-                        reply(&mut stream, 200, r#"{"freshness":{"asOf":null},"items":[{"key":"ABC-1","title":"t","status":null}]}"#);
+                        reply(
+                            &mut stream,
+                            200,
+                            r#"{"freshness":{"asOf":null},"items":[{"key":"ABC-1","title":"t","status":null}]}"#,
+                        );
                         continue;
                     }
                     reply(&mut stream, 404, r#"{"kind":"not-found","message":"no"}"#);
@@ -144,14 +165,25 @@ fn an_honest_source_passes_the_handshake_and_then_gets_the_token() {
     let (addr, seen) = fake_source(&token, Identity::Honest, false);
     let mut client = SourceClient::new(&addr, &token).unwrap();
     client.verify().expect("the proof verifies");
-    assert!(!seen.lock().unwrap().saw_token, "nothing token-bearing before the proof");
+    assert!(
+        !seen.lock().unwrap().saw_token,
+        "nothing token-bearing before the proof"
+    );
     let manifest = client.manifest().unwrap();
     assert_eq!(manifest["source"]["id"], "fake");
     let seen = seen.lock().unwrap();
     assert!(seen.saw_token);
-    assert!(seen.requests[0].starts_with("GET /chappa/v1/identity?challenge="), "{:?}", seen.requests);
+    assert!(
+        seen.requests[0].starts_with("GET /chappa/v1/identity?challenge="),
+        "{:?}",
+        seen.requests
+    );
     assert_eq!(seen.requests[1], "GET /chappa/v1/manifest HTTP/1.1");
-    assert_eq!(seen.requests.len(), 2, "one keep-alive connection, no reconnect");
+    assert_eq!(
+        seen.requests.len(),
+        2,
+        "one keep-alive connection, no reconnect"
+    );
 }
 
 #[test]
@@ -167,8 +199,18 @@ fn an_impostor_on_the_port_never_sees_the_token() {
         let err = client.manifest().unwrap_err();
         assert!(matches!(err, SourceError::Untrusted(_)), "{err}");
         let seen = seen.lock().unwrap();
-        assert!(!seen.saw_token, "the token went out to an impostor: {:?}", seen.requests);
-        assert!(seen.requests.iter().all(|r| r.contains("/chappa/v1/identity?challenge=")), "{:?}", seen.requests);
+        assert!(
+            !seen.saw_token,
+            "the token went out to an impostor: {:?}",
+            seen.requests
+        );
+        assert!(
+            seen.requests
+                .iter()
+                .all(|r| r.contains("/chappa/v1/identity?challenge=")),
+            "{:?}",
+            seen.requests
+        );
     }
 }
 
@@ -189,14 +231,27 @@ fn a_chunked_manifest_is_decoded() {
 #[test]
 fn the_client_refuses_non_loopback_addresses_and_bad_tokens_before_connecting() {
     let token = new_token_hex().unwrap();
-    assert!(SourceClient::new("10.0.0.5:5000", &token).err().unwrap().contains("loopback"));
+    assert!(SourceClient::new("10.0.0.5:5000", &token)
+        .err()
+        .unwrap()
+        .contains("loopback"));
     assert!(SourceClient::new("localhost:5000", &token).is_err());
-    assert!(SourceClient::new("127.0.0.1:5000", "nope").err().unwrap().contains("hex"));
+    assert!(SourceClient::new("127.0.0.1:5000", "nope")
+        .err()
+        .unwrap()
+        .contains("hex"));
     // Nothing listening is Unreachable, not Untrusted: the source may still
     // be starting.
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let mut client = SourceClient::new(&format!("127.0.0.1:{port}"), &token).unwrap();
-    assert!(matches!(client.verify().unwrap_err(), SourceError::Unreachable(_)));
+    assert!(matches!(
+        client.verify().unwrap_err(),
+        SourceError::Unreachable(_)
+    ));
 }
 
 #[test]
@@ -226,7 +281,12 @@ fn fixture_script() -> PathBuf {
 }
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().map_or(false, |s| s.success())
+    Command::new("node")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_or(false, |s| s.success())
 }
 
 fn spawn_fixture(addr: &str, token: &str) -> Child {
@@ -274,10 +334,15 @@ fn the_fixture_source_is_launched_proved_trusted_polled_and_survives_a_restart()
     std::fs::create_dir_all(&project).unwrap();
     let events = Arc::new(Collector(Mutex::new(Vec::new())));
     let sources = Sources::default();
-    sources.init_with(SourceStore::new(dir.path().join("sources.json")), events.clone());
+    sources.init_with(
+        SourceStore::new(dir.path().join("sources.json")),
+        events.clone(),
+    );
 
     // Launch: a fresh port and token, handed to the process in its env.
-    let launch = sources.prepare_launch(7, &project, "fixture-source").unwrap();
+    let launch = sources
+        .prepare_launch(7, &project, "fixture-source")
+        .unwrap();
     assert!(launch.addr.starts_with("127.0.0.1:"));
     assert_eq!(launch.token.len(), 64);
     let mut child = Reaper(Some(spawn_fixture(&launch.addr, &launch.token)));
@@ -301,14 +366,27 @@ fn the_fixture_source_is_launched_proved_trusted_polled_and_survives_a_restart()
     assert_eq!(trust.views, ["attention", "environment", "prs", "work"]);
     std::thread::sleep(Duration::from_millis(300));
     let s = &sources.listing().sources[0];
-    assert!(s.views.iter().all(|v| !v.has_payload), "an untrusted source is polled for nothing");
+    assert!(
+        s.views.iter().all(|v| !v.has_payload),
+        "an untrusted source is polled for nothing"
+    );
     assert_eq!(s.label, "Fixture");
-    assert_eq!(s.views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["attention", "environment", "prs", "work", "workflows"]);
+    assert_eq!(
+        s.views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        ["attention", "environment", "prs", "work", "workflows"]
+    );
 
     // A stale hash is refused; the shown hash is accepted.
-    assert!(sources.trust_answer(&source_id, true, "0".repeat(64).as_str()).is_err());
-    sources.trust_answer(&source_id, false, &trust.hash).unwrap();
-    assert_eq!(sources.listing().sources[0].status, SourceStatus::NeedsReview);
+    assert!(sources
+        .trust_answer(&source_id, true, "0".repeat(64).as_str())
+        .is_err());
+    sources
+        .trust_answer(&source_id, false, &trust.hash)
+        .unwrap();
+    assert_eq!(
+        sources.listing().sources[0].status,
+        SourceStatus::NeedsReview
+    );
     sources.trust_answer(&source_id, true, &trust.hash).unwrap();
 
     // Every view (and the workflows list) is fetched and cached raw.
@@ -322,8 +400,16 @@ fn the_fixture_source_is_launched_proved_trusted_polled_and_survives_a_restart()
     assert!(work.freshness.errors.is_empty());
     let workflows = sources.view(&source_id, "workflows").unwrap();
     assert!(workflows.payload.unwrap().is_object());
-    assert!(sources.view(&source_id, "panel").is_err(), "an endpoint the manifest did not list as a view is not cached");
-    assert!(events.0.lock().unwrap().iter().any(|e| e["event"] == "view" && e["view"] == "work"));
+    assert!(
+        sources.view(&source_id, "panel").is_err(),
+        "an endpoint the manifest did not list as a view is not cached"
+    );
+    assert!(events
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| e["event"] == "view" && e["view"] == "work"));
 
     // Crash: the process dies; the source is down, the data stays.
     child.0.as_mut().unwrap().kill().unwrap();
@@ -331,27 +417,50 @@ fn the_fixture_source_is_launched_proved_trusted_polled_and_survives_a_restart()
     sources.process_gone(&project, "fixture-source", "exited with code 1");
     let s = &sources.listing().sources[0];
     assert_eq!(s.status, SourceStatus::Down);
-    assert!(s.last_error.as_deref().unwrap().contains("exited with code 1"));
-    assert!(s.views.iter().all(|v| v.has_payload), "payloads survive the crash");
-    assert_eq!(sources.view(&source_id, "work").unwrap().payload.unwrap()["items"][0]["key"], "ABC-1");
+    assert!(s
+        .last_error
+        .as_deref()
+        .unwrap()
+        .contains("exited with code 1"));
+    assert!(
+        s.views.iter().all(|v| v.has_payload),
+        "payloads survive the crash"
+    );
+    assert_eq!(
+        sources.view(&source_id, "work").unwrap().payload.unwrap()["items"][0]["key"],
+        "ABC-1"
+    );
 
     // Restart: a NEW port and token, identity proved again, trust already on
     // record for the same manifest, so polling resumes without a prompt.
-    let relaunch = sources.prepare_launch(7, &project, "fixture-source").unwrap();
+    let relaunch = sources
+        .prepare_launch(7, &project, "fixture-source")
+        .unwrap();
     assert_ne!(relaunch.addr, launch.addr);
     assert_ne!(relaunch.token, launch.token);
     let _child = Reaper(Some(spawn_fixture(&relaunch.addr, &relaunch.token)));
     sources.launched(&project, "fixture-source", 2);
-    assert_eq!(sources.listing().sources[0].id, source_id, "the same source, not a second entry");
-    wait_for("up again after the restart", Duration::from_secs(20), || {
-        let s = &sources.listing().sources[0];
-        (s.status == SourceStatus::Up && s.trusted).then_some(())
-    });
+    assert_eq!(
+        sources.listing().sources[0].id,
+        source_id,
+        "the same source, not a second entry"
+    );
+    wait_for(
+        "up again after the restart",
+        Duration::from_secs(20),
+        || {
+            let s = &sources.listing().sources[0];
+            (s.status == SourceStatus::Up && s.trusted).then_some(())
+        },
+    );
     assert_eq!(sources.listing().sources.len(), 1);
 
     // The trust record persisted next to the attached list.
     let store = SourceStore::new(dir.path().join("sources.json"));
-    assert!(store.is_trusted(&SourceStore::launched_key(&project, "fixture-source"), &trust.hash));
+    assert!(store.is_trusted(
+        &SourceStore::launched_key(&project, "fixture-source"),
+        &trust.hash
+    ));
     sources.shutdown();
 }
 
@@ -360,16 +469,25 @@ fn a_launched_source_that_never_answers_is_down_with_a_reason_and_its_restart_ge
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("p");
     let sources = Sources::default();
-    sources.init_with(SourceStore::new(dir.path().join("sources.json")), Arc::new(Collector(Mutex::new(Vec::new()))));
+    sources.init_with(
+        SourceStore::new(dir.path().join("sources.json")),
+        Arc::new(Collector(Mutex::new(Vec::new()))),
+    );
     let launch = sources.prepare_launch(1, &project, "dead").unwrap();
     sources.launched(&project, "dead", 9);
     // Nothing binds the port; the process row then dies.
     sources.process_gone(&project, "dead", "exited with code 2");
     let s = &sources.listing().sources[0];
     assert_eq!(s.status, SourceStatus::Down);
-    assert_eq!(s.label, "dead", "no manifest yet: the command name stands in");
+    assert_eq!(
+        s.label, "dead",
+        "no manifest yet: the command name stands in"
+    );
     assert!(s.trust.is_none());
-    assert!(matches!(s.origin, app_lib::sources::OriginDto::Launched { project_id: 1, .. }));
+    assert!(matches!(
+        s.origin,
+        app_lib::sources::OriginDto::Launched { project_id: 1, .. }
+    ));
     let again = sources.prepare_launch(1, &project, "dead").unwrap();
     assert_ne!(again.token, launch.token);
     assert_eq!(sources.listing().sources.len(), 1);
@@ -380,7 +498,10 @@ fn a_launched_source_that_never_answers_is_down_with_a_reason_and_its_restart_ge
 fn attaching_needs_a_loopback_address_and_a_real_token_file() {
     let dir = tempfile::tempdir().unwrap();
     let sources = Sources::default();
-    sources.init_with(SourceStore::new(dir.path().join("sources.json")), Arc::new(Collector(Mutex::new(Vec::new()))));
+    sources.init_with(
+        SourceStore::new(dir.path().join("sources.json")),
+        Arc::new(Collector(Mutex::new(Vec::new()))),
+    );
     let token_file = dir.path().join("token");
     std::fs::write(&token_file, new_token_hex().unwrap()).unwrap();
     #[cfg(unix)]
@@ -388,12 +509,23 @@ fn attaching_needs_a_loopback_address_and_a_real_token_file() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    assert!(sources.attach("10.0.0.5:7000", &token_file).unwrap_err().contains("loopback"));
-    assert!(sources.attach("127.0.0.1:7000", &dir.path().join("missing")).is_err());
+    assert!(sources
+        .attach("10.0.0.5:7000", &token_file)
+        .unwrap_err()
+        .contains("loopback"));
+    assert!(sources
+        .attach("127.0.0.1:7000", &dir.path().join("missing"))
+        .is_err());
     // A loopback address nothing listens on attaches fine and reads "down"
     // with the reason; the worker keeps retrying until detached.
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    sources.attach(&format!("127.0.0.1:{port}"), &token_file).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    sources
+        .attach(&format!("127.0.0.1:{port}"), &token_file)
+        .unwrap();
     let id = wait_for("down", Duration::from_secs(10), || {
         let listing = sources.listing();
         let s = listing.sources.first()?;
@@ -401,11 +533,22 @@ fn attaching_needs_a_loopback_address_and_a_real_token_file() {
     });
     let s = &sources.listing().sources[0];
     assert!(s.last_error.as_deref().unwrap().contains("not reachable"));
-    assert!(matches!(s.origin, app_lib::sources::OriginDto::Attached { .. }));
-    assert_eq!(SourceStore::new(dir.path().join("sources.json")).attached().len(), 1, "persisted");
+    assert!(matches!(
+        s.origin,
+        app_lib::sources::OriginDto::Attached { .. }
+    ));
+    assert_eq!(
+        SourceStore::new(dir.path().join("sources.json"))
+            .attached()
+            .len(),
+        1,
+        "persisted"
+    );
     sources.detach(&id).unwrap();
     assert!(sources.listing().sources.is_empty());
-    assert!(SourceStore::new(dir.path().join("sources.json")).attached().is_empty());
+    assert!(SourceStore::new(dir.path().join("sources.json"))
+        .attached()
+        .is_empty());
     sources.shutdown();
 }
 
@@ -413,7 +556,10 @@ fn attaching_needs_a_loopback_address_and_a_real_token_file() {
 fn hidden_views_are_remembered_and_only_real_views_qualify() {
     let dir = tempfile::tempdir().unwrap();
     let sources = Sources::default();
-    sources.init_with(SourceStore::new(dir.path().join("sources.json")), Arc::new(Collector(Mutex::new(Vec::new()))));
+    sources.init_with(
+        SourceStore::new(dir.path().join("sources.json")),
+        Arc::new(Collector(Mutex::new(Vec::new()))),
+    );
     sources.set_view_hidden("prs", true).unwrap();
     assert!(sources.set_view_hidden("workflows", true).is_err());
     assert_eq!(sources.listing().hidden_views, ["prs"]);

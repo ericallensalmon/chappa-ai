@@ -65,16 +65,23 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 use term_core::actor::epoch_ms;
 
-use actions::{action_verdict, actions_for, find_action, ActionVerdict, SourceAction, VerdictContext};
+use actions::{
+    action_verdict, actions_for, find_action, ActionVerdict, SourceAction, VerdictContext,
+};
 use client::{PostReply, SourceClient, SourceError};
-use manifest::{backoff_delay, parse_manifest, trust_summary, Endpoint, Manifest, TrustSummary, VIEW_NAMES, WORKFLOWS_POLL, WORKFLOWS_VIEW};
-pub use store::{KeyMatch, PromptPolicy};
+use manifest::{
+    backoff_delay, parse_manifest, trust_summary, Endpoint, Manifest, TrustSummary, VIEW_NAMES,
+    WORKFLOWS_POLL, WORKFLOWS_VIEW,
+};
 use owner_updates::{pushes_after_poll, sent_key, OverlaySide, OwnerPush, PushQueue};
 use store::{AttachedSource, SourceStore};
+pub use store::{KeyMatch, PromptPolicy};
 use verdicts::{RememberedStack, SavedVerdict, Undeclared, VerdictStore};
 
 use crate::agent_tools::AgentTool;
-use crate::data_safety::{self, active_block, parse_block, parse_secret_block, ActiveBlock, ENVIRONMENT_VIEW};
+use crate::data_safety::{
+    self, active_block, parse_block, parse_secret_block, ActiveBlock, ENVIRONMENT_VIEW,
+};
 use crate::roots::Root;
 
 /// Sent on every actions call: this app hosts a pane for a job's `run`
@@ -102,7 +109,12 @@ impl CallActor {
     pub fn human() -> Self {
         let name = ["USERNAME", "USER", "LOGNAME"]
             .iter()
-            .find_map(|v| std::env::var(v).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()))
+            .find_map(|v| {
+                std::env::var(v)
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "unknown".to_owned());
         CallActor::Human(name)
     }
@@ -114,7 +126,10 @@ impl CallActor {
             CallActor::Human(name) => format!("human:{name}"),
             CallActor::Agent(id) => format!("agent:{id}"),
         };
-        raw.chars().map(|c| if (' '..='~').contains(&c) { c } else { '_' }).take(ACTOR_HEADER_CAP).collect()
+        raw.chars()
+            .map(|c| if (' '..='~').contains(&c) { c } else { '_' })
+            .take(ACTOR_HEADER_CAP)
+            .collect()
     }
 }
 
@@ -151,7 +166,9 @@ pub fn main_window_label_only(label: &str) -> Result<(), String> {
     if label == MAIN_WINDOW_LABEL {
         Ok(())
     } else {
-        Err(format!("source commands are accepted from the main window only (caller: `{label}`)"))
+        Err(format!(
+            "source commands are accepted from the main window only (caller: `{label}`)"
+        ))
     }
 }
 
@@ -370,7 +387,10 @@ impl Sources {
     /// Called once from setup: the store at `<app-config>/sources.json`, the
     /// app as the event sink, and every attached source starts connecting.
     pub fn init(&self, app: &AppHandle, config_dir: PathBuf) {
-        self.init_with(SourceStore::new(config_dir.join(store::FILE_NAME)), Arc::new(AppSourcesEmitter(app.clone())));
+        self.init_with(
+            SourceStore::new(config_dir.join(store::FILE_NAME)),
+            Arc::new(AppSourcesEmitter(app.clone())),
+        );
     }
 
     /// Tests and headless services: an explicit store and emitter.
@@ -427,7 +447,12 @@ impl Sources {
     /// token for THIS launch. A source that was launched before keeps its
     /// cached payloads but gets a new address and token (the old worker, if
     /// any, ends), and proves itself again before anything is polled.
-    pub fn prepare_launch(&self, project_id: u32, project_path: &Path, command: &str) -> Result<LaunchEnv, String> {
+    pub fn prepare_launch(
+        &self,
+        project_id: u32,
+        project_path: &Path,
+        command: &str,
+    ) -> Result<LaunchEnv, String> {
         let port = free_loopback_port()?;
         let addr = format!("127.0.0.1:{port}");
         let token = identity::new_token_hex()?;
@@ -442,7 +467,10 @@ impl Sources {
                 token: token.clone(),
                 term_id: None,
             };
-            let state = inner.sources.entry(key.clone()).or_insert_with(|| fresh_state(&key, origin.clone()));
+            let state = inner
+                .sources
+                .entry(key.clone())
+                .or_insert_with(|| fresh_state(&key, origin.clone()));
             state.generation += 1;
             state.origin = origin;
             state.status = SourceStatus::Starting;
@@ -472,7 +500,9 @@ impl Sources {
         let key = SourceStore::launched_key(project_path, command);
         let generation = {
             let mut inner = self.lock();
-            let Some(state) = inner.sources.get_mut(&key) else { return };
+            let Some(state) = inner.sources.get_mut(&key) else {
+                return;
+            };
             if let Origin::Launched { term_id: slot, .. } = &mut state.origin {
                 *slot = Some(term_id);
             }
@@ -493,7 +523,11 @@ impl Sources {
 
     /// The spawn failed after [`Sources::prepare_launch`]: nothing to wait for.
     pub fn launch_failed(&self, project_path: &Path, command: &str, error: &str) {
-        self.process_gone(project_path, command, &format!("could not be started: {error}"));
+        self.process_gone(
+            project_path,
+            command,
+            &format!("could not be started: {error}"),
+        );
     }
 
     /// The source's process row ended (exited, stopped, project closed):
@@ -502,7 +536,9 @@ impl Sources {
         let key = SourceStore::launched_key(project_path, command);
         {
             let mut inner = self.lock();
-            let Some(state) = inner.sources.get_mut(&key) else { return };
+            let Some(state) = inner.sources.get_mut(&key) else {
+                return;
+            };
             state.generation += 1;
             state.status = SourceStatus::Down;
             state.last_error = Some(format!("the source process {reason}"));
@@ -554,7 +590,10 @@ impl Sources {
                 state.generation += 1;
             }
             if let Some(verdicts) = inner.verdicts.as_mut().filter(|v| v.holds(&id)) {
-                let mark = Undeclared { project: project_path.to_path_buf(), command: command.to_owned() };
+                let mark = Undeclared {
+                    project: project_path.to_path_buf(),
+                    command: command.to_owned(),
+                };
                 if let Err(e) = verdicts.set_undeclared(&id, Some(mark)) {
                     log::warn!("[data-safety] cannot mark {id} as removed: {e}");
                 }
@@ -571,10 +610,16 @@ impl Sources {
     pub fn content_trusted(&self, project_path: &Path, declared: &[String]) {
         let changed = {
             let mut inner = self.lock();
-            let Some(verdicts) = inner.verdicts.as_mut() else { return };
+            let Some(verdicts) = inner.verdicts.as_mut() else {
+                return;
+            };
             let waiting = verdicts.undeclared_in(project_path);
             for (id, u) in &waiting {
-                let done = if declared.contains(&u.command) { verdicts.set_undeclared(id, None) } else { verdicts.remove(id) };
+                let done = if declared.contains(&u.command) {
+                    verdicts.set_undeclared(id, None)
+                } else {
+                    verdicts.remove(id)
+                };
                 if let Err(e) = done {
                     log::warn!("[data-safety] cannot update the record of {id}: {e}");
                 }
@@ -590,7 +635,9 @@ impl Sources {
     /// of its sources that were waiting for trusted content go too.
     pub fn forget_project(&self, project_path: &Path) {
         let mut inner = self.lock();
-        let Some(verdicts) = inner.verdicts.as_mut() else { return };
+        let Some(verdicts) = inner.verdicts.as_mut() else {
+            return;
+        };
         for (id, _) in verdicts.undeclared_in(project_path) {
             if let Err(e) = verdicts.remove(&id) {
                 log::warn!("[data-safety] cannot drop the record of {id}: {e}");
@@ -607,7 +654,10 @@ impl Sources {
     pub fn attach(&self, addr: &str, token_file: &Path) -> Result<(), String> {
         let addr = manifest::parse_loopback_addr(addr)?.to_string();
         read_attached_token(token_file)?;
-        let source = AttachedSource { addr: addr.clone(), token_file: token_file.to_path_buf() };
+        let source = AttachedSource {
+            addr: addr.clone(),
+            token_file: token_file.to_path_buf(),
+        };
         {
             let mut inner = self.lock();
             inner
@@ -621,11 +671,20 @@ impl Sources {
 
     fn start_attached(&self, source: AttachedSource) -> Result<(), String> {
         let key = SourceStore::attached_key(&source.addr);
-        let warning = read_attached_token(&source.token_file).map(|(_, warning)| warning).unwrap_or(None);
+        let warning = read_attached_token(&source.token_file)
+            .map(|(_, warning)| warning)
+            .unwrap_or(None);
         let generation = {
             let mut inner = self.lock();
-            let origin = Origin::Attached { addr: source.addr.clone(), token_file: source.token_file.clone(), warning };
-            let state = inner.sources.entry(key.clone()).or_insert_with(|| fresh_state(&key, origin.clone()));
+            let origin = Origin::Attached {
+                addr: source.addr.clone(),
+                token_file: source.token_file.clone(),
+                warning,
+            };
+            let state = inner
+                .sources
+                .entry(key.clone())
+                .or_insert_with(|| fresh_state(&key, origin.clone()));
             state.generation += 1;
             state.origin = origin;
             state.status = SourceStatus::Starting;
@@ -653,7 +712,12 @@ impl Sources {
                 .ok_or_else(|| format!("no source {source_id}"))?;
             let addr = match &inner.sources[&key].origin {
                 Origin::Attached { addr, .. } => addr.clone(),
-                Origin::Launched { .. } => return Err("a launched source is detached by removing `source:` from its command".into()),
+                Origin::Launched { .. } => {
+                    return Err(
+                        "a launched source is detached by removing `source:` from its command"
+                            .into(),
+                    )
+                }
             };
             if let Some(state) = inner.sources.get_mut(&key) {
                 state.generation += 1;
@@ -662,7 +726,10 @@ impl Sources {
             if let Some(verdicts) = inner.verdicts.as_mut() {
                 verdicts.remove(source_id)?;
             }
-            let store = inner.store.as_mut().ok_or_else(|| "sources store not initialized".to_owned())?;
+            let store = inner
+                .store
+                .as_mut()
+                .ok_or_else(|| "sources store not initialized".to_owned())?;
             store.remove_attached(&addr)?;
             store.forget_trust(&key)?;
         }
@@ -689,12 +756,18 @@ impl Sources {
                 .ok_or_else(|| format!("no source {source_id}"))?;
             let current = inner.sources[&key].trust.as_ref().map(|t| t.hash.clone());
             if current.as_deref() != Some(hash) {
-                return Err("the source's manifest changed after the prompt was shown; nothing was trusted".into());
+                return Err(
+                    "the source's manifest changed after the prompt was shown; nothing was trusted"
+                        .into(),
+                );
             }
             if !trust {
                 return Ok(());
             }
-            let store = inner.store.as_mut().ok_or_else(|| "sources store not initialized".to_owned())?;
+            let store = inner
+                .store
+                .as_mut()
+                .ok_or_else(|| "sources store not initialized".to_owned())?;
             if !store.is_trusted(&key, hash) {
                 // A different manifest may be a different program: the
                 // prompts it showed before do not count as shown.
@@ -728,7 +801,11 @@ impl Sources {
             .map(|s| s.hidden_views().iter().cloned().collect())
             .unwrap_or_default();
         SourcesListing {
-            sources: inner.sources.values().map(|s| source_dto(s, inner.store.as_ref())).collect(),
+            sources: inner
+                .sources
+                .values()
+                .map(|s| source_dto(s, inner.store.as_ref()))
+                .collect(),
             hidden_views,
         }
     }
@@ -755,7 +832,10 @@ impl Sources {
     /// Hide or show a rail view everywhere. Hidden keeps data and trust.
     pub fn set_view_hidden(&self, view: &str, hidden: bool) -> Result<(), String> {
         if !VIEW_NAMES.contains(&view) {
-            return Err(format!("`{view}` is not a view (one of {})", VIEW_NAMES.join(", ")));
+            return Err(format!(
+                "`{view}` is not a view (one of {})",
+                VIEW_NAMES.join(", ")
+            ));
         }
         {
             let mut inner = self.lock();
@@ -784,14 +864,20 @@ impl Sources {
 
     fn cancelled(&self, key: &str, generation: u64) -> bool {
         let inner = self.lock();
-        inner.shutting_down || inner.sources.get(key).map_or(true, |s| s.cancelled(generation))
+        inner.shutting_down
+            || inner
+                .sources
+                .get(key)
+                .map_or(true, |s| s.cancelled(generation))
     }
 
     /// Mark the source down with `error`; payloads stay.
     fn set_down(&self, key: &str, generation: u64, status: SourceStatus, error: String) {
         {
             let mut inner = self.lock();
-            let Some(state) = inner.sources.get_mut(key) else { return };
+            let Some(state) = inner.sources.get_mut(key) else {
+                return;
+            };
             if state.cancelled(generation) {
                 return;
             }
@@ -816,7 +902,10 @@ impl Sources {
                 return;
             }
             let outcome = self.run_once(&key, generation);
-            let attached = matches!(self.lock().sources.get(&key).map(|s| &s.origin), Some(Origin::Attached { .. }));
+            let attached = matches!(
+                self.lock().sources.get(&key).map(|s| &s.origin),
+                Some(Origin::Attached { .. })
+            );
             match outcome {
                 RunEnd::Cancelled => return,
                 RunEnd::Failed if !attached => return,
@@ -836,7 +925,12 @@ impl Sources {
         let deadline = Instant::now() + delay;
         let mut guard = self.lock();
         loop {
-            if guard.shutting_down || guard.sources.get(key).map_or(true, |s| s.cancelled(generation)) {
+            if guard.shutting_down
+                || guard
+                    .sources
+                    .get(key)
+                    .map_or(true, |s| s.cancelled(generation))
+            {
                 return true;
             }
             let now = Instant::now();
@@ -858,9 +952,10 @@ impl Sources {
         };
         let built = match &origin {
             Origin::Launched { addr, token, .. } => SourceClient::new(addr, token),
-            Origin::Attached { addr, token_file, .. } => {
-                read_attached_token(token_file).and_then(|(token, _)| SourceClient::new(addr, &token))
-            }
+            Origin::Attached {
+                addr, token_file, ..
+            } => read_attached_token(token_file)
+                .and_then(|(token, _)| SourceClient::new(addr, &token)),
         };
         let mut client = match built {
             Ok(client) => client,
@@ -882,7 +977,12 @@ impl Sources {
                 Ok(()) => break,
                 Err(SourceError::Unreachable(why)) => {
                     if matches!(origin, Origin::Attached { .. }) {
-                        self.set_down(key, generation, SourceStatus::Down, format!("not reachable at {}: {why}", origin.addr()));
+                        self.set_down(
+                            key,
+                            generation,
+                            SourceStatus::Down,
+                            format!("not reachable at {}: {why}", origin.addr()),
+                        );
                         return RunEnd::Failed;
                     }
                     if Instant::now() >= deadline {
@@ -910,10 +1010,18 @@ impl Sources {
         }
 
         // Manifest.
-        let manifest = match client.manifest().map_err(|e| e.to_string()).and_then(|v| parse_manifest(&v).map_err(|e| e.to_string())) {
+        let manifest = match client
+            .manifest()
+            .map_err(|e| e.to_string())
+            .and_then(|v| parse_manifest(&v).map_err(|e| e.to_string()))
+        {
             Ok(manifest) => manifest,
             Err(text) => {
-                let status = if text.contains("contract version") { SourceStatus::NeedsUpdate } else { SourceStatus::Down };
+                let status = if text.contains("contract version") {
+                    SourceStatus::NeedsUpdate
+                } else {
+                    SourceStatus::Down
+                };
                 self.set_down(key, generation, status, text);
                 return RunEnd::Failed;
             }
@@ -921,8 +1029,13 @@ impl Sources {
         {
             let mut inner = self.lock();
             let hash = manifest::trust_hash(&manifest);
-            let trusted = inner.store.as_ref().is_some_and(|s| s.is_trusted(key, &hash));
-            let Some(state) = inner.sources.get_mut(key) else { return RunEnd::Cancelled };
+            let trusted = inner
+                .store
+                .as_ref()
+                .is_some_and(|s| s.is_trusted(key, &hash));
+            let Some(state) = inner.sources.get_mut(key) else {
+                return RunEnd::Cancelled;
+            };
             if state.cancelled(generation) {
                 return RunEnd::Cancelled;
             }
@@ -961,7 +1074,11 @@ impl Sources {
             state.manifest = Some(manifest);
             state.trusted = trusted;
             state.last_error = None;
-            state.status = if trusted { SourceStatus::Starting } else { SourceStatus::NeedsReview };
+            state.status = if trusted {
+                SourceStatus::Starting
+            } else {
+                SourceStatus::NeedsReview
+            };
             remember_kind(&mut inner, key);
         }
         self.emit_sources();
@@ -974,7 +1091,9 @@ impl Sources {
                     if guard.shutting_down {
                         return RunEnd::Cancelled;
                     }
-                    let Some(state) = guard.sources.get_mut(key) else { return RunEnd::Cancelled };
+                    let Some(state) = guard.sources.get_mut(key) else {
+                        return RunEnd::Cancelled;
+                    };
                     if state.cancelled(generation) {
                         return RunEnd::Cancelled;
                     }
@@ -1002,7 +1121,11 @@ impl Sources {
                             .map(Duration::from_millis)
                     };
                     guard = match wait {
-                        Some(delay) => match self.inner.1.wait_timeout(guard, delay.max(Duration::from_millis(10))) {
+                        Some(delay) => match self
+                            .inner
+                            .1
+                            .wait_timeout(guard, delay.max(Duration::from_millis(10)))
+                        {
                             Ok((g, _)) => g,
                             Err(poisoned) => poisoned.into_inner().0,
                         },
@@ -1023,10 +1146,19 @@ impl Sources {
     }
 
     /// Store one fetch outcome. Returns true when the worker was cancelled.
-    fn apply_poll(&self, key: &str, generation: u64, view: &str, poll: Duration, result: Result<Value, SourceError>) -> bool {
+    fn apply_poll(
+        &self,
+        key: &str,
+        generation: u64,
+        view: &str,
+        poll: Duration,
+        result: Result<Value, SourceError>,
+    ) -> bool {
         let source_id = {
             let mut inner = self.lock();
-            let Some(state) = inner.sources.get_mut(key) else { return true };
+            let Some(state) = inner.sources.get_mut(key) else {
+                return true;
+            };
             if state.cancelled(generation) {
                 return true;
             }
@@ -1035,10 +1167,14 @@ impl Sources {
             // An Environment answer is this source's data-safety verdict now,
             // clean or not; kept on disk for the next start.
             let verdict = match &result {
-                Ok(payload) if payload.is_object() && view == ENVIRONMENT_VIEW => Some(Self::verdict_of(state, payload, now)),
+                Ok(payload) if payload.is_object() && view == ENVIRONMENT_VIEW => {
+                    Some(Self::verdict_of(state, payload, now))
+                }
                 _ => None,
             };
-            let Some(v) = state.views.get_mut(view) else { return false };
+            let Some(v) = state.views.get_mut(view) else {
+                return false;
+            };
             v.refreshing = false;
             match result {
                 Ok(payload) if payload.is_object() => {
@@ -1062,8 +1198,15 @@ impl Sources {
                     // The connection is gone or the token is refused: the
                     // SOURCE is down. A per-view error status leaves the
                     // source up with that one view marked.
-                    let whole_source = matches!(e, SourceError::Unreachable(_) | SourceError::Untrusted(_))
-                        || matches!(e, SourceError::Http { status: 401 | 403, .. });
+                    let whole_source =
+                        matches!(e, SourceError::Unreachable(_) | SourceError::Untrusted(_))
+                            || matches!(
+                                e,
+                                SourceError::Http {
+                                    status: 401 | 403,
+                                    ..
+                                }
+                            );
                     if whole_source {
                         state.status = SourceStatus::Down;
                         state.last_error = Some(e.to_string());
@@ -1076,7 +1219,8 @@ impl Sources {
                     log::warn!("[data-safety] cannot keep the verdict of {id}: {e}");
                 }
             }
-            let start_sender = fresh && view == "work" && Self::queue_owner_updates(&mut inner, key);
+            let start_sender =
+                fresh && view == "work" && Self::queue_owner_updates(&mut inner, key);
             (id, start_sender)
         };
         let (source_id, start_sender) = source_id;
@@ -1092,8 +1236,13 @@ impl Sources {
     /// been sent in this form. Answers whether a sender must be started.
     fn queue_owner_updates(inner: &mut Inner, key: &str) -> bool {
         let pushes: Vec<OwnerPush> = {
-            let Some(owner) = inner.sources.get(key) else { return false };
-            let (Some(manifest), Some(work)) = (owner.manifest.as_ref(), owner.views.get("work").and_then(|v| v.payload.as_ref())) else {
+            let Some(owner) = inner.sources.get(key) else {
+                return false;
+            };
+            let (Some(manifest), Some(work)) = (
+                owner.manifest.as_ref(),
+                owner.views.get("work").and_then(|v| v.payload.as_ref()),
+            ) else {
                 return false;
             };
             let overlays: Vec<OverlaySide<'_>> = inner
@@ -1102,7 +1251,10 @@ impl Sources {
                 .filter(|s| s.key != key)
                 .map(|s| OverlaySide {
                     id: &s.id,
-                    accepts: s.trusted && s.manifest.as_ref().is_some_and(|m| m.owner_updates.is_some()),
+                    accepts: s.trusted
+                        && s.manifest
+                            .as_ref()
+                            .is_some_and(|m| m.owner_updates.is_some()),
                     work: s.views.get("work").and_then(|v| v.payload.as_ref()),
                     sent: &s.owner_sent,
                 })
@@ -1114,7 +1266,9 @@ impl Sources {
             if let Some(target) = inner.sources.values_mut().find(|s| s.id == push.target) {
                 // Recorded when queued: a send that fails is not repeated
                 // until the row changes again.
-                target.owner_sent.insert(sent_key(&push.owner, &push.key), push.hash.clone());
+                target
+                    .owner_sent
+                    .insert(sent_key(&push.owner, &push.key), push.hash.clone());
             }
             start |= inner.owner_queue.add(push);
         }
@@ -1125,16 +1279,18 @@ impl Sources {
     /// posts what is queued, off the poll thread.
     fn spawn_owner_sender(&self) {
         let sources = self.clone();
-        let spawned = std::thread::Builder::new().name("source owner updates".into()).spawn(move || {
-            std::thread::sleep(owner_updates::DEBOUNCE);
-            if sources.is_shutting_down() {
-                return;
-            }
-            let batch = sources.lock().owner_queue.take();
-            for push in batch {
-                sources.send_owner_update(&push);
-            }
-        });
+        let spawned = std::thread::Builder::new()
+            .name("source owner updates".into())
+            .spawn(move || {
+                std::thread::sleep(owner_updates::DEBOUNCE);
+                if sources.is_shutting_down() {
+                    return;
+                }
+                let batch = sources.lock().owner_queue.take();
+                for push in batch {
+                    sources.send_owner_update(&push);
+                }
+            });
         if let Err(e) = spawned {
             log::error!("[sources] cannot start the owner-update sender: {e}");
         }
@@ -1143,14 +1299,31 @@ impl Sources {
     /// `POST {ownerUpdates}` with one owner row. Only a `2xx` counts; any
     /// other answer or a failure is logged and dropped.
     fn send_owner_update(&self, push: &OwnerPush) {
-        let sent = self.client_for(&push.target).and_then(|(mut client, manifest)| {
-            let endpoint = manifest.owner_updates.ok_or_else(|| "it no longer asks for owner updates".to_owned())?;
-            client.post(&endpoint, &[], &push.body()).map_err(|e| e.to_string())
-        });
+        let sent = self
+            .client_for(&push.target)
+            .and_then(|(mut client, manifest)| {
+                let endpoint = manifest
+                    .owner_updates
+                    .ok_or_else(|| "it no longer asks for owner updates".to_owned())?;
+                client
+                    .post(&endpoint, &[], &push.body())
+                    .map_err(|e| e.to_string())
+            });
         match sent {
             Ok(reply) if (200..300).contains(&reply.status) => {}
-            Ok(reply) => log::warn!("[sources] owner update {}:{} to {} refused: {}", push.owner, push.key, push.target, reply.as_error()),
-            Err(e) => log::warn!("[sources] owner update {}:{} to {} not sent: {e}", push.owner, push.key, push.target),
+            Ok(reply) => log::warn!(
+                "[sources] owner update {}:{} to {} refused: {}",
+                push.owner,
+                push.key,
+                push.target,
+                reply.as_error()
+            ),
+            Err(e) => log::warn!(
+                "[sources] owner update {}:{} to {} not sent: {e}",
+                push.owner,
+                push.key,
+                push.target
+            ),
         }
     }
 
@@ -1174,12 +1347,18 @@ impl Sources {
 /// split on whitespace for this.
 pub fn launch_folder_of(cwd: &Path, args: &[String]) -> PathBuf {
     let words: Vec<&str> = args.iter().flat_map(|a| a.split_whitespace()).collect();
-    let named = words.iter().enumerate().find_map(|(i, w)| match w.strip_prefix("--project") {
-        Some("") => words.get(i + 1).copied(),
-        Some(rest) => rest.strip_prefix('='),
-        None => None,
-    });
-    match named.map(|n| n.trim_matches(['"', '\''])).filter(|n| !n.is_empty()) {
+    let named = words
+        .iter()
+        .enumerate()
+        .find_map(|(i, w)| match w.strip_prefix("--project") {
+            Some("") => words.get(i + 1).copied(),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        });
+    match named
+        .map(|n| n.trim_matches(['"', '\'']))
+        .filter(|n| !n.is_empty())
+    {
         Some(dir) => {
             let dir = Path::new(dir);
             if dir.is_absolute() {
@@ -1257,7 +1436,10 @@ impl Sources {
             .find(|s| s.id == source_id)
             .ok_or_else(|| format!("no source {source_id}"))?;
         if !state.trusted || state.manifest.is_none() {
-            return Err(format!("source {} is not trusted; review it under Settings ▸ Sources first", state.id));
+            return Err(format!(
+                "source {} is not trusted; review it under Settings ▸ Sources first",
+                state.id
+            ));
         }
         Ok(state)
     }
@@ -1265,13 +1447,22 @@ impl Sources {
     fn info_of(state: &SourceState) -> SourceInfo {
         let manifest = state.manifest.as_ref();
         let (project_id, project_path, term_id) = match &state.origin {
-            Origin::Launched { project_id, project_path, term_id, .. } => (Some(*project_id), Some(project_path.clone()), *term_id),
+            Origin::Launched {
+                project_id,
+                project_path,
+                term_id,
+                ..
+            } => (Some(*project_id), Some(project_path.clone()), *term_id),
             Origin::Attached { .. } => (None, None, None),
         };
         SourceInfo {
             id: state.id.clone(),
-            manifest_id: manifest.map(|m| m.id.clone()).unwrap_or_else(|| state.id.clone()),
-            label: manifest.map(|m| m.label.clone()).unwrap_or_else(|| state.key.clone()),
+            manifest_id: manifest
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| state.id.clone()),
+            label: manifest
+                .map(|m| m.label.clone())
+                .unwrap_or_else(|| state.key.clone()),
             key: state.key.clone(),
             project_id,
             project_path,
@@ -1293,14 +1484,27 @@ impl Sources {
             .sources
             .values()
             .filter(|s| s.trusted)
-            .flat_map(|s| s.manifest.iter().flat_map(|m| m.roots.iter()).map(move |r| (s.id.clone(), r.clone())))
+            .flat_map(|s| {
+                s.manifest
+                    .iter()
+                    .flat_map(|m| m.roots.iter())
+                    .map(move |r| (s.id.clone(), r.clone()))
+            })
             .collect()
     }
 
     pub fn prompt_policy(&self, source_id: &str) -> Result<PromptPolicy, String> {
         let inner = self.lock();
-        let state = inner.sources.values().find(|s| s.id == source_id).ok_or_else(|| format!("no source {source_id}"))?;
-        Ok(inner.store.as_ref().map(|st| st.prompt_policy(&state.key)).unwrap_or_default())
+        let state = inner
+            .sources
+            .values()
+            .find(|s| s.id == source_id)
+            .ok_or_else(|| format!("no source {source_id}"))?;
+        Ok(inner
+            .store
+            .as_ref()
+            .map(|st| st.prompt_policy(&state.key))
+            .unwrap_or_default())
     }
 
     pub fn set_prompt_policy(&self, source_id: &str, policy: PromptPolicy) -> Result<(), String> {
@@ -1324,7 +1528,12 @@ impl Sources {
 
     /// Whether this source's work item keys join pull requests that mention
     /// them, and with which pattern (blank = the default).
-    pub fn set_key_match(&self, source_id: &str, enabled: bool, pattern: Option<&str>) -> Result<(), String> {
+    pub fn set_key_match(
+        &self,
+        source_id: &str,
+        enabled: bool,
+        pattern: Option<&str>,
+    ) -> Result<(), String> {
         {
             let mut inner = self.lock();
             let key = inner
@@ -1348,7 +1557,10 @@ impl Sources {
     pub fn prompt_needs_dialog(&self, source_id: &str, action_id: &str) -> Result<bool, String> {
         let inner = self.lock();
         let state = Self::trusted_state(&inner, source_id)?;
-        let store = inner.store.as_ref().ok_or_else(|| "sources store not initialized".to_owned())?;
+        let store = inner
+            .store
+            .as_ref()
+            .ok_or_else(|| "sources store not initialized".to_owned())?;
         Ok(match store.prompt_policy(&state.key) {
             PromptPolicy::Always => true,
             PromptPolicy::FirstTime => !store.prompt_shown(&state.key, action_id),
@@ -1378,11 +1590,12 @@ impl Sources {
             if !state.names_panel(path) {
                 return Err(format!("source {} names no panel at `{path}`", state.id));
             }
-            return state
-                .panels
-                .get(path)
-                .cloned()
-                .ok_or_else(|| format!("source {} has no page at `{path}` yet; open it first", state.id));
+            return state.panels.get(path).cloned().ok_or_else(|| {
+                format!(
+                    "source {} has no page at `{path}` yet; open it first",
+                    state.id
+                )
+            });
         }
         state
             .views
@@ -1394,7 +1607,14 @@ impl Sources {
     /// The actions under `key` in the cached `view` payload (or panel page,
     /// `panel:<path>`), judged. A mutating endpoint without a confirm is
     /// left out (logged once).
-    pub fn actions(&self, source_id: &str, view: &str, key: Option<&str>, tools: &[AgentTool], roots: &[Root]) -> Result<Vec<ActionDto>, String> {
+    pub fn actions(
+        &self,
+        source_id: &str,
+        view: &str,
+        key: Option<&str>,
+        tools: &[AgentTool],
+        roots: &[Root],
+    ) -> Result<Vec<ActionDto>, String> {
         let (found, hosts, label, policy, shown) = {
             let inner = self.lock();
             let state = Self::trusted_state(&inner, source_id)?;
@@ -1405,11 +1625,19 @@ impl Sources {
                 actions_for(&payload, key),
                 manifest.link_hosts.clone(),
                 manifest.label.clone(),
-                store.map(|s| s.prompt_policy(&state.key)).unwrap_or_default(),
-                store.map(|s| s.prompts_shown(&state.key)).unwrap_or_default(),
+                store
+                    .map(|s| s.prompt_policy(&state.key))
+                    .unwrap_or_default(),
+                store
+                    .map(|s| s.prompts_shown(&state.key))
+                    .unwrap_or_default(),
             )
         };
-        let ctx = VerdictContext { tools, roots, link_hosts: &hosts };
+        let ctx = VerdictContext {
+            tools,
+            roots,
+            link_hosts: &hosts,
+        };
         let blocks = self.data_safety_blocks();
         let mut out = Vec::new();
         let mut hide: Vec<String> = Vec::new();
@@ -1424,7 +1652,11 @@ impl Sources {
                     PromptPolicy::Always => true,
                     PromptPolicy::FirstTime => !shown.iter().any(|id| id == f.action.id()),
                 };
-            out.push(ActionDto { action: f.action, verdict, needs_prompt });
+            out.push(ActionDto {
+                action: f.action,
+                verdict,
+                needs_prompt,
+            });
         }
         if !hide.is_empty() {
             let mut inner = self.lock();
@@ -1441,14 +1673,27 @@ impl Sources {
 
     /// The action `action_id` under `key` in the cached `view` payload, with
     /// the source it belongs to. The runner judges it again before acting.
-    pub fn action(&self, source_id: &str, view: &str, key: Option<&str>, action_id: &str) -> Result<(SourceAction, SourceInfo), String> {
-        self.action_for_call(source_id, view, key, action_id).map(|(action, info, _)| (action, info))
+    pub fn action(
+        &self,
+        source_id: &str,
+        view: &str,
+        key: Option<&str>,
+        action_id: &str,
+    ) -> Result<(SourceAction, SourceInfo), String> {
+        self.action_for_call(source_id, view, key, action_id)
+            .map(|(action, info, _)| (action, info))
     }
 
     /// [`Sources::action`] plus what its call's `target` carries: for an
     /// action of a work entry that adds to another source's item, that item's
     /// owner and the owner's row as last received.
-    pub fn action_for_call(&self, source_id: &str, view: &str, key: Option<&str>, action_id: &str) -> Result<(SourceAction, SourceInfo, CallTarget), String> {
+    pub fn action_for_call(
+        &self,
+        source_id: &str,
+        view: &str,
+        key: Option<&str>,
+        action_id: &str,
+    ) -> Result<(SourceAction, SourceInfo, CallTarget), String> {
         let inner = self.lock();
         let state = Self::trusted_state(&inner, source_id)?;
         let payload = Self::cached_payload(state, view)?;
@@ -1456,11 +1701,16 @@ impl Sources {
             format!(
                 "source {} offers no action `{action_id}` on {} of its `{view}` view",
                 state.id,
-                key.map(|k| format!("`{k}`")).unwrap_or_else(|| "the view itself".to_owned())
+                key.map(|k| format!("`{k}`"))
+                    .unwrap_or_else(|| "the view itself".to_owned())
             )
         })?;
         let info = Self::info_of(state);
-        Ok((found.action, info.clone(), Self::row_target(&inner, &info, &payload, view, key)))
+        Ok((
+            found.action,
+            info.clone(),
+            Self::row_target(&inner, &info, &payload, view, key),
+        ))
     }
 
     /// What a call naming the `view` row `key` of a source's payload
@@ -1470,10 +1720,20 @@ impl Sources {
     /// received (no row while the owner does not list it); for a row the
     /// source owns itself (a work item, a pull request), the source and the
     /// row as it sent it. Nothing for the view's own actions.
-    fn row_target(inner: &Inner, info: &SourceInfo, payload: &Value, view: &str, key: Option<&str>) -> CallTarget {
-        let Some(key) = key else { return CallTarget::default() };
+    fn row_target(
+        inner: &Inner,
+        info: &SourceInfo,
+        payload: &Value,
+        view: &str,
+        key: Option<&str>,
+    ) -> CallTarget {
+        let Some(key) = key else {
+            return CallTarget::default();
+        };
         if view == "work" {
-            if let Some((owner, owner_key)) = actions::work_entry(payload, key).and_then(actions::overlay_ref) {
+            if let Some((owner, owner_key)) =
+                actions::work_entry(payload, key).and_then(actions::overlay_ref)
+            {
                 return CallTarget {
                     key: Some(owner_key.to_owned()),
                     source: Some(owner.to_owned()),
@@ -1483,7 +1743,11 @@ impl Sources {
         }
         if view == "work" || view == "prs" {
             if let Some(row) = actions::owned_row(payload, view, key) {
-                return CallTarget { key: Some(key.to_owned()), source: Some(info.manifest_id.clone()), item: Some(row.clone()) };
+                return CallTarget {
+                    key: Some(key.to_owned()),
+                    source: Some(info.manifest_id.clone()),
+                    item: Some(row.clone()),
+                };
             }
         }
         CallTarget::default()
@@ -1493,7 +1757,12 @@ impl Sources {
     /// `owner` itself lists, as last received, with that source. Sources are
     /// asked in listing order (the Settings order), so the first one that
     /// lists the row answers.
-    fn owner_row<'a>(inner: &'a Inner, owner: &str, view: &str, key: &str) -> Option<(&'a SourceState, Value)> {
+    fn owner_row<'a>(
+        inner: &'a Inner,
+        owner: &str,
+        view: &str,
+        key: &str,
+    ) -> Option<(&'a SourceState, Value)> {
         inner
             .sources
             .values()
@@ -1510,11 +1779,20 @@ impl Sources {
     /// is the declaring source itself, or when the owner does not list the
     /// row. Empty when the declaring source already adds to the row (its
     /// overlay brings its own actions) or offers nothing there.
-    fn item_actions_on(inner: &Inner, source_id: &str, view: &str, owner_id: &str, key: &str) -> Result<(Vec<SourceAction>, SourceInfo, CallTarget), String> {
+    fn item_actions_on(
+        inner: &Inner,
+        source_id: &str,
+        view: &str,
+        owner_id: &str,
+        key: &str,
+    ) -> Result<(Vec<SourceAction>, SourceInfo, CallTarget), String> {
         let state = Self::trusted_state(inner, source_id)?;
         let owner = Self::trusted_state(inner, owner_id)?;
         if owner.id == state.id {
-            return Err(format!("source {} offers its item actions on other sources' rows only", state.id));
+            return Err(format!(
+                "source {} offers its item actions on other sources' rows only",
+                state.id
+            ));
         }
         let manifest = state.manifest.as_ref().expect("trusted implies a manifest");
         let owner_manifest = owner.manifest.as_ref().expect("trusted implies a manifest");
@@ -1523,8 +1801,17 @@ impl Sources {
             .get(view)
             .and_then(|v| v.payload.as_ref())
             .and_then(|p| actions::owned_row(p, view, key))
-            .ok_or_else(|| format!("{} lists no `{key}` in its `{view}` view", owner_manifest.label))?;
-        let target = CallTarget { key: Some(key.to_owned()), source: Some(owner_manifest.id.clone()), item: Some(row.clone()) };
+            .ok_or_else(|| {
+                format!(
+                    "{} lists no `{key}` in its `{view}` view",
+                    owner_manifest.label
+                )
+            })?;
+        let target = CallTarget {
+            key: Some(key.to_owned()),
+            source: Some(owner_manifest.id.clone()),
+            item: Some(row.clone()),
+        };
         let adds_to_it = view == "work"
             && state
                 .views
@@ -1540,11 +1827,22 @@ impl Sources {
             .iter()
             .filter(|a| a.offered_on(view, &owner_manifest.id))
             .map(|a| match &a.action {
-                SourceAction::Endpoint { id, label, mutates, confirm, params, note, inputs, disabled } => SourceAction::Endpoint {
+                SourceAction::Endpoint {
+                    id,
+                    label,
+                    mutates,
+                    confirm,
+                    params,
+                    note,
+                    inputs,
+                    disabled,
+                } => SourceAction::Endpoint {
                     id: id.clone(),
                     label: label.clone(),
                     mutates: *mutates,
-                    confirm: confirm.as_deref().map(|c| actions::fill_confirm(c, key, title, &owner_manifest.label)),
+                    confirm: confirm
+                        .as_deref()
+                        .map(|c| actions::fill_confirm(c, key, title, &owner_manifest.label)),
                     params: params.clone(),
                     note: *note,
                     inputs: inputs.clone(),
@@ -1558,19 +1856,35 @@ impl Sources {
 
     /// The judged item actions `source_id` offers on the `view` row `key`
     /// of the source `owner_id` (see [`Sources::item_actions_on`]).
-    pub fn item_actions(&self, source_id: &str, view: &str, owner_id: &str, key: &str, tools: &[AgentTool], roots: &[Root]) -> Result<Vec<ActionDto>, String> {
+    pub fn item_actions(
+        &self,
+        source_id: &str,
+        view: &str,
+        owner_id: &str,
+        key: &str,
+        tools: &[AgentTool],
+        roots: &[Root],
+    ) -> Result<Vec<ActionDto>, String> {
         let (offered, info) = {
             let inner = self.lock();
             let (offered, info, _) = Self::item_actions_on(&inner, source_id, view, owner_id, key)?;
             (offered, info)
         };
-        let ctx = VerdictContext { tools, roots, link_hosts: &info.link_hosts };
+        let ctx = VerdictContext {
+            tools,
+            roots,
+            link_hosts: &info.link_hosts,
+        };
         let blocks = self.data_safety_blocks();
         Ok(offered
             .into_iter()
             .map(|action| {
                 let verdict = data_safety_verdict(&action, action_verdict(&action, &ctx), &blocks);
-                ActionDto { action, verdict, needs_prompt: false }
+                ActionDto {
+                    action,
+                    verdict,
+                    needs_prompt: false,
+                }
             })
             .collect())
     }
@@ -1578,9 +1892,17 @@ impl Sources {
     /// The item action `action_id` of `source_id` on the `view` row `key` of
     /// `owner_id`, for the runner. Only an id the source's trusted manifest
     /// declares for that row can be named: the webview cannot invent one.
-    pub fn item_action(&self, source_id: &str, view: &str, owner_id: &str, key: &str, action_id: &str) -> Result<(SourceAction, SourceInfo, CallTarget), String> {
+    pub fn item_action(
+        &self,
+        source_id: &str,
+        view: &str,
+        owner_id: &str,
+        key: &str,
+        action_id: &str,
+    ) -> Result<(SourceAction, SourceInfo, CallTarget), String> {
         let inner = self.lock();
-        let (offered, info, target) = Self::item_actions_on(&inner, source_id, view, owner_id, key)?;
+        let (offered, info, target) =
+            Self::item_actions_on(&inner, source_id, view, owner_id, key)?;
         let action = offered.into_iter().find(|a| a.id() == action_id).ok_or_else(|| {
             format!("source {} offers no item action `{action_id}` on `{key}` of that source's `{view}` view", info.id)
         })?;
@@ -1595,7 +1917,11 @@ impl Sources {
         let hosts = {
             let inner = self.lock();
             let state = Self::trusted_state(&inner, source_id)?;
-            state.manifest.as_ref().map(|m| m.link_hosts.clone()).unwrap_or_default()
+            state
+                .manifest
+                .as_ref()
+                .map(|m| m.link_hosts.clone())
+                .unwrap_or_default()
         };
         links::source_link_check(url, &hosts).map(|_| ())
     }
@@ -1607,11 +1933,16 @@ impl Sources {
         let (origin, manifest) = {
             let inner = self.lock();
             let state = Self::trusted_state(&inner, source_id)?;
-            (state.origin.clone(), state.manifest.clone().expect("trusted implies a manifest"))
+            (
+                state.origin.clone(),
+                state.manifest.clone().expect("trusted implies a manifest"),
+            )
         };
         let client = match &origin {
             Origin::Launched { addr, token, .. } => SourceClient::new(addr, token)?,
-            Origin::Attached { addr, token_file, .. } => {
+            Origin::Attached {
+                addr, token_file, ..
+            } => {
                 let (token, _) = read_attached_token(token_file)?;
                 SourceClient::new(addr, &token)?
             }
@@ -1622,15 +1953,31 @@ impl Sources {
     /// `POST {actions}` with the app's runs-jobs header and who asked
     /// ([`ACTOR_HEADER`]). The status is the outcome: 200 done, 202
     /// started, 503 uncertain, anything else the source's refusal.
-    pub fn call_endpoint(&self, source_id: &str, body: &Value, actor: &CallActor) -> Result<PostReply, String> {
+    pub fn call_endpoint(
+        &self,
+        source_id: &str,
+        body: &Value,
+        actor: &CallActor,
+    ) -> Result<PostReply, String> {
         let (mut client, manifest) = self.client_for(source_id)?;
-        let endpoint = manifest.actions.ok_or_else(|| "this source declares no `actions` endpoint".to_owned())?;
+        let endpoint = manifest
+            .actions
+            .ok_or_else(|| "this source declares no `actions` endpoint".to_owned())?;
         let who = actor.header_value();
-        client.post(&endpoint, &[RUNS_JOBS_HEADER, (ACTOR_HEADER, who.as_str())], body).map_err(|e| e.to_string())
+        client
+            .post(
+                &endpoint,
+                &[RUNS_JOBS_HEADER, (ACTOR_HEADER, who.as_str())],
+                body,
+            )
+            .map_err(|e| e.to_string())
     }
 
     fn job_endpoint(manifest: &Manifest, job_id: &str) -> Result<Endpoint, String> {
-        let jobs = manifest.jobs.as_ref().ok_or_else(|| "this source declares no `jobs` endpoint".to_owned())?;
+        let jobs = manifest
+            .jobs
+            .as_ref()
+            .ok_or_else(|| "this source declares no `jobs` endpoint".to_owned())?;
         if !jobs.has_placeholder("id") {
             return Err("the source's `jobs` path has no `{id}` placeholder".into());
         }
@@ -1640,13 +1987,22 @@ impl Sources {
     /// `GET jobs/{id}`: `{state, log?}`.
     pub fn job_get(&self, source_id: &str, job_id: &str) -> Result<Value, String> {
         let (mut client, manifest) = self.client_for(source_id)?;
-        client.get(&Self::job_endpoint(&manifest, job_id)?).map_err(|e| e.to_string())
+        client
+            .get(&Self::job_endpoint(&manifest, job_id)?)
+            .map_err(|e| e.to_string())
     }
 
     /// `POST jobs/{id}` with a run's exit report.
-    pub fn job_report(&self, source_id: &str, job_id: &str, report: &Value) -> Result<PostReply, String> {
+    pub fn job_report(
+        &self,
+        source_id: &str,
+        job_id: &str,
+        report: &Value,
+    ) -> Result<PostReply, String> {
         let (mut client, manifest) = self.client_for(source_id)?;
-        client.post(&Self::job_endpoint(&manifest, job_id)?, &[], report).map_err(|e| e.to_string())
+        client
+            .post(&Self::job_endpoint(&manifest, job_id)?, &[], report)
+            .map_err(|e| e.to_string())
     }
 
     /// Fetch a panel. `path` must be the `endpoint` of a `panel` action in
@@ -1669,7 +2025,11 @@ impl Sources {
             let mut inner = self.lock();
             // A source relaunched or re-trusted meanwhile keeps nothing from
             // before; the page is still returned for this one look.
-            if let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id && s.generation == generation && s.trusted) {
+            if let Some(state) = inner
+                .sources
+                .values_mut()
+                .find(|s| s.id == source_id && s.generation == generation && s.trusted)
+            {
                 state.panels.put(path, page.clone());
             }
         }
@@ -1681,7 +2041,9 @@ impl Sources {
         let job_id = job.job_id.clone();
         {
             let mut inner = self.lock();
-            let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) else { return };
+            let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) else {
+                return;
+            };
             state.jobs.retain(|j| j.job_id != job.job_id);
             state.jobs.push(job);
             // Finished jobs roll off; running ones stay.
@@ -1701,8 +2063,12 @@ impl Sources {
     pub fn job_update(&self, source_id: &str, job_id: &str, update: impl FnOnce(&mut JobRecord)) {
         {
             let mut inner = self.lock();
-            let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) else { return };
-            let Some(job) = state.jobs.iter_mut().find(|j| j.job_id == job_id) else { return };
+            let Some(state) = inner.sources.values_mut().find(|s| s.id == source_id) else {
+                return;
+            };
+            let Some(job) = state.jobs.iter_mut().find(|j| j.job_id == job_id) else {
+                return;
+            };
             update(job);
         }
         self.emit(json!({"event": "job", "source_id": source_id, "job_id": job_id}));
@@ -1710,7 +2076,14 @@ impl Sources {
 
     pub fn job(&self, source_id: &str, job_id: &str) -> Option<JobRecord> {
         let inner = self.lock();
-        inner.sources.values().find(|s| s.id == source_id)?.jobs.iter().find(|j| j.job_id == job_id).cloned()
+        inner
+            .sources
+            .values()
+            .find(|s| s.id == source_id)?
+            .jobs
+            .iter()
+            .find(|j| j.job_id == job_id)
+            .cloned()
     }
 
     /// Whether the app is shutting down (job threads end then).
@@ -1765,29 +2138,59 @@ impl Sources {
         let mut out = Vec::new();
         for state in inner.sources.values() {
             let info = Self::info_of(state);
-            let fallback = state.launch_folder.clone().or_else(|| info.project_path.clone());
+            let fallback = state
+                .launch_folder
+                .clone()
+                .or_else(|| info.project_path.clone());
             let view = state.views.get(ENVIRONMENT_VIEW);
             if let Some(payload) = view.and_then(|v| v.payload.as_ref()) {
-                let current = state.trusted && state.status == SourceStatus::Up && view.is_some_and(|v| v.last_error.is_none());
-                for block in [parse_block(payload), parse_secret_block(payload)].into_iter().flatten() {
-                    out.extend(active_block(&state.id, &info.label, &block, current, fallback.as_deref()));
+                let current = state.trusted
+                    && state.status == SourceStatus::Up
+                    && view.is_some_and(|v| v.last_error.is_none());
+                for block in [parse_block(payload), parse_secret_block(payload)]
+                    .into_iter()
+                    .flatten()
+                {
+                    out.extend(active_block(
+                        &state.id,
+                        &info.label,
+                        &block,
+                        current,
+                        fallback.as_deref(),
+                    ));
                 }
                 continue;
             }
             match saved(&state.id) {
                 Some(v) => {
-                    let label = state.manifest.as_ref().map(|m| m.label.as_str()).unwrap_or(&v.source_label);
+                    let label = state
+                        .manifest
+                        .as_ref()
+                        .map(|m| m.label.as_str())
+                        .unwrap_or(&v.source_label);
                     out.extend(saved_blocks(&state.id, label, v));
                 }
-                None => out.extend(Self::unheard_block(state, &info, fallback, remembered(&state.id))),
+                None => out.extend(Self::unheard_block(
+                    state,
+                    &info,
+                    fallback,
+                    remembered(&state.id),
+                )),
             }
         }
         if let Some(store) = &inner.verdicts {
             for (id, v) in store.all() {
                 if !inner.sources.values().any(|s| &s.id == id) {
                     let removed = store.undeclared(id).is_some();
-                    for wire in [v.block.as_ref(), v.secret_scan.as_ref()].into_iter().flatten() {
-                        let Some(mut b) = active_block(id, &v.source_label, wire, false, v.fallback.as_deref()) else { continue };
+                    for wire in [v.block.as_ref(), v.secret_scan.as_ref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let Some(mut b) =
+                            active_block(id, &v.source_label, wire, false, v.fallback.as_deref())
+                        else {
+                            continue;
+                        };
                         if removed {
                             b.reason = data_safety::removed_reason(wire);
                         }
@@ -1803,9 +2206,16 @@ impl Sources {
     /// yet): its folder is kept from agents until it answers. A stack is one
     /// whose trusted manifest says so, or, before such a manifest is in
     /// hand, one `remembered` as a stack from an earlier one.
-    fn unheard_block(state: &SourceState, info: &SourceInfo, folder: Option<PathBuf>, remembered: Option<&RememberedStack>) -> Option<ActiveBlock> {
+    fn unheard_block(
+        state: &SourceState,
+        info: &SourceInfo,
+        folder: Option<PathBuf>,
+        remembered: Option<&RememberedStack>,
+    ) -> Option<ActiveBlock> {
         let (manifest_id, label) = match state.manifest.as_ref() {
-            Some(manifest) if state.trusted && is_stack_manifest(manifest) => (manifest.id.as_str(), info.label.as_str()),
+            Some(manifest) if state.trusted && is_stack_manifest(manifest) => {
+                (manifest.id.as_str(), info.label.as_str())
+            }
             _ => {
                 let r = remembered?;
                 (r.manifest_id.as_str(), r.source_label.as_str())
@@ -1816,7 +2226,10 @@ impl Sources {
             kind: data_safety::BlockKind::DataSafety,
             source_id: state.id.clone(),
             source_label: label.to_owned(),
-            instance: manifest_id.strip_prefix(STACK_SOURCE_PREFIX).unwrap_or(manifest_id).to_owned(),
+            instance: manifest_id
+                .strip_prefix(STACK_SOURCE_PREFIX)
+                .unwrap_or(manifest_id)
+                .to_owned(),
             state: data_safety::UNHEARD_STATE.to_owned(),
             current: false,
             reason: data_safety::unheard_reason(label),
@@ -1843,8 +2256,12 @@ fn is_stack_manifest(manifest: &Manifest) -> bool {
 /// stack, for its next launch: set when it is one, cleared when it is not.
 /// A manifest that is not trusted changes nothing (fail closed).
 fn remember_kind(inner: &mut Inner, key: &str) {
-    let Some(state) = inner.sources.get(key) else { return };
-    let Some(manifest) = state.manifest.as_ref().filter(|_| state.trusted) else { return };
+    let Some(state) = inner.sources.get(key) else {
+        return;
+    };
+    let Some(manifest) = state.manifest.as_ref().filter(|_| state.trusted) else {
+        return;
+    };
     let stack = is_stack_manifest(manifest).then(|| RememberedStack {
         manifest_id: manifest.id.clone(),
         source_label: manifest.label.clone(),
@@ -1869,8 +2286,14 @@ fn saved_blocks(id: &str, label: &str, v: &SavedVerdict) -> Vec<ActiveBlock> {
 
 /// An agent action whose folder data safety blocks is disabled with the
 /// reason: the launch would be refused anyway, and the button says so first.
-fn data_safety_verdict(action: &SourceAction, mut verdict: ActionVerdict, blocks: &[ActiveBlock]) -> ActionVerdict {
-    if let (SourceAction::Agent { .. }, true, Some(cwd)) = (action, verdict.enabled, verdict.cwd.as_ref()) {
+fn data_safety_verdict(
+    action: &SourceAction,
+    mut verdict: ActionVerdict,
+    blocks: &[ActiveBlock],
+) -> ActionVerdict {
+    if let (SourceAction::Agent { .. }, true, Some(cwd)) =
+        (action, verdict.enabled, verdict.cwd.as_ref())
+    {
         if let Some(b) = data_safety::blocking(blocks, cwd) {
             verdict.enabled = false;
             verdict.reason = Some(data_safety::disabled_text(b));
@@ -1914,7 +2337,8 @@ fn fresh_state(key: &str, origin: Origin) -> SourceState {
 /// "pick a free port" scheme has, and the identity check is what makes a
 /// hijack of that window harmless (the token never reaches the hijacker).
 fn free_loopback_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot pick a loopback port: {e}"))?;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("cannot pick a loopback port: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     drop(listener);
     Ok(port)
@@ -1925,21 +2349,29 @@ fn free_loopback_port() -> Result<u16, String> {
 /// (that user could then impersonate the source to the app). Elsewhere the
 /// permission model is not checked and the listing says so.
 pub fn read_attached_token(path: &Path) -> Result<(String, Option<String>), String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("{} is not a file", path.display()));
     }
     let warning = token_file_permission_check(path, &meta)?;
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read the token file {}: {e}", path.display()))?;
     let token = text.trim().to_owned();
     if identity::decode_token(&token).is_none() {
-        return Err(format!("{} does not hold a 64-character lowercase hex token", path.display()));
+        return Err(format!(
+            "{} does not hold a 64-character lowercase hex token",
+            path.display()
+        ));
     }
     Ok((token, warning))
 }
 
 #[cfg(unix)]
-fn token_file_permission_check(path: &Path, meta: &std::fs::Metadata) -> Result<Option<String>, String> {
+fn token_file_permission_check(
+    path: &Path,
+    meta: &std::fs::Metadata,
+) -> Result<Option<String>, String> {
     use std::os::unix::fs::PermissionsExt;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
@@ -1952,7 +2384,10 @@ fn token_file_permission_check(path: &Path, meta: &std::fs::Metadata) -> Result<
 }
 
 #[cfg(not(unix))]
-fn token_file_permission_check(path: &Path, _meta: &std::fs::Metadata) -> Result<Option<String>, String> {
+fn token_file_permission_check(
+    path: &Path,
+    _meta: &std::fs::Metadata,
+) -> Result<Option<String>, String> {
     Ok(Some(format!(
         "the permissions of {} were not checked on this platform; keep it in a folder only your account can read",
         path.display()
@@ -1972,8 +2407,15 @@ pub struct SourcesListing {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OriginDto {
-    Launched { project_id: u32, project_path: String, command: String },
-    Attached { addr: String, token_file: String },
+    Launched {
+        project_id: u32,
+        project_path: String,
+        command: String,
+    },
+    Attached {
+        addr: String,
+        token_file: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2064,7 +2506,12 @@ pub struct SourceViewDto {
 
 fn source_dto(state: &SourceState, store: Option<&SourceStore>) -> SourceDto {
     let (origin, fallback_label, warning) = match &state.origin {
-        Origin::Launched { project_id, project_path, command, .. } => (
+        Origin::Launched {
+            project_id,
+            project_path,
+            command,
+            ..
+        } => (
             OriginDto::Launched {
                 project_id: *project_id,
                 project_path: project_path.display().to_string(),
@@ -2073,15 +2520,26 @@ fn source_dto(state: &SourceState, store: Option<&SourceStore>) -> SourceDto {
             command.clone(),
             None,
         ),
-        Origin::Attached { addr, token_file, warning } => (
-            OriginDto::Attached { addr: addr.clone(), token_file: token_file.display().to_string() },
+        Origin::Attached {
+            addr,
+            token_file,
+            warning,
+        } => (
+            OriginDto::Attached {
+                addr: addr.clone(),
+                token_file: token_file.display().to_string(),
+            },
             addr.clone(),
             warning.clone(),
         ),
     };
     SourceDto {
         id: state.id.clone(),
-        label: state.manifest.as_ref().map(|m| m.label.clone()).unwrap_or(fallback_label),
+        label: state
+            .manifest
+            .as_ref()
+            .map(|m| m.label.clone())
+            .unwrap_or(fallback_label),
         origin,
         status: state.status,
         last_error: state.last_error.clone(),
@@ -2103,8 +2561,12 @@ fn source_dto(state: &SourceState, store: Option<&SourceStore>) -> SourceDto {
             })
             .collect(),
         warning,
-        prompt_policy: store.map(|s| s.prompt_policy(&state.key)).unwrap_or_default(),
-        prompts_shown: store.map(|s| s.prompts_shown(&state.key)).unwrap_or_default(),
+        prompt_policy: store
+            .map(|s| s.prompt_policy(&state.key))
+            .unwrap_or_default(),
+        prompts_shown: store
+            .map(|s| s.prompts_shown(&state.key))
+            .unwrap_or_default(),
         jobs: state.jobs.clone(),
         key_match: store.map(|s| s.key_match(&state.key)).unwrap_or_default(),
     }
@@ -2154,7 +2616,10 @@ pub fn iso_utc(ms: u64) -> String {
 // ---- Tauri commands ------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_sources(window: tauri::Window, sources: State<'_, Sources>) -> Result<SourcesListing, String> {
+pub fn list_sources(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+) -> Result<SourcesListing, String> {
     main_window_only(&window)?;
     Ok(sources.listing())
 }
@@ -2173,7 +2638,12 @@ pub fn source_trust_answer(
 }
 
 #[tauri::command]
-pub fn source_view(window: tauri::Window, sources: State<'_, Sources>, source_id: String, view: String) -> Result<SourceViewDto, String> {
+pub fn source_view(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    source_id: String,
+    view: String,
+) -> Result<SourceViewDto, String> {
     main_window_only(&window)?;
     sources.view(&source_id, &view)
 }
@@ -2206,14 +2676,23 @@ pub fn set_source_key_match(
 }
 
 #[tauri::command]
-pub fn attach_source(window: tauri::Window, sources: State<'_, Sources>, addr: String, token_file: String) -> Result<SourcesListing, String> {
+pub fn attach_source(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    addr: String,
+    token_file: String,
+) -> Result<SourcesListing, String> {
     main_window_only(&window)?;
     sources.attach(&addr, Path::new(&token_file))?;
     Ok(sources.listing())
 }
 
 #[tauri::command]
-pub fn detach_source(window: tauri::Window, sources: State<'_, Sources>, source_id: String) -> Result<SourcesListing, String> {
+pub fn detach_source(
+    window: tauri::Window,
+    sources: State<'_, Sources>,
+    source_id: String,
+) -> Result<SourcesListing, String> {
     main_window_only(&window)?;
     sources.detach(&source_id)?;
     Ok(sources.listing())
@@ -2238,13 +2717,28 @@ mod tests {
         cache.put("/a", json!({"title": "A1"}));
         cache.put("/b", json!({"title": "B"}));
         cache.put("/a", json!({"title": "A2"}));
-        assert_eq!(cache.get("/a").unwrap()["title"], "A2", "a refetch replaces the page");
-        assert_eq!(cache.pages.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["/b", "/a"], "and makes it the most recent");
+        assert_eq!(
+            cache.get("/a").unwrap()["title"],
+            "A2",
+            "a refetch replaces the page"
+        );
+        assert_eq!(
+            cache
+                .pages
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            ["/b", "/a"],
+            "and makes it the most recent"
+        );
         for i in 0..PANEL_CACHE_CAP {
             cache.put(&format!("/p{i}"), json!({}));
         }
         assert_eq!(cache.pages.len(), PANEL_CACHE_CAP);
-        assert!(cache.get("/b").is_none() && cache.get("/a").is_none(), "the least recently fetched went first");
+        assert!(
+            cache.get("/b").is_none() && cache.get("/a").is_none(),
+            "the least recently fetched went first"
+        );
         assert!(cache.get(&format!("/p{}", PANEL_CACHE_CAP - 1)).is_some());
         cache.clear();
         assert!(cache.get("/p0").is_none());
@@ -2252,7 +2746,14 @@ mod tests {
 
     #[test]
     fn a_panel_page_is_addressed_only_while_a_view_names_it() {
-        let mut state = fresh_state("k", Origin::Attached { addr: "127.0.0.1:1".into(), token_file: PathBuf::from("t"), warning: None });
+        let mut state = fresh_state(
+            "k",
+            Origin::Attached {
+                addr: "127.0.0.1:1".into(),
+                token_file: PathBuf::from("t"),
+                warning: None,
+            },
+        );
         let named = json!({"items": [{"key": "ABC-1", "actions": [{"kind": "panel", "id": "v", "label": "V", "endpoint": "/api/panel/validate"}]}]});
         state.views.insert(
             "work".into(),
@@ -2268,20 +2769,40 @@ mod tests {
             },
         );
         let view = format!("{PANEL_VIEW_PREFIX}/api/panel/validate");
-        assert!(Sources::cached_payload(&state, &view).unwrap_err().contains("open it first"), "named but not fetched yet");
-        state.panels.put("/api/panel/validate", json!({"title": "Validate", "actions": []}));
-        assert_eq!(Sources::cached_payload(&state, &view).unwrap()["title"], "Validate");
+        assert!(
+            Sources::cached_payload(&state, &view)
+                .unwrap_err()
+                .contains("open it first"),
+            "named but not fetched yet"
+        );
+        state.panels.put(
+            "/api/panel/validate",
+            json!({"title": "Validate", "actions": []}),
+        );
+        assert_eq!(
+            Sources::cached_payload(&state, &view).unwrap()["title"],
+            "Validate"
+        );
         // A cached page of a path no view names answers nothing.
-        state.panels.put("/api/panel/deeper", json!({"title": "Deeper"}));
-        assert!(Sources::cached_payload(&state, "panel:/api/panel/deeper").unwrap_err().contains("names no panel"));
+        state
+            .panels
+            .put("/api/panel/deeper", json!({"title": "Deeper"}));
+        assert!(Sources::cached_payload(&state, "panel:/api/panel/deeper")
+            .unwrap_err()
+            .contains("names no panel"));
         // The view stops naming the panel: its page no longer answers.
         state.views.get_mut("work").unwrap().payload = Some(json!({"items": []}));
-        assert!(Sources::cached_payload(&state, &view).unwrap_err().contains("names no panel"));
+        assert!(Sources::cached_payload(&state, &view)
+            .unwrap_err()
+            .contains("names no panel"));
     }
 
     #[test]
     fn launch_env_carries_exactly_the_two_variables() {
-        let env = LaunchEnv { addr: "127.0.0.1:5000".into(), token: "ab".repeat(32) };
+        let env = LaunchEnv {
+            addr: "127.0.0.1:5000".into(),
+            token: "ab".repeat(32),
+        };
         assert_eq!(
             env.env(),
             vec![
@@ -2305,13 +2826,17 @@ mod tests {
         let path = dir.path().join("token");
         assert!(read_attached_token(&path).is_err(), "missing file");
         std::fs::write(&path, "not a token\n").unwrap();
-        assert!(read_attached_token(&path).unwrap_err().contains("64-character"));
+        assert!(read_attached_token(&path)
+            .unwrap_err()
+            .contains("64-character"));
         std::fs::write(&path, format!("{}\n", "0a".repeat(32))).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(read_attached_token(&path).unwrap_err().contains("readable by other users"));
+            assert!(read_attached_token(&path)
+                .unwrap_err()
+                .contains("readable by other users"));
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
             let (token, warning) = read_attached_token(&path).unwrap();
             assert_eq!(token, "0a".repeat(32));
@@ -2327,9 +2852,30 @@ mod tests {
 
     #[test]
     fn source_ids_are_stable_opaque_and_distinct_per_key() {
-        let a = fresh_state("/p::feed", Origin::Attached { addr: "x".into(), token_file: "t".into(), warning: None });
-        let b = fresh_state("/p::feed", Origin::Attached { addr: "x".into(), token_file: "t".into(), warning: None });
-        let c = fresh_state("/p::other", Origin::Attached { addr: "x".into(), token_file: "t".into(), warning: None });
+        let a = fresh_state(
+            "/p::feed",
+            Origin::Attached {
+                addr: "x".into(),
+                token_file: "t".into(),
+                warning: None,
+            },
+        );
+        let b = fresh_state(
+            "/p::feed",
+            Origin::Attached {
+                addr: "x".into(),
+                token_file: "t".into(),
+                warning: None,
+            },
+        );
+        let c = fresh_state(
+            "/p::other",
+            Origin::Attached {
+                addr: "x".into(),
+                token_file: "t".into(),
+                warning: None,
+            },
+        );
         assert_eq!(a.id, b.id);
         assert_ne!(a.id, c.id);
         assert_eq!(a.id.len(), 16);
@@ -2338,7 +2884,14 @@ mod tests {
 
     /// A launched source with an Environment view whose cached payload is
     /// `payload`, in `status`, trusted or not, its last poll failed or not.
-    fn put_environment(sources: &Sources, project: &Path, payload: Option<Value>, status: SourceStatus, trusted: bool, poll_error: Option<&str>) -> String {
+    fn put_environment(
+        sources: &Sources,
+        project: &Path,
+        payload: Option<Value>,
+        status: SourceStatus,
+        trusted: bool,
+        poll_error: Option<&str>,
+    ) -> String {
         let mut state = fresh_state(
             "stack",
             Origin::Launched {
@@ -2388,18 +2941,46 @@ mod tests {
         // Never sent a block: nothing is enforced.
         put_environment(&sources, &project, None, SourceStatus::Up, true, None);
         assert!(sources.data_safety_blocks().is_empty());
-        put_environment(&sources, &project, Some(json!({ "components": [] })), SourceStatus::Up, true, None);
-        assert!(sources.data_safety_blocks().is_empty(), "an older source sends no block");
+        put_environment(
+            &sources,
+            &project,
+            Some(json!({ "components": [] })),
+            SourceStatus::Up,
+            true,
+            None,
+        );
+        assert!(
+            sources.data_safety_blocks().is_empty(),
+            "an older source sends no block"
+        );
         assert_eq!(sources.hold_reason(&inside), None);
         // Blocking, and answering.
-        put_environment(&sources, &project, Some(payload("not-clean", true)), SourceStatus::Up, true, None);
+        put_environment(
+            &sources,
+            &project,
+            Some(payload("not-clean", true)),
+            SourceStatus::Up,
+            true,
+            None,
+        );
         let blocks = sources.data_safety_blocks();
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].current);
-        assert_eq!(blocks[0].reason, "db: 1 finding (card-number ×1) — acknowledge in Environment");
-        assert!(sources.hold_reason(&inside).unwrap().starts_with("held until data safety on app/0 clears"));
-        assert!(crate::data_safety::check_launch(&sources, &inside).unwrap_err().starts_with(crate::data_safety::REFUSAL_LEAD));
-        assert!(crate::data_safety::check_launch(&sources, dir.path()).is_ok(), "outside the stack project");
+        assert_eq!(
+            blocks[0].reason,
+            "db: 1 finding (card-number ×1) — acknowledge in Environment"
+        );
+        assert!(sources
+            .hold_reason(&inside)
+            .unwrap()
+            .starts_with("held until data safety on app/0 clears"));
+        assert!(crate::data_safety::check_launch(&sources, &inside)
+            .unwrap_err()
+            .starts_with(crate::data_safety::REFUSAL_LEAD));
+        assert!(
+            crate::data_safety::check_launch(&sources, dir.path()).is_ok(),
+            "outside the stack project"
+        );
         // Down, untrusted, or failing its Environment poll: the last block stays, marked.
         for (status, trusted, error) in [
             (SourceStatus::Down, true, None),
@@ -2407,24 +2988,53 @@ mod tests {
             (SourceStatus::Up, false, None),
             (SourceStatus::Up, true, Some("HTTP 500")),
         ] {
-            put_environment(&sources, &project, Some(payload("not-clean", true)), status, trusted, error);
+            put_environment(
+                &sources,
+                &project,
+                Some(payload("not-clean", true)),
+                status,
+                trusted,
+                error,
+            );
             let blocks = sources.data_safety_blocks();
             assert_eq!(blocks.len(), 1, "{status:?} {trusted} {error:?}");
             assert!(!blocks[0].current);
             assert!(
-                blocks[0].reason.starts_with("last known: db: 1 finding") && blocks[0].reason.ends_with(", source unavailable"),
+                blocks[0].reason.starts_with("last known: db: 1 finding")
+                    && blocks[0].reason.ends_with(", source unavailable"),
                 "{}",
                 blocks[0].reason
             );
             assert!(crate::data_safety::check_launch(&sources, &inside).is_err());
         }
         // A last block that did not block keeps nothing out.
-        put_environment(&sources, &project, Some(payload("clean", false)), SourceStatus::Down, true, None);
+        put_environment(
+            &sources,
+            &project,
+            Some(payload("clean", false)),
+            SourceStatus::Down,
+            true,
+            None,
+        );
         assert!(sources.data_safety_blocks().is_empty());
         // An error blocks whatever it says, and recovery clears it.
-        put_environment(&sources, &project, Some(payload("error", false)), SourceStatus::Up, true, None);
+        put_environment(
+            &sources,
+            &project,
+            Some(payload("error", false)),
+            SourceStatus::Up,
+            true,
+            None,
+        );
         assert_eq!(sources.data_safety_blocks().len(), 1);
-        put_environment(&sources, &project, Some(payload("acknowledged", false)), SourceStatus::Up, true, None);
+        put_environment(
+            &sources,
+            &project,
+            Some(payload("acknowledged", false)),
+            SourceStatus::Up,
+            true,
+            None,
+        );
         assert!(sources.data_safety_blocks().is_empty());
         assert_eq!(sources.hold_reason(&inside), None);
         assert!(crate::data_safety::check_launch(&sources, &inside).is_ok());
@@ -2434,10 +3044,20 @@ mod tests {
     fn a_block_without_a_project_covers_the_folder_of_the_project_that_launched_it() {
         let dir = tempfile::tempdir().unwrap();
         let sources = Sources::default();
-        put_environment(&sources, dir.path(), Some(json!({ "dataSafety": { "instance": "app/0", "state": "error" } })), SourceStatus::Up, true, None);
+        put_environment(
+            &sources,
+            dir.path(),
+            Some(json!({ "dataSafety": { "instance": "app/0", "state": "error" } })),
+            SourceStatus::Up,
+            true,
+            None,
+        );
         let blocks = sources.data_safety_blocks();
         assert_eq!(blocks.len(), 1);
-        assert!(crate::data_safety::covers(&blocks[0].covered, &dir.path().join("sub")));
+        assert!(crate::data_safety::covers(
+            &blocks[0].covered,
+            &dir.path().join("sub")
+        ));
     }
 
     #[test]
@@ -2447,22 +3067,36 @@ mod tests {
         put_environment(
             &sources,
             dir.path(),
-            Some(json!({ "dataSafety": { "instance": "app/0", "state": "not-clean", "blocksAgents": true, "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }] } })),
+            Some(
+                json!({ "dataSafety": { "instance": "app/0", "state": "not-clean", "blocksAgents": true, "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }] } }),
+            ),
             SourceStatus::Up,
             true,
             None,
         );
         let blocks = sources.data_safety_blocks();
         let agent = actions::parse_action(&json!({ "kind": "agent", "id": "a", "label": "Agent here", "cwd": "/x", "prompt": "go" })).unwrap();
-        let terminal = actions::parse_action(&json!({ "kind": "terminal", "id": "t", "label": "Terminal here", "cwd": "/x" })).unwrap();
-        let ok = |cwd: &Path| ActionVerdict { enabled: true, reason: None, hidden: false, cwd: Some(cwd.to_path_buf()), tool: Some((1, "claude".into())) };
+        let terminal = actions::parse_action(
+            &json!({ "kind": "terminal", "id": "t", "label": "Terminal here", "cwd": "/x" }),
+        )
+        .unwrap();
+        let ok = |cwd: &Path| ActionVerdict {
+            enabled: true,
+            reason: None,
+            hidden: false,
+            cwd: Some(cwd.to_path_buf()),
+            tool: Some((1, "claude".into())),
+        };
         let judged = data_safety_verdict(&agent, ok(dir.path()), &blocks);
         assert!(!judged.enabled);
         assert_eq!(
             judged.reason.as_deref(),
             Some("agents blocked — data safety on app/0: db: 1 finding (card-number ×1) — acknowledge in Environment")
         );
-        assert!(data_safety_verdict(&terminal, ok(dir.path()), &blocks).enabled, "terminals are never blocked");
+        assert!(
+            data_safety_verdict(&terminal, ok(dir.path()), &blocks).enabled,
+            "terminals are never blocked"
+        );
         let elsewhere = tempfile::tempdir().unwrap();
         assert!(data_safety_verdict(&agent, ok(elsewhere.path()), &blocks).enabled);
     }
@@ -2471,7 +3105,10 @@ mod tests {
     fn the_actor_header_names_a_person_or_an_agent_in_printable_ascii() {
         assert_eq!(CallActor::Human("Alex".into()).header_value(), "human:Alex");
         assert_eq!(CallActor::Agent("12".into()).header_value(), "agent:12");
-        assert_eq!(CallActor::Human("Jos\u{e9}\r\nX-Evil: 1".into()).header_value(), "human:Jos___X-Evil: 1");
+        assert_eq!(
+            CallActor::Human("Jos\u{e9}\r\nX-Evil: 1".into()).header_value(),
+            "human:Jos___X-Evil: 1"
+        );
         let long = CallActor::Human("a".repeat(200)).header_value();
         assert_eq!(long.len(), ACTOR_HEADER_CAP);
         assert!(long.starts_with("human:aaa"));
@@ -2496,7 +3133,10 @@ mod tests {
     /// Sources over a config folder, as the app starts them.
     fn started(config: &Path) -> Sources {
         let sources = Sources::default();
-        sources.init_with(SourceStore::new(config.join(store::FILE_NAME)), Arc::new(NullEmitter));
+        sources.init_with(
+            SourceStore::new(config.join(store::FILE_NAME)),
+            Arc::new(NullEmitter),
+        );
         sources
     }
 
@@ -2510,21 +3150,30 @@ mod tests {
     }
 
     fn answer(sources: &Sources, payload: Value) {
-        assert!(!sources.apply_poll("stack", 0, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(payload)), "not cancelled");
+        assert!(
+            !sources.apply_poll(
+                "stack",
+                0,
+                ENVIRONMENT_VIEW,
+                Duration::from_secs(120),
+                Ok(payload)
+            ),
+            "not cancelled"
+        );
     }
 
     fn secret_payload(project: &Path, folder: &Path, state: &str, blocks: bool) -> Value {
         json!({ "components": [],
-            "dataSafety": { "instance": "app/0", "state": "clean", "blocksAgents": false, "bound": null,
-                            "project": project.display().to_string(), "reasons": [] },
-            "secretScan": {
-                "instance": "app/0", "state": state, "blocksAgents": blocks, "policy": "block-agents",
-                "findings": [{ "rule": "github-pat", "file": ".work/ABC-1/src/api-1a2b3c4d/.env", "line": 1 }],
-                "bound": { "source": "tracker", "key": "ABC-1", "folders": [folder.display().to_string()] },
-                "project": project.display().to_string(),
-                "reasons": [{ "component": null, "text": "api worktree: 1 possible secret (.work/ABC-1/src/api-1a2b3c4d/.env:1 (github-pat))" }],
-                "ackActionId": "secret-scan-ack",
-            }})
+        "dataSafety": { "instance": "app/0", "state": "clean", "blocksAgents": false, "bound": null,
+                        "project": project.display().to_string(), "reasons": [] },
+        "secretScan": {
+            "instance": "app/0", "state": state, "blocksAgents": blocks, "policy": "block-agents",
+            "findings": [{ "rule": "github-pat", "file": ".work/ABC-1/src/api-1a2b3c4d/.env", "line": 1 }],
+            "bound": { "source": "tracker", "key": "ABC-1", "folders": [folder.display().to_string()] },
+            "project": project.display().to_string(),
+            "reasons": [{ "component": null, "text": "api worktree: 1 possible secret (.work/ABC-1/src/api-1a2b3c4d/.env:1 (github-pat))" }],
+            "ackActionId": "secret-scan-ack",
+        }})
     }
 
     #[test]
@@ -2544,20 +3193,45 @@ mod tests {
         with_manifest(&first, "stack:app");
         answer(&first, secret_payload(&project, &item, "not-clean", true));
         let blocks = first.data_safety_blocks();
-        assert_eq!(blocks.len(), 1, "the clean data-safety block keeps nothing out");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the clean data-safety block keeps nothing out"
+        );
         assert_eq!(blocks[0].kind, BlockKind::SecretScan);
         assert!(blocks[0].current);
         // The one spawn path refuses, naming the check; deliveries are held.
         let refusal = crate::data_safety::check_launch(&first, &wt).unwrap_err();
-        assert!(refusal.starts_with(crate::data_safety::REFUSAL_LEAD), "{refusal}");
-        assert!(refusal.contains("the secret scan on app/0") && refusal.contains(".env:1 (github-pat)"), "{refusal}");
-        assert!(first.hold_reason(&wt).unwrap().starts_with("held until the secret scan on app/0 clears"));
-        assert!(crate::data_safety::check_launch(&first, &project).is_ok(), "the project itself is not the bound item");
+        assert!(
+            refusal.starts_with(crate::data_safety::REFUSAL_LEAD),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("the secret scan on app/0") && refusal.contains(".env:1 (github-pat)"),
+            "{refusal}"
+        );
+        assert!(first
+            .hold_reason(&wt)
+            .unwrap()
+            .starts_with("held until the secret scan on app/0 clears"));
+        assert!(
+            crate::data_safety::check_launch(&first, &project).is_ok(),
+            "the project itself is not the bound item"
+        );
         let agent = actions::parse_action(&json!({ "kind": "agent", "id": "a", "label": "Agent here", "cwd": "/x", "prompt": "go" })).unwrap();
-        let ok = ActionVerdict { enabled: true, reason: None, hidden: false, cwd: Some(wt.clone()), tool: Some((1, "claude".into())) };
+        let ok = ActionVerdict {
+            enabled: true,
+            reason: None,
+            hidden: false,
+            cwd: Some(wt.clone()),
+            tool: Some((1, "claude".into())),
+        };
         let judged = data_safety_verdict(&agent, ok, &blocks);
         assert!(!judged.enabled);
-        assert!(judged.reason.unwrap().starts_with("agents blocked — secret scan on app/0: api worktree"));
+        assert!(judged
+            .reason
+            .unwrap()
+            .starts_with("agents blocked — secret scan on app/0: api worktree"));
         // An unfinished scan the source says does not block (commits, build
         // contexts) keeps nothing out: unlike data safety, `error` alone is not a block.
         answer(&first, secret_payload(&project, &item, "error", false));
@@ -2573,7 +3247,10 @@ mod tests {
         assert_eq!(kinds, [BlockKind::DataSafety, BlockKind::SecretScan]);
         answer(&first, secret_payload(&project, &item, "not-clean", true));
         let saved = std::fs::read_to_string(config.join(verdicts::FILE_NAME)).unwrap();
-        assert!(saved.contains("\"secretScan\""), "kept in its own field: {saved}");
+        assert!(
+            saved.contains("\"secretScan\""),
+            "kept in its own field: {saved}"
+        );
 
         // Restart: the saved secret block is in force before any answer.
         let second = started(&config);
@@ -2581,12 +3258,19 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, BlockKind::SecretScan);
         assert!(!blocks[0].current);
-        assert!(blocks[0].reason.starts_with("last known: api worktree"), "{}", blocks[0].reason);
+        assert!(
+            blocks[0].reason.starts_with("last known: api worktree"),
+            "{}",
+            blocks[0].reason
+        );
         assert!(crate::data_safety::check_launch(&second, &wt).is_err());
         // Its acknowledgement lifts it.
         put_environment(&second, &project, None, SourceStatus::Up, true, None);
         with_manifest(&second, "stack:app");
-        answer(&second, secret_payload(&project, &item, "acknowledged", false));
+        answer(
+            &second,
+            secret_payload(&project, &item, "acknowledged", false),
+        );
         assert!(second.data_safety_blocks().is_empty());
         assert!(crate::data_safety::check_launch(&second, &wt).is_ok());
         assert_eq!(second.hold_reason(&wt), None);
@@ -2607,7 +3291,10 @@ mod tests {
         with_manifest(&first, "stack:app");
         answer(&first, block_payload(&project, "not-clean", true));
         assert_eq!(first.data_safety_blocks().len(), 1);
-        assert!(config.join(verdicts::FILE_NAME).is_file(), "kept in the config folder");
+        assert!(
+            config.join(verdicts::FILE_NAME).is_file(),
+            "kept in the config folder"
+        );
 
         // Restart, before the source is even registered: the saved block
         // is in force, as the last known one.
@@ -2616,7 +3303,11 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].source_id, id);
         assert!(!blocks[0].current);
-        assert!(blocks[0].reason.starts_with("last known: db: 1 finding"), "{}", blocks[0].reason);
+        assert!(
+            blocks[0].reason.starts_with("last known: db: 1 finding"),
+            "{}",
+            blocks[0].reason
+        );
         assert!(crate::data_safety::check_launch(&second, &inside).is_err());
         // Registered (launched, not trusted or answered yet): still in force.
         put_environment(&second, &project, None, SourceStatus::Starting, false, None);
@@ -2655,26 +3346,51 @@ mod tests {
         with_manifest(&sources, "stack:app");
         let blocks = sources.data_safety_blocks();
         assert_eq!(blocks.len(), 1);
-        assert_eq!((blocks[0].state.as_str(), blocks[0].instance.as_str()), (crate::data_safety::UNHEARD_STATE, "app"));
+        assert_eq!(
+            (blocks[0].state.as_str(), blocks[0].instance.as_str()),
+            (crate::data_safety::UNHEARD_STATE, "app")
+        );
         assert!(!blocks[0].current);
-        assert_eq!(blocks[0].reason, "Stack app has not said yet whether its data is safe — agents wait until it answers");
+        assert_eq!(
+            blocks[0].reason,
+            "Stack app has not said yet whether its data is safe — agents wait until it answers"
+        );
         let refusal = crate::data_safety::check_launch(&sources, &deep).unwrap_err();
-        assert!(refusal.starts_with(crate::data_safety::REFUSAL_LEAD), "{refusal}");
-        assert!(crate::data_safety::check_launch(&sources, dir.path()).is_ok(), "outside its folder");
+        assert!(
+            refusal.starts_with(crate::data_safety::REFUSAL_LEAD),
+            "{refusal}"
+        );
+        assert!(
+            crate::data_safety::check_launch(&sources, dir.path()).is_ok(),
+            "outside its folder"
+        );
         // The launch folder, when known, is what is covered.
         let elsewhere = dir.path().join("other").join("stack-project");
         std::fs::create_dir_all(&elsewhere).unwrap();
-        sources.lock().sources.get_mut("stack").unwrap().launch_folder = Some(elsewhere.clone());
+        sources
+            .lock()
+            .sources
+            .get_mut("stack")
+            .unwrap()
+            .launch_folder = Some(elsewhere.clone());
         assert!(crate::data_safety::check_launch(&sources, &elsewhere).is_err());
         assert!(crate::data_safety::check_launch(&sources, &deep).is_ok());
-        sources.lock().sources.get_mut("stack").unwrap().launch_folder = None;
+        sources
+            .lock()
+            .sources
+            .get_mut("stack")
+            .unwrap()
+            .launch_folder = None;
         // An answer with no block at all lifts it, and is kept as such.
         answer(&sources, json!({ "components": [] }));
         assert!(sources.data_safety_blocks().is_empty());
         let restarted = started(&config);
         put_environment(&restarted, &project, None, SourceStatus::Up, true, None);
         with_manifest(&restarted, "stack:app");
-        assert!(restarted.data_safety_blocks().is_empty(), "it answered before: no longer never heard from");
+        assert!(
+            restarted.data_safety_blocks().is_empty(),
+            "it answered before: no longer never heard from"
+        );
     }
 
     #[test]
@@ -2691,7 +3407,14 @@ mod tests {
         assert!(sources.data_safety_blocks().is_empty());
         // A stack source not trusted (yet): nothing either; its manifest
         // is not something the user agreed to.
-        put_environment(&sources, &project, None, SourceStatus::NeedsReview, false, None);
+        put_environment(
+            &sources,
+            &project,
+            None,
+            SourceStatus::NeedsReview,
+            false,
+            None,
+        );
         with_manifest(&sources, "stack:app");
         assert!(sources.data_safety_blocks().is_empty());
         // One that serves no Environment view cannot answer, so is not held.
@@ -2716,7 +3439,14 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let sources = started(&config);
         let key = SourceStore::attached_key("127.0.0.1:7000");
-        let mut state = fresh_state(&key, Origin::Attached { addr: "127.0.0.1:7000".into(), token_file: dir.path().join("t"), warning: None });
+        let mut state = fresh_state(
+            &key,
+            Origin::Attached {
+                addr: "127.0.0.1:7000".into(),
+                token_file: dir.path().join("t"),
+                warning: None,
+            },
+        );
         state.trusted = true;
         state.status = SourceStatus::Up;
         state.views.insert(
@@ -2734,34 +3464,83 @@ mod tests {
         );
         let id = state.id.clone();
         sources.lock().sources.insert(key.clone(), state);
-        assert!(!sources.apply_poll(&key, 0, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(block_payload(&project, "not-clean", true))));
+        assert!(!sources.apply_poll(
+            &key,
+            0,
+            ENVIRONMENT_VIEW,
+            Duration::from_secs(120),
+            Ok(block_payload(&project, "not-clean", true))
+        ));
         assert_eq!(sources.data_safety_blocks().len(), 1);
-        assert!(VerdictStore::beside(&config.join(store::FILE_NAME)).get(&id).is_some());
+        assert!(VerdictStore::beside(&config.join(store::FILE_NAME))
+            .get(&id)
+            .is_some());
         sources.detach(&id).unwrap();
         assert!(sources.data_safety_blocks().is_empty());
-        assert!(VerdictStore::beside(&config.join(store::FILE_NAME)).get(&id).is_none());
-        assert!(started(&config).data_safety_blocks().is_empty(), "and it is not back after a restart");
+        assert!(VerdictStore::beside(&config.join(store::FILE_NAME))
+            .get(&id)
+            .is_none());
+        assert!(
+            started(&config).data_safety_blocks().is_empty(),
+            "and it is not back after a restart"
+        );
     }
 
     #[test]
     fn the_launch_folder_is_the_project_argument_or_the_working_folder() {
-        let cwd = if cfg!(windows) { PathBuf::from("C:\\code\\x") } else { PathBuf::from("/srv/example") };
-        let abs = if cfg!(windows) { "C:\\code\\stack" } else { "/srv/stack" };
+        let cwd = if cfg!(windows) {
+            PathBuf::from("C:\\code\\x")
+        } else {
+            PathBuf::from("/srv/example")
+        };
+        let abs = if cfg!(windows) {
+            "C:\\code\\stack"
+        } else {
+            "/srv/stack"
+        };
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(launch_folder_of(&cwd, &args(&["serve"])), cwd);
-        assert_eq!(launch_folder_of(&cwd, &args(&["serve", "--project", "stack"])), cwd.join("stack"));
-        assert_eq!(launch_folder_of(&cwd, &args(&["serve", "--project", abs])), PathBuf::from(abs));
-        assert_eq!(launch_folder_of(&cwd, &args(&["serve", &format!("--project={abs}")])), PathBuf::from(abs));
+        assert_eq!(
+            launch_folder_of(&cwd, &args(&["serve", "--project", "stack"])),
+            cwd.join("stack")
+        );
+        assert_eq!(
+            launch_folder_of(&cwd, &args(&["serve", "--project", abs])),
+            PathBuf::from(abs)
+        );
+        assert_eq!(
+            launch_folder_of(&cwd, &args(&["serve", &format!("--project={abs}")])),
+            PathBuf::from(abs)
+        );
         // A command given as one shell string.
-        assert_eq!(launch_folder_of(&cwd, &args(&["/C", "chappa-stack serve --project stack --slot 1"])), cwd.join("stack"));
+        assert_eq!(
+            launch_folder_of(
+                &cwd,
+                &args(&["/C", "chappa-stack serve --project stack --slot 1"])
+            ),
+            cwd.join("stack")
+        );
         // Not the flag: a longer word, or no value after it.
         assert_eq!(launch_folder_of(&cwd, &args(&["--projects", "x"])), cwd);
         assert_eq!(launch_folder_of(&cwd, &args(&["serve", "--project"])), cwd);
     }
 
     /// A source with a Work view whose payload is `work`, under `key`.
-    fn put_work(sources: &Sources, key: &str, manifest: Value, work: Option<Value>, trusted: bool) -> String {
-        let mut state = fresh_state(key, Origin::Attached { addr: "127.0.0.1:1".into(), token_file: PathBuf::from("t"), warning: None });
+    fn put_work(
+        sources: &Sources,
+        key: &str,
+        manifest: Value,
+        work: Option<Value>,
+        trusted: bool,
+    ) -> String {
+        let mut state = fresh_state(
+            key,
+            Origin::Attached {
+                addr: "127.0.0.1:1".into(),
+                token_file: PathBuf::from("t"),
+                warning: None,
+            },
+        );
         state.trusted = trusted;
         state.status = SourceStatus::Up;
         state.manifest = Some(parse_manifest(&manifest).unwrap());
@@ -2797,18 +3576,51 @@ mod tests {
             m
         };
         let overlay = json!({"items": [{"ref": {"source": "tracker", "key": "ABC-1"}}]});
-        let asks = put_work(&sources, "a-asks", manifest("ws", true), Some(overlay.clone()), true);
-        put_work(&sources, "b-silent", manifest("other", false), Some(overlay.clone()), true);
-        put_work(&sources, "c-untrusted", manifest("third", true), Some(overlay.clone()), false);
+        let asks = put_work(
+            &sources,
+            "a-asks",
+            manifest("ws", true),
+            Some(overlay.clone()),
+            true,
+        );
+        put_work(
+            &sources,
+            "b-silent",
+            manifest("other", false),
+            Some(overlay.clone()),
+            true,
+        );
+        put_work(
+            &sources,
+            "c-untrusted",
+            manifest("third", true),
+            Some(overlay.clone()),
+            false,
+        );
         put_work(&sources, "tracker", manifest("tracker", false), None, true);
         let row = |status: &str| json!({"items": [{"key": "ABC-1", "status": {"label": status}}]});
-        let poll = |status: &str| sources.apply_poll("tracker", 0, "work", Duration::from_secs(60), Ok(row(status)));
+        let poll = |status: &str| {
+            sources.apply_poll(
+                "tracker",
+                0,
+                "work",
+                Duration::from_secs(60),
+                Ok(row(status)),
+            )
+        };
         assert!(!poll("To Do"));
         let queued = |sources: &Sources| sources.lock().owner_queue.len();
-        assert_eq!(queued(&sources), 1, "only the trusted overlay asking for them");
+        assert_eq!(
+            queued(&sources),
+            1,
+            "only the trusted overlay asking for them"
+        );
         let batch = sources.lock().owner_queue.take();
         assert_eq!(batch[0].target, asks);
-        assert_eq!(batch[0].body(), json!({"source": "tracker", "key": "ABC-1", "item": {"key": "ABC-1", "status": {"label": "To Do"}}}));
+        assert_eq!(
+            batch[0].body(),
+            json!({"source": "tracker", "key": "ABC-1", "item": {"key": "ABC-1", "status": {"label": "To Do"}}})
+        );
         // The same row on the next poll: nothing; a changed one: queued.
         assert!(!poll("To Do"));
         assert_eq!(queued(&sources), 0);
@@ -2816,10 +3628,22 @@ mod tests {
         assert_eq!(queued(&sources), 1);
         // A failed poll queues nothing.
         let _ = sources.lock().owner_queue.take();
-        assert!(!sources.apply_poll("tracker", 0, "work", Duration::from_secs(60), Err(SourceError::Unreachable("down".into()))));
+        assert!(!sources.apply_poll(
+            "tracker",
+            0,
+            "work",
+            Duration::from_secs(60),
+            Err(SourceError::Unreachable("down".into()))
+        ));
         assert_eq!(queued(&sources), 0);
         // An overlay re-trusted hears every row once more.
-        sources.lock().sources.get_mut("a-asks").unwrap().owner_sent.clear();
+        sources
+            .lock()
+            .sources
+            .get_mut("a-asks")
+            .unwrap()
+            .owner_sent
+            .clear();
         assert!(!poll("Doing"));
         assert_eq!(queued(&sources), 1);
     }
@@ -2835,7 +3659,11 @@ mod tests {
 
     /// A manifest with id `id`; `environment` = it serves that view.
     fn manifest_of(id: &str, label: &str, environment: bool) -> Manifest {
-        let views = if environment { json!({"environment": {"list": "/api/env"}}) } else { json!({"work": {"list": "/w"}}) };
+        let views = if environment {
+            json!({"environment": {"list": "/api/env"}})
+        } else {
+            json!({"work": {"list": "/w"}})
+        };
         parse_manifest(&json!({"contract": 1, "source": {"id": id, "label": label, "version": "1"}, "views": views})).unwrap()
     }
 
@@ -2844,24 +3672,34 @@ mod tests {
     fn manifest_arrives(sources: &Sources, key: &str, manifest: Manifest) {
         let mut inner = sources.lock();
         let hash = manifest::trust_hash(&manifest);
-        let trusted = inner.store.as_ref().is_some_and(|s| s.is_trusted(key, &hash));
+        let trusted = inner
+            .store
+            .as_ref()
+            .is_some_and(|s| s.is_trusted(key, &hash));
         let state = inner.sources.get_mut(key).unwrap();
         for (name, v) in &manifest.views {
-            state.views.entry(name.clone()).or_insert_with(|| ViewState {
-                endpoint: v.list.clone(),
-                poll: v.poll,
-                payload: None,
-                as_of_ms: None,
-                next_due_ms: 0,
-                refreshing: false,
-                failures: 0,
-                last_error: None,
-            });
+            state
+                .views
+                .entry(name.clone())
+                .or_insert_with(|| ViewState {
+                    endpoint: v.list.clone(),
+                    poll: v.poll,
+                    payload: None,
+                    as_of_ms: None,
+                    next_due_ms: 0,
+                    refreshing: false,
+                    failures: 0,
+                    last_error: None,
+                });
         }
         state.trust = Some(trust_summary(&manifest));
         state.manifest = Some(manifest);
         state.trusted = trusted;
-        state.status = if trusted { SourceStatus::Starting } else { SourceStatus::NeedsReview };
+        state.status = if trusted {
+            SourceStatus::Starting
+        } else {
+            SourceStatus::NeedsReview
+        };
         remember_kind(&mut inner, key);
     }
 
@@ -2877,7 +3715,16 @@ mod tests {
 
     fn answer_as(sources: &Sources, key: &str, payload: Value) {
         let generation = sources.lock().sources[key].generation;
-        assert!(!sources.apply_poll(key, generation, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(payload)), "not cancelled");
+        assert!(
+            !sources.apply_poll(
+                key,
+                generation,
+                ENVIRONMENT_VIEW,
+                Duration::from_secs(120),
+                Ok(payload)
+            ),
+            "not cancelled"
+        );
     }
 
     fn kept(config: &Path, key: &str) -> (bool, bool) {
@@ -2898,7 +3745,9 @@ mod tests {
     }
 
     fn undeclared_mark(config: &Path, key: &str) -> bool {
-        VerdictStore::beside(&config.join(store::FILE_NAME)).undeclared(&source_id_of(key)).is_some()
+        VerdictStore::beside(&config.join(store::FILE_NAME))
+            .undeclared(&source_id_of(key))
+            .is_some()
     }
 
     #[test]
@@ -2927,7 +3776,9 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert!(
             blocks[0].reason.starts_with("last known: db: 1 finding")
-                && blocks[0].reason.ends_with(", source removed — trust the new chappa.yml to lift"),
+                && blocks[0]
+                    .reason
+                    .ends_with(", source removed — trust the new chappa.yml to lift"),
             "{}",
             blocks[0].reason
         );
@@ -2936,7 +3787,9 @@ mod tests {
         assert!(undeclared_mark(&config, &key));
         // Across a restart too.
         let restarted = started(&config);
-        assert!(restarted.data_safety_blocks()[0].reason.contains("source removed"));
+        assert!(restarted.data_safety_blocks()[0]
+            .reason
+            .contains("source removed"));
         // Trust for another project's content changes nothing.
         restarted.content_trusted(&project.join("elsewhere"), &[]);
         assert!(crate::data_safety::check_launch(&restarted, &inside).is_err());
@@ -2946,7 +3799,10 @@ mod tests {
         assert!(crate::data_safety::check_launch(&restarted, &inside).is_ok());
         assert_eq!(kept(&config, &key), (false, false));
         assert!(!undeclared_mark(&config, &key));
-        assert!(started(&config).data_safety_blocks().is_empty(), "and it is not back after a restart");
+        assert!(
+            started(&config).data_safety_blocks().is_empty(),
+            "and it is not back after a restart"
+        );
         // Its trust record stays: declared again, the same manifest is trusted.
         let again = started(&config);
         let key = launch(&again, &project, "stack");
@@ -2968,7 +3824,9 @@ mod tests {
         first.content_trusted(&project, &["stack".to_owned()]);
         assert_eq!(kept(&config, &key), (true, true));
         assert!(!undeclared_mark(&config, &key));
-        assert!(first.data_safety_blocks()[0].reason.ends_with(", source unavailable"));
+        assert!(first.data_safety_blocks()[0]
+            .reason
+            .ends_with(", source unavailable"));
         // Removed, then launched again: the same.
         first.undeclare_launched(&project, "stack");
         assert!(undeclared_mark(&config, &key));
@@ -2977,7 +3835,10 @@ mod tests {
         assert!(crate::data_safety::check_launch(&first, &inside).is_err());
         // A source with nothing kept leaves no mark.
         first.undeclare_launched(&project, "fresh");
-        assert!(!undeclared_mark(&config, &SourceStore::launched_key(&project, "fresh")));
+        assert!(!undeclared_mark(
+            &config,
+            &SourceStore::launched_key(&project, "fresh")
+        ));
     }
 
     #[test]
@@ -3021,7 +3882,11 @@ mod tests {
         let first = started(&config);
         let key = launch(&first, &project, "stack");
         manifest_arrives(&first, &key, manifest_of("stack:app", "Stack app", true));
-        assert_eq!(kept(&config, &key), (false, false), "not trusted yet: nothing remembered");
+        assert_eq!(
+            kept(&config, &key),
+            (false, false),
+            "not trusted yet: nothing remembered"
+        );
         trust_shown(&first, &key);
         assert_eq!(kept(&config, &key), (false, true));
         first.process_gone(&project, "stack", "exited with code 1");
@@ -3035,12 +3900,22 @@ mod tests {
         let blocks = second.data_safety_blocks();
         assert_eq!(blocks.len(), 1);
         assert_eq!(
-            (blocks[0].state.as_str(), blocks[0].instance.as_str(), blocks[0].source_label.as_str()),
+            (
+                blocks[0].state.as_str(),
+                blocks[0].instance.as_str(),
+                blocks[0].source_label.as_str()
+            ),
             (crate::data_safety::UNHEARD_STATE, "app", "Stack app")
         );
-        assert_eq!(blocks[0].reason, crate::data_safety::unheard_reason("Stack app"));
+        assert_eq!(
+            blocks[0].reason,
+            crate::data_safety::unheard_reason("Stack app")
+        );
         assert!(crate::data_safety::check_launch(&second, &inside).is_err());
-        assert!(crate::data_safety::check_launch(&second, project.parent().unwrap()).is_ok(), "outside its folder");
+        assert!(
+            crate::data_safety::check_launch(&second, project.parent().unwrap()).is_ok(),
+            "outside its folder"
+        );
         // Its launch folder, when it names another, is what is covered.
         let elsewhere = project.parent().unwrap().join("served");
         std::fs::create_dir_all(&elsewhere).unwrap();
@@ -3083,7 +3958,10 @@ mod tests {
         let restarted = started(&config);
         launch(&restarted, &project, "tracker");
         launch(&restarted, &project, "plain");
-        assert!(restarted.data_safety_blocks().is_empty(), "a non-stack source never blocks");
+        assert!(
+            restarted.data_safety_blocks().is_empty(),
+            "a non-stack source never blocks"
+        );
 
         // A stack, remembered.
         let second = started(&config);
@@ -3096,20 +3974,39 @@ mod tests {
         let third = started(&config);
         let key = launch(&third, &project, "stack");
         manifest_arrives(&third, &key, manifest_of("stack:app2", "Stack two", true));
-        assert!(!third.lock().sources[&key].trusted, "a changed hash asks again");
+        assert!(
+            !third.lock().sources[&key].trusted,
+            "a changed hash asks again"
+        );
         trust_shown(&third, &key);
-        let remembered = VerdictStore::beside(&config.join(store::FILE_NAME)).stack(&source_id_of(&key)).cloned().unwrap();
-        assert_eq!((remembered.manifest_id.as_str(), remembered.source_label.as_str()), ("stack:app2", "Stack two"));
+        let remembered = VerdictStore::beside(&config.join(store::FILE_NAME))
+            .stack(&source_id_of(&key))
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            (
+                remembered.manifest_id.as_str(),
+                remembered.source_label.as_str()
+            ),
+            ("stack:app2", "Stack two")
+        );
 
         // A changed manifest that is NOT a stack: until it is trusted the
         // flag holds (and so does the block); trusting it clears both.
         let fourth = started(&config);
         let key = launch(&fourth, &project, "stack");
         manifest_arrives(&fourth, &key, manifest_of("tracker", "Tracker", true));
-        assert_eq!(fourth.lock().sources[&key].status, SourceStatus::NeedsReview);
+        assert_eq!(
+            fourth.lock().sources[&key].status,
+            SourceStatus::NeedsReview
+        );
         let blocks = fourth.data_safety_blocks();
         assert_eq!(blocks.len(), 1);
-        assert_eq!((blocks[0].instance.as_str(), blocks[0].source_label.as_str()), ("app2", "Stack two"), "named after what was trusted");
+        assert_eq!(
+            (blocks[0].instance.as_str(), blocks[0].source_label.as_str()),
+            ("app2", "Stack two"),
+            "named after what was trusted"
+        );
         assert!(crate::data_safety::check_launch(&fourth, &inside).is_err());
         trust_shown(&fourth, &key);
         assert!(fourth.data_safety_blocks().is_empty());

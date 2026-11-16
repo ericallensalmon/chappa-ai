@@ -9,7 +9,11 @@
 /// through [`shell_words`]). A bare word — Windows paths with backslashes
 /// included — is left alone: backslash is literal outside quotes.
 pub fn quote_word(word: &str) -> String {
-    if word.is_empty() || word.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+    if word.is_empty()
+        || word
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
         let escaped = word.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{escaped}\"")
     } else {
@@ -19,7 +23,11 @@ pub fn quote_word(word: &str) -> String {
 
 /// Render a word list as one line, each word quoted as needed.
 pub fn join_words<S: AsRef<str>>(words: &[S]) -> String {
-    words.iter().map(|w| quote_word(w.as_ref())).collect::<Vec<_>>().join(" ")
+    words
+        .iter()
+        .map(|w| quote_word(w.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Shell-words split: whitespace separates, single quotes are literal, double

@@ -1,7 +1,8 @@
 //! Tests for the OSC pre-scan scanner (deliverables).
 
 use term_core::scanner::{
-    cap_summary, KittyEvent, OscEvent, OscScanner, PromptMarkKind, SUMMARY_MAX_BYTES, SUMMARY_TRUNCATED_MARKER,
+    cap_summary, KittyEvent, OscEvent, OscScanner, PromptMarkKind, SUMMARY_MAX_BYTES,
+    SUMMARY_TRUNCATED_MARKER,
 };
 use term_core::status::ProgramStatus;
 
@@ -62,10 +63,18 @@ fn osc_777_session_announces_an_id() {
     let mut s = OscScanner::new();
     assert_eq!(
         s.feed(b"]777;session;f1c70000-0000-4000-8000-000000000000"),
-        vec![OscEvent::Session("f1c70000-0000-4000-8000-000000000000".into())]
+        vec![OscEvent::Session(
+            "f1c70000-0000-4000-8000-000000000000".into()
+        )]
     );
-    assert_eq!(s.feed(b"]777;session; ses_abc;v2 \\"), vec![OscEvent::Session("ses_abc;v2".into())]);
-    assert!(s.feed(b"]777;session;").is_empty(), "an empty id is not a session");
+    assert_eq!(
+        s.feed(b"]777;session; ses_abc;v2 \\"),
+        vec![OscEvent::Session("ses_abc;v2".into())]
+    );
+    assert!(
+        s.feed(b"]777;session;").is_empty(),
+        "an empty id is not a session"
+    );
     assert!(s.feed(b"]777;session").is_empty());
     let split = feed_one_byte_at_a_time(&mut s, b"]777;session;abc\\");
     assert_eq!(split, vec![OscEvent::Session("abc".into())]);
@@ -87,8 +96,16 @@ fn osc_777_status_reports_each_state() {
         ("failed", ProgramStatus::Failed),
         ("idle", ProgramStatus::Idle),
     ] {
-        assert_eq!(s.feed(format!("\x1b]777;status;{word}\x07").as_bytes()), status(state), "{word} BEL");
-        assert_eq!(s.feed(format!("out \x1b]777;status;{word}\x1b\\ more").as_bytes()), status(state), "{word} ST");
+        assert_eq!(
+            s.feed(format!("\x1b]777;status;{word}\x07").as_bytes()),
+            status(state),
+            "{word} BEL"
+        );
+        assert_eq!(
+            s.feed(format!("out \x1b]777;status;{word}\x1b\\ more").as_bytes()),
+            status(state),
+            "{word} ST"
+        );
         assert_eq!(state.as_str(), word);
     }
     let split = feed_one_byte_at_a_time(&mut s, b"\x1b]777;status;blocked\x1b\\");
@@ -118,12 +135,26 @@ fn osc_777_status_ignores_anything_but_the_exact_word() {
         "waiting",
         "",
     ] {
-        assert!(s.feed(format!("\x1b]777;status;{bad}\x07").as_bytes()).is_empty(), "{bad:?}");
+        assert!(
+            s.feed(format!("\x1b]777;status;{bad}\x07").as_bytes())
+                .is_empty(),
+            "{bad:?}"
+        );
     }
     assert!(s.feed(b"\x1b]777;status\x07").is_empty(), "no value field");
-    assert!(s.feed(b"\x1b]777;statuses;done\x07").is_empty(), "not the sub-key");
-    assert!(s.feed(b"\x1b]777;Status;done\x07").is_empty(), "sub-key is case-sensitive too");
-    assert_eq!(s.feed(b"\x1b]777;status;idle\x07"), status(ProgramStatus::Idle), "still scanning");
+    assert!(
+        s.feed(b"\x1b]777;statuses;done\x07").is_empty(),
+        "not the sub-key"
+    );
+    assert!(
+        s.feed(b"\x1b]777;Status;done\x07").is_empty(),
+        "sub-key is case-sensitive too"
+    );
+    assert_eq!(
+        s.feed(b"\x1b]777;status;idle\x07"),
+        status(ProgramStatus::Idle),
+        "still scanning"
+    );
 }
 
 fn summary(text: &str) -> Vec<OscEvent> {
@@ -136,7 +167,10 @@ fn summary(text: &str) -> Vec<OscEvent> {
 #[test]
 fn osc_777_summary_carries_the_text() {
     let mut s = OscScanner::new();
-    assert_eq!(s.feed(b"\x1b]777;summary;build ok, 3 warnings\x07"), summary("build ok, 3 warnings"));
+    assert_eq!(
+        s.feed(b"\x1b]777;summary;build ok, 3 warnings\x07"),
+        summary("build ok, 3 warnings")
+    );
     assert_eq!(
         s.feed(b"out \x1b]777;summary;# Done\r\n\r\n- a; b\n- `c`\n\x1b\\ more"),
         summary("# Done\n\n- a; b\n- `c`")
@@ -146,7 +180,10 @@ fn osc_777_summary_carries_the_text() {
     assert!(s.feed(b"\x1b]777;summary;\x07").is_empty(), "empty");
     assert!(s.feed(b"\x1b]777;summary; \n \x07").is_empty(), "blank");
     assert!(s.feed(b"\x1b]777;summary\x07").is_empty(), "no text field");
-    assert!(s.feed(b"\x1b]777;summarize;x\x07").is_empty(), "not the sub-key");
+    assert!(
+        s.feed(b"\x1b]777;summarize;x\x07").is_empty(),
+        "not the sub-key"
+    );
     // A CAN aborts it the way the terminal's own parser does; what was
     // collected so far is still the summary.
     assert_eq!(s.feed(b"\x1b]777;summary;cut\x18short"), summary("cut"));
@@ -166,12 +203,28 @@ fn osc_777_summary_truncates_at_its_cap() {
     // Multi-byte characters straddle the cut point.
     let long = "é".repeat(SUMMARY_MAX_BYTES);
     let ev = s.feed(format!("\x1b]777;summary;{long}\x07\x1b]9;next\x07").as_bytes());
-    assert_eq!(ev.len(), 2, "{:?}", ev.iter().map(std::mem::discriminant).collect::<Vec<_>>());
-    let OscEvent::Summary { text } = &ev[0] else { panic!("not a summary") };
+    assert_eq!(
+        ev.len(),
+        2,
+        "{:?}",
+        ev.iter().map(std::mem::discriminant).collect::<Vec<_>>()
+    );
+    let OscEvent::Summary { text } = &ev[0] else {
+        panic!("not a summary")
+    };
     assert!(text.len() <= SUMMARY_MAX_BYTES, "{}", text.len());
     assert!(text.ends_with(SUMMARY_TRUNCATED_MARKER));
-    assert!(text.trim_end_matches(SUMMARY_TRUNCATED_MARKER).chars().all(|c| c == 'é'));
-    assert_eq!(ev[1], OscEvent::Notify { title: None, body: "next".into() });
+    assert!(text
+        .trim_end_matches(SUMMARY_TRUNCATED_MARKER)
+        .chars()
+        .all(|c| c == 'é'));
+    assert_eq!(
+        ev[1],
+        OscEvent::Notify {
+            title: None,
+            body: "next".into()
+        }
+    );
 
     // Other payloads keep the generic cap: an oversized notify is dropped.
     let big = "y".repeat(5000);
@@ -182,7 +235,10 @@ fn osc_777_summary_truncates_at_its_cap() {
 #[test]
 fn cap_summary_normalizes_and_caps() {
     assert_eq!(cap_summary("\r\n\nok\r\n  "), Some("ok".into()));
-    assert_eq!(cap_summary("  indented\nkept"), Some("  indented\nkept".into()));
+    assert_eq!(
+        cap_summary("  indented\nkept"),
+        Some("  indented\nkept".into())
+    );
     assert_eq!(cap_summary(" \n\t"), None);
     let capped = cap_summary(&"z".repeat(SUMMARY_MAX_BYTES + 1)).unwrap();
     assert_eq!(capped.len(), SUMMARY_MAX_BYTES);
@@ -549,7 +605,10 @@ fn kitty_set_form() {
             OscEvent::Kitty(KittyEvent::Set(1, 3)),
         ]
     );
-    assert!(s.feed(b"\x1b[=1;4u").is_empty(), "mode 4 is not a kitty form");
+    assert!(
+        s.feed(b"\x1b[=1;4u").is_empty(),
+        "mode 4 is not a kitty form"
+    );
     assert!(s.feed(b"\x1b[=u").is_empty(), "flags are required");
     assert!(
         s.feed(b"\x1b[=1;2;3u").is_empty(),

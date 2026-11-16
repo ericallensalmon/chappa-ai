@@ -26,11 +26,52 @@ pub const ANY_PORT: &str = ":*";
 /// labels (`com`, `test`, `dev`, …) need no entry: they are refused by the
 /// two-label rule.
 pub const PUBLIC_SUFFIXES: &[&str] = &[
-    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "com.au", "net.au", "org.au", "edu.au", "gov.au",
-    "co.nz", "org.nz", "co.jp", "ne.jp", "or.jp", "co.kr", "or.kr", "com.br", "com.cn", "net.cn", "org.cn", "com.mx",
-    "co.in", "co.za", "com.tr", "com.tw", "com.hk", "com.sg", "github.io", "gitlab.io", "pages.dev", "workers.dev",
-    "vercel.app", "netlify.app", "herokuapp.com", "appspot.com", "blogspot.com", "azurewebsites.net", "cloudfront.net",
-    "amazonaws.com", "web.app", "firebaseapp.com", "ngrok.io", "ngrok-free.app",
+    "co.uk",
+    "org.uk",
+    "ac.uk",
+    "gov.uk",
+    "me.uk",
+    "ltd.uk",
+    "plc.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "edu.au",
+    "gov.au",
+    "co.nz",
+    "org.nz",
+    "co.jp",
+    "ne.jp",
+    "or.jp",
+    "co.kr",
+    "or.kr",
+    "com.br",
+    "com.cn",
+    "net.cn",
+    "org.cn",
+    "com.mx",
+    "co.in",
+    "co.za",
+    "com.tr",
+    "com.tw",
+    "com.hk",
+    "com.sg",
+    "github.io",
+    "gitlab.io",
+    "pages.dev",
+    "workers.dev",
+    "vercel.app",
+    "netlify.app",
+    "herokuapp.com",
+    "appspot.com",
+    "blogspot.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "amazonaws.com",
+    "web.app",
+    "firebaseapp.com",
+    "ngrok.io",
+    "ngrok-free.app",
 ];
 
 /// The host of an any-port entry (`dev.example.test:*` → `dev.example.test`,
@@ -53,7 +94,9 @@ pub fn check_any_port_host(host: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(inner) = host.strip_prefix('[') {
-        let inner = inner.strip_suffix(']').ok_or("an IPv6 host must be closed with `]`")?;
+        let inner = inner
+            .strip_suffix(']')
+            .ok_or("an IPv6 host must be closed with `]`")?;
         return match inner.parse::<IpAddr>() {
             Ok(IpAddr::V6(_)) => Ok(()),
             _ => Err(format!("`{host}` is not an IPv6 address")),
@@ -69,14 +112,19 @@ pub fn check_any_port_host(host: &str) -> Result<(), String> {
     if labels.iter().any(|l| l.is_empty()) {
         return Err(format!("`{host}` has an empty label"));
     }
-    if labels.iter().any(|l| !l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+    if labels
+        .iter()
+        .any(|l| !l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    {
         return Err(format!("`{host}` is not a host name"));
     }
     if labels.len() < 2 {
         return Err(format!("`{host}` is a single label (a top-level domain or a bare name); a port wildcard needs a host such as `dev.example.test`"));
     }
     if PUBLIC_SUFFIXES.contains(&host.as_str()) {
-        return Err(format!("`{host}` is a public suffix that unrelated sites share"));
+        return Err(format!(
+            "`{host}` is a public suffix that unrelated sites share"
+        ));
     }
     Ok(())
 }
@@ -96,8 +144,23 @@ mod tests {
 
     #[test]
     fn any_port_hosts_are_accepted_on_a_named_party_only() {
-        for ok in ["localhost", "127.0.0.1", "[::1]", "192.0.2.7", "[2001:db8::1]", "dev.example.test", "example.com", "a.b.c.example.com", "Dev.Example.Test", "api-1.example.test"] {
-            assert!(check_any_port_host(ok).is_ok(), "{ok} must be accepted: {:?}", check_any_port_host(ok));
+        for ok in [
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+            "192.0.2.7",
+            "[2001:db8::1]",
+            "dev.example.test",
+            "example.com",
+            "a.b.c.example.com",
+            "Dev.Example.Test",
+            "api-1.example.test",
+        ] {
+            assert!(
+                check_any_port_host(ok).is_ok(),
+                "{ok} must be accepted: {:?}",
+                check_any_port_host(ok)
+            );
         }
         let refused = [
             ("", "needs a host"),
@@ -124,7 +187,10 @@ mod tests {
 
     #[test]
     fn entries_are_recognised_and_described() {
-        assert_eq!(any_port_host("Dev.Example.Test:*").as_deref(), Some("dev.example.test"));
+        assert_eq!(
+            any_port_host("Dev.Example.Test:*").as_deref(),
+            Some("dev.example.test")
+        );
         assert_eq!(any_port_host("[::1]:*").as_deref(), Some("[::1]"));
         assert_eq!(any_port_host("dev.example.test:8443"), None);
         assert_eq!(any_port_host("dev.example.test"), None);

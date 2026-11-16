@@ -149,7 +149,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(provider: impl Into<String>, session_id: impl Into<String>, source: SessionSource, captured_at_ms: u64) -> Self {
+    pub fn new(
+        provider: impl Into<String>,
+        session_id: impl Into<String>,
+        source: SessionSource,
+        captured_at_ms: u64,
+    ) -> Self {
         Self {
             provider: provider.into(),
             session_id: session_id.into(),
@@ -162,7 +167,11 @@ impl Session {
     /// The last four characters of the id — what a row label shows.
     pub fn short_id(&self) -> &str {
         let n = self.session_id.len();
-        let cut = self.session_id.char_indices().map(|(i, _)| i).nth(n.saturating_sub(4).min(n));
+        let cut = self
+            .session_id
+            .char_indices()
+            .map(|(i, _)| i)
+            .nth(n.saturating_sub(4).min(n));
         &self.session_id[cut.unwrap_or(0)..]
     }
 }
@@ -224,9 +233,17 @@ pub struct Run {
     /// The run's summary, posted by the process itself. Read leniently: a
     /// file written while this slot was still an untyped reservation (any
     /// JSON) loads instead of failing the whole store.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "summary_text")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "summary_text"
+    )]
     pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
     pub summary_source: Option<SummarySource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
@@ -243,7 +260,9 @@ fn summary_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>
 }
 
 /// Any value this build does not understand reads as absent.
-fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<Option<T>, D::Error> {
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
     Ok(serde_json::from_value(Value::deserialize(d)?).ok())
 }
 
@@ -266,7 +285,13 @@ impl Run {
     }
 
     /// The child exited: record the outcome and the automatic tail.
-    pub fn finish(&mut self, ended_at_ms: u64, exit_code: Option<i32>, success: bool, tail: Vec<Value>) {
+    pub fn finish(
+        &mut self,
+        ended_at_ms: u64,
+        exit_code: Option<i32>,
+        success: bool,
+        tail: Vec<Value>,
+    ) {
         self.status = if success {
             ProcessStatus::Exited
         } else {
@@ -307,7 +332,10 @@ impl Run {
     /// True while no end has been recorded — the only state a late fact may
     /// still land on.
     pub fn is_open(&self) -> bool {
-        matches!(self.status, ProcessStatus::Starting | ProcessStatus::Running)
+        matches!(
+            self.status,
+            ProcessStatus::Starting | ProcessStatus::Running
+        )
     }
 
     /// A run still `running` when the app starts was interrupted by a crash
@@ -355,9 +383,17 @@ pub struct RunHead {
     pub success: Option<bool>,
     pub tail_kind: TailKind,
     pub tail_len: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "summary_text")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "summary_text"
+    )]
     pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
     pub summary_source: Option<SummarySource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
@@ -377,7 +413,11 @@ pub enum RunUpdate {
 
 /// Apply `edit` to `last_run` when it is the run `run_uuid` names and still
 /// open — the one rule every late fact goes through.
-pub fn update_run(last_run: Option<&mut Run>, run_uuid: &str, edit: impl FnOnce(&mut Run)) -> RunUpdate {
+pub fn update_run(
+    last_run: Option<&mut Run>,
+    run_uuid: &str,
+    edit: impl FnOnce(&mut Run),
+) -> RunUpdate {
     match last_run {
         Some(run) if run.run_uuid == run_uuid && run.is_open() => {
             edit(run);
@@ -542,7 +582,10 @@ pub fn prune_job_records(jobs: &mut Vec<JobRecord>) -> Vec<String> {
     while jobs.len() > JOB_RECORDS_RETAINED {
         // Records are appended in creation order: the first finished one is
         // the oldest.
-        match jobs.iter().position(|j| !j.last_run.as_ref().is_some_and(Run::is_open)) {
+        match jobs
+            .iter()
+            .position(|j| !j.last_run.as_ref().is_some_and(Run::is_open))
+        {
             Some(i) => dropped.push(jobs.remove(i).record_id),
             None => break,
         }
@@ -621,8 +664,10 @@ mod tests {
     #[test]
     fn an_agent_patch_tells_a_cleared_level_from_an_absent_one() {
         let keep: AgentRecordPatch = serde_json::from_value(json!({"favorite": true})).unwrap();
-        let clear: AgentRecordPatch = serde_json::from_value(json!({"notification_level": null})).unwrap();
-        let set: AgentRecordPatch = serde_json::from_value(json!({"notification_level": "important"})).unwrap();
+        let clear: AgentRecordPatch =
+            serde_json::from_value(json!({"notification_level": null})).unwrap();
+        let set: AgentRecordPatch =
+            serde_json::from_value(json!({"notification_level": "important"})).unwrap();
         assert_eq!(keep.notification_level, None);
         assert_eq!(clear.notification_level, Some(None));
         assert_eq!(set.notification_level, Some(Some("important".into())));
@@ -639,9 +684,15 @@ mod tests {
 
     #[test]
     fn an_agent_patch_refuses_a_blank_name_or_an_unknown_level() {
-        let blank = AgentRecordPatch { name: Some("   ".into()), ..Default::default() };
+        let blank = AgentRecordPatch {
+            name: Some("   ".into()),
+            ..Default::default()
+        };
         assert!(blank.validate().is_err());
-        let level = AgentRecordPatch { notification_level: Some(Some("loud".into())), ..Default::default() };
+        let level = AgentRecordPatch {
+            notification_level: Some(Some("loud".into())),
+            ..Default::default()
+        };
         assert!(level.validate().is_err());
         let ok = AgentRecordPatch {
             name: Some("  reviewer ".into()),
@@ -678,7 +729,8 @@ mod tests {
         assert_eq!(back.head().tail_len, 2);
 
         let sparse: Run =
-            serde_json::from_str(r#"{"run_uuid":"r2","status":"running","started_at_ms":5}"#).unwrap();
+            serde_json::from_str(r#"{"run_uuid":"r2","status":"running","started_at_ms":5}"#)
+                .unwrap();
         assert_eq!(sparse.tail_kind, TailKind::Text);
         assert!(sparse.tail.is_empty());
         assert_eq!(sparse.summary, None);
@@ -695,7 +747,10 @@ mod tests {
         assert_eq!(future.head().summary, future.summary);
         assert_eq!(future.head().summary_source, Some(SummarySource::Mcp));
         let session = future.session.as_ref().unwrap();
-        assert_eq!((session.provider.as_str(), session.session_id.as_str()), ("claude", "ses-y"));
+        assert_eq!(
+            (session.provider.as_str(), session.session_id.as_str()),
+            ("claude", "ses-y")
+        );
         assert_eq!(session.source, SessionSource::Json);
         assert_eq!(session.resumed_from, None);
         assert_eq!(session.short_id(), "es-y");
@@ -713,21 +768,33 @@ mod tests {
             r#"{"run_uuid":"r","status":"exited","started_at_ms":1,"summary":{"text":"kept","source":"x"},"summary_source":"carrier-pigeon"}"#,
         )
         .unwrap();
-        assert_eq!((old.summary.as_deref(), old.summary_source), (Some("kept"), None));
+        assert_eq!(
+            (old.summary.as_deref(), old.summary_source),
+            (Some("kept"), None)
+        );
         let odd: RunHead = serde_json::from_str(
             r#"{"run_uuid":"r","status":"exited","started_at_ms":1,"ended_at_ms":null,"exit_code":null,"success":null,"tail_kind":"text","tail_len":0,"summary":[1,2]}"#,
         )
         .unwrap();
         assert_eq!(odd.summary, None);
         let absent = serde_json::to_value(Run::begin("r", 1, TailKind::Text)).unwrap();
-        assert!(absent.get("summary").is_none() && absent.get("summary_source").is_none(), "absent stays absent");
+        assert!(
+            absent.get("summary").is_none() && absent.get("summary_source").is_none(),
+            "absent stays absent"
+        );
 
         let mut run = Run::begin("r", 1, TailKind::Text);
         run.set_summary("draft", SummarySource::Osc);
         run.set_summary("final", SummarySource::Mcp);
-        assert_eq!((run.summary.as_deref(), run.summary_source), (Some("final"), Some(SummarySource::Mcp)));
+        assert_eq!(
+            (run.summary.as_deref(), run.summary_source),
+            (Some("final"), Some(SummarySource::Mcp))
+        );
         let v = serde_json::to_value(&run).unwrap();
-        assert_eq!((v["summary"].as_str(), v["summary_source"].as_str()), (Some("final"), Some("mcp")));
+        assert_eq!(
+            (v["summary"].as_str(), v["summary_source"].as_str()),
+            (Some("final"), Some("mcp"))
+        );
     }
 
     /// A later sighting of the session replaces the id, and the id a run was
@@ -740,11 +807,25 @@ mod tests {
         run.set_session(asked);
         run.set_session(Session::new("claude", "old-id", SessionSource::Json, 2));
         let s = run.session.as_ref().unwrap();
-        assert_eq!((s.source, s.resumed_from.as_deref()), (SessionSource::Json, Some("old-id")));
-        run.set_session(Session::new("claude", "new-id", SessionSource::Announced, 3));
+        assert_eq!(
+            (s.source, s.resumed_from.as_deref()),
+            (SessionSource::Json, Some("old-id"))
+        );
+        run.set_session(Session::new(
+            "claude",
+            "new-id",
+            SessionSource::Announced,
+            3,
+        ));
         let s = run.session.as_ref().unwrap();
-        assert_eq!((s.session_id.as_str(), s.resumed_from.as_deref()), ("new-id", Some("old-id")));
-        assert_eq!(Session::new("x", "ab", SessionSource::Mcp, 0).short_id(), "ab");
+        assert_eq!(
+            (s.session_id.as_str(), s.resumed_from.as_deref()),
+            ("new-id", Some("old-id"))
+        );
+        assert_eq!(
+            Session::new("x", "ab", SessionSource::Mcp, 0).short_id(),
+            "ab"
+        );
         assert_eq!(run.head().session, run.session);
     }
 
@@ -758,7 +839,10 @@ mod tests {
             update_run(head.as_mut(), "old", |r| r.stop(9)),
             RunUpdate::Stale
         );
-        assert!(head.as_ref().unwrap().is_open(), "the stale stop touched nothing");
+        assert!(
+            head.as_ref().unwrap().is_open(),
+            "the stale stop touched nothing"
+        );
         assert_eq!(
             update_run(head.as_mut(), "new", |r| r.finish(5, Some(0), true, vec![])),
             RunUpdate::Applied
@@ -766,7 +850,10 @@ mod tests {
         assert_eq!(head.as_ref().unwrap().status, ProcessStatus::Exited);
         // A second fact for the SAME run after it ended is stale too: first
         // writer wins (a close racing an exit cannot turn exited into stopped).
-        assert_eq!(update_run(head.as_mut(), "new", |r| r.stop(6)), RunUpdate::Stale);
+        assert_eq!(
+            update_run(head.as_mut(), "new", |r| r.stop(6)),
+            RunUpdate::Stale
+        );
         assert_eq!(head.as_ref().unwrap().status, ProcessStatus::Exited);
         assert_eq!(update_run(None, "new", |_| {}), RunUpdate::Stale);
     }
@@ -782,7 +869,10 @@ mod tests {
         let changed = reconcile_runs([&mut open, &mut stopped].into_iter());
         assert_eq!(changed, vec!["a".to_owned()]);
         assert_eq!(open.status, ProcessStatus::Exited);
-        assert_eq!((open.exit_code, open.success, open.ended_at_ms), (None, None, None));
+        assert_eq!(
+            (open.exit_code, open.success, open.ended_at_ms),
+            (None, None, None)
+        );
         assert_eq!(open.tail.len(), 1, "whatever tail it had stays");
         assert_eq!(stopped.status, ProcessStatus::Stopped);
     }
@@ -851,9 +941,19 @@ mod tests {
             r#"{"record_id":"r","name":"n","source_id":"s","source_label":"S","action_id":"a","job_id":"j"}"#,
         )
         .unwrap();
-        assert_eq!((sparse.action_label.as_str(), sparse.key.as_ref(), sparse.last_run.as_ref()), ("", None, None));
+        assert_eq!(
+            (
+                sparse.action_label.as_str(),
+                sparse.key.as_ref(),
+                sparse.last_run.as_ref()
+            ),
+            ("", None, None)
+        );
         let stored = StoredRecord::of_job(&j);
-        assert_eq!((stored.kind, stored.job.as_ref()), (RecordKind::Job, Some(&j)));
+        assert_eq!(
+            (stored.kind, stored.job.as_ref()),
+            (RecordKind::Job, Some(&j))
+        );
     }
 
     /// Only agents resume; every kind but a job starts again.
@@ -877,8 +977,9 @@ mod tests {
         assert_eq!(dropped, vec!["done-0".to_owned()]);
         assert_eq!(jobs.len(), JOB_RECORDS_RETAINED);
         assert_eq!(jobs[0].record_id, "open-0", "a running job stays");
-        let mut all_open: Vec<JobRecord> =
-            (0..JOB_RECORDS_RETAINED + 2).map(|i| job(&format!("o{i}"), true)).collect();
+        let mut all_open: Vec<JobRecord> = (0..JOB_RECORDS_RETAINED + 2)
+            .map(|i| job(&format!("o{i}"), true))
+            .collect();
         assert!(prune_job_records(&mut all_open).is_empty());
     }
 }

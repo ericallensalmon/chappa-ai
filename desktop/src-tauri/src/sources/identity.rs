@@ -104,7 +104,8 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn is_lower_hex(s: &str) -> bool {
-    s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -122,7 +123,11 @@ mod tests {
         assert!(vectors.len() >= 5, "the vector file lost entries");
         for v in &vectors {
             let token = decode_token(v["token"].as_str().unwrap()).expect("vector token decodes");
-            let proof = source_proof(&token, v["challenge"].as_str().unwrap(), v["addr"].as_str().unwrap());
+            let proof = source_proof(
+                &token,
+                v["challenge"].as_str().unwrap(),
+                v["addr"].as_str().unwrap(),
+            );
             assert_eq!(proof, v["proof"].as_str().unwrap(), "vector {v}");
         }
     }
@@ -132,17 +137,30 @@ mod tests {
         let token = decode_token(&"ab".repeat(32)).unwrap();
         let base = source_proof(&token, &"01".repeat(32), "127.0.0.1:1");
         assert_eq!(base.len(), 64);
-        assert_ne!(base, source_proof(&decode_token(&"ac".repeat(32)).unwrap(), &"01".repeat(32), "127.0.0.1:1"));
+        assert_ne!(
+            base,
+            source_proof(
+                &decode_token(&"ac".repeat(32)).unwrap(),
+                &"01".repeat(32),
+                "127.0.0.1:1"
+            )
+        );
         assert_ne!(base, source_proof(&token, &"02".repeat(32), "127.0.0.1:1"));
         assert_ne!(base, source_proof(&token, &"01".repeat(32), "127.0.0.1:2"));
         // The separator keeps the two fields apart.
-        assert_ne!(source_proof(&token, "ab", "c"), source_proof(&token, "a", "bc"));
+        assert_ne!(
+            source_proof(&token, "ab", "c"),
+            source_proof(&token, "a", "bc")
+        );
     }
 
     #[test]
     fn tokens_and_challenges_are_exact_lowercase_hex() {
         assert!(decode_token(&"0f".repeat(32)).is_some());
-        assert!(decode_token(&"0F".repeat(32)).is_none(), "uppercase is refused");
+        assert!(
+            decode_token(&"0F".repeat(32)).is_none(),
+            "uppercase is refused"
+        );
         assert!(decode_token(&"0f".repeat(31)).is_none(), "short is refused");
         assert!(decode_token(&format!("{}zz", "0f".repeat(31))).is_none());
         let token = new_token_hex().unwrap();

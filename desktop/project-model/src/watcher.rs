@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use log::warn;
-use notify::{Event, EventKind, RecommendedWatcher, Watcher};
 pub use notify::RecursiveMode;
+use notify::{Event, EventKind, RecommendedWatcher, Watcher};
 
 /// Changes burst together; restart at most once per burst, 500ms after the
 /// LAST matching event.
@@ -251,8 +251,8 @@ fn run_debounce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::fs;
+    use std::path::PathBuf;
 
     fn wait_for(signal: &Receiver<()>) -> bool {
         signal
@@ -351,7 +351,10 @@ mod tests {
         let tmp = format!("{own}.chappa-tmp");
         let bak = format!("{own}.chappa-bak");
         for artifact in [own, tmp.as_str(), bak.as_str()] {
-            assert!(!m.matches(&root.join(artifact)), "{artifact} must not restart anything");
+            assert!(
+                !m.matches(&root.join(artifact)),
+                "{artifact} must not restart anything"
+            );
         }
         assert!(m.matches(&root.join("other.yml")));
         assert!(m.matches(&root.join("main.py")));
@@ -390,6 +393,9 @@ mod tests {
         .unwrap();
 
         fs::write(root.path().join(own), "processes:\n  a:\n    command: x\n").unwrap();
-        assert!(wait_for(&rx), "an external project-file edit must signal a reload");
+        assert!(
+            wait_for(&rx),
+            "an external project-file edit must signal a reload"
+        );
     }
 }

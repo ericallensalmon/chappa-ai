@@ -33,19 +33,22 @@ use crate::agent_json::{
     TurnReceipt, TURN_RECEIPT_WAIT_DEFAULT_MS, TURN_RECEIPT_WAIT_MAX_MS,
 };
 use crate::agent_tools::{
-    docker_exec_prefix, prompt_args, resume_args, AgentTool, AgentToolsState, EnvFlags, Runtime, ToolType, Transport,
+    docker_exec_prefix, prompt_args, resume_args, AgentTool, AgentToolsState, EnvFlags, Runtime,
+    ToolType, Transport,
 };
 use crate::open_path::{parse_mounts, Mount};
 use crate::projects::Projects;
 use crate::records::{Records, Scope};
-use crate::roots::check_cwd;
-use crate::startup_questions::StartupQuestion;
 use crate::registry::{
-    emit_created, emit_session, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink,
-    JsonEvent, NullSink, Registry, RunRecorder, TermId,
+    emit_created, emit_session, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent,
+    EventSink, JsonEvent, NullSink, Registry, RunRecorder, TermId,
 };
+use crate::roots::check_cwd;
 use crate::settings::SettingsState;
-use project_model::records::{new_record_id, AgentRecord, RecordKind, Run, Session, SessionSource, TailKind};
+use crate::startup_questions::StartupQuestion;
+use project_model::records::{
+    new_record_id, AgentRecord, RecordKind, Run, Session, SessionSource, TailKind,
+};
 
 // ---- constants (tuning numbers, named once) ----------------------------------
 
@@ -168,7 +171,11 @@ impl DockerCli for RealDocker {
                 stdout,
                 stderr,
             }),
-            None => Err(format!("docker {} timed out after {:?}", args.join(" "), timeout)),
+            None => Err(format!(
+                "docker {} timed out after {:?}",
+                args.join(" "),
+                timeout
+            )),
         }
     }
 }
@@ -476,7 +483,12 @@ pub fn merge_env(
 
 /// The identity bootstrap: `CHAPPA_AI_PROCESS_ID`, `CHAPPA_AI_PROJECT_ID`,
 /// `CHAPPA_AI_AGENT_TOOL_ID`, plus the spawn uuid marker.
-pub fn identity_env(process_id: TermId, project_id: Option<u32>, tool_id: u32, uuid: &str) -> Vec<(String, String)> {
+pub fn identity_env(
+    process_id: TermId,
+    project_id: Option<u32>,
+    tool_id: u32,
+    uuid: &str,
+) -> Vec<(String, String)> {
     let mut env = vec![
         ("CHAPPA_AI_PROCESS_ID".to_owned(), process_id.to_string()),
         ("CHAPPA_AI_AGENT_TOOL_ID".to_owned(), tool_id.to_string()),
@@ -505,9 +517,7 @@ pub fn agent_instructions(process_id: TermId, project: Option<(u32, &str)>) -> S
 /// The exact wrapper script. `$$` is the NAMESPACE pid of `sh`, which
 /// `exec` preserves; `"$0" "$@"` are the program + args passed after `-c`.
 pub fn wrapper_script(uuid: &str) -> String {
-    format!(
-        "mkdir -p {PID_DIR} && echo $$ > {PID_DIR}/{uuid}.pid && exec \"$0\" \"$@\""
-    )
+    format!("mkdir -p {PID_DIR} && echo $$ > {PID_DIR}/{uuid}.pid && exec \"$0\" \"$@\"")
 }
 
 /// Everything a spawn needs, derived from the tool + request. Pure.
@@ -627,7 +637,9 @@ pub fn readiness(view: IoView, now_ms: u64, gate: ReadyGate) -> Readiness {
     match view.last_output_ms {
         Some(last) if now_ms.saturating_sub(last) >= gate.quiet_ms => Readiness::Ready,
         _ => match gate.first_output_ms {
-            Some(first) if now_ms.saturating_sub(first) >= gate.max_wait_ms => Readiness::ReadyByTimeout,
+            Some(first) if now_ms.saturating_sub(first) >= gate.max_wait_ms => {
+                Readiness::ReadyByTimeout
+            }
             _ => Readiness::Pending,
         },
     }
@@ -731,7 +743,14 @@ pub fn gate_step(
     waited: Duration,
     blocked: bool,
 ) -> Option<GateStep> {
-    gate_step_held(view, now_ms, first_output_ms, policy, waited, if blocked { Hold::Blocked } else { Hold::None })
+    gate_step_held(
+        view,
+        now_ms,
+        first_output_ms,
+        policy,
+        waited,
+        if blocked { Hold::Blocked } else { Hold::None },
+    )
 }
 
 /// A hold means the program's quiet is a question on screen, not a prompt
@@ -807,7 +826,8 @@ pub fn deliver_prompt_when_ready(
         if first_output_ms.is_none() && view.has_output {
             first_output_ms = Some(epoch_ms());
         }
-        if view.has_output && screen_checked_at.map_or(true, |t| t.elapsed() >= SCREEN_CHECK_EVERY) {
+        if view.has_output && screen_checked_at.map_or(true, |t| t.elapsed() >= SCREEN_CHECK_EVERY)
+        {
             screen_checked_at = Some(Instant::now());
             question = crate::startup_questions::detect_startup_question(&handle.dump_text(0));
         }
@@ -816,7 +836,14 @@ pub fn deliver_prompt_when_ready(
         } else {
             question.map_or(Hold::None, Hold::Question)
         };
-        match gate_step_held(view, epoch_ms(), first_output_ms, policy, started.elapsed(), hold) {
+        match gate_step_held(
+            view,
+            epoch_ms(),
+            first_output_ms,
+            policy,
+            started.elapsed(),
+            hold,
+        ) {
             Some(GateStep::Write { by_timeout }) => break by_timeout,
             Some(step) => {
                 return PromptReceipt {
@@ -885,7 +912,9 @@ pub fn busy_guard(
             "{} (process {}, last_output_at {})",
             r.name,
             r.id,
-            r.last_output_at.map(|t| t.to_string()).unwrap_or_else(|| "never".into())
+            r.last_output_at
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "never".into())
         )
     };
     let mut violations = Vec::new();
@@ -899,7 +928,10 @@ pub fn busy_guard(
                 "tool \"{}\" has {} busy agent(s), max_busy = {max}: {}",
                 tool.name,
                 busy.len(),
-                busy.iter().map(|r| describe(r)).collect::<Vec<_>>().join("; ")
+                busy.iter()
+                    .map(|r| describe(r))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
     }
@@ -917,14 +949,20 @@ pub fn busy_guard(
             violations.push(format!(
                 "container \"{container}\" has {} busy agent(s), max_busy_in_container = {max}: {}",
                 busy.len(),
-                busy.iter().map(|r| describe(r)).collect::<Vec<_>>().join("; ")
+                busy.iter()
+                    .map(|r| describe(r))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
     }
     if violations.is_empty() {
         Ok(None)
     } else if force {
-        Ok(Some(format!("forced past busy guard: {}", violations.join(" | "))))
+        Ok(Some(format!(
+            "forced past busy guard: {}",
+            violations.join(" | ")
+        )))
     } else {
         Err(format!(
             "refused: {} (pass force=true to override)",
@@ -993,14 +1031,16 @@ pub fn inspect_container(docker: &dyn DockerCli, container: &str) -> ContainerSt
     ];
     match docker.run(&args, DOCKER_CALL_TIMEOUT) {
         Ok(out) if out.success => parse_inspect(&out.stdout, epoch_ms()),
-        Ok(out) if out.stderr.contains("No such") || out.stdout.contains("No such") => ContainerState {
-            status: ContainerStatus::Missing,
-            started_at: None,
-            uptime_s: None,
-            mem_bytes: None,
-            mem_limit_bytes: None,
-            mounts: Vec::new(),
-        },
+        Ok(out) if out.stderr.contains("No such") || out.stdout.contains("No such") => {
+            ContainerState {
+                status: ContainerStatus::Missing,
+                started_at: None,
+                uptime_s: None,
+                mem_bytes: None,
+                mem_limit_bytes: None,
+                mounts: Vec::new(),
+            }
+        }
         _ => ContainerState::unknown(),
     }
 }
@@ -1134,7 +1174,11 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
         _ => return None,
     };
     // Days from civil (Howard Hinnant's algorithm).
-    let (y, m) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
     let doy = (153 * m + 2) / 5 + day - 1;
@@ -1161,7 +1205,11 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
 /// signals as that same user; `None` = the default exec user, the close path).
 fn signal_args(container: &str, user: Option<&str>, signal: &str, pid: u32) -> Vec<String> {
     let script = format!("kill -{signal} \"$1\"");
-    exec_args_user(container, user, &["sh", "-c", &script, "kill", &pid.to_string()])
+    exec_args_user(
+        container,
+        user,
+        &["sh", "-c", &script, "kill", &pid.to_string()],
+    )
 }
 
 fn exec_args(container: &str, cmd: &[&str]) -> Vec<String> {
@@ -1207,14 +1255,21 @@ fn runtime_user(runtime: &Runtime) -> Option<&str> {
 pub fn resolve_nspid(docker: &dyn DockerCli, meta: &AgentMeta) -> Option<u32> {
     let container = meta.container_name()?;
     let out = match meta.nspid {
-        NsPid::PidFile => docker.run(&exec_args(container, &["cat", &meta.pid_file()]), DOCKER_CALL_TIMEOUT),
+        NsPid::PidFile => docker.run(
+            &exec_args(container, &["cat", &meta.pid_file()]),
+            DOCKER_CALL_TIMEOUT,
+        ),
         NsPid::Unresolved => {
             let script = format!(
                 "for p in /proc/[0-9]*; do if tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qx '{SPAWN_UUID_ENV}={}'; then echo \"${{p#/proc/}}\"; fi; done",
                 meta.spawn_uuid
             );
             docker.run(
-                &exec_args_user(container, runtime_user(&meta.runtime), &["sh", "-c", &script]),
+                &exec_args_user(
+                    container,
+                    runtime_user(&meta.runtime),
+                    &["sh", "-c", &script],
+                ),
                 DOCKER_CALL_TIMEOUT,
             )
         }
@@ -1234,14 +1289,22 @@ pub fn resolve_nspid(docker: &dyn DockerCli, meta: &AgentMeta) -> Option<u32> {
 /// `test -d /proc/<pid>` inside the container.
 fn nspid_present(docker: &dyn DockerCli, container: &str, pid: u32) -> Option<bool> {
     let out = docker
-        .run(&exec_args(container, &["test", "-d", &format!("/proc/{pid}")]), DOCKER_CALL_TIMEOUT)
+        .run(
+            &exec_args(container, &["test", "-d", &format!("/proc/{pid}")]),
+            DOCKER_CALL_TIMEOUT,
+        )
         .ok()?;
     Some(out.success)
 }
 
 /// Poll `test -d /proc/<pid>` until it is gone or `grace` passes. `None` =
 /// docker itself stopped answering.
-fn wait_nspid_gone(docker: &dyn DockerCli, container: &str, pid: u32, grace: Duration) -> Option<bool> {
+fn wait_nspid_gone(
+    docker: &dyn DockerCli,
+    container: &str,
+    pid: u32,
+    grace: Duration,
+) -> Option<bool> {
     let deadline = Instant::now() + grace;
     loop {
         match nspid_present(docker, container, pid)? {
@@ -1268,13 +1331,19 @@ pub fn reap_pid(
     term_grace: Duration,
     kill_grace: Duration,
 ) -> CloseVerification {
-    let _ = docker.run(&signal_args(container, user, "TERM", pid), DOCKER_CALL_TIMEOUT);
+    let _ = docker.run(
+        &signal_args(container, user, "TERM", pid),
+        DOCKER_CALL_TIMEOUT,
+    );
     match wait_nspid_gone(docker, container, pid, term_grace) {
         Some(true) => return CloseVerification::Gone,
         Some(false) => {}
         None => return CloseVerification::Unresolved,
     }
-    let _ = docker.run(&signal_args(container, user, "KILL", pid), DOCKER_CALL_TIMEOUT);
+    let _ = docker.run(
+        &signal_args(container, user, "KILL", pid),
+        DOCKER_CALL_TIMEOUT,
+    );
     match wait_nspid_gone(docker, container, pid, kill_grace) {
         Some(true) => CloseVerification::Gone,
         Some(false) => CloseVerification::StillPresent,
@@ -1296,7 +1365,10 @@ pub fn kill_container_side(
         return CloseVerification::Unresolved;
     };
     let state = inspect_container(docker, container);
-    if matches!(state.status, ContainerStatus::Exited | ContainerStatus::Missing) {
+    if matches!(
+        state.status,
+        ContainerStatus::Exited | ContainerStatus::Missing
+    ) {
         return CloseVerification::ContainerDown;
     }
     let Some(pid) = resolve_nspid(docker, meta) else {
@@ -1316,12 +1388,18 @@ pub fn kill_container_side(
 /// `unresolved` (docker is not answering — one more call would only hang).
 pub fn remove_pid_file(docker: &dyn DockerCli, meta: &AgentMeta, verdict: CloseVerification) {
     if meta.nspid != NsPid::PidFile
-        || matches!(verdict, CloseVerification::ContainerDown | CloseVerification::Unresolved)
+        || matches!(
+            verdict,
+            CloseVerification::ContainerDown | CloseVerification::Unresolved
+        )
     {
         return;
     }
     if let Some(container) = meta.container_name() {
-        let _ = docker.run(&exec_args(container, &["rm", "-f", &meta.pid_file()]), DOCKER_CALL_TIMEOUT);
+        let _ = docker.run(
+            &exec_args(container, &["rm", "-f", &meta.pid_file()]),
+            DOCKER_CALL_TIMEOUT,
+        );
     }
 }
 
@@ -1330,7 +1408,10 @@ pub fn remove_pid_file(docker: &dyn DockerCli, meta: &AgentMeta, verdict: CloseV
 /// counts as "no wrapper" too — the spawn itself will then fail visibly.
 pub fn container_has_sh(docker: &dyn DockerCli, container: &str) -> bool {
     docker
-        .run(&exec_args(container, &["sh", "-c", "exit 0"]), DOCKER_CALL_TIMEOUT)
+        .run(
+            &exec_args(container, &["sh", "-c", "exit 0"]),
+            DOCKER_CALL_TIMEOUT,
+        )
         .map(|o| o.success)
         .unwrap_or(false)
 }
@@ -1375,7 +1456,12 @@ pub struct ReapResult {
 /// returns); otherwise the SMALLEST pid per unknown uuid is the orphan root.
 /// Platform-neutral: the caller supplies the scan rows (and their spawn
 /// times), so tests need no docker or `/proc`.
-pub fn orphans(scan_rows: &[ScanRow], live_uuids: &HashSet<String>, busy_window_ms: u64, now_ms: u64) -> Vec<Orphan> {
+pub fn orphans(
+    scan_rows: &[ScanRow],
+    live_uuids: &HashSet<String>,
+    busy_window_ms: u64,
+    now_ms: u64,
+) -> Vec<Orphan> {
     // BTreeMap gives a deterministic (and test-friendly) ordering by uuid.
     let mut roots: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
     for row in scan_rows {
@@ -1416,9 +1502,16 @@ s=$(awk '{print $22}' \"$p/stat\" 2>/dev/null); echo \"${p#/proc/} $u $(( btime*
 /// One scan of a container as a user: every marker-bearing process's pid,
 /// uuid and spawn time. `None` = docker unreachable or the exec failed
 /// (skip silently — the bridge probe already reports down/unreachable).
-pub fn scan_markers(docker: &dyn DockerCli, container: &str, user: Option<&str>) -> Option<Vec<ScanRow>> {
+pub fn scan_markers(
+    docker: &dyn DockerCli,
+    container: &str,
+    user: Option<&str>,
+) -> Option<Vec<ScanRow>> {
     let out = docker
-        .run(&exec_args_user(container, user, &["sh", "-c", ORPHAN_SCAN_SCRIPT]), DOCKER_CALL_TIMEOUT)
+        .run(
+            &exec_args_user(container, user, &["sh", "-c", ORPHAN_SCAN_SCRIPT]),
+            DOCKER_CALL_TIMEOUT,
+        )
         .ok()?;
     if !out.success {
         return None;
@@ -1438,7 +1531,11 @@ pub fn parse_scan(stdout: &str) -> Vec<ScanRow> {
                 return None;
             }
             let spawned_at_ms = it.next().and_then(|w| w.parse::<u64>().ok()).unwrap_or(0);
-            Some(ScanRow { pid, uuid, spawned_at_ms })
+            Some(ScanRow {
+                pid,
+                uuid,
+                spawned_at_ms,
+            })
         })
         .collect()
 }
@@ -1453,7 +1550,10 @@ fn distinct_docker_users(tools: &AgentToolsState) -> Vec<(String, Option<String>
         if !tool.enabled {
             continue;
         }
-        let Runtime::DockerExec { container, user, .. } = &tool.runtime else {
+        let Runtime::DockerExec {
+            container, user, ..
+        } = &tool.runtime
+        else {
             continue;
         };
         let key = (container.clone(), user.clone());
@@ -1494,7 +1594,11 @@ pub fn reap_orphans(
     let spawn_guard = registry.spawn_guard();
     let _serialized = spawn_guard.lock().unwrap_or_else(|e| e.into_inner());
     let now_ms = epoch_ms();
-    let live: HashSet<String> = registry.agent_rows().into_iter().map(|r| r.spawn_uuid).collect();
+    let live: HashSet<String> = registry
+        .agent_rows()
+        .into_iter()
+        .map(|r| r.spawn_uuid)
+        .collect();
     let mut out = Vec::new();
     let mut reaped_per_container: HashMap<String, usize> = HashMap::new();
     for (container, user) in distinct_docker_users(tools) {
@@ -1512,10 +1616,21 @@ pub fn reap_orphans(
             continue;
         };
         for orph in orphans(&scan, &live, BUSY_WINDOW_MS, now_ms) {
-            let verdict = reap_pid(docker.as_ref(), &container, user.as_deref(), orph.pid, TERM_GRACE, KILL_GRACE);
+            let verdict = reap_pid(
+                docker.as_ref(),
+                &container,
+                user.as_deref(),
+                orph.pid,
+                TERM_GRACE,
+                KILL_GRACE,
+            );
             if verdict == CloseVerification::Gone {
                 let _ = docker.run(
-                    &exec_args_user(&container, user.as_deref(), &["rm", "-f", &orphan_pid_file(&orph.uuid)]),
+                    &exec_args_user(
+                        &container,
+                        user.as_deref(),
+                        &["rm", "-f", &orphan_pid_file(&orph.uuid)],
+                    ),
                     DOCKER_CALL_TIMEOUT,
                 );
             }
@@ -1547,7 +1662,6 @@ pub fn reap_orphans(
     }
     out
 }
-
 
 // ---- bridge probe thread ---------------------------------------------------------------
 
@@ -1598,8 +1712,14 @@ pub fn spawn_bridge_probe(
                 }
             }
             if settings.snapshot().agent_reap_orphans {
-                let probe_containers: HashSet<String> = targets.iter().map(|t| t.container.clone()).collect();
-                reap_orphans(&registry, &tools, Some(&probe_containers), Some(&*reap_emit));
+                let probe_containers: HashSet<String> =
+                    targets.iter().map(|t| t.container.clone()).collect();
+                reap_orphans(
+                    &registry,
+                    &tools,
+                    Some(&probe_containers),
+                    Some(&*reap_emit),
+                );
             }
             std::thread::sleep(PROBE_PERIOD);
         }
@@ -1609,7 +1729,12 @@ pub fn spawn_bridge_probe(
 /// One probe tick: inspect each distinct container ONCE, derive per agent,
 /// poke only the stale candidates. Returns the (possibly unchanged) state per
 /// agent; the registry decides what is a transition.
-pub fn probe_once(docker: &dyn DockerCli, targets: &[ProbeTarget], stale_after_ms: u64, now_ms: u64) -> Vec<BridgeEvent> {
+pub fn probe_once(
+    docker: &dyn DockerCli,
+    targets: &[ProbeTarget],
+    stale_after_ms: u64,
+    now_ms: u64,
+) -> Vec<BridgeEvent> {
     let containers: HashSet<&str> = targets.iter().map(|t| t.container.as_str()).collect();
     let states: HashMap<&str, ContainerState> = containers
         .into_iter()
@@ -1617,7 +1742,10 @@ pub fn probe_once(docker: &dyn DockerCli, targets: &[ProbeTarget], stale_after_m
         .collect();
     let mut out = Vec::new();
     for t in targets {
-        let state = states.get(t.container.as_str()).cloned().unwrap_or_else(ContainerState::unknown);
+        let state = states
+            .get(t.container.as_str())
+            .cloned()
+            .unwrap_or_else(ContainerState::unknown);
         let last_output_ms = t.handle.io().last_output_ms();
         let poke = if state.status == ContainerStatus::Running
             && stale_candidate(last_output_ms, now_ms, stale_after_ms)
@@ -1671,9 +1799,7 @@ fn resolve_parent_process_id(
     id: TermId,
     entry_exists: impl Fn(TermId) -> bool,
 ) -> Option<TermId> {
-    explicit
-        .or(actor)
-        .filter(|p| *p != id && entry_exists(*p))
+    explicit.or(actor).filter(|p| *p != id && entry_exists(*p))
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1808,7 +1934,10 @@ pub fn spawn_agent_with(
         .get(req.agent_tool_id)
         .ok_or_else(|| format!("no such agent tool: {}", req.agent_tool_id))?;
     if !tool.enabled {
-        return Err(format!("agent tool \"{}\" ({}) is disabled", tool.name, tool.id));
+        return Err(format!(
+            "agent tool \"{}\" ({}) is disabled",
+            tool.name, tool.id
+        ));
     }
     let settings = ctx.settings.snapshot();
     let project = match req.project_id {
@@ -1821,12 +1950,21 @@ pub fn spawn_agent_with(
     };
     // The working directory: the project root, or a folder inside a cwd
     // root when the request names one.
-    let working_dir = req.working_dir.as_deref().map(str::trim).filter(|w| !w.is_empty());
+    let working_dir = req
+        .working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty());
     let cwd: Option<PathBuf> = match working_dir {
         Some(dir) => Some(check_cwd(&ctx.projects.cwd_roots(req.project_id), dir).into_result()?),
         None => project.as_ref().map(|(_, root)| root.clone()),
     };
-    crate::sources::actions::validate_env(&req.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())?;
+    crate::sources::actions::validate_env(
+        &req.env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )?;
     // No new agent next to data that may be real: a stack source's
     // data-safety block covering the folder refuses every launch here (a
     // source's agent action, the app's own spawn, the control surface and
@@ -1839,9 +1977,20 @@ pub fn spawn_agent_with(
     // BEFORE anything is spawned; a blocking finding is the error here.
     let scan_notice = match &cwd {
         Some(dir) if tool.runtime.container().is_none() => {
-            let project_root = project.as_ref().map(|(_, root)| root.as_path()).unwrap_or(dir.as_path());
-            let pref = req.project_id.and_then(|id| ctx.projects.secret_scan_pref(id));
-            crate::secret_scan::gate_launch(&settings, pref, project_root, dir, req.launch_anyway.as_deref())?
+            let project_root = project
+                .as_ref()
+                .map(|(_, root)| root.as_path())
+                .unwrap_or(dir.as_path());
+            let pref = req
+                .project_id
+                .and_then(|id| ctx.projects.secret_scan_pref(id));
+            crate::secret_scan::gate_launch(
+                &settings,
+                pref,
+                project_root,
+                dir,
+                req.launch_anyway.as_deref(),
+            )?
         }
         _ => None,
     };
@@ -1864,12 +2013,9 @@ pub fn spawn_agent_with(
     let id = ctx.registry.reserve_id();
     // Resolve + validate the parent the rail will nest this agent
     // under (see [`resolve_parent_process_id`] — pure and unit-tested).
-    let parent_process_id = resolve_parent_process_id(
-        req.parent_process_id,
-        ctx.actor,
-        id,
-        |p| ctx.registry.handle(p).is_some(),
-    );
+    let parent_process_id = resolve_parent_process_id(req.parent_process_id, ctx.actor, id, |p| {
+        ctx.registry.handle(p).is_some()
+    });
     let identity = identity_env(id, req.project_id, tool.id, &uuid);
     // inherited < tool.env < the request's env < identity.
     let mut tool_env = tool.env.clone();
@@ -1910,13 +2056,27 @@ pub fn spawn_agent_with(
     // them never swallows it), and nothing is typed: an argv prompt cannot
     // answer a startup question. A resumed session gets no first prompt
     // either way; the json transport hands the prompt to its adapter.
-    let prompt_on_argv = json_mode.is_none() && req.resume.is_none() && !tool.prompt_argv.is_empty() && prompt.is_some();
+    let prompt_on_argv = json_mode.is_none()
+        && req.resume.is_none()
+        && !tool.prompt_argv.is_empty()
+        && prompt.is_some();
     let extra_args: Vec<String> = if prompt_on_argv {
-        [req.extra_args.clone(), prompt_args(&tool.prompt_argv, prompt.unwrap_or_default())].concat()
+        [
+            req.extra_args.clone(),
+            prompt_args(&tool.prompt_argv, prompt.unwrap_or_default()),
+        ]
+        .concat()
     } else {
         req.extra_args.clone()
     };
-    let plan = build_spawn_plan(&planned_tool, &extra_args, &env, cwd.clone(), &uuid, with_wrapper);
+    let plan = build_spawn_plan(
+        &planned_tool,
+        &extra_args,
+        &env,
+        cwd.clone(),
+        &uuid,
+        with_wrapper,
+    );
     let cols = req.cols.unwrap_or(80).clamp(1, 4096);
     let rows = req.rows.unwrap_or(24).clamp(1, 4096);
     let cfg = ActorConfig {
@@ -1924,7 +2084,11 @@ pub fn spawn_agent_with(
             command: plan.command.clone(),
             args: plan.args.clone(),
             cwd: plan.cwd.clone(),
-            env: plan.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            env: plan
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             cols,
             rows,
         },
@@ -1933,12 +2097,21 @@ pub fn spawn_agent_with(
         wheel_speed: settings.scroll_wheel_speed,
         // The `regex` capture reads the pty stream; a json spawn has no
         // stream to read (its adapter carries the id).
-        session_matcher: if json_mode.is_none() { tool.session_matcher() } else { None },
+        session_matcher: if json_mode.is_none() {
+            tool.session_matcher()
+        } else {
+            None
+        },
     };
     // The run a resume begins already names the session it continues, so
     // the row can say so before the provider confirms anything.
     let resume_session = req.resume.as_ref().map(|spec| {
-        let mut session = Session::new(tool.tool_type.as_str(), spec.session_id.clone(), SessionSource::Resume, now);
+        let mut session = Session::new(
+            tool.tool_type.as_str(),
+            spec.session_id.clone(),
+            SessionSource::Resume,
+            now,
+        );
         session.resumed_from = Some(spec.session_id.clone());
         session
     });
@@ -1973,11 +2146,22 @@ pub fn spawn_agent_with(
             Transport::Json => TailKind::Events,
             Transport::Tty => TailKind::Text,
         };
-        match agent_record(ctx.records, ctx.registry, scope, &req, &name, tool.id, parent_process_id) {
+        match agent_record(
+            ctx.records,
+            ctx.registry,
+            scope,
+            &req,
+            &name,
+            tool.id,
+            parent_process_id,
+        ) {
             Ok(record_id) => {
                 let mut run = Run::begin(uuid.clone(), now, tail_kind);
                 run.session = resume_session.clone();
-                match ctx.records.begin_run(scope, RecordKind::Agent, &record_id, &run) {
+                match ctx
+                    .records
+                    .begin_run(scope, RecordKind::Agent, &record_id, &run)
+                {
                     Ok(()) => Some(record_id),
                     Err(e) => {
                         log::warn!("[agents] run {uuid} of record {record_id} not recorded: {e}");
@@ -1997,7 +2181,16 @@ pub fn spawn_agent_with(
     let created = match json_mode {
         None => ctx
             .registry
-            .create_agent_terminal(cfg, sink, on_notify.clone(), name.clone(), id, meta.clone(), req.close_on_exit, record_id.clone())
+            .create_agent_terminal(
+                cfg,
+                sink,
+                on_notify.clone(),
+                name.clone(),
+                id,
+                meta.clone(),
+                req.close_on_exit,
+                record_id.clone(),
+            )
             .map(|_| None),
         Some(mode) => ctx
             .registry
@@ -2044,7 +2237,12 @@ pub fn spawn_agent_with(
     // The entry exists: the next spawn's guard sees it. Everything below is
     // observation (inspect/stats) and the prompt wait — no lock needed.
     drop(_serialized);
-    let instructions = agent_instructions(id, project.as_ref().map(|(n, _)| (req.project_id.unwrap_or_default(), n.as_str())));
+    let instructions = agent_instructions(
+        id,
+        project
+            .as_ref()
+            .map(|(n, _)| (req.project_id.unwrap_or_default(), n.as_str())),
+    );
     let container = tool.runtime.container().map(|c| {
         let mut state = inspect_container(docker.as_ref(), c);
         if let Some((mem, limit)) = container_memory(docker.as_ref(), c) {
@@ -2062,14 +2260,24 @@ pub fn spawn_agent_with(
         let launch = format!(
             "launch {} {} in {}",
             plan.command,
-            stack_core::credentials::mask_argv(&plan.args).iter().map(|a| project_model::words::quote_word(a)).collect::<Vec<_>>().join(" "),
-            cwd.as_deref().map(crate::roots::display).unwrap_or_else(|| "the home directory".to_owned())
+            stack_core::credentials::mask_argv(&plan.args)
+                .iter()
+                .map(|a| project_model::words::quote_word(a))
+                .collect::<Vec<_>>()
+                .join(" "),
+            cwd.as_deref()
+                .map(crate::roots::display)
+                .unwrap_or_else(|| "the home directory".to_owned())
         );
-        ctx.registry.record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
+        ctx.registry
+            .record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
     }
     // An agent settings file git would commit is a warning, never a block.
     if let (Some(dir), None) = (&cwd, tool.runtime.container()) {
-        let project_root = project.as_ref().map(|(_, root)| root.as_path()).unwrap_or(dir.as_path());
+        let project_root = project
+            .as_ref()
+            .map(|(_, root)| root.as_path())
+            .unwrap_or(dir.as_path());
         let files = crate::secret_scan::agent_settings_warnings(project_root, dir);
         crate::secret_scan::emit_agent_settings(created_app.as_ref(), id, project_root, &files);
     }
@@ -2078,7 +2286,8 @@ pub fn spawn_agent_with(
         // the person who chose it.
         if let Some(line) = crate::secret_scan::launch_anyway_record(notice) {
             let actor = crate::sources::CallActor::human().header_value();
-            ctx.registry.record_input_as(id, 0, line, false, Some(&actor), Some("launch-anyway"));
+            ctx.registry
+                .record_input_as(id, 0, line, false, Some(&actor), Some("launch-anyway"));
         }
         crate::secret_scan::emit_notice(created_app.as_ref(), id, notice);
     }
@@ -2093,7 +2302,14 @@ pub fn spawn_agent_with(
             }
         },
         None if prompt_on_argv => prompt.map(|p| {
-            ctx.registry.record_input_as(id, 0, p.to_owned(), true, req.journal_actor.as_deref(), Some(PROMPT_VIA_ARGV));
+            ctx.registry.record_input_as(
+                id,
+                0,
+                p.to_owned(),
+                true,
+                req.journal_actor.as_deref(),
+                Some(PROMPT_VIA_ARGV),
+            );
             PromptReceipt {
                 delivered: true,
                 reason: Some(PROMPT_VIA_ARGV.to_owned()),
@@ -2197,7 +2413,11 @@ fn agent_record(
 /// --output-format stream-json … --model …`), the resume words (if any)
 /// between the two, and a docker runtime without `-t` (a pipe must not be
 /// a tty — the CLI would render, not stream).
-pub fn json_planned_tool(tool: &AgentTool, mode: crate::agent_json::MachineMode, resume: &[String]) -> AgentTool {
+pub fn json_planned_tool(
+    tool: &AgentTool,
+    mode: crate::agent_json::MachineMode,
+    resume: &[String],
+) -> AgentTool {
     let mut planned = tool.clone();
     let mut args: Vec<String> = mode.args.iter().map(|s| s.to_string()).collect();
     args.extend(resume.iter().cloned());
@@ -2214,7 +2434,11 @@ pub fn json_planned_tool(tool: &AgentTool, mode: crate::agent_json::MachineMode,
 /// seeded with the id and every child carries `-s <id>` already. A tool
 /// with an empty template cannot be resumed from the command line, and
 /// says so rather than starting a fresh session in resume's clothes.
-pub fn resume_words(tool: &AgentTool, json_mode: Option<crate::agent_json::MachineMode>, session_id: &str) -> Result<Vec<String>, String> {
+pub fn resume_words(
+    tool: &AgentTool,
+    json_mode: Option<crate::agent_json::MachineMode>,
+    session_id: &str,
+) -> Result<Vec<String>, String> {
     if json_mode.is_some_and(|mode| !mode.persistent) {
         return Ok(Vec::new());
     }
@@ -2233,7 +2457,12 @@ pub fn resume_words(tool: &AgentTool, json_mode: Option<crate::agent_json::Machi
 /// the ledger) with a `term://session` broadcast when it changes.
 /// `awaiting_input` is NOT mirrored: the registry derives it from the agent
 /// at read time.
-fn json_hooks(app: Option<AppHandle>, registry: Registry, id: TermId, tool_type: ToolType) -> JsonHooks {
+fn json_hooks(
+    app: Option<AppHandle>,
+    registry: Registry,
+    id: TermId,
+    tool_type: ToolType,
+) -> JsonHooks {
     JsonHooks {
         emit: Arc::new(move |event: &AgentEvent| {
             if let Some(app) = &app {
@@ -2245,7 +2474,12 @@ fn json_hooks(app: Option<AppHandle>, registry: Registry, id: TermId, tool_type:
             let Some(session_id) = event.payload.get("session_id").and_then(Value::as_str) else {
                 return;
             };
-            let session = Session::new(tool_type.as_str(), session_id, SessionSource::Json, event.ts);
+            let session = Session::new(
+                tool_type.as_str(),
+                session_id,
+                SessionSource::Json,
+                event.ts,
+            );
             if let Some((binding, true)) = registry.record_session(id, session.clone()) {
                 if let Some(app) = &app {
                     emit_session(app, id, binding.as_ref(), &session);
@@ -2259,7 +2493,12 @@ fn json_hooks(app: Option<AppHandle>, registry: Registry, id: TermId, tool_type:
 /// written-but-unacknowledged) — a refused send (`busy` / `exited` /
 /// `unsupported`) never shows up as a `submit: true` delivery record, the
 /// same rule as the pty path's `write_journaled`.
-fn json_send_journaled(registry: &Registry, agent: &Arc<JsonAgent>, text: &str, wait: Duration) -> TurnReceipt {
+fn json_send_journaled(
+    registry: &Registry,
+    agent: &Arc<JsonAgent>,
+    text: &str,
+    wait: Duration,
+) -> TurnReceipt {
     let receipt = agent.send_input(text, wait);
     if receipt.written() {
         registry.record_input(agent.id(), text.len() + 1, text.to_owned(), true);
@@ -2271,7 +2510,11 @@ fn json_send_journaled(registry: &Registry, agent: &Arc<JsonAgent>, text: &str, 
 /// prompt (if any) goes down stdin — without one the CLI's first ready
 /// signal is `awaiting_input`. Per-turn CLIs: the prompt IS the first
 /// child's message; without one the agent simply waits (`awaiting_input`).
-fn json_boot(registry: &Registry, agent: &Arc<JsonAgent>, prompt: Option<&str>) -> Result<Option<PromptReceipt>, String> {
+fn json_boot(
+    registry: &Registry,
+    agent: &Arc<JsonAgent>,
+    prompt: Option<&str>,
+) -> Result<Option<PromptReceipt>, String> {
     if agent.mode().persistent {
         if prompt.is_none() {
             agent.expect_ready_as_awaiting();
@@ -2281,7 +2524,12 @@ fn json_boot(registry: &Registry, agent: &Arc<JsonAgent>, prompt: Option<&str>) 
     match prompt {
         Some(prompt) => {
             let receipt = json_send_journaled(registry, agent, prompt, PROMPT_WAIT_CAP);
-            if !agent.mode().persistent && receipt.reason.as_deref().is_some_and(|r| r.starts_with("exited:")) {
+            if !agent.mode().persistent
+                && receipt
+                    .reason
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("exited:"))
+            {
                 return Err(receipt.reason.unwrap_or_default());
             }
             Ok(Some(prompt_receipt_of(&receipt)))
@@ -2313,17 +2561,31 @@ pub fn prompt_receipt_of(receipt: &TurnReceipt) -> PromptReceipt {
 /// one user-message line (claude) or one continuation child (opencode),
 /// journaled, receipt = the next `turn_started`. `Err` when `id` is not a
 /// json agent — the caller falls back to the pty path.
-pub fn json_send_input(registry: &Registry, id: TermId, text: &str, wait_ms: Option<u64>) -> Result<TurnReceipt, String> {
+pub fn json_send_input(
+    registry: &Registry,
+    id: TermId,
+    text: &str,
+    wait_ms: Option<u64>,
+) -> Result<TurnReceipt, String> {
     let agent = registry
         .json_agent(id)
         .ok_or_else(|| format!("process {id} is not a json-transport agent"))?;
-    let wait_ms = wait_ms.unwrap_or(TURN_RECEIPT_WAIT_DEFAULT_MS).min(TURN_RECEIPT_WAIT_MAX_MS);
-    Ok(json_send_journaled(registry, &agent, text, Duration::from_millis(wait_ms)))
+    let wait_ms = wait_ms
+        .unwrap_or(TURN_RECEIPT_WAIT_DEFAULT_MS)
+        .min(TURN_RECEIPT_WAIT_MAX_MS);
+    Ok(json_send_journaled(
+        registry,
+        &agent,
+        text,
+        Duration::from_millis(wait_ms),
+    ))
 }
 
 /// Events with `seq > since` for a json agent; `None` when `id` is not one.
 pub fn agent_events(registry: &Registry, id: TermId, since: u64) -> Option<Vec<AgentEvent>> {
-    registry.json_agent(id).map(|agent| agent.events_since(since))
+    registry
+        .json_agent(id)
+        .map(|agent| agent.events_since(since))
 }
 
 /// `send_agent_input` from the webview (the transcript view's input box).
@@ -2344,8 +2606,13 @@ pub async fn send_agent_input(
 /// The event ring since a cursor (the transcript view's catch-up after a
 /// reveal, and the debug surface).
 #[tauri::command]
-pub fn get_agent_events(registry: State<'_, Registry>, id: TermId, since: Option<u64>) -> Result<Vec<AgentEvent>, String> {
-    agent_events(&registry, id, since.unwrap_or(0)).ok_or_else(|| format!("process {id} is not a json-transport agent"))
+pub fn get_agent_events(
+    registry: State<'_, Registry>,
+    id: TermId,
+    since: Option<u64>,
+) -> Result<Vec<AgentEvent>, String> {
+    agent_events(&registry, id, since.unwrap_or(0))
+        .ok_or_else(|| format!("process {id} is not a json-transport agent"))
 }
 
 /// The spawn uuid: the ONLY thing the close path matches the container-side
@@ -2380,7 +2647,10 @@ pub fn app_bridge_emitter(app: AppHandle) -> Arc<dyn Fn(BridgeEvent) + Send + Sy
 /// frontend records it into the notification center.
 pub fn app_reap_emitter(app: AppHandle) -> Arc<dyn Fn(&str, usize) + Send + Sync> {
     Arc::new(move |container: &str, count: usize| {
-        let _ = app.emit("agent://reap", &json!({ "container": container, "count": count }));
+        let _ = app.emit(
+            "agent://reap",
+            &json!({ "container": container, "count": count }),
+        );
     })
 }
 
@@ -2405,7 +2675,9 @@ pub async fn spawn_agent(
 ) -> Result<SpawnAgentResponse, String> {
     // The launch dialog's "Launch anyway" (a confirm with a required note):
     // only this webview command carries it.
-    req.launch_anyway = launch_anyway.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+    req.launch_anyway = launch_anyway
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty());
     let (registry, tools, settings, projects, records) = (
         registry.inner().clone(),
         tools.inner().clone(),
@@ -2436,7 +2708,10 @@ pub async fn spawn_agent(
 
 /// The control-surface spawn (no webview channel — agents read output back
 /// through `/output`, exactly like `spawn_terminal`).
-pub fn spawn_agent_headless(ctx: SpawnContext<'_>, req: SpawnAgentRequest) -> Result<SpawnAgentResponse, String> {
+pub fn spawn_agent_headless(
+    ctx: SpawnContext<'_>,
+    req: SpawnAgentRequest,
+) -> Result<SpawnAgentResponse, String> {
     spawn_agent_with(ctx, req, Arc::new(NullSink), None)
 }
 
@@ -2446,12 +2721,21 @@ mod tests {
     use crate::agent_tools::parse_command_line;
 
     fn docker_tool() -> AgentTool {
-        parse_command_line("docker exec -u dev -it -w /workspace/app dev-worker opencode -m gateway/model-fast").tool
+        parse_command_line(
+            "docker exec -u dev -it -w /workspace/app dev-worker opencode -m gateway/model-fast",
+        )
+        .tool
     }
 
     /// A row spawned long ago (outside the busy window), so only its output
     /// decides busy-ness — the pre-review shape of every guard case.
-    fn row(id: u32, tool_id: u32, container: Option<&str>, alive: bool, last: Option<u64>) -> AgentRow {
+    fn row(
+        id: u32,
+        tool_id: u32,
+        container: Option<&str>,
+        alive: bool,
+        last: Option<u64>,
+    ) -> AgentRow {
         AgentRow {
             id,
             name: format!("agent-{id}"),
@@ -2478,14 +2762,37 @@ mod tests {
         let planned = json_planned_tool(&claude, mode, &words);
         assert_eq!(
             planned.args,
-            vec!["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--resume", "ses-1", "--model", "m"]
+            vec![
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
+                "--verbose",
+                "--resume",
+                "ses-1",
+                "--model",
+                "m"
+            ]
         );
-        assert_eq!(resume_words(&claude, None, "ses-1").unwrap(), vec!["--resume", "ses-1"], "tty: the same words");
+        assert_eq!(
+            resume_words(&claude, None, "ses-1").unwrap(),
+            vec!["--resume", "ses-1"],
+            "tty: the same words"
+        );
 
         let opencode = AgentTool::template(ToolType::Opencode);
         let per_turn = machine_mode(ToolType::Opencode).unwrap();
-        assert!(resume_words(&opencode, Some(per_turn), "ses-2").unwrap().is_empty(), "the adapter continues with -s");
-        assert_eq!(resume_words(&opencode, None, "ses-2").unwrap(), vec!["-s", "ses-2"]);
+        assert!(
+            resume_words(&opencode, Some(per_turn), "ses-2")
+                .unwrap()
+                .is_empty(),
+            "the adapter continues with -s"
+        );
+        assert_eq!(
+            resume_words(&opencode, None, "ses-2").unwrap(),
+            vec!["-s", "ses-2"]
+        );
 
         let mut custom = AgentTool::template(ToolType::Custom);
         custom.name = "mine".into();
@@ -2515,13 +2822,25 @@ mod tests {
         let mut tool_env = IndexMap::new();
         tool_env.insert("FOO".to_owned(), "tool".to_owned());
         tool_env.insert("CHAPPA_AI_AGENT_TOOL_ID".to_owned(), "forged".to_owned());
-        tool_env.insert("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(), "1".to_owned());
+        tool_env.insert(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+            "1".to_owned(),
+        );
         let identity = identity_env(7, Some(6), 3, "u-u-i-d");
         let merged = merge_env(&inherited, &tool_env, &identity);
-        assert_eq!(merged["PATH"], "/bin", "inherited survives when unset above");
+        assert_eq!(
+            merged["PATH"], "/bin",
+            "inherited survives when unset above"
+        );
         assert_eq!(merged["FOO"], "tool", "tool.env beats inherited");
-        assert_eq!(merged["CHAPPA_AI_PROCESS_ID"], "7", "identity beats inherited");
-        assert_eq!(merged["CHAPPA_AI_AGENT_TOOL_ID"], "3", "identity beats tool.env");
+        assert_eq!(
+            merged["CHAPPA_AI_PROCESS_ID"], "7",
+            "identity beats inherited"
+        );
+        assert_eq!(
+            merged["CHAPPA_AI_AGENT_TOOL_ID"], "3",
+            "identity beats tool.env"
+        );
         assert_eq!(merged["CHAPPA_AI_PROJECT_ID"], "6");
         assert_eq!(merged[SPAWN_UUID_ENV], "u-u-i-d");
         assert_eq!(merged["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"], "1");
@@ -2537,19 +2856,49 @@ mod tests {
     fn spawn_plan_keeps_extra_args_verbatim_and_flags_env_for_docker() {
         let tool = docker_tool();
         let env = merge_env(&[], &tool.env, &identity_env(9, None, tool.id, "abc"));
-        let plan = build_spawn_plan(&tool, &["--prompt".into(), "two words here".into()], &env, None, "abc", true);
-        assert!(plan.args.contains(&"two words here".to_owned()), "{:?}", plan.args);
+        let plan = build_spawn_plan(
+            &tool,
+            &["--prompt".into(), "two words here".into()],
+            &env,
+            None,
+            "abc",
+            true,
+        );
+        assert!(
+            plan.args.contains(&"two words here".to_owned()),
+            "{:?}",
+            plan.args
+        );
         let idx = plan.args.iter().position(|a| a == "--prompt").unwrap();
         assert_eq!(plan.args[idx + 1], "two words here");
         assert_eq!(&plan.args[..2], &["exec".to_owned(), "-u".to_owned()]);
         // Env reaches docker by name; the values ride in the client's env,
         // never on its argv.
-        assert!(plan.args.windows(2).any(|w| w[0] == "-e" && w[1] == "CHAPPA_AI_PROCESS_ID"));
-        assert!(plan.args.windows(2).any(|w| w[0] == "-e" && w[1] == SPAWN_UUID_ENV));
-        assert!(!plan.args.iter().any(|a| a.contains('=') && a.starts_with("CHAPPA_")), "{:?}", plan.args);
-        assert_eq!(plan.env.get("CHAPPA_AI_PROCESS_ID").map(String::as_str), Some("9"));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w[0] == "-e" && w[1] == "CHAPPA_AI_PROCESS_ID"));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w[0] == "-e" && w[1] == SPAWN_UUID_ENV));
+        assert!(
+            !plan
+                .args
+                .iter()
+                .any(|a| a.contains('=') && a.starts_with("CHAPPA_")),
+            "{:?}",
+            plan.args
+        );
+        assert_eq!(
+            plan.env.get("CHAPPA_AI_PROCESS_ID").map(String::as_str),
+            Some("9")
+        );
         let c = plan.args.iter().position(|a| a == "dev-worker").unwrap();
-        assert_eq!(&plan.args[c + 1..c + 4], &["sh".to_owned(), "-c".to_owned(), wrapper_script("abc")]);
+        assert_eq!(
+            &plan.args[c + 1..c + 4],
+            &["sh".to_owned(), "-c".to_owned(), wrapper_script("abc")]
+        );
         assert_eq!(plan.args[c + 4], "opencode");
         assert_eq!(plan.nspid, NsPid::PidFile);
         assert_eq!(
@@ -2563,9 +2912,19 @@ mod tests {
         // Host: program + args, cwd = project root, no docker words.
         let mut host = AgentTool::template(ToolType::Claude);
         host.args = vec!["--verbose".into()];
-        let plan = build_spawn_plan(&host, &["a b".into()], &env, Some(PathBuf::from("/p")), "u", false);
+        let plan = build_spawn_plan(
+            &host,
+            &["a b".into()],
+            &env,
+            Some(PathBuf::from("/p")),
+            "u",
+            false,
+        );
         // The template names the .cmd shim on Windows, the bare name elsewhere.
-        assert_eq!(plan.command, ToolType::Claude.default_program(cfg!(windows)));
+        assert_eq!(
+            plan.command,
+            ToolType::Claude.default_program(cfg!(windows))
+        );
         assert_eq!(plan.args, vec!["--verbose", "a b"]);
         assert_eq!(plan.cwd, Some(PathBuf::from("/p")));
     }
@@ -2581,17 +2940,45 @@ mod tests {
     #[test]
     fn ready_gate_with_a_fake_clock() {
         // No output → never ready, however long we wait.
-        let booting = IoView { has_output: false, last_output_ms: None, child_alive: true };
+        let booting = IoView {
+            has_output: false,
+            last_output_ms: None,
+            child_alive: true,
+        };
         assert_eq!(readiness(booting, 0, gate(None)), Readiness::Pending);
-        assert_eq!(readiness(booting, 1_000_000, gate(None)), Readiness::Pending);
+        assert_eq!(
+            readiness(booting, 1_000_000, gate(None)),
+            Readiness::Pending
+        );
         // Output, then 750 ms quiet → ready (not a ms sooner).
-        let spoke = IoView { has_output: true, last_output_ms: Some(10_000), child_alive: true };
-        assert_eq!(readiness(spoke, 10_749, gate(Some(10_000))), Readiness::Pending);
-        assert_eq!(readiness(spoke, 10_750, gate(Some(10_000))), Readiness::Ready);
+        let spoke = IoView {
+            has_output: true,
+            last_output_ms: Some(10_000),
+            child_alive: true,
+        };
+        assert_eq!(
+            readiness(spoke, 10_749, gate(Some(10_000))),
+            Readiness::Pending
+        );
+        assert_eq!(
+            readiness(spoke, 10_750, gate(Some(10_000))),
+            Readiness::Ready
+        );
         // Exit before ready → the receipt reason is "exited".
-        let dead = IoView { has_output: true, last_output_ms: Some(10_000), child_alive: false };
-        assert_eq!(readiness(dead, 10_100, gate(Some(10_000))), Readiness::Exited);
-        assert_eq!(readiness(dead, 20_000, gate(Some(10_000))), Readiness::Exited, "a dead child is never 'ready'");
+        let dead = IoView {
+            has_output: true,
+            last_output_ms: Some(10_000),
+            child_alive: false,
+        };
+        assert_eq!(
+            readiness(dead, 10_100, gate(Some(10_000))),
+            Readiness::Exited
+        );
+        assert_eq!(
+            readiness(dead, 20_000, gate(Some(10_000))),
+            Readiness::Exited,
+            "a dead child is never 'ready'"
+        );
     }
 
     /// A startup question on screen holds the gate like `blocked` does: a
@@ -2600,28 +2987,82 @@ mod tests {
     #[test]
     fn a_startup_question_holds_the_gate_and_never_times_out_into_a_write() {
         let question = &crate::startup_questions::STARTUP_QUESTIONS[0];
-        let quiet = IoView { has_output: true, last_output_ms: Some(10_000), child_alive: true };
+        let quiet = IoView {
+            has_output: true,
+            last_output_ms: Some(10_000),
+            child_alive: true,
+        };
         let policy = DeliveryPolicy::spawn_prompt(750, 5_000);
         let hold = Hold::Question(question);
         // Quiet for long enough to be ready, but held: keep waiting.
-        assert_eq!(gate_step_held(quiet, 20_000, Some(10_000), policy, Duration::from_secs(10), hold), None);
+        assert_eq!(
+            gate_step_held(
+                quiet,
+                20_000,
+                Some(10_000),
+                policy,
+                Duration::from_secs(10),
+                hold
+            ),
+            None
+        );
         // Past the max-wait fallback too: still no write.
-        assert_eq!(gate_step_held(quiet, 60_000, Some(10_000), policy, Duration::from_secs(19), hold), None);
+        assert_eq!(
+            gate_step_held(
+                quiet,
+                60_000,
+                Some(10_000),
+                policy,
+                Duration::from_secs(19),
+                hold
+            ),
+            None
+        );
         // At the cap: give up, naming the question — the receipt reason.
-        let step = gate_step_held(quiet, 60_000, Some(10_000), policy, PROMPT_WAIT_CAP, hold).unwrap();
+        let step =
+            gate_step_held(quiet, 60_000, Some(10_000), policy, PROMPT_WAIT_CAP, hold).unwrap();
         assert_eq!(step, GateStep::Held(question));
-        assert_eq!(step.reason().as_deref(), Some("held: waiting on the folder-trust question"));
+        assert_eq!(
+            step.reason().as_deref(),
+            Some("held: waiting on the folder-trust question")
+        );
         // The question answered (hold lifted) → the ordinary gate decides.
         assert_eq!(
-            gate_step_held(quiet, 20_000, Some(10_000), policy, Duration::from_secs(10), Hold::None),
+            gate_step_held(
+                quiet,
+                20_000,
+                Some(10_000),
+                policy,
+                Duration::from_secs(10),
+                Hold::None
+            ),
             Some(GateStep::Write { by_timeout: false })
         );
         // A dead child is `exited`, held or not.
-        let dead = IoView { child_alive: false, ..quiet };
-        assert_eq!(gate_step_held(dead, 20_000, Some(10_000), policy, Duration::from_secs(1), hold), Some(GateStep::GiveUp("exited")));
+        let dead = IoView {
+            child_alive: false,
+            ..quiet
+        };
+        assert_eq!(
+            gate_step_held(
+                dead,
+                20_000,
+                Some(10_000),
+                policy,
+                Duration::from_secs(1),
+                hold
+            ),
+            Some(GateStep::GiveUp("exited"))
+        );
         // The bool entry point is the `blocked` hold.
-        assert_eq!(gate_step(quiet, 20_000, Some(10_000), policy, PROMPT_WAIT_CAP, true), Some(GateStep::GiveUp("blocked")));
-        assert_eq!(GateStep::GiveUp("not-ready").reason().as_deref(), Some("not-ready"));
+        assert_eq!(
+            gate_step(quiet, 20_000, Some(10_000), policy, PROMPT_WAIT_CAP, true),
+            Some(GateStep::GiveUp("blocked"))
+        );
+        assert_eq!(
+            GateStep::GiveUp("not-ready").reason().as_deref(),
+            Some("not-ready")
+        );
         assert_eq!(GateStep::Write { by_timeout: true }.reason(), None);
     }
 
@@ -2633,22 +3074,57 @@ mod tests {
     fn ready_gate_falls_back_to_the_max_wait_for_a_chatty_tui() {
         let first = 10_000;
         // Output that never stops: last byte is always "just now".
-        let chatty = |now: u64| IoView { has_output: true, last_output_ms: Some(now - 5), child_alive: true };
-        assert_eq!(readiness(chatty(14_999), 14_999, gate(Some(first))), Readiness::Pending);
-        assert_eq!(readiness(chatty(15_000), 15_000, gate(Some(first))), Readiness::ReadyByTimeout);
-        assert_eq!(readiness(chatty(60_000), 60_000, gate(Some(first))), Readiness::ReadyByTimeout);
+        let chatty = |now: u64| IoView {
+            has_output: true,
+            last_output_ms: Some(now - 5),
+            child_alive: true,
+        };
+        assert_eq!(
+            readiness(chatty(14_999), 14_999, gate(Some(first))),
+            Readiness::Pending
+        );
+        assert_eq!(
+            readiness(chatty(15_000), 15_000, gate(Some(first))),
+            Readiness::ReadyByTimeout
+        );
+        assert_eq!(
+            readiness(chatty(60_000), 60_000, gate(Some(first))),
+            Readiness::ReadyByTimeout
+        );
         // The fallback counts from the first byte, never from the spawn: no
         // first byte, no timeout (a silent boot stays pending until the cap).
         assert_eq!(
-            readiness(IoView { has_output: false, last_output_ms: None, child_alive: true }, 60_000, gate(None)),
+            readiness(
+                IoView {
+                    has_output: false,
+                    last_output_ms: None,
+                    child_alive: true
+                },
+                60_000,
+                gate(None)
+            ),
             Readiness::Pending
         );
         // A quiet window still wins when it happens first.
-        let quiet = IoView { has_output: true, last_output_ms: Some(11_000), child_alive: true };
-        assert_eq!(readiness(quiet, 11_750, gate(Some(first))), Readiness::Ready);
+        let quiet = IoView {
+            has_output: true,
+            last_output_ms: Some(11_000),
+            child_alive: true,
+        };
+        assert_eq!(
+            readiness(quiet, 11_750, gate(Some(first))),
+            Readiness::Ready
+        );
         // A dead child beats the timeout too.
         assert_eq!(
-            readiness(IoView { child_alive: false, ..chatty(20_000) }, 20_000, gate(Some(first))),
+            readiness(
+                IoView {
+                    child_alive: false,
+                    ..chatty(20_000)
+                },
+                20_000,
+                gate(Some(first))
+            ),
             Readiness::Exited
         );
     }
@@ -2660,7 +3136,11 @@ mod tests {
         tool.id = 2;
         tool.name = "worker".into();
         tool.max_busy = Some(1);
-        if let Runtime::DockerExec { max_busy_in_container, .. } = &mut tool.runtime {
+        if let Runtime::DockerExec {
+            max_busy_in_container,
+            ..
+        } = &mut tool.runtime
+        {
             *max_busy_in_container = Some(2);
         }
         // Under every limit: allowed.
@@ -2668,7 +3148,10 @@ mod tests {
         // One busy agent of this tool (output 30 s ago) → per-tool refusal naming it.
         let rows = vec![row(4, 2, Some("dev-worker"), true, Some(now - 30_000))];
         let err = busy_guard(&tool, &rows, now, false).unwrap_err();
-        assert!(err.contains("agent-4 (process 4, last_output_at 970000)"), "{err}");
+        assert!(
+            err.contains("agent-4 (process 4, last_output_at 970000)"),
+            "{err}"
+        );
         assert!(err.contains("max_busy = 1"), "{err}");
         // Idle (121 s quiet) or dead agents do not count.
         let idle = vec![
@@ -2685,7 +3168,9 @@ mod tests {
         assert!(err.contains("max_busy_in_container = 2"), "{err}");
         assert!(err.contains("agent-6") && err.contains("agent-7"), "{err}");
         // force overrides, and says so.
-        let note = busy_guard(&tool, &rows, now, true).unwrap().expect("forced note");
+        let note = busy_guard(&tool, &rows, now, true)
+            .unwrap()
+            .expect("forced note");
         assert!(note.starts_with("forced past busy guard"), "{note}");
     }
 
@@ -2698,7 +3183,11 @@ mod tests {
         let now = 1_000_000;
         let mut tool = docker_tool();
         tool.id = 2;
-        if let Runtime::DockerExec { max_busy_in_container, .. } = &mut tool.runtime {
+        if let Runtime::DockerExec {
+            max_busy_in_container,
+            ..
+        } = &mut tool.runtime
+        {
             *max_busy_in_container = Some(1);
         }
         let silent = |spawned_at_ms: u64| AgentRow {
@@ -2709,12 +3198,26 @@ mod tests {
         let err = busy_guard(&tool, &[silent(now - 1_000)], now, false).unwrap_err();
         assert!(err.contains("max_busy_in_container = 1"), "{err}");
         assert!(err.contains("last_output_at never"), "{err}");
-        assert!(busy_guard(&tool, &[silent(now - 1_000)], now, true).unwrap().is_some(), "force still works");
+        assert!(
+            busy_guard(&tool, &[silent(now - 1_000)], now, true)
+                .unwrap()
+                .is_some(),
+            "force still works"
+        );
         // Spawned 121 s ago and never spoke: idle.
         assert!(!is_busy(&silent(now - 121_000), now));
-        assert_eq!(busy_guard(&tool, &[silent(now - 121_000)], now, false), Ok(None));
+        assert_eq!(
+            busy_guard(&tool, &[silent(now - 121_000)], now, false),
+            Ok(None)
+        );
         // Dead children never count, however fresh.
-        assert!(!is_busy(&AgentRow { child_alive: false, ..silent(now) }, now));
+        assert!(!is_busy(
+            &AgentRow {
+                child_alive: false,
+                ..silent(now)
+            },
+            now
+        ));
     }
 
     #[test]
@@ -2730,12 +3233,37 @@ mod tests {
         };
         assert_eq!(derive_bridge(base), Bridge::Ok);
         // running → exited flips.
-        assert_eq!(derive_bridge(BridgeInputs { container_status: ContainerStatus::Exited, ..base }), Bridge::ContainerDown);
-        assert_eq!(derive_bridge(BridgeInputs { container_status: ContainerStatus::Missing, ..base }), Bridge::ContainerDown);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                container_status: ContainerStatus::Exited,
+                ..base
+            }),
+            Bridge::ContainerDown
+        );
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                container_status: ContainerStatus::Missing,
+                ..base
+            }),
+            Bridge::ContainerDown
+        );
         // started_at newer than the spawn = restarted under us.
-        assert_eq!(derive_bridge(BridgeInputs { container_started_ms: Some(6_000), ..base }), Bridge::ContainerDown);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                container_started_ms: Some(6_000),
+                ..base
+            }),
+            Bridge::ContainerDown
+        );
         // unknown never flips (docker slow ≠ container gone).
-        assert_eq!(derive_bridge(BridgeInputs { container_status: ContainerStatus::Unknown, container_started_ms: None, ..base }), Bridge::Ok);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                container_status: ContainerStatus::Unknown,
+                container_started_ms: None,
+                ..base
+            }),
+            Bridge::Ok
+        );
     }
 
     #[test]
@@ -2751,15 +3279,39 @@ mod tests {
         };
         assert_eq!(derive_bridge(quiet), Bridge::Stale);
         // Quiet but the poke produced bytes → ok.
-        assert_eq!(derive_bridge(BridgeInputs { poke_produced_output: Some(true), ..quiet }), Bridge::Ok);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                poke_produced_output: Some(true),
+                ..quiet
+            }),
+            Bridge::Ok
+        );
         // Poke failed but NOT quiet long enough → ok.
-        assert_eq!(derive_bridge(BridgeInputs { now_ms: 10_000 + 899_999, ..quiet }), Bridge::Ok);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                now_ms: 10_000 + 899_999,
+                ..quiet
+            }),
+            Bridge::Ok
+        );
         // Never spoke = booting, not stale.
-        assert_eq!(derive_bridge(BridgeInputs { last_output_ms: None, ..quiet }), Bridge::Ok);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                last_output_ms: None,
+                ..quiet
+            }),
+            Bridge::Ok
+        );
         assert!(!stale_candidate(None, 1_000_000, 10));
         assert!(stale_candidate(Some(0), 900_000, 900_000));
         // Container down wins over stale.
-        assert_eq!(derive_bridge(BridgeInputs { container_status: ContainerStatus::Exited, ..quiet }), Bridge::ContainerDown);
+        assert_eq!(
+            derive_bridge(BridgeInputs {
+                container_status: ContainerStatus::Exited,
+                ..quiet
+            }),
+            Bridge::ContainerDown
+        );
     }
 
     #[test]
@@ -2771,26 +3323,51 @@ mod tests {
         assert_eq!(s.started_at.as_deref(), Some("2026-08-28T10:00:00Z"));
         assert_eq!(
             s.mounts,
-            vec![Mount { source: r"C:\code\my app".into(), destination: "/workspace/app".into() }]
+            vec![Mount {
+                source: r"C:\code\my app".into(),
+                destination: "/workspace/app".into()
+            }]
         );
         // The wire omits an empty list and keeps a known one.
-        assert!(serde_json::to_value(ContainerState::unknown()).unwrap().get("mounts").is_none());
-        assert_eq!(serde_json::to_value(&s).unwrap()["mounts"][0]["destination"], "/workspace/app");
+        assert!(serde_json::to_value(ContainerState::unknown())
+            .unwrap()
+            .get("mounts")
+            .is_none());
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["mounts"][0]["destination"],
+            "/workspace/app"
+        );
         // A line without the mounts field (or with garbage there) has none.
-        assert!(parse_inspect("running 2026-08-28T10:00:00Z", 0).mounts.is_empty());
-        assert!(parse_inspect("running 2026-08-28T10:00:00Z <no value>", 0).mounts.is_empty());
+        assert!(parse_inspect("running 2026-08-28T10:00:00Z", 0)
+            .mounts
+            .is_empty());
+        assert!(parse_inspect("running 2026-08-28T10:00:00Z <no value>", 0)
+            .mounts
+            .is_empty());
     }
 
     #[test]
     fn inspect_stats_and_time_parsers() {
-        let s = parse_inspect("running 2026-08-28T10:00:00.123456789Z\n", parse_rfc3339_ms("2026-08-28T10:00:10Z").unwrap());
+        let s = parse_inspect(
+            "running 2026-08-28T10:00:00.123456789Z\n",
+            parse_rfc3339_ms("2026-08-28T10:00:10Z").unwrap(),
+        );
         assert_eq!(s.status, ContainerStatus::Running);
         assert_eq!(s.uptime_s, Some(9));
-        assert_eq!(s.started_at.as_deref(), Some("2026-08-28T10:00:00.123456789Z"));
-        assert_eq!(parse_inspect("exited 2026-08-28T10:00:00Z", 0).status, ContainerStatus::Exited);
+        assert_eq!(
+            s.started_at.as_deref(),
+            Some("2026-08-28T10:00:00.123456789Z")
+        );
+        assert_eq!(
+            parse_inspect("exited 2026-08-28T10:00:00Z", 0).status,
+            ContainerStatus::Exited
+        );
         assert_eq!(parse_inspect("", 0).status, ContainerStatus::Unknown);
         assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:01Z"), Some(1_000));
-        assert_eq!(parse_rfc3339_ms("2026-08-28T10:00:00+02:00"), Some(parse_rfc3339_ms("2026-08-28T08:00:00Z").unwrap()));
+        assert_eq!(
+            parse_rfc3339_ms("2026-08-28T10:00:00+02:00"),
+            Some(parse_rfc3339_ms("2026-08-28T08:00:00Z").unwrap())
+        );
         assert_eq!(parse_rfc3339_ms("garbage"), None);
         assert_eq!(
             parse_stats_mem(r#"{"MemUsage":"1.5GiB / 3GiB","Name":"dev-worker"}"#),
@@ -2841,12 +3418,24 @@ mod tests {
     fn close_sequence_term_poll_kill_verify() {
         let docker = FakeDocker::new();
         docker.ok(&["inspect"], "running 2026-01-01T00:00:00Z");
-        docker.ok(&["exec", "dev-worker", "cat", "/tmp/.chappa-ai/u1.pid"], "4242\n");
+        docker.ok(
+            &["exec", "dev-worker", "cat", "/tmp/.chappa-ai/u1.pid"],
+            "4242\n",
+        );
         docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -TERM \"$1\""], "");
         docker.ok(&["exec", "dev-worker", "test", "-d", "/proc/4242"], ""); // still there
         docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -KILL \"$1\""], "");
-        let verdict = kill_container_side(docker.as_ref(), &meta(NsPid::PidFile), Duration::from_millis(300), NO_KILL_GRACE);
-        assert_eq!(verdict, CloseVerification::StillPresent, "ignores KILL: still-present");
+        let verdict = kill_container_side(
+            docker.as_ref(),
+            &meta(NsPid::PidFile),
+            Duration::from_millis(300),
+            NO_KILL_GRACE,
+        );
+        assert_eq!(
+            verdict,
+            CloseVerification::StillPresent,
+            "ignores KILL: still-present"
+        );
         let kinds: Vec<String> = docker
             .calls()
             .iter()
@@ -2857,12 +3446,25 @@ mod tests {
         assert_eq!(kinds[1], "cat");
         // The signal goes through the shell builtin (`sh -c 'kill -SIG "$1"'
         // kill <pid>`), never a bare `kill` executable — worker images lack one.
-        assert_eq!(docker.calls()[term][2..5], ["sh", "-c", "kill -TERM \"$1\""].map(String::from));
+        assert_eq!(
+            docker.calls()[term][2..5],
+            ["sh", "-c", "kill -TERM \"$1\""].map(String::from)
+        );
         assert_eq!(docker.calls()[term][6], "4242");
-        let last_kill = docker.calls().iter().rposition(|c| call_kind(c) == "kill").unwrap();
+        let last_kill = docker
+            .calls()
+            .iter()
+            .rposition(|c| call_kind(c) == "kill")
+            .unwrap();
         assert_eq!(docker.calls()[last_kill][4], "kill -KILL \"$1\"");
-        assert!(docker.calls_with(&["top"]).is_empty(), "docker top must never be consulted");
-        assert!(docker.calls_with(&["exec", "dev-worker", "test"]).len() >= 2, "polled then re-verified");
+        assert!(
+            docker.calls_with(&["top"]).is_empty(),
+            "docker top must never be consulted"
+        );
+        assert!(
+            docker.calls_with(&["exec", "dev-worker", "test"]).len() >= 2,
+            "polled then re-verified"
+        );
 
         // The process obeys TERM: gone, no KILL.
         let docker = FakeDocker::new();
@@ -2870,13 +3472,31 @@ mod tests {
         docker.ok(&["exec", "dev-worker", "cat"], "4242");
         docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -TERM \"$1\""], "");
         docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/4242"], "");
-        assert_eq!(kill_container_side(docker.as_ref(), &meta(NsPid::PidFile), TERM_GRACE, KILL_GRACE), CloseVerification::Gone);
-        assert!(docker.calls_with(&["exec", "dev-worker", "sh", "-c", "kill -KILL \"$1\""]).is_empty());
+        assert_eq!(
+            kill_container_side(
+                docker.as_ref(),
+                &meta(NsPid::PidFile),
+                TERM_GRACE,
+                KILL_GRACE
+            ),
+            CloseVerification::Gone
+        );
+        assert!(docker
+            .calls_with(&["exec", "dev-worker", "sh", "-c", "kill -KILL \"$1\""])
+            .is_empty());
 
         // Container already down → short-circuit: no exec at all.
         let docker = FakeDocker::new();
         docker.ok(&["inspect"], "exited 2026-01-01T00:00:00Z");
-        assert_eq!(kill_container_side(docker.as_ref(), &meta(NsPid::PidFile), TERM_GRACE, KILL_GRACE), CloseVerification::ContainerDown);
+        assert_eq!(
+            kill_container_side(
+                docker.as_ref(),
+                &meta(NsPid::PidFile),
+                TERM_GRACE,
+                KILL_GRACE
+            ),
+            CloseVerification::ContainerDown
+        );
         assert!(docker.calls_with(&["exec"]).is_empty());
 
         // No pid file (no sh at spawn) → the environ match, exact on the uuid,
@@ -2889,7 +3509,15 @@ mod tests {
         docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -TERM \"$1\""], "");
         docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -KILL \"$1\""], "");
         docker.fail(&["exec", "dev-worker", "test", "-d", "/proc/77"], "");
-        assert_eq!(kill_container_side(docker.as_ref(), &meta(NsPid::Unresolved), TERM_GRACE, KILL_GRACE), CloseVerification::Gone);
+        assert_eq!(
+            kill_container_side(
+                docker.as_ref(),
+                &meta(NsPid::Unresolved),
+                TERM_GRACE,
+                KILL_GRACE
+            ),
+            CloseVerification::Gone
+        );
         let script = &docker.calls_with(&["exec", "-u", "dev", "dev-worker", "sh"])[0][6];
         assert!(script.contains("CHAPPA_AI_SPAWN_UUID=u1"), "{script}");
         assert!(docker.calls_with(&["exec", "dev-worker", "cat"]).is_empty());
@@ -2897,7 +3525,15 @@ mod tests {
         let docker = FakeDocker::new();
         docker.ok(&["inspect"], "running 2026-01-01T00:00:00Z");
         docker.ok(&["exec", "-u", "dev", "dev-worker", "sh", "-c"], "");
-        assert_eq!(kill_container_side(docker.as_ref(), &meta(NsPid::Unresolved), TERM_GRACE, KILL_GRACE), CloseVerification::Unresolved);
+        assert_eq!(
+            kill_container_side(
+                docker.as_ref(),
+                &meta(NsPid::Unresolved),
+                TERM_GRACE,
+                KILL_GRACE
+            ),
+            CloseVerification::Unresolved
+        );
     }
 
     /// Review fix: a SIGKILLed process takes a beat to be reaped. The verdict
@@ -2925,19 +3561,34 @@ mod tests {
             move |args| {
                 if args.get(4).map(String::as_str) == Some("kill -KILL \"$1\"") {
                     *after_kill.lock().unwrap() = true;
-                } else if args.get(2).map(String::as_str) == Some("test") && *after_kill.lock().unwrap() {
+                } else if args.get(2).map(String::as_str) == Some("test")
+                    && *after_kill.lock().unwrap()
+                {
                     let mut n = polls.lock().unwrap();
                     *n += 1;
                     if *n == 3 {
-                        docker_for_rule.fail(&["exec", "dev-worker", "test", "-d", "/proc/4242"], "");
+                        docker_for_rule
+                            .fail(&["exec", "dev-worker", "test", "-d", "/proc/4242"], "");
                     }
                 }
             }
         });
         docker.ok(&["exec", "dev-worker", "test", "-d", "/proc/4242"], "");
-        let verdict = kill_container_side(docker.as_ref(), &meta(NsPid::PidFile), Duration::from_millis(100), KILL_GRACE);
-        assert_eq!(verdict, CloseVerification::Gone, "went within the KILL grace");
-        assert!(*polls_after_kill.lock().unwrap() >= 3, "polled after the KILL, not read once");
+        let verdict = kill_container_side(
+            docker.as_ref(),
+            &meta(NsPid::PidFile),
+            Duration::from_millis(100),
+            KILL_GRACE,
+        );
+        assert_eq!(
+            verdict,
+            CloseVerification::Gone,
+            "went within the KILL grace"
+        );
+        assert!(
+            *polls_after_kill.lock().unwrap() >= 3,
+            "polled after the KILL, not read once"
+        );
 
         // Never goes: still-present after the grace, and the grace is honoured
         // (bounded, but not zero polls).
@@ -2948,11 +3599,26 @@ mod tests {
         docker.ok(&["exec", "dev-worker", "sh", "-c", "kill -KILL \"$1\""], "");
         docker.ok(&["exec", "dev-worker", "test", "-d", "/proc/4242"], "");
         let started = Instant::now();
-        let verdict = kill_container_side(docker.as_ref(), &meta(NsPid::PidFile), Duration::ZERO, Duration::from_millis(600));
+        let verdict = kill_container_side(
+            docker.as_ref(),
+            &meta(NsPid::PidFile),
+            Duration::ZERO,
+            Duration::from_millis(600),
+        );
         assert_eq!(verdict, CloseVerification::StillPresent);
-        assert!(started.elapsed() >= Duration::from_millis(600), "waited the KILL grace");
-        let kill_at = docker.calls().iter().position(|c| c.get(4).map(String::as_str) == Some("kill -KILL \"$1\"")).unwrap();
-        let polls_after = docker.calls()[kill_at + 1..].iter().filter(|c| c.get(2).map(String::as_str) == Some("test")).count();
+        assert!(
+            started.elapsed() >= Duration::from_millis(600),
+            "waited the KILL grace"
+        );
+        let kill_at = docker
+            .calls()
+            .iter()
+            .position(|c| c.get(4).map(String::as_str) == Some("kill -KILL \"$1\""))
+            .unwrap();
+        let polls_after = docker.calls()[kill_at + 1..]
+            .iter()
+            .filter(|c| c.get(2).map(String::as_str) == Some("test"))
+            .count();
         assert!(polls_after >= 2, "{polls_after} post-KILL polls");
 
         // remove_pid_file: skipped for container-down AND unresolved, runs for
@@ -2966,11 +3632,22 @@ mod tests {
             let docker = FakeDocker::new();
             docker.ok(&["exec"], "");
             remove_pid_file(docker.as_ref(), &meta(NsPid::PidFile), verdict);
-            assert_eq!(!docker.calls_with(&["exec", "dev-worker", "rm"]).is_empty(), expect_rm, "{verdict:?}");
+            assert_eq!(
+                !docker.calls_with(&["exec", "dev-worker", "rm"]).is_empty(),
+                expect_rm,
+                "{verdict:?}"
+            );
         }
         let docker = FakeDocker::new();
-        remove_pid_file(docker.as_ref(), &meta(NsPid::Unresolved), CloseVerification::Gone);
-        assert!(docker.calls().is_empty(), "no pid file to remove without the wrapper");
+        remove_pid_file(
+            docker.as_ref(),
+            &meta(NsPid::Unresolved),
+            CloseVerification::Gone,
+        );
+        assert!(
+            docker.calls().is_empty(),
+            "no pid file to remove without the wrapper"
+        );
     }
 
     #[test]
@@ -3015,7 +3692,10 @@ mod tests {
         assert_eq!(resolve_parent_process_id(None, Some(41), 41, exists), None);
         assert_eq!(resolve_parent_process_id(Some(41), None, 41, exists), None);
         // A legitimate live parent of ANY kind is accepted (a plain shell).
-        assert_eq!(resolve_parent_process_id(None, Some(9), 41, exists), Some(9));
+        assert_eq!(
+            resolve_parent_process_id(None, Some(9), 41, exists),
+            Some(9)
+        );
     }
 
     // ---- the orphan classifier (pure) -------------------------------
@@ -3027,17 +3707,30 @@ mod tests {
         // u-live: never an orphan. u-fresh: unknown but spawned inside the
         // busy window — skipped (its entry may still be materializing).
         let rows = vec![
-            ScanRow { pid: 100, uuid: "u-live".into(), spawned_at_ms: now - 1 },
-            ScanRow { pid: 200, uuid: "u-fresh".into(), spawned_at_ms: now },
+            ScanRow {
+                pid: 100,
+                uuid: "u-live".into(),
+                spawned_at_ms: now - 1,
+            },
+            ScanRow {
+                pid: 200,
+                uuid: "u-fresh".into(),
+                spawned_at_ms: now,
+            },
         ];
         assert_eq!(orphans(&rows, &live, BUSY_WINDOW_MS, now), Vec::new());
         // Once the fresh one ages out of the window, it IS an orphan.
-        let rows = vec![
-            ScanRow { pid: 200, uuid: "u-fresh".into(), spawned_at_ms: now - BUSY_WINDOW_MS - 1 },
-        ];
+        let rows = vec![ScanRow {
+            pid: 200,
+            uuid: "u-fresh".into(),
+            spawned_at_ms: now - BUSY_WINDOW_MS - 1,
+        }];
         assert_eq!(
             orphans(&rows, &live, BUSY_WINDOW_MS, now),
-            vec![Orphan { pid: 200, uuid: "u-fresh".into() }]
+            vec![Orphan {
+                pid: 200,
+                uuid: "u-fresh".into()
+            }]
         );
     }
 
@@ -3048,19 +3741,40 @@ mod tests {
     fn orphans_roots_the_smallest_pid_per_uuid() {
         let now = 1_000_000;
         let rows = vec![
-            ScanRow { pid: 6927, uuid: "u1".into(), spawned_at_ms: 0 },
-            ScanRow { pid: 532, uuid: "u1".into(), spawned_at_ms: 0 },
-            ScanRow { pid: 8875, uuid: "u2".into(), spawned_at_ms: 0 },
+            ScanRow {
+                pid: 6927,
+                uuid: "u1".into(),
+                spawned_at_ms: 0,
+            },
+            ScanRow {
+                pid: 532,
+                uuid: "u1".into(),
+                spawned_at_ms: 0,
+            },
+            ScanRow {
+                pid: 8875,
+                uuid: "u2".into(),
+                spawned_at_ms: 0,
+            },
         ];
         let got = orphans(&rows, &HashSet::new(), BUSY_WINDOW_MS, now);
         assert_eq!(
             got,
             vec![
-                Orphan { pid: 532, uuid: "u1".into() }, // BTreeMap orders by uuid
-                Orphan { pid: 8875, uuid: "u2".into() },
+                Orphan {
+                    pid: 532,
+                    uuid: "u1".into()
+                }, // BTreeMap orders by uuid
+                Orphan {
+                    pid: 8875,
+                    uuid: "u2".into()
+                },
             ]
         );
-        assert!(!got.iter().any(|o| o.pid == 6927), "the larger sibling is not the root");
+        assert!(
+            !got.iter().any(|o| o.pid == 6927),
+            "the larger sibling is not the root"
+        );
     }
 
     #[test]
@@ -3069,13 +3783,32 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ScanRow { pid: 532, uuid: "u1".into(), spawned_at_ms: 0 },
-                ScanRow { pid: 6927, uuid: "u1".into(), spawned_at_ms: 5 },
-                ScanRow { pid: 8875, uuid: "u2".into(), spawned_at_ms: 999 },
+                ScanRow {
+                    pid: 532,
+                    uuid: "u1".into(),
+                    spawned_at_ms: 0
+                },
+                ScanRow {
+                    pid: 6927,
+                    uuid: "u1".into(),
+                    spawned_at_ms: 5
+                },
+                ScanRow {
+                    pid: 8875,
+                    uuid: "u2".into(),
+                    spawned_at_ms: 999
+                },
             ]
         );
         // A missing spawn-time column collapses to a fresh-ish 0 (still
         // outside the busy window when the process is old in reality).
-        assert_eq!(parse_scan("1 u1\n"), vec![ScanRow { pid: 1, uuid: "u1".into(), spawned_at_ms: 0 }]);
+        assert_eq!(
+            parse_scan("1 u1\n"),
+            vec![ScanRow {
+                pid: 1,
+                uuid: "u1".into(),
+                spawned_at_ms: 0
+            }]
+        );
     }
 }

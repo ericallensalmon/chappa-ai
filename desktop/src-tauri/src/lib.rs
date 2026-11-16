@@ -3,7 +3,6 @@ use tauri::{Manager, RunEvent};
 pub mod agent_json;
 pub mod agent_tools;
 pub mod agents;
-pub mod event_ring;
 mod commands;
 pub mod control_http;
 pub mod coordination;
@@ -13,6 +12,7 @@ pub mod data_safety;
 #[cfg(debug_assertions)]
 pub mod debug_http;
 pub mod delivery_hold;
+pub mod event_ring;
 pub mod open_path;
 pub mod projects;
 pub mod records;
@@ -96,7 +96,9 @@ pub fn run() {
             // handle, so EVERY close (frontend ×, MCP/control close_terminal,
             // project stop, close_on_exit) reaches the open webview.
             app.state::<Registry>()
-                .set_closed_broadcast(std::sync::Arc::new(AppClosedBroadcast(app.handle().clone())));
+                .set_closed_broadcast(std::sync::Arc::new(AppClosedBroadcast(
+                    app.handle().clone(),
+                )));
             // `<app-config>/agent_tools.json`.
             app.state::<AgentToolsState>().init(config_dir.clone());
             // `<app-config>/coordination.db` (scratchpads + todos).
@@ -105,12 +107,17 @@ pub fn run() {
             // AFTER settings load (auto_start commands start at launch, and a
             // spawn resolves the execution profile out of settings).
             let coordination = app.state::<Coordination>().inner().clone();
-            app.state::<Workspace>()
-                .init(app.handle(), config_dir.clone(), settings.inner().clone(), coordination.clone());
+            app.state::<Workspace>().init(
+                app.handle(),
+                config_dir.clone(),
+                settings.inner().clone(),
+                coordination.clone(),
+            );
             // The source registry (`<app-config>/sources.json`): attached
             // sources start connecting now; launched ones register when their
             // project command spawns, so it is initialized BEFORE projects.
-            app.state::<Sources>().init(app.handle(), config_dir.clone());
+            app.state::<Sources>()
+                .init(app.handle(), config_dir.clone());
             // Point the projects store at the app-config dir and start the
             // 500ms-alive ticker. Idempotent: setup runs once.
             app.state::<Projects>().init(
@@ -202,7 +209,12 @@ pub fn run() {
                     if !sweep_settings.snapshot().agent_reap_orphans {
                         return;
                     }
-                    agents::reap_orphans(&sweep_registry, &sweep_tools, None, Some(&*agents::app_reap_emitter(sweep_app)));
+                    agents::reap_orphans(
+                        &sweep_registry,
+                        &sweep_tools,
+                        None,
+                        Some(&*agents::app_reap_emitter(sweep_app)),
+                    );
                 });
             }
             #[cfg(debug_assertions)]
@@ -418,4 +430,3 @@ pub fn run() {
         }
     });
 }
-

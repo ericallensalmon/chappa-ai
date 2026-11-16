@@ -380,8 +380,10 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
                     let id = lossy(&join_rest(&mut params)).trim().to_owned();
                     (!id.is_empty()).then_some(OscEvent::Session(id))
                 }
-                b"summary" => cap_summary(&lossy(&join_rest(&mut params))).map(|text| OscEvent::Summary { text }),
-                b"status" => ProgramStatus::parse(&join_rest(&mut params)).map(|state| OscEvent::Status { state }),
+                b"summary" => cap_summary(&lossy(&join_rest(&mut params)))
+                    .map(|text| OscEvent::Summary { text }),
+                b"status" => ProgramStatus::parse(&join_rest(&mut params))
+                    .map(|state| OscEvent::Status { state }),
                 _ => None,
             }
         }

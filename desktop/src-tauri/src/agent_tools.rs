@@ -74,8 +74,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
-pub use project_model::words::shell_words;
 use project_model::words::quote_word;
+pub use project_model::words::shell_words;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use term_core::session::SessionMatcher;
@@ -141,7 +141,11 @@ impl ToolType {
     fn npm_shipped(self) -> bool {
         matches!(
             self,
-            ToolType::Claude | ToolType::Codex | ToolType::Gemini | ToolType::Copilot | ToolType::Amp
+            ToolType::Claude
+                | ToolType::Codex
+                | ToolType::Gemini
+                | ToolType::Copilot
+                | ToolType::Amp
         )
     }
 
@@ -315,7 +319,10 @@ pub fn resume_argv_template(tool_type: ToolType) -> Vec<String> {
 /// `template` with every [`SESSION_ID_SLOT`] replaced by `session_id`
 /// (inside a word too, so `--resume={session_id}` works).
 pub fn resume_args(template: &[String], session_id: &str) -> Vec<String> {
-    template.iter().map(|word| word.replace(SESSION_ID_SLOT, session_id)).collect()
+    template
+        .iter()
+        .map(|word| word.replace(SESSION_ID_SLOT, session_id))
+        .collect()
 }
 
 /// The per-type first-prompt template: claude and codex take the prompt as
@@ -331,13 +338,17 @@ pub fn prompt_argv_template(tool_type: ToolType) -> Vec<String> {
 /// word too, so `--prompt={prompt}` works). The prompt stays ONE argument
 /// however many spaces or newlines it holds.
 pub fn prompt_args(template: &[String], prompt: &str) -> Vec<String> {
-    template.iter().map(|word| word.replace(PROMPT_SLOT, prompt)).collect()
+    template
+        .iter()
+        .map(|word| word.replace(PROMPT_SLOT, prompt))
+        .collect()
 }
 
 /// Compile a `regex` capture pattern: one capture group, the id. Errors are
 /// user-facing (the edit modal shows them).
 pub fn compile_session_pattern(pattern: &str) -> Result<regex::Regex, String> {
-    let re = regex::Regex::new(pattern).map_err(|e| format!("session pattern does not compile: {e}"))?;
+    let re =
+        regex::Regex::new(pattern).map_err(|e| format!("session pattern does not compile: {e}"))?;
     if re.captures_len() != 2 {
         return Err(format!(
             "session pattern must have exactly one capture group (the id); this one has {}",
@@ -424,7 +435,8 @@ impl AgentTool {
     /// `--settings <hooks_file>` at the front of the args; the hook announces
     /// the id, so the capture becomes `announced`.
     fn add_session_hook(&mut self, hooks_file: &str) {
-        self.args.splice(0..0, [SETTINGS_FLAG.to_owned(), hooks_file.to_owned()]);
+        self.args
+            .splice(0..0, [SETTINGS_FLAG.to_owned(), hooks_file.to_owned()]);
         self.session_capture = SessionCapture::Announced;
     }
 
@@ -450,12 +462,20 @@ impl AgentTool {
         let mut words: Vec<String> = Vec::new();
         if self.runtime.is_docker() {
             words.push("docker".into());
-            words.extend(docker_exec_prefix(&self.runtime, &self.env, EnvFlags::WithValues));
+            words.extend(docker_exec_prefix(
+                &self.runtime,
+                &self.env,
+                EnvFlags::WithValues,
+            ));
         }
         words.push(self.program.clone());
         words.extend(self.args.iter().cloned());
         // Shown to people: a credential written into the tool's args is masked.
-        stack_core::credentials::mask_argv(&words).iter().map(|w| quote_word(w)).collect::<Vec<_>>().join(" ")
+        stack_core::credentials::mask_argv(&words)
+            .iter()
+            .map(|w| quote_word(w))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Prune what the lenient parse let through and clamp the limits (0 = no
@@ -614,7 +634,9 @@ pub fn parse_command_line(line: &str) -> ParsedCommand {
                             Some((k, v)) => {
                                 env.insert(k.to_owned(), v.to_owned());
                             }
-                            None => warnings.push(format!("env `{kv}` without a value was dropped")),
+                            None => {
+                                warnings.push(format!("env `{kv}` without a value was dropped"))
+                            }
                         }
                     }
                     i += 2;
@@ -727,14 +749,20 @@ pub const SESSION_HOOK_TIMEOUT_S: u64 = 5;
 
 /// Whether `args` already carry a `--settings` (either spelling).
 pub fn has_settings_flag(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == SETTINGS_FLAG || a.strip_prefix(SETTINGS_FLAG).is_some_and(|rest| rest.starts_with('=')))
+    args.iter().any(|a| {
+        a == SETTINGS_FLAG
+            || a.strip_prefix(SETTINGS_FLAG)
+                .is_some_and(|rest| rest.starts_with('='))
+    })
 }
 
 /// The `chappa-ai-mcp` binary: beside `exe_dir` (the app's own executable;
 /// a cargo build puts both in one target dir), else the first absolute
 /// `PATH` entry holding it. `None` when neither exists.
-pub fn find_mcp_binary(exe_dir: Option<&std::path::Path>, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+pub fn find_mcp_binary(
+    exe_dir: Option<&std::path::Path>,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
     let name = format!("chappa-ai-mcp{}", std::env::consts::EXE_SUFFIX);
     let beside = exe_dir.map(|d| d.join(&name)).filter(|p| p.is_file());
     beside.or_else(|| {
@@ -785,12 +813,17 @@ pub fn claude_hooks_json(command: Option<&str>) -> String {
 /// `None` when there is no hook to point at, or when the path cannot travel
 /// as one argument: a claude program is usually an npm `.cmd` shim, and the
 /// spawn refuses arguments cmd.exe would interpret.
-pub fn write_claude_hooks(config_dir: &std::path::Path, binary: Option<&std::path::Path>) -> Option<String> {
+pub fn write_claude_hooks(
+    config_dir: &std::path::Path,
+    binary: Option<&std::path::Path>,
+) -> Option<String> {
     let path = config_dir.join(CLAUDE_HOOKS_FILE);
     let command = binary.and_then(|b| session_hook_command(b, cfg!(windows)));
     let text = claude_hooks_json(command.as_deref());
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-        if let Err(err) = project_model::atomic::write_private_text_atomic(&path, &text, "hooks.tmp") {
+        if let Err(err) =
+            project_model::atomic::write_private_text_atomic(&path, &text, "hooks.tmp")
+        {
             log::error!("[agent_tools] cannot write {}: {err}", path.display());
             return None;
         }
@@ -917,7 +950,9 @@ impl AgentToolStore {
         if tool.program.is_empty() {
             return Err("program is required".to_owned());
         }
-        if tool.transport == Transport::Json && crate::agent_json::machine_mode(tool.tool_type).is_none() {
+        if tool.transport == Transport::Json
+            && crate::agent_json::machine_mode(tool.tool_type).is_none()
+        {
             return Err(format!(
                 "tool type \"{}\" has no machine mode — the json transport needs one of: {}",
                 tool.tool_type.as_str(),
@@ -1010,10 +1045,14 @@ impl AgentToolsState {
     /// Load the store, writing the claude hooks file first so the load can
     /// point tools at it.
     pub fn init(&self, config_dir: PathBuf) {
-        let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from));
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(PathBuf::from));
         let binary = find_mcp_binary(exe_dir.as_deref(), std::env::var_os("PATH").as_deref());
         if binary.is_none() {
-            log::warn!("[agent_tools] no chappa-ai-mcp binary found; claude tty tools get no session hook");
+            log::warn!(
+                "[agent_tools] no chappa-ai-mcp binary found; claude tty tools get no session hook"
+            );
         }
         let hooks = write_claude_hooks(&config_dir, binary.as_deref());
         let store = AgentToolStore::with_claude_hooks(config_dir.join(FILE_NAME), hooks);
@@ -1159,7 +1198,10 @@ mod tests {
         t.program = program.into();
         t.args = args.iter().map(|s| s.to_string()).collect();
         t.runtime = runtime;
-        t.env = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        t.env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         t.model = detect_model(&t.args);
         t.name = match t.tool_type {
             ToolType::Custom => t.program.clone(),
@@ -1177,21 +1219,57 @@ mod tests {
     fn parse_render_round_trips_every_docker_flag_combination() {
         let fixtures = vec![
             tool("claude", &[], Runtime::Host, &[]),
-            tool("opencode", &["-m", "gateway/model-fast"], docker("dev-worker", Some("dev"), Some("/workspace/app"), true), &[]),
-            tool("opencode", &["-m", "gateway/model-large"], docker("dev-worker", None, Some("/workspace/app"), true), &[]),
+            tool(
+                "opencode",
+                &["-m", "gateway/model-fast"],
+                docker("dev-worker", Some("dev"), Some("/workspace/app"), true),
+                &[],
+            ),
+            tool(
+                "opencode",
+                &["-m", "gateway/model-large"],
+                docker("dev-worker", None, Some("/workspace/app"), true),
+                &[],
+            ),
             tool("kimi", &[], docker("box", Some("root"), None, true), &[]),
             tool("codex", &[], docker("box", None, None, true), &[]),
             tool("gemini", &[], docker("box", None, None, false), &[]),
-            tool("claude", &[], docker("box", Some("me"), Some("/w"), false), &[("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"), ("FOO", "bar baz")]),
-            tool("amp", &["--prompt", "two words here"], docker("box", Some("u"), Some("/w"), true), &[]),
-            tool("/usr/local/bin/my tool", &["--flag", "a \"quoted\" arg"], Runtime::Host, &[]),
+            tool(
+                "claude",
+                &[],
+                docker("box", Some("me"), Some("/w"), false),
+                &[
+                    ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"),
+                    ("FOO", "bar baz"),
+                ],
+            ),
+            tool(
+                "amp",
+                &["--prompt", "two words here"],
+                docker("box", Some("u"), Some("/w"), true),
+                &[],
+            ),
+            tool(
+                "/usr/local/bin/my tool",
+                &["--flag", "a \"quoted\" arg"],
+                Runtime::Host,
+                &[],
+            ),
         ];
         for t in fixtures {
             let rendered = t.command_line();
             let parsed = parse_command_line(&rendered);
             assert_eq!(parsed.tool, t, "round trip of {rendered:?}");
-            assert_eq!(parsed.docker_detected, t.runtime.is_docker(), "{rendered:?}");
-            assert!(parsed.warnings.is_empty(), "{rendered:?}: {:?}", parsed.warnings);
+            assert_eq!(
+                parsed.docker_detected,
+                t.runtime.is_docker(),
+                "{rendered:?}"
+            );
+            assert!(
+                parsed.warnings.is_empty(),
+                "{rendered:?}: {:?}",
+                parsed.warnings
+            );
         }
     }
 
@@ -1204,7 +1282,10 @@ mod tests {
         assert_eq!(p.tool.program, "opencode");
         assert_eq!(p.tool.args, vec!["-m", "gateway/model-fast"]);
         assert_eq!(p.tool.model.as_deref(), Some("model-fast"));
-        assert_eq!(p.tool.runtime, docker("dev-worker", Some("dev"), Some("/workspace/app"), true));
+        assert_eq!(
+            p.tool.runtime,
+            docker("dev-worker", Some("dev"), Some("/workspace/app"), true)
+        );
         assert!(p.docker_detected);
         assert_eq!(
             p.tool.command_line(),
@@ -1220,7 +1301,10 @@ mod tests {
         assert_eq!(p.tool.runtime, Runtime::Host);
         assert_eq!(p.tool.program, "docker");
         assert_eq!(p.tool.args, vec!["exec", "-it", "dev-worker"]);
-        assert!(p.warnings.iter().any(|w| w.contains("could not detect container")));
+        assert!(p
+            .warnings
+            .iter()
+            .any(|w| w.contains("could not detect container")));
         // A non-docker string is Host with a bare program.
         let p = parse_command_line("claude --dangerously-skip-permissions");
         assert_eq!(p.tool.runtime, Runtime::Host);
@@ -1231,8 +1315,14 @@ mod tests {
 
     #[test]
     fn shell_words_handles_quotes_and_escapes() {
-        assert_eq!(shell_words(r#"a "b c" 'd e' f\ g"#), vec!["a", "b c", "d e", "f\\", "g"]);
-        assert_eq!(shell_words(r#""with \"inner\" quotes""#), vec![r#"with "inner" quotes"#]);
+        assert_eq!(
+            shell_words(r#"a "b c" 'd e' f\ g"#),
+            vec!["a", "b c", "d e", "f\\", "g"]
+        );
+        assert_eq!(
+            shell_words(r#""with \"inner\" quotes""#),
+            vec![r#"with "inner" quotes"#]
+        );
         assert_eq!(shell_words("   "), Vec::<String>::new());
         assert_eq!(shell_words("x \"\" y"), vec!["x", "", "y"]);
     }
@@ -1251,26 +1341,49 @@ mod tests {
         assert_eq!(parsed.tool.program, r"D:\tools\npm\claude.cmd");
         assert_eq!(parsed.tool.args, vec!["--flag"]);
         assert_eq!(parsed.tool.tool_type, ToolType::Claude);
-        assert_eq!(parsed.tool.command_line(), line, "render → parse → render is the identity");
+        assert_eq!(
+            parsed.tool.command_line(),
+            line,
+            "render → parse → render is the identity"
+        );
         // A backslash INSIDE quotes still escapes only `"` and `\`; a spaced
         // path is quoted with its backslashes doubled and comes back intact.
         let spaced = r"C:\Program Files\x y\tool.exe";
         assert_eq!(quote_word(spaced), r#""C:\\Program Files\\x y\\tool.exe""#);
         assert_eq!(shell_words(&quote_word(spaced)), vec![spaced]);
-        assert_eq!(shell_words(r#""C:\Program Files\tool.exe" -v"#), vec![r"C:\Program Files\tool.exe", "-v"]);
+        assert_eq!(
+            shell_words(r#""C:\Program Files\tool.exe" -v"#),
+            vec![r"C:\Program Files\tool.exe", "-v"]
+        );
         // The docker prefix is one spelling for the display line and the spawn.
-        let tool = parse_command_line("docker exec -u dev -it -w /workspace/app dev-worker opencode").tool;
+        let tool =
+            parse_command_line("docker exec -u dev -it -w /workspace/app dev-worker opencode").tool;
         assert_eq!(
             docker_exec_prefix(&tool.runtime, &tool.env, EnvFlags::WithValues),
-            vec!["exec", "-u", "dev", "-it", "-w", "/workspace/app", "dev-worker"]
+            vec![
+                "exec",
+                "-u",
+                "dev",
+                "-it",
+                "-w",
+                "/workspace/app",
+                "dev-worker"
+            ]
         );
-        assert!(docker_exec_prefix(&Runtime::Host, &IndexMap::new(), EnvFlags::NamesOnly).is_empty());
+        assert!(
+            docker_exec_prefix(&Runtime::Host, &IndexMap::new(), EnvFlags::NamesOnly).is_empty()
+        );
     }
 
     #[test]
     fn claude_template_ships_the_alt_screen_env_visibly() {
         let t = AgentTool::template(ToolType::Claude);
-        assert_eq!(t.env.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").map(String::as_str), Some("1"));
+        assert_eq!(
+            t.env
+                .get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+                .map(String::as_str),
+            Some("1")
+        );
         assert_eq!(t.program, ToolType::Claude.default_program(cfg!(windows)));
         assert!(t.enabled);
         // Other templates carry no such default — it is claude's, not spawn's.
@@ -1296,20 +1409,39 @@ mod tests {
             assert_eq!(tool.session_capture, SessionCapture::None, "{t:?}");
         }
         assert_eq!(
-            resume_args(&["--resume".into(), "{session_id}".into(), "--session={session_id}".into()], "ses-1"),
+            resume_args(
+                &[
+                    "--resume".into(),
+                    "{session_id}".into(),
+                    "--session={session_id}".into()
+                ],
+                "ses-1"
+            ),
             vec!["--resume", "ses-1", "--session=ses-1"]
         );
         assert!(resume_args(&[], "ses-1").is_empty());
         let pasted = parse_command_line("claude --dangerously-skip-permissions").tool;
         assert_eq!(pasted.resume_argv, vec!["--resume", "{session_id}"]);
-        assert_eq!(parse_command_line("mytool -x").tool.session_capture, SessionCapture::None);
-        // The wire shape of the capture kinds.
-        assert_eq!(serde_json::to_value(SessionCapture::Json).unwrap(), serde_json::json!({"kind": "json"}));
         assert_eq!(
-            serde_json::to_value(SessionCapture::Regex { pattern: r"id (\S+)".into() }).unwrap(),
+            parse_command_line("mytool -x").tool.session_capture,
+            SessionCapture::None
+        );
+        // The wire shape of the capture kinds.
+        assert_eq!(
+            serde_json::to_value(SessionCapture::Json).unwrap(),
+            serde_json::json!({"kind": "json"})
+        );
+        assert_eq!(
+            serde_json::to_value(SessionCapture::Regex {
+                pattern: r"id (\S+)".into()
+            })
+            .unwrap(),
             serde_json::json!({"kind": "regex", "pattern": r"id (\S+)"})
         );
-        assert_eq!(serde_json::from_str::<SessionCapture>(r#"{"kind":"announced"}"#).unwrap(), SessionCapture::Announced);
+        assert_eq!(
+            serde_json::from_str::<SessionCapture>(r#"{"kind":"announced"}"#).unwrap(),
+            SessionCapture::Announced
+        );
     }
 
     /// The regex capture: one capture group, trimmed, empty matches
@@ -1317,7 +1449,9 @@ mod tests {
     #[test]
     fn session_matcher_captures_the_one_group() {
         let mut tool = AgentTool::template(ToolType::Custom);
-        tool.session_capture = SessionCapture::Regex { pattern: r"^Session(?: ID)?: (\S+)".into() };
+        tool.session_capture = SessionCapture::Regex {
+            pattern: r"^Session(?: ID)?: (\S+)".into(),
+        };
         let m = tool.session_matcher().expect("a matcher");
         assert_eq!(m.matches("Session ID: ses_abc "), Some("ses_abc".into()));
         assert_eq!(m.matches("Session: 42"), Some("42".into()));
@@ -1340,17 +1474,41 @@ mod tests {
         let mut store = AgentToolStore::new(path.clone());
         let mut t = AgentTool::template(ToolType::Custom);
         t.program = "x".into();
-        t.session_capture = SessionCapture::Regex { pattern: "(".into() };
-        assert!(store.upsert(t.clone()).unwrap_err().contains("does not compile"));
-        t.session_capture = SessionCapture::Regex { pattern: "nogroup".into() };
-        assert!(store.upsert(t.clone()).unwrap_err().contains("one capture group"));
+        t.session_capture = SessionCapture::Regex {
+            pattern: "(".into(),
+        };
+        assert!(store
+            .upsert(t.clone())
+            .unwrap_err()
+            .contains("does not compile"));
+        t.session_capture = SessionCapture::Regex {
+            pattern: "nogroup".into(),
+        };
+        assert!(store
+            .upsert(t.clone())
+            .unwrap_err()
+            .contains("one capture group"));
         t.session_capture = SessionCapture::Json;
-        assert!(store.upsert(t.clone()).unwrap_err().contains("no machine mode"));
-        t.session_capture = SessionCapture::Regex { pattern: r" id (\w+) ".into() };
+        assert!(store
+            .upsert(t.clone())
+            .unwrap_err()
+            .contains("no machine mode"));
+        t.session_capture = SessionCapture::Regex {
+            pattern: r" id (\w+) ".into(),
+        };
         t.resume_argv = vec!["--resume".into(), "  ".into(), "{session_id}".into()];
         let stored = store.upsert(t).unwrap();
-        assert_eq!(stored.session_capture, SessionCapture::Regex { pattern: r"id (\w+)".into() });
-        assert_eq!(stored.resume_argv, vec!["--resume", "{session_id}"], "blank words are dropped");
+        assert_eq!(
+            stored.session_capture,
+            SessionCapture::Regex {
+                pattern: r"id (\w+)".into()
+            }
+        );
+        assert_eq!(
+            stored.resume_argv,
+            vec!["--resume", "{session_id}"],
+            "blank words are dropped"
+        );
 
         // An older file: no resume keys at all → the type's template; an
         // explicit `none` on a claude tool is kept (the user's choice).
@@ -1366,7 +1524,10 @@ mod tests {
         .unwrap();
         let store = AgentToolStore::new(path);
         assert_eq!(store.get(1).unwrap().session_capture, SessionCapture::Json);
-        assert_eq!(store.get(1).unwrap().resume_argv, vec!["--resume", "{session_id}"]);
+        assert_eq!(
+            store.get(1).unwrap().resume_argv,
+            vec!["--resume", "{session_id}"]
+        );
         assert_eq!(store.get(2).unwrap().session_capture, SessionCapture::None);
         assert!(store.get(2).unwrap().resume_argv.is_empty());
     }
@@ -1377,17 +1538,29 @@ mod tests {
     /// type's template while an explicit empty list is kept.
     #[test]
     fn prompt_argv_templates_substitution_and_backfill() {
-        assert_eq!(AgentTool::template(ToolType::Claude).prompt_argv, vec!["{prompt}"]);
-        assert_eq!(AgentTool::template(ToolType::Codex).prompt_argv, vec!["{prompt}"]);
+        assert_eq!(
+            AgentTool::template(ToolType::Claude).prompt_argv,
+            vec!["{prompt}"]
+        );
+        assert_eq!(
+            AgentTool::template(ToolType::Codex).prompt_argv,
+            vec!["{prompt}"]
+        );
         for t in [ToolType::Opencode, ToolType::Gemini, ToolType::Custom] {
             assert!(AgentTool::template(t).prompt_argv.is_empty(), "{t:?}");
         }
         assert_eq!(
-            prompt_args(&["--prompt={prompt}".into(), "{prompt}".into()], "fix the\nfailing test"),
+            prompt_args(
+                &["--prompt={prompt}".into(), "{prompt}".into()],
+                "fix the\nfailing test"
+            ),
             vec!["--prompt=fix the\nfailing test", "fix the\nfailing test"]
         );
         assert!(prompt_args(&[], "x").is_empty());
-        assert_eq!(parse_command_line("claude --verbose").tool.prompt_argv, vec!["{prompt}"]);
+        assert_eq!(
+            parse_command_line("claude --verbose").tool.prompt_argv,
+            vec!["{prompt}"]
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.json");
@@ -1402,12 +1575,23 @@ mod tests {
         )
         .unwrap();
         let mut store = AgentToolStore::new(path);
-        assert_eq!(store.get(1).unwrap().prompt_argv, vec!["{prompt}"], "absent key: the template");
-        assert!(store.get(2).unwrap().prompt_argv.is_empty(), "an explicit empty list is the user's choice");
+        assert_eq!(
+            store.get(1).unwrap().prompt_argv,
+            vec!["{prompt}"],
+            "absent key: the template"
+        );
+        assert!(
+            store.get(2).unwrap().prompt_argv.is_empty(),
+            "an explicit empty list is the user's choice"
+        );
         assert!(store.get(3).unwrap().prompt_argv.is_empty());
         let mut t = store.get(3).unwrap().clone();
         t.prompt_argv = vec!["run".into(), " ".into(), "{prompt}".into()];
-        assert_eq!(store.upsert(t).unwrap().prompt_argv, vec!["run", "{prompt}"], "blank words are dropped");
+        assert_eq!(
+            store.upsert(t).unwrap().prompt_argv,
+            vec!["run", "{prompt}"],
+            "blank words are dropped"
+        );
     }
 
     #[test]
@@ -1422,7 +1606,10 @@ mod tests {
         assert_eq!(ToolType::Custom.default_program(true), "");
         // The shim still classifies as its type when pasted back in.
         assert_eq!(ToolType::from_program("claude.cmd"), ToolType::Claude);
-        assert_eq!(ToolType::from_program(r"D:\tools\npm\gemini.cmd"), ToolType::Gemini);
+        assert_eq!(
+            ToolType::from_program(r"D:\tools\npm\gemini.cmd"),
+            ToolType::Gemini
+        );
     }
 
     #[test]
@@ -1437,8 +1624,15 @@ mod tests {
         t.max_busy = Some(2);
         let stored = store.upsert(t.clone()).unwrap();
         assert_eq!(stored.id, 1);
-        let mut d = parse_command_line("docker exec -u dev -it -w /workspace/app dev-worker opencode -m gateway/model-fast").tool;
-        if let Runtime::DockerExec { max_busy_in_container, .. } = &mut d.runtime {
+        let mut d = parse_command_line(
+            "docker exec -u dev -it -w /workspace/app dev-worker opencode -m gateway/model-fast",
+        )
+        .tool;
+        if let Runtime::DockerExec {
+            max_busy_in_container,
+            ..
+        } = &mut d.runtime
+        {
             *max_busy_in_container = Some(1);
         }
         let stored2 = store.upsert(d.clone()).unwrap();
@@ -1447,7 +1641,15 @@ mod tests {
         // Reload: identical.
         let reopened = AgentToolStore::new(path.clone());
         assert_eq!(reopened.list(), store.list());
-        assert_eq!(reopened.get(1).unwrap().env.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").unwrap(), "1");
+        assert_eq!(
+            reopened
+                .get(1)
+                .unwrap()
+                .env
+                .get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+                .unwrap(),
+            "1"
+        );
         assert_eq!(reopened.next_id, 3);
 
         // Unknown fields (a future version's / a hand edit) are ignored; a
@@ -1455,13 +1657,25 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
         value["tools"][0]["future_field"] = serde_json::json!({"x": 1});
-        value["tools"].as_array_mut().unwrap().push(serde_json::json!({"id": 7, "name": "broken"}));
+        value["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": 7, "name": "broken"}));
         value["next_id"] = serde_json::json!(1);
         std::fs::write(&path, value.to_string()).unwrap();
         let mut reopened = AgentToolStore::new(path.clone());
-        assert_eq!(reopened.list().len(), 2, "the broken entry is pruned, the rest survive");
+        assert_eq!(
+            reopened.list().len(),
+            2,
+            "the broken entry is pruned, the rest survive"
+        );
         assert_eq!(reopened.list()[0], store.list()[0]);
-        let fresh = reopened.upsert(AgentTool { program: "x".into(), ..AgentTool::default() }).unwrap();
+        let fresh = reopened
+            .upsert(AgentTool {
+                program: "x".into(),
+                ..AgentTool::default()
+            })
+            .unwrap();
         assert_eq!(fresh.id, 3, "counter re-derived above the max stored id");
 
         // Delete + edit.
@@ -1496,9 +1710,36 @@ mod tests {
     fn delete_refusal_names_live_processes() {
         use crate::registry::AgentRow;
         let rows = vec![
-            AgentRow { id: 4, name: "worker · build".into(), tool_id: 2, container: Some("dev-worker".into()), child_alive: true, last_output_at: Some(1), spawned_at_ms: 0, spawn_uuid: "u4".into() },
-            AgentRow { id: 5, name: "old".into(), tool_id: 2, container: None, child_alive: false, last_output_at: None, spawned_at_ms: 0, spawn_uuid: "u5".into() },
-            AgentRow { id: 6, name: "other".into(), tool_id: 3, container: None, child_alive: true, last_output_at: None, spawned_at_ms: 0, spawn_uuid: "u6".into() },
+            AgentRow {
+                id: 4,
+                name: "worker · build".into(),
+                tool_id: 2,
+                container: Some("dev-worker".into()),
+                child_alive: true,
+                last_output_at: Some(1),
+                spawned_at_ms: 0,
+                spawn_uuid: "u4".into(),
+            },
+            AgentRow {
+                id: 5,
+                name: "old".into(),
+                tool_id: 2,
+                container: None,
+                child_alive: false,
+                last_output_at: None,
+                spawned_at_ms: 0,
+                spawn_uuid: "u5".into(),
+            },
+            AgentRow {
+                id: 6,
+                name: "other".into(),
+                tool_id: 3,
+                container: None,
+                child_alive: true,
+                last_output_at: None,
+                spawned_at_ms: 0,
+                spawn_uuid: "u6".into(),
+            },
         ];
         let reason = delete_refusal(2, &rows).expect("refused");
         assert!(reason.contains("worker · build (process 4)"), "{reason}");
@@ -1510,10 +1751,20 @@ mod tests {
     #[test]
     fn the_hook_command_quotes_the_binary_for_the_shell() {
         assert_eq!(
-            session_hook_command(Path::new(r"C:\Program Files\chappa ai\chappa-ai-mcp.exe"), true).as_deref(),
+            session_hook_command(
+                Path::new(r"C:\Program Files\chappa ai\chappa-ai-mcp.exe"),
+                true
+            )
+            .as_deref(),
             Some(r#""C:/Program Files/chappa ai/chappa-ai-mcp.exe" session-hook"#)
         );
-        for bad in [r"C:\100%\m.exe", r"C:\a$b\m.exe", r"C:\a`b\m.exe", "C:\\a\"b\\m.exe", "C:\\a\nb\\m.exe"] {
+        for bad in [
+            r"C:\100%\m.exe",
+            r"C:\a$b\m.exe",
+            r"C:\a`b\m.exe",
+            "C:\\a\"b\\m.exe",
+            "C:\\a\nb\\m.exe",
+        ] {
             assert_eq!(session_hook_command(Path::new(bad), true), None, "{bad:?}");
         }
         assert_eq!(
@@ -1526,7 +1777,10 @@ mod tests {
         );
         assert!(has_settings_flag(&["--settings".into(), "f".into()]));
         assert!(has_settings_flag(&["-p".into(), "--settings=f".into()]));
-        assert!(!has_settings_flag(&["--settingsx".into(), "--setting".into()]));
+        assert!(!has_settings_flag(&[
+            "--settingsx".into(),
+            "--setting".into()
+        ]));
     }
 
     #[test]
@@ -1541,11 +1795,17 @@ mod tests {
         let file = dir.path().join(CLAUDE_HOOKS_FILE);
         let arg = write_claude_hooks(dir.path(), Some(&binary)).expect("a --settings argument");
         assert_eq!(Path::new(&arg), file);
-        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let hook = &value["hooks"]["SessionStart"][0]["hooks"][0];
         assert_eq!(hook["type"], "command");
         assert_eq!(hook["timeout"], 5);
-        assert_eq!(hook["command"], session_hook_command(&binary, cfg!(windows)).unwrap().as_str());
+        assert_eq!(
+            hook["command"],
+            session_hook_command(&binary, cfg!(windows))
+                .unwrap()
+                .as_str()
+        );
 
         // Same content: the file is left untouched (a marker survives).
         let text = std::fs::read_to_string(&file).unwrap();
@@ -1553,12 +1813,16 @@ mod tests {
         let before = std::fs::metadata(&file).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_claude_hooks(dir.path(), Some(&binary)).unwrap();
-        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            before
+        );
 
         // No binary: the file stays (a tool carrying --settings still
         // starts) but holds no hooks, and there is nothing to point at.
         assert_eq!(write_claude_hooks(dir.path(), None), None);
-        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(value, serde_json::json!({"hooks": {}}));
 
         // The binary beside the app wins over PATH; relative PATH entries
@@ -1567,10 +1831,19 @@ mod tests {
         std::fs::create_dir_all(&path_dir).unwrap();
         std::fs::write(path_dir.join(&name), "").unwrap();
         let path_var = std::env::join_paths([Path::new("bin"), path_dir.as_path()]).unwrap();
-        assert_eq!(find_mcp_binary(Some(&bin_dir), Some(&path_var)), Some(binary.clone()));
-        assert_eq!(find_mcp_binary(Some(dir.path()), Some(&path_var)), Some(path_dir.join(&name)));
+        assert_eq!(
+            find_mcp_binary(Some(&bin_dir), Some(&path_var)),
+            Some(binary.clone())
+        );
+        assert_eq!(
+            find_mcp_binary(Some(dir.path()), Some(&path_var)),
+            Some(path_dir.join(&name))
+        );
         let relative_only = std::env::join_paths([Path::new("bin")]).unwrap();
-        assert_eq!(find_mcp_binary(Some(dir.path()), Some(&relative_only)), None);
+        assert_eq!(
+            find_mcp_binary(Some(dir.path()), Some(&relative_only)),
+            None
+        );
         assert_eq!(find_mcp_binary(None, None), None);
     }
 
@@ -1599,25 +1872,51 @@ mod tests {
         capture_none.session_capture = SessionCapture::None;
         let mut with_args = claude_tty();
         with_args.args = vec!["--model".into(), "opus".into()];
-        let tools = [claude_tty(), json_transport, docker_tool, own_settings, opted_out, capture_none, with_args,
-            AgentTool::template(ToolType::Opencode)];
+        let tools = [
+            claude_tty(),
+            json_transport,
+            docker_tool,
+            own_settings,
+            opted_out,
+            capture_none,
+            with_args,
+            AgentTool::template(ToolType::Opencode),
+        ];
         {
             let mut store = AgentToolStore::new(path.clone());
             for t in tools {
                 store.upsert(t).unwrap();
             }
-            assert!(store.list().iter().all(|t| !has_settings_flag(&t.args) || t.id == 4), "no hooks without a hook file");
+            assert!(
+                store
+                    .list()
+                    .iter()
+                    .all(|t| !has_settings_flag(&t.args) || t.id == 4),
+                "no hooks without a hook file"
+            );
         }
         let store = AgentToolStore::with_claude_hooks(path.clone(), Some(HOOKS.into()));
         let upgraded = store.get(1).unwrap();
         assert_eq!(upgraded.args, vec!["--settings", HOOKS]);
         assert_eq!(upgraded.session_capture, SessionCapture::Announced);
-        assert_eq!(store.get(7).unwrap().args, vec!["--settings", HOOKS, "--model", "opus"], "user args kept after the flag");
+        assert_eq!(
+            store.get(7).unwrap().args,
+            vec!["--settings", HOOKS, "--model", "opus"],
+            "user args kept after the flag"
+        );
         for id in [2, 3, 4, 5, 6, 8] {
             let t = store.get(id).unwrap();
-            assert!(!t.args.iter().any(|a| a == HOOKS), "tool {id} untouched: {:?}", t.args);
+            assert!(
+                !t.args.iter().any(|a| a == HOOKS),
+                "tool {id} untouched: {:?}",
+                t.args
+            );
         }
-        assert_eq!(store.get(2).unwrap().session_capture, SessionCapture::Json, "json transport keeps its capture");
+        assert_eq!(
+            store.get(2).unwrap().session_capture,
+            SessionCapture::Json,
+            "json transport keeps its capture"
+        );
 
         // Saved once; a second load changes nothing (the flag is there now).
         let saved = std::fs::read_to_string(&path).unwrap();

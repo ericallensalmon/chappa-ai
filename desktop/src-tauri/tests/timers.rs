@@ -15,9 +15,9 @@ use app_lib::agents::{gate_step, DeliveryPolicy, GateStep, IoView};
 use app_lib::control_http::{self, ControlState, ACTOR_HEADER};
 use app_lib::coordination::{Coordination, DB_FILE, SCHEMA_VERSION};
 use app_lib::timers::{
-    coalesced_with, is_idle, Action, Delivery, Deliverer, FakeClock, FireReason, Knobs, Liveness,
-    OutputProbe, ProcessRow, RecentDelivery, Scheduler, Timer, TimerKind, TimerService, TimerStatus,
-    TimerStore, INTERRUPTED,
+    coalesced_with, is_idle, Action, Deliverer, Delivery, FakeClock, FireReason, Knobs, Liveness,
+    OutputProbe, ProcessRow, RecentDelivery, Scheduler, Timer, TimerKind, TimerService,
+    TimerStatus, TimerStore, INTERRUPTED,
 };
 use serde_json::{json, Value};
 
@@ -99,7 +99,11 @@ impl FakeProbe {
 
 impl OutputProbe for FakeProbe {
     fn liveness(&self, id: u32) -> Option<Liveness> {
-        self.rows.lock().unwrap().get(&id).map(|(l, _, _)| l.clone())
+        self.rows
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|(l, _, _)| l.clone())
     }
     fn processes(&self) -> Vec<ProcessRow> {
         self.rows
@@ -171,7 +175,10 @@ impl Deliverer for FakeDeliverer {
                 receipt: None,
             };
         }
-        self.sent.lock().unwrap().push((process_id, body.to_owned()));
+        self.sent
+            .lock()
+            .unwrap()
+            .push((process_id, body.to_owned()));
         Delivery {
             delivered: true,
             detail: None,
@@ -213,12 +220,18 @@ fn one_shot_fires_at_delay_ms() {
     clock.set(6_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Condition }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Condition
+        }]
     );
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Fired);
     assert_eq!(s.get(id).unwrap().fired_count, 1);
     clock.set(60_000);
-    assert!(s.tick(probe.as_ref()).is_empty(), "a fired one-shot never fires again");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "a fired one-shot never fires again"
+    );
 }
 
 /// `loop` repeats at the interval and `fired_count` climbs; the schedule is
@@ -237,7 +250,10 @@ fn a_loop_repeats_at_its_interval() {
     }
     s.cancel(id);
     clock.set(100_000);
-    assert!(s.tick(probe.as_ref()).is_empty(), "no fourth firing after cancel");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "no fourth firing after cancel"
+    );
     assert_eq!(s.get(id).unwrap().fired_count, 3);
 }
 
@@ -252,12 +268,21 @@ fn a_loop_whose_target_is_gone_expires_instead_of_firing_forever() {
     timer.repeat_every_ms = Some(2_000);
     let id = s.insert(timer);
     clock.set(2_000);
-    assert_eq!(s.tick(probe.as_ref()), vec![Action::Fire { id, reason: FireReason::Condition }]);
+    assert_eq!(
+        s.tick(probe.as_ref()),
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Condition
+        }]
+    );
     probe.close(7);
     clock.set(4_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Expire { id, detail: "process gone" }]
+        vec![Action::Expire {
+            id,
+            detail: "process gone"
+        }]
     );
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Expired);
     assert_eq!(s.get(id).unwrap().next_fire_at, None);
@@ -271,7 +296,10 @@ fn a_loop_whose_target_is_gone_expires_instead_of_firing_forever() {
     clock.set(61_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Expire { id: id2, detail: "process gone" }]
+        vec![Action::Expire {
+            id: id2,
+            detail: "process gone"
+        }]
     );
 }
 
@@ -290,13 +318,19 @@ fn idle_any_ignores_already_idle_processes_and_fires_after_confirm() {
 
     // 1 stays quiet forever — it must NOT trigger anything.
     clock.set(1_100_000);
-    assert!(s.tick(probe.as_ref()).is_empty(), "an already-idle process is not a transition");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "an already-idle process is not a transition"
+    );
 
     // 2 goes quiet: idle at +120 s, then CONFIRM before the body moves.
     clock.set(1_120_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Confirm { id, until: 1_125_000 }]
+        vec![Action::Confirm {
+            id,
+            until: 1_125_000
+        }]
     );
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Confirming);
     clock.set(1_124_999);
@@ -304,7 +338,10 @@ fn idle_any_ignores_already_idle_processes_and_fires_after_confirm() {
     clock.set(1_125_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Condition }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Condition
+        }]
     );
 }
 
@@ -320,24 +357,36 @@ fn an_ignored_process_that_becomes_busy_is_watched_again() {
     let id = s.insert(timer);
     assert!(s.get(id).unwrap().waiting_on().is_empty());
     clock.set(1_100_000);
-    assert!(s.tick(probe.as_ref()).is_empty(), "still idle from before: ignored");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "still idle from before: ignored"
+    );
 
     // It starts working: bytes at t=1 100 000.
     probe.bump(1, 1_100_000);
     clock.set(1_100_001);
-    assert!(s.tick(probe.as_ref()).is_empty(), "busy: nothing to fire, but no longer ignored");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "busy: nothing to fire, but no longer ignored"
+    );
     assert_eq!(s.get(id).unwrap().waiting_on(), vec![1], "watched again");
 
     // Then it goes quiet for real: idle at +120 s → confirm → fire.
     clock.set(1_100_000 + IDLE);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Confirm { id, until: 1_100_000 + IDLE + CONFIRM }]
+        vec![Action::Confirm {
+            id,
+            until: 1_100_000 + IDLE + CONFIRM
+        }]
     );
     clock.set(1_100_000 + IDLE + CONFIRM);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Condition }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Condition
+        }]
     );
     assert_eq!(s.get(id).unwrap().fired_count, 1);
 }
@@ -352,16 +401,28 @@ fn a_byte_in_the_confirm_window_rearms_the_timer() {
 
     // Quiet for 120 s → confirming.
     clock.set(IDLE);
-    assert_eq!(s.tick(probe.as_ref()), vec![Action::Confirm { id, until: IDLE + CONFIRM }]);
+    assert_eq!(
+        s.tick(probe.as_ref()),
+        vec![Action::Confirm {
+            id,
+            until: IDLE + CONFIRM
+        }]
+    );
     // A byte lands 2 s into the confirm window: back to pending, still armed.
     clock.set(IDLE + 2_000);
     probe.bump(1, IDLE + 2_000);
-    assert_eq!(s.tick(probe.as_ref()), vec![Action::Rearm { id, armed: true }]);
+    assert_eq!(
+        s.tick(probe.as_ref()),
+        vec![Action::Rearm { id, armed: true }]
+    );
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Pending);
     // Even past the ORIGINAL confirm deadline nothing fires — the silence
     // clock restarted with that byte.
     clock.set(IDLE + CONFIRM + 1);
-    assert!(s.tick(probe.as_ref()).is_empty(), "the flicker must not fire the timer");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "the flicker must not fire the timer"
+    );
     // Now it really goes quiet: 120 s of silence, then the confirm window.
     let quiet_at = IDLE + 2_000;
     clock.set(quiet_at + IDLE);
@@ -369,7 +430,10 @@ fn a_byte_in_the_confirm_window_rearms_the_timer() {
     clock.set(quiet_at + IDLE + CONFIRM);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Condition }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Condition
+        }]
     );
     assert_eq!(s.get(id).unwrap().fired_count, 1, "fires exactly once");
 }
@@ -387,15 +451,24 @@ fn rearm_false_disarms_after_a_flicker_but_keeps_the_deadline() {
     assert_eq!(s.tick(probe.as_ref()).len(), 1, "confirming");
     clock.set(IDLE + 1_000);
     probe.bump(1, IDLE + 1_000);
-    assert_eq!(s.tick(probe.as_ref()), vec![Action::Rearm { id, armed: false }]);
+    assert_eq!(
+        s.tick(probe.as_ref()),
+        vec![Action::Rearm { id, armed: false }]
+    );
     // Quiet again — but it is disarmed, so the condition no longer fires it.
     clock.set(IDLE * 4);
-    assert!(s.tick(probe.as_ref()).is_empty(), "disarmed: no second chance");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "disarmed: no second chance"
+    );
     // The hard deadline still holds.
     clock.set(600_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Deadline }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Deadline
+        }]
     );
 }
 
@@ -426,7 +499,10 @@ fn idle_all_with_everything_idle_is_already_satisfied() {
     assert_eq!(reply["timer_id"], Value::Null);
     assert_eq!(reply["already_idle"], json!([1, 2]));
     assert_eq!(reply["waiting_on"], json!([]));
-    assert_eq!(service.list("7", true, true, None, None, None).unwrap()["total"], 0);
+    assert_eq!(
+        service.list("7", true, true, None, None, None).unwrap()["total"],
+        0
+    );
     clock.advance(1);
 }
 
@@ -445,7 +521,10 @@ fn idle_all_waits_for_every_process() {
     clock.set(IDLE * 2 + 2_000 + CONFIRM);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Condition }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Condition
+        }]
     );
 }
 
@@ -460,7 +539,10 @@ fn the_deadline_fires_with_reason_deadline() {
     clock.set(IDLE + 1_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Fire { id, reason: FireReason::Deadline }]
+        vec![Action::Fire {
+            id,
+            reason: FireReason::Deadline
+        }]
     );
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Fired);
 }
@@ -474,7 +556,10 @@ fn pause_stops_the_clock_and_resume_continues_from_the_remainder() {
     s.pause(id);
     assert_eq!(s.get(id).unwrap().remaining_ms, Some(6_000));
     clock.set(1_000_000);
-    assert!(s.tick(probe.as_ref()).is_empty(), "a paused timer never comes due");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "a paused timer never comes due"
+    );
     s.resume(id);
     assert_eq!(s.get(id).unwrap().next_fire_at, Some(1_006_000));
     clock.set(1_005_999);
@@ -494,7 +579,10 @@ fn cancelling_a_confirming_timer_never_fires() {
     s.cancel(id);
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Cancelled);
     clock.set(600_001);
-    assert!(s.tick(probe.as_ref()).is_empty(), "not even at the deadline");
+    assert!(
+        s.tick(probe.as_ref()).is_empty(),
+        "not even at the deadline"
+    );
     assert_eq!(s.get(id).unwrap().fired_count, 0);
 }
 
@@ -509,7 +597,10 @@ fn a_watched_process_going_away_expires_the_timer() {
     probe.kill(1);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Expire { id, detail: "process gone" }]
+        vec![Action::Expire {
+            id,
+            detail: "process gone"
+        }]
     );
     assert_eq!(s.get(id).unwrap().status, TimerStatus::Expired);
     // A CLOSED process (gone from the registry entirely) is the same story.
@@ -518,7 +609,10 @@ fn a_watched_process_going_away_expires_the_timer() {
     clock.set(2_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Expire { id: id2, detail: "process gone" }]
+        vec![Action::Expire {
+            id: id2,
+            detail: "process gone"
+        }]
     );
     // And so is a watched id whose spawn changed under it (pinned watch).
     let mut id3_timer = idle_timer(TimerKind::IdleAny, vec![1], 600_000, 2_000);
@@ -528,33 +622,93 @@ fn a_watched_process_going_away_expires_the_timer() {
     clock.set(3_000);
     assert_eq!(
         s.tick(probe.as_ref()),
-        vec![Action::Expire { id: id3, detail: "process gone" }]
+        vec![Action::Expire {
+            id: id3,
+            detail: "process gone"
+        }]
     );
 }
 
 /// The idle rule reads the byte stream and nothing else.
 #[test]
 fn idle_is_derived_from_the_byte_stream_only() {
-    let booting = Liveness { uuid: "u".into(), child_alive: true, last_output_at: None, output_bytes: 0 };
-    assert!(!is_idle(&booting, u64::MAX, IDLE), "no output yet = booting, not idle");
-    let quiet = Liveness { uuid: "u".into(), child_alive: true, last_output_at: Some(0), output_bytes: 9 };
+    let booting = Liveness {
+        uuid: "u".into(),
+        child_alive: true,
+        last_output_at: None,
+        output_bytes: 0,
+    };
+    assert!(
+        !is_idle(&booting, u64::MAX, IDLE),
+        "no output yet = booting, not idle"
+    );
+    let quiet = Liveness {
+        uuid: "u".into(),
+        child_alive: true,
+        last_output_at: Some(0),
+        output_bytes: 9,
+    };
     assert!(!is_idle(&quiet, IDLE - 1, IDLE));
     assert!(is_idle(&quiet, IDLE, IDLE));
-    assert!(!is_idle(&Liveness { child_alive: false, ..quiet }, IDLE, IDLE));
+    assert!(!is_idle(
+        &Liveness {
+            child_alive: false,
+            ..quiet
+        },
+        IDLE,
+        IDLE
+    ));
 }
 
 /// Dedupe is a pure window test over the delivery log: delivered rows inside
 /// the window, in-flight rows regardless of age.
 #[test]
 fn dedupe_coalesces_an_identical_body_inside_the_window_only() {
-    let log = vec![RecentDelivery { firing_id: 30, timer_id: 3, process_id: 7, body: "go".into(), at: 10_000, in_flight: false }];
-    assert_eq!(coalesced_with(&log, 9, false, 7, "go", 14_999, 5_000), Some(30));
-    assert_eq!(coalesced_with(&log, 9, false, 7, "go", 15_000, 5_000), None, "past the window");
-    assert_eq!(coalesced_with(&log, 9, false, 8, "go", 11_000, 5_000), None, "other process");
-    assert_eq!(coalesced_with(&log, 9, false, 7, "go!", 11_000, 5_000), None, "other body");
-    let inflight = vec![RecentDelivery { firing_id: 31, timer_id: 3, process_id: 7, body: "go".into(), at: 10_000, in_flight: true }];
-    assert_eq!(coalesced_with(&inflight, 9, false, 7, "go", 99_000, 5_000), Some(31), "in flight: any age");
-    assert_eq!(coalesced_with(&inflight, 3, true, 7, "go", 99_000, 5_000), Some(31), "a loop behind its own in-flight firing");
+    let log = vec![RecentDelivery {
+        firing_id: 30,
+        timer_id: 3,
+        process_id: 7,
+        body: "go".into(),
+        at: 10_000,
+        in_flight: false,
+    }];
+    assert_eq!(
+        coalesced_with(&log, 9, false, 7, "go", 14_999, 5_000),
+        Some(30)
+    );
+    assert_eq!(
+        coalesced_with(&log, 9, false, 7, "go", 15_000, 5_000),
+        None,
+        "past the window"
+    );
+    assert_eq!(
+        coalesced_with(&log, 9, false, 8, "go", 11_000, 5_000),
+        None,
+        "other process"
+    );
+    assert_eq!(
+        coalesced_with(&log, 9, false, 7, "go!", 11_000, 5_000),
+        None,
+        "other body"
+    );
+    let inflight = vec![RecentDelivery {
+        firing_id: 31,
+        timer_id: 3,
+        process_id: 7,
+        body: "go".into(),
+        at: 10_000,
+        in_flight: true,
+    }];
+    assert_eq!(
+        coalesced_with(&inflight, 9, false, 7, "go", 99_000, 5_000),
+        Some(31),
+        "in flight: any age"
+    );
+    assert_eq!(
+        coalesced_with(&inflight, 3, true, 7, "go", 99_000, 5_000),
+        Some(31),
+        "a loop behind its own in-flight firing"
+    );
 }
 
 /// Review fix: the timer delivery policy waits for GENUINE quiet. A
@@ -563,24 +717,107 @@ fn dedupe_coalesces_an_identical_body_inside_the_window_only() {
 /// `not-ready` at the cap — decided over a fake clock, no pty.
 #[test]
 fn a_timer_body_waits_for_genuine_quiet_and_gives_up_at_the_cap() {
-    let streaming = |now: u64| IoView { has_output: true, last_output_ms: Some(now - 10), child_alive: true };
+    let streaming = |now: u64| IoView {
+        has_output: true,
+        last_output_ms: Some(now - 10),
+        child_alive: true,
+    };
     let first = Some(0);
     let timer = DeliveryPolicy::quiet_only(750, Duration::from_millis(30_000));
     let spawn = DeliveryPolicy::spawn_prompt(750, 5_000);
     // 6 s of continuous output: the spawn prompt goes in by timeout, a timer
     // body keeps waiting.
-    assert_eq!(gate_step(streaming(6_000), 6_000, first, spawn, Duration::from_millis(6_000), false), Some(GateStep::Write { by_timeout: true }));
-    assert_eq!(gate_step(streaming(6_000), 6_000, first, timer, Duration::from_millis(6_000), false), None, "still mid-turn");
-    assert_eq!(gate_step(streaming(29_000), 29_000, first, timer, Duration::from_millis(29_000), false), None);
+    assert_eq!(
+        gate_step(
+            streaming(6_000),
+            6_000,
+            first,
+            spawn,
+            Duration::from_millis(6_000),
+            false
+        ),
+        Some(GateStep::Write { by_timeout: true })
+    );
+    assert_eq!(
+        gate_step(
+            streaming(6_000),
+            6_000,
+            first,
+            timer,
+            Duration::from_millis(6_000),
+            false
+        ),
+        None,
+        "still mid-turn"
+    );
+    assert_eq!(
+        gate_step(
+            streaming(29_000),
+            29_000,
+            first,
+            timer,
+            Duration::from_millis(29_000),
+            false
+        ),
+        None
+    );
     // Quiet for 750 ms: write, and not "by timeout".
-    let quiet = IoView { has_output: true, last_output_ms: Some(20_000), child_alive: true };
-    assert_eq!(gate_step(quiet, 20_750, first, timer, Duration::from_millis(20_750), false), Some(GateStep::Write { by_timeout: false }));
-    assert_eq!(gate_step(quiet, 20_749, first, timer, Duration::from_millis(20_749), false), None);
+    let quiet = IoView {
+        has_output: true,
+        last_output_ms: Some(20_000),
+        child_alive: true,
+    };
+    assert_eq!(
+        gate_step(
+            quiet,
+            20_750,
+            first,
+            timer,
+            Duration::from_millis(20_750),
+            false
+        ),
+        Some(GateStep::Write { by_timeout: false })
+    );
+    assert_eq!(
+        gate_step(
+            quiet,
+            20_749,
+            first,
+            timer,
+            Duration::from_millis(20_749),
+            false
+        ),
+        None
+    );
     // Quiet never comes: `not-ready` exactly at the cap.
-    assert_eq!(gate_step(streaming(30_000), 30_000, first, timer, Duration::from_millis(30_000), false), Some(GateStep::GiveUp("not-ready")));
+    assert_eq!(
+        gate_step(
+            streaming(30_000),
+            30_000,
+            first,
+            timer,
+            Duration::from_millis(30_000),
+            false
+        ),
+        Some(GateStep::GiveUp("not-ready"))
+    );
     // A dead child is `exited` before anything else.
-    let dead = IoView { has_output: true, last_output_ms: Some(0), child_alive: false };
-    assert_eq!(gate_step(dead, 1_000, first, timer, Duration::from_millis(1_000), false), Some(GateStep::GiveUp("exited")));
+    let dead = IoView {
+        has_output: true,
+        last_output_ms: Some(0),
+        child_alive: false,
+    };
+    assert_eq!(
+        gate_step(
+            dead,
+            1_000,
+            first,
+            timer,
+            Duration::from_millis(1_000),
+            false
+        ),
+        Some(GateStep::GiveUp("exited"))
+    );
 }
 
 /// A program that reports itself blocked is waiting on a person: its quiet
@@ -589,23 +826,84 @@ fn a_timer_body_waits_for_genuine_quiet_and_gives_up_at_the_cap() {
 /// answer is `blocked`; a dead child is still `exited` first.
 #[test]
 fn a_blocked_program_holds_every_delivery_until_the_cap() {
-    let quiet = IoView { has_output: true, last_output_ms: Some(1_000), child_alive: true };
-    let streaming = |now: u64| IoView { has_output: true, last_output_ms: Some(now - 10), child_alive: true };
+    let quiet = IoView {
+        has_output: true,
+        last_output_ms: Some(1_000),
+        child_alive: true,
+    };
+    let streaming = |now: u64| IoView {
+        has_output: true,
+        last_output_ms: Some(now - 10),
+        child_alive: true,
+    };
     let first = Some(0);
     let timer = DeliveryPolicy::quiet_only(750, Duration::from_millis(30_000));
     let spawn = DeliveryPolicy::spawn_prompt(750, 5_000);
     for policy in [timer, spawn] {
-        assert_eq!(gate_step(quiet, 20_000, first, policy, Duration::from_millis(5_000), true), None, "quiet but blocked");
         assert_eq!(
-            gate_step(quiet, 20_000, first, policy, Duration::from_millis(5_000), false),
+            gate_step(
+                quiet,
+                20_000,
+                first,
+                policy,
+                Duration::from_millis(5_000),
+                true
+            ),
+            None,
+            "quiet but blocked"
+        );
+        assert_eq!(
+            gate_step(
+                quiet,
+                20_000,
+                first,
+                policy,
+                Duration::from_millis(5_000),
+                false
+            ),
             Some(GateStep::Write { by_timeout: false }),
             "unblocked: the same quiet opens it"
         );
     }
-    assert_eq!(gate_step(streaming(6_000), 6_000, first, spawn, Duration::from_millis(6_000), true), None, "no timeout fallback while blocked");
-    assert_eq!(gate_step(quiet, 40_000, first, timer, Duration::from_millis(30_000), true), Some(GateStep::GiveUp("blocked")));
-    let dead = IoView { has_output: true, last_output_ms: Some(0), child_alive: false };
-    assert_eq!(gate_step(dead, 1_000, first, timer, Duration::from_millis(1_000), true), Some(GateStep::GiveUp("exited")));
+    assert_eq!(
+        gate_step(
+            streaming(6_000),
+            6_000,
+            first,
+            spawn,
+            Duration::from_millis(6_000),
+            true
+        ),
+        None,
+        "no timeout fallback while blocked"
+    );
+    assert_eq!(
+        gate_step(
+            quiet,
+            40_000,
+            first,
+            timer,
+            Duration::from_millis(30_000),
+            true
+        ),
+        Some(GateStep::GiveUp("blocked"))
+    );
+    let dead = IoView {
+        has_output: true,
+        last_output_ms: Some(0),
+        child_alive: false,
+    };
+    assert_eq!(
+        gate_step(
+            dead,
+            1_000,
+            first,
+            timer,
+            Duration::from_millis(1_000),
+            true
+        ),
+        Some(GateStep::GiveUp("exited"))
+    );
 }
 
 // ---- the service (fake clock + fake probe + fake deliverer + real db) --------
@@ -621,7 +919,9 @@ fn knobs() -> Knobs {
     }
 }
 
-fn service(now: u64) -> (
+fn service(
+    now: u64,
+) -> (
     TimerService,
     Arc<FakeClock>,
     Arc<FakeProbe>,
@@ -635,7 +935,15 @@ fn service(now: u64) -> (
 
 /// A service over an existing (or fresh) db file — the "restart" half of the
 /// persistence tests.
-fn service_over(dir: &std::path::Path, now: u64) -> (TimerService, Arc<FakeClock>, Arc<FakeProbe>, Arc<FakeDeliverer>) {
+fn service_over(
+    dir: &std::path::Path,
+    now: u64,
+) -> (
+    TimerService,
+    Arc<FakeClock>,
+    Arc<FakeProbe>,
+    Arc<FakeDeliverer>,
+) {
     let coord = Coordination::default();
     coord.open(dir.join(DB_FILE)).unwrap();
     let clock = FakeClock::new(now);
@@ -687,7 +995,15 @@ fn a_delivery_failure_is_recorded_and_a_loop_keeps_its_schedule() {
     probe.add(7, "me", 0);
     deliverer.make_unready(7);
     let reply = service
-        .set("7", None, 7, "go".into(), 2_000, Some(2_000), Some("beat".into()))
+        .set(
+            "7",
+            None,
+            7,
+            "go".into(),
+            2_000,
+            Some(2_000),
+            Some("beat".into()),
+        )
         .unwrap();
     let id = reply["timer_id"].as_i64().unwrap();
     clock.set(2_000);
@@ -698,7 +1014,10 @@ fn a_delivery_failure_is_recorded_and_a_loop_keeps_its_schedule() {
     assert_eq!(delivery["error"], "not ready within 1000 ms");
     assert_eq!(delivery["reason"], "condition");
     let row = row_of(&service, id);
-    assert_eq!(row["status"], "pending", "a loop keeps its schedule after a failure");
+    assert_eq!(
+        row["status"], "pending",
+        "a loop keeps its schedule after a failure"
+    );
     assert_eq!(row["next_fire_at"], json!(4_000));
     assert_eq!(row["fired_count"], 1);
     // The deliverer itself finding the child gone (it died between the tick
@@ -717,13 +1036,19 @@ fn a_delivery_failure_is_recorded_and_a_loop_keeps_its_schedule() {
 fn an_identical_body_is_coalesced_inside_the_window_and_not_after() {
     let (service, clock, probe, deliverer, _dir) = service(0);
     probe.add(7, "me", 0);
-    let first = service.set("7", None, 7, "same".into(), 1_000, None, None).unwrap()["timer_id"]
+    let first = service
+        .set("7", None, 7, "same".into(), 1_000, None, None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
-    let second = service.set("7", None, 7, "same".into(), 2_000, None, None).unwrap()["timer_id"]
+    let second = service
+        .set("7", None, 7, "same".into(), 2_000, None, None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
-    let third = service.set("7", None, 7, "same".into(), 30_000, None, None).unwrap()["timer_id"]
+    let third = service
+        .set("7", None, 7, "same".into(), 30_000, None, None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
     clock.set(1_000);
@@ -734,13 +1059,26 @@ fn an_identical_body_is_coalesced_inside_the_window_and_not_after() {
     service.tick_now();
     let coalesced = last_delivery(&service, second);
     assert_eq!(coalesced["status"], "coalesced");
-    assert_eq!(coalesced["delivered"], Value::Null, "THIS firing typed nothing");
-    assert_eq!(coalesced["coalesced_with"], first_firing, "names the FIRING, not the timer");
-    assert!(coalesced["error"].as_str().unwrap().contains("identical body"));
+    assert_eq!(
+        coalesced["delivered"],
+        Value::Null,
+        "THIS firing typed nothing"
+    );
+    assert_eq!(
+        coalesced["coalesced_with"], first_firing,
+        "names the FIRING, not the timer"
+    );
+    assert!(coalesced["error"]
+        .as_str()
+        .unwrap()
+        .contains("identical body"));
     clock.set(30_000);
     service.tick_now();
     wait_for(|| last_delivery(&service, third)["status"] == json!("delivered"));
-    assert_eq!(last_delivery(&service, third)["coalesced_with"], Value::Null);
+    assert_eq!(
+        last_delivery(&service, third)["coalesced_with"],
+        Value::Null
+    );
     // Exactly TWO writes reached the process, not three.
     assert_eq!(
         deliverer.sent(),
@@ -762,7 +1100,9 @@ fn a_loop_does_not_queue_behind_its_own_in_flight_firing() {
         .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
-    let other = service.set("7", None, 7, "beat".into(), 1_500, None, None).unwrap()["timer_id"]
+    let other = service
+        .set("7", None, 7, "beat".into(), 1_500, None, None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
     clock.set(1_000);
@@ -778,7 +1118,11 @@ fn a_loop_does_not_queue_behind_its_own_in_flight_firing() {
     let second = last_delivery(&service, beat);
     assert_eq!(second["status"], "coalesced");
     assert_eq!(second["coalesced_with"], inflight_id);
-    assert_eq!(row_of(&service, beat)["fired_count"], 2, "the schedule still advanced");
+    assert_eq!(
+        row_of(&service, beat)["fired_count"],
+        2,
+        "the schedule still advanced"
+    );
     // The other timer's identical body (due at 1 500, seen on this tick):
     // coalesced with the in-flight firing as well.
     let other_delivery = last_delivery(&service, other);
@@ -793,15 +1137,19 @@ fn a_loop_does_not_queue_behind_its_own_in_flight_firing() {
 fn timer_list_is_the_audit_log() {
     let (service, clock, probe, _deliverer, _dir) = service(0);
     probe.add(7, "me", 0);
-    let id = service.set("7", None, 7, "go".into(), 1_000, None, Some("wake".into())).unwrap()
-        ["timer_id"]
+    let id = service
+        .set("7", None, 7, "go".into(), 1_000, None, Some("wake".into()))
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
     clock.set(1_000);
     service.tick_now();
     wait_for(|| last_delivery(&service, id)["delivered"] == json!(true));
     let pending_only = service.list("7", false, false, None, None, None).unwrap();
-    assert_eq!(pending_only["total"], 0, "a fired timer is hidden by default");
+    assert_eq!(
+        pending_only["total"], 0,
+        "a fired timer is hidden by default"
+    );
     let rows = service.list("7", true, false, None, None, None).unwrap();
     let row = &rows["timers"][0];
     assert_eq!(row["id"], json!(id));
@@ -817,8 +1165,14 @@ fn timer_list_is_the_audit_log() {
     assert_eq!(row["delivery"]["at"], json!(1_000));
     assert_eq!(row["delivery"]["receipt"]["had_output_within_ms"], true);
     // Owner scoping: another actor sees nothing until `all`.
-    assert_eq!(service.list("99", true, false, None, None, None).unwrap()["total"], 0);
-    assert_eq!(service.list("99", true, true, None, None, None).unwrap()["total"], 1);
+    assert_eq!(
+        service.list("99", true, false, None, None, None).unwrap()["total"],
+        0
+    );
+    assert_eq!(
+        service.list("99", true, true, None, None, None).unwrap()["total"],
+        1
+    );
 }
 
 /// Review fix: the list is pending first, newest first, paged by
@@ -832,7 +1186,13 @@ fn timer_list_is_newest_first_with_pending_ahead_and_pages_by_offset() {
     for n in 1..=5u64 {
         clock.set(n * 100);
         let delay = if n <= 2 { 1_000 } else { 100_000 };
-        ids.push(service.set("7", None, 7, format!("t{n}"), delay, None, None).unwrap()["timer_id"].as_i64().unwrap());
+        ids.push(
+            service
+                .set("7", None, 7, format!("t{n}"), delay, None, None)
+                .unwrap()["timer_id"]
+                .as_i64()
+                .unwrap(),
+        );
     }
     clock.set(2_000);
     service.tick_now(); // t1 and t2 fire
@@ -842,12 +1202,25 @@ fn timer_list_is_newest_first_with_pending_ahead_and_pages_by_offset() {
     assert_eq!(page["limit"], 2);
     assert_eq!(page["offset"], 0);
     let bodies = |page: &Value| -> Vec<String> {
-        page["timers"].as_array().unwrap().iter().map(|t| t["body"].as_str().unwrap().to_owned()).collect()
+        page["timers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["body"].as_str().unwrap().to_owned())
+            .collect()
     };
     assert_eq!(bodies(&page), vec!["t5", "t4"], "the newest pending first");
-    let next = service.list("7", true, false, Some(2), Some(2), None).unwrap();
-    assert_eq!(bodies(&next), vec!["t3", "t2"], "then the last pending, then the newest fired");
-    let last = service.list("7", true, false, Some(2), Some(4), None).unwrap();
+    let next = service
+        .list("7", true, false, Some(2), Some(2), None)
+        .unwrap();
+    assert_eq!(
+        bodies(&next),
+        vec!["t3", "t2"],
+        "then the last pending, then the newest fired"
+    );
+    let last = service
+        .list("7", true, false, Some(2), Some(4), None)
+        .unwrap();
     assert_eq!(bodies(&last), vec!["t1"]);
     assert_eq!(last["total"], 5);
     let pending = service.list("7", false, false, None, None, None).unwrap();
@@ -875,24 +1248,37 @@ fn retention_prunes_fired_rows_past_the_window() {
             ..Knobs::default()
         }),
     );
-    let fired = service.set("7", None, 7, "go".into(), 1_000, None, None).unwrap()["timer_id"]
+    let fired = service
+        .set("7", None, 7, "go".into(), 1_000, None, None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
-    let beat = service.set("7", None, 7, "beat".into(), 1_000, Some(10_000_000), None).unwrap()["timer_id"]
+    let beat = service
+        .set("7", None, 7, "beat".into(), 1_000, Some(10_000_000), None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
-    service.set("7", None, 7, "later".into(), 10_000_000, None, None).unwrap();
+    service
+        .set("7", None, 7, "later".into(), 10_000_000, None, None)
+        .unwrap();
     clock.set(1_000);
     service.tick_now();
     wait_for(|| last_delivery(&service, fired)["delivered"] == json!(true));
     wait_for(|| last_delivery(&service, beat)["delivered"] == json!(true));
     clock.set(3_600_999);
     service.prune_now();
-    assert_eq!(service.list("7", true, true, None, None, None).unwrap()["total"], 3, "inside the window");
+    assert_eq!(
+        service.list("7", true, true, None, None, None).unwrap()["total"],
+        3,
+        "inside the window"
+    );
     clock.set(3_602_001);
     service.prune_now();
     let rows = service.list("7", true, true, None, None, None).unwrap();
-    assert_eq!(rows["total"], 2, "the fired row is gone, the pending ones stay");
+    assert_eq!(
+        rows["total"], 2,
+        "the fired row is gone, the pending ones stay"
+    );
     assert!(
         store.last_firings(&[fired]).unwrap().is_empty(),
         "its firing rows went with it"
@@ -920,8 +1306,9 @@ fn missed_absolute_timers_fire_once_on_restart() {
         let coord = Coordination::default();
         coord.open(dir.path().join(DB_FILE)).unwrap();
         assert_eq!(coord.schema_version().unwrap(), SCHEMA_VERSION);
-        let overdue = service.set("7", None, 7, "overdue".into(), 60_000, None, None).unwrap()
-            ["timer_id"]
+        let overdue = service
+            .set("7", None, 7, "overdue".into(), 60_000, None, None)
+            .unwrap()["timer_id"]
             .as_i64()
             .unwrap();
         let looping = service
@@ -941,8 +1328,15 @@ fn missed_absolute_timers_fire_once_on_restart() {
     let (service, clock, probe, deliverer) = service_over(dir.path(), 600_000);
     probe.add(7, "me", 600_000);
     service.restore();
-    assert!(deliverer.sent().is_empty(), "restore itself delivers nothing");
-    assert_eq!(last_delivery(&service, ids.0)["status"], "in_flight", "recorded BEFORE delivery");
+    assert!(
+        deliverer.sent().is_empty(),
+        "restore itself delivers nothing"
+    );
+    assert_eq!(
+        last_delivery(&service, ids.0)["status"],
+        "in_flight",
+        "recorded BEFORE delivery"
+    );
     service.tick_now();
     wait_for(|| deliverer.sent().len() >= 2);
     assert_eq!(
@@ -954,9 +1348,21 @@ fn missed_absolute_timers_fire_once_on_restart() {
     assert_eq!(last_delivery(&service, ids.0)["reason"], "missed");
     assert_eq!(last_delivery(&service, ids.0)["delivered"], true);
     assert_eq!(row_of(&service, ids.0)["fired_count"], 1);
-    assert_eq!(row_of(&service, ids.1)["status"], "pending", "a loop continues");
-    assert_eq!(row_of(&service, ids.1)["next_fire_at"], json!(660_000), "on a FRESH interval");
-    assert_eq!(row_of(&service, ids.2)["status"], "pending", "a future timer is untouched");
+    assert_eq!(
+        row_of(&service, ids.1)["status"],
+        "pending",
+        "a loop continues"
+    );
+    assert_eq!(
+        row_of(&service, ids.1)["next_fire_at"],
+        json!(660_000),
+        "on a FRESH interval"
+    );
+    assert_eq!(
+        row_of(&service, ids.2)["status"],
+        "pending",
+        "a future timer is untouched"
+    );
     assert_eq!(row_of(&service, ids.2)["next_fire_at"], json!(6_000_000));
     // And nothing fires twice on a second restore-free tick.
     clock.set(600_001);
@@ -976,9 +1382,25 @@ fn a_stale_target_after_a_relaunch_is_process_gone_never_a_reused_id() {
         let (service, _clock, probe, _deliverer) = service_over(dir.path(), 0);
         probe.add(7, "me", 0);
         probe.add(3, "worker", 0);
-        let overdue = service.set("7", None, 7, "overdue".into(), 60_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
+        let overdue = service
+            .set("7", None, 7, "overdue".into(), 60_000, None, None)
+            .unwrap()["timer_id"]
+            .as_i64()
+            .unwrap();
         let watching = service
-            .fire_when_idle(TimerKind::IdleAny, "7", None, 7, "B is quiet".into(), &["worker".into()], 3_600_000, None, None, None, None)
+            .fire_when_idle(
+                TimerKind::IdleAny,
+                "7",
+                None,
+                7,
+                "B is quiet".into(),
+                &["worker".into()],
+                3_600_000,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap()["timer_id"]
             .as_i64()
             .unwrap();
@@ -1001,7 +1423,10 @@ fn a_stale_target_after_a_relaunch_is_process_gone_never_a_reused_id() {
     assert_eq!(expired["error"], "process gone");
     assert_eq!(expired["reason"], "expired");
     assert_eq!(row_of(&service, watching)["status"], "expired");
-    assert!(deliverer.sent().is_empty(), "nothing was typed into the reused ids");
+    assert!(
+        deliverer.sent().is_empty(),
+        "nothing was typed into the reused ids"
+    );
     assert_eq!(deliverer.attempts(), 0);
 }
 
@@ -1014,21 +1439,36 @@ fn a_missed_firing_waits_for_its_spawn_within_the_grace_window() {
     let (early, late) = {
         let (service, _clock, probe, _deliverer) = service_over(dir.path(), 0);
         probe.add(7, "me", 0);
-        let early = service.set("7", None, 7, "early".into(), 1_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
-        let late = service.set("7", None, 7, "late".into(), 2_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
+        let early = service
+            .set("7", None, 7, "early".into(), 1_000, None, None)
+            .unwrap()["timer_id"]
+            .as_i64()
+            .unwrap();
+        let late = service
+            .set("7", None, 7, "late".into(), 2_000, None, None)
+            .unwrap()["timer_id"]
+            .as_i64()
+            .unwrap();
         (early, late)
     };
     let (service, clock, probe, deliverer) = service_over(dir.path(), 100_000);
     service.restore(); // nothing is live yet
     service.tick_now();
-    assert_eq!(last_delivery(&service, early)["status"], "in_flight", "waiting for its spawn");
+    assert_eq!(
+        last_delivery(&service, early)["status"],
+        "in_flight",
+        "waiting for its spawn"
+    );
     assert!(deliverer.sent().is_empty());
     // The spawn comes back 3 s later (same uuid): both bodies go out, once.
     clock.set(103_000);
     probe.add(7, "me", 103_000);
     service.tick_now();
     wait_for(|| deliverer.sent().len() == 2);
-    assert_eq!(deliverer.sent(), vec![(7, "early".to_owned()), (7, "late".to_owned())]);
+    assert_eq!(
+        deliverer.sent(),
+        vec![(7, "early".to_owned()), (7, "late".to_owned())]
+    );
     wait_for(|| last_delivery(&service, late)["status"] == json!("delivered"));
     assert_eq!(last_delivery(&service, early)["reason"], "missed");
     clock.set(200_000);
@@ -1049,8 +1489,16 @@ fn a_crash_after_the_persisted_firing_does_not_refire_on_restart() {
         let (service, clock, probe, deliverer) = service_over(dir.path(), 0);
         probe.add(7, "me", 0);
         deliverer.hang();
-        let one_shot = service.set("7", None, 7, "once".into(), 1_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
-        let beat = service.set("7", None, 7, "beat".into(), 1_000, Some(1_000), None).unwrap()["timer_id"].as_i64().unwrap();
+        let one_shot = service
+            .set("7", None, 7, "once".into(), 1_000, None, None)
+            .unwrap()["timer_id"]
+            .as_i64()
+            .unwrap();
+        let beat = service
+            .set("7", None, 7, "beat".into(), 1_000, Some(1_000), None)
+            .unwrap()["timer_id"]
+            .as_i64()
+            .unwrap();
         clock.set(1_000);
         service.tick_now();
         wait_for(|| deliverer.attempts() == 1);
@@ -1062,12 +1510,20 @@ fn a_crash_after_the_persisted_firing_does_not_refire_on_restart() {
     probe.add(7, "me", 1_500);
     service.restore();
     service.tick_now();
-    assert_eq!(row_of(&service, one_shot)["status"], "fired", "the persisted transition stands");
+    assert_eq!(
+        row_of(&service, one_shot)["status"],
+        "fired",
+        "the persisted transition stands"
+    );
     let closed = last_delivery(&service, one_shot);
     assert_eq!(closed["status"], "failed");
     assert_eq!(closed["delivered"], false);
     assert_eq!(closed["error"], INTERRUPTED);
-    assert_eq!(row_of(&service, beat)["next_fire_at"], json!(2_000), "the loop's advanced schedule stands");
+    assert_eq!(
+        row_of(&service, beat)["next_fire_at"],
+        json!(2_000),
+        "the loop's advanced schedule stands"
+    );
     assert_eq!(row_of(&service, beat)["fired_count"], 1);
     assert_eq!(deliverer.attempts(), 0, "nothing re-fired at restore");
     // The loop simply continues from its persisted schedule.
@@ -1103,19 +1559,44 @@ fn processes_accept_ids_or_names() {
     assert_eq!(reply["already_idle"], json!([]));
     let by_id = service
         .fire_when_idle(
-            TimerKind::IdleAny, "7", None, 7, "go".into(), &["4".into()], 600_000, None, None, None, None,
+            TimerKind::IdleAny,
+            "7",
+            None,
+            7,
+            "go".into(),
+            &["4".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(by_id["waiting_on"], json!([4]));
     let err = service
         .fire_when_idle(
-            TimerKind::IdleAny, "7", None, 7, "go".into(), &["nope".into()], 600_000, None, None, None, None,
+            TimerKind::IdleAny,
+            "7",
+            None,
+            7,
+            "go".into(),
+            &["nope".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap_err();
     assert!(err.to_string().contains("no process `nope`"), "{err}");
-    assert!(err.to_string().contains("worker · build"), "names what IS live: {err}");
+    assert!(
+        err.to_string().contains("worker · build"),
+        "names what IS live: {err}"
+    );
     // A delivery target that is not live is refused up front (timer 116).
-    let err = service.set("7", None, 99, "go".into(), 1_000, None, None).unwrap_err();
+    let err = service
+        .set("7", None, 99, "go".into(), 1_000, None, None)
+        .unwrap_err();
     assert!(err.to_string().contains("no live process 99"), "{err}");
 }
 
@@ -1131,39 +1612,118 @@ fn names_resolve_within_the_project_scope_first() {
     probe.add(9, "loose", 1_000_000);
     // Explicit scope: project 2's server.
     let reply = service
-        .fire_when_idle(TimerKind::IdleAny, "8", Some(2), 8, "go".into(), &["server".into()], 600_000, None, None, None, None)
+        .fire_when_idle(
+            TimerKind::IdleAny,
+            "8",
+            Some(2),
+            8,
+            "go".into(),
+            &["server".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(reply["waiting_on"], json!([7]));
     assert_eq!(reply["project_id"], 2);
     // No scope, but the actor (8) belongs to project 2: same answer, and the
     // timer is recorded in project 2.
     let reply = service
-        .fire_when_idle(TimerKind::IdleAny, "8", None, 8, "go".into(), &["server".into()], 600_000, None, None, None, None)
+        .fire_when_idle(
+            TimerKind::IdleAny,
+            "8",
+            None,
+            8,
+            "go".into(),
+            &["server".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(reply["waiting_on"], json!([7]));
     assert_eq!(reply["project_id"], 2);
     // A scope with no match falls back to every project — one candidate.
     let reply = service
-        .fire_when_idle(TimerKind::IdleAny, "8", Some(5), 8, "go".into(), &["loose".into()], 600_000, None, None, None, None)
+        .fire_when_idle(
+            TimerKind::IdleAny,
+            "8",
+            Some(5),
+            8,
+            "go".into(),
+            &["loose".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(reply["waiting_on"], json!([9]));
     // An unscoped caller (no project) hits the ambiguity and is told.
     let err = service
-        .fire_when_idle(TimerKind::IdleAny, "9", None, 9, "go".into(), &["server".into()], 600_000, None, None, None, None)
+        .fire_when_idle(
+            TimerKind::IdleAny,
+            "9",
+            None,
+            9,
+            "go".into(),
+            &["server".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("ambiguous"), "{err}");
-    assert!(err.to_string().contains("3 (project 1)") && err.to_string().contains("7 (project 2)"), "{err}");
+    assert!(
+        err.to_string().contains("3 (project 1)") && err.to_string().contains("7 (project 2)"),
+        "{err}"
+    );
     // The numeric id is never ambiguous.
     let reply = service
-        .fire_when_idle(TimerKind::IdleAny, "9", None, 9, "go".into(), &["3".into()], 600_000, None, None, None, None)
+        .fire_when_idle(
+            TimerKind::IdleAny,
+            "9",
+            None,
+            9,
+            "go".into(),
+            &["3".into()],
+            600_000,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(reply["waiting_on"], json!([3]));
-    assert_eq!(reply["project_id"], Value::Null, "a loose actor has no project to default to");
+    assert_eq!(
+        reply["project_id"],
+        Value::Null,
+        "a loose actor has no project to default to"
+    );
     // timer_set defaults its project the same way, and the list filter sees it.
-    let set = service.set("3", None, 3, "go".into(), 60_000, None, None).unwrap();
+    let set = service
+        .set("3", None, 3, "go".into(), 60_000, None, None)
+        .unwrap();
     assert_eq!(set["project_id"], 1);
-    assert_eq!(service.list("3", false, false, None, None, Some(1)).unwrap()["total"], 1);
-    assert_eq!(service.list("3", false, false, None, None, Some(2)).unwrap()["total"], 0);
+    assert_eq!(
+        service
+            .list("3", false, false, None, None, Some(1))
+            .unwrap()["total"],
+        1
+    );
+    assert_eq!(
+        service
+            .list("3", false, false, None, None, Some(2))
+            .unwrap()["total"],
+        0
+    );
 }
 
 /// Lifecycle is owner-scoped; `user` (the orchestrator seat) may act on any
@@ -1172,7 +1732,9 @@ fn names_resolve_within_the_project_scope_first() {
 fn lifecycle_is_owner_scoped() {
     let (service, _clock, probe, _deliverer, _dir) = service(0);
     probe.add(7, "me", 0);
-    let id = service.set("7", None, 7, "go".into(), 60_000, None, None).unwrap()["timer_id"]
+    let id = service
+        .set("7", None, 7, "go".into(), 60_000, None, None)
+        .unwrap()["timer_id"]
         .as_i64()
         .unwrap();
     let err = service
@@ -1199,8 +1761,12 @@ fn lifecycle_is_owner_scoped() {
 
 fn http(addr: &str, method: &str, path: &str, actor: Option<&str>, body: &str) -> (u16, Value) {
     let mut stream = TcpStream::connect(addr).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let actor = actor.map(|a| format!("{ACTOR_HEADER}: {a}\r\n")).unwrap_or_default();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let actor = actor
+        .map(|a| format!("{ACTOR_HEADER}: {a}\r\n"))
+        .unwrap_or_default();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\n{actor}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -1209,7 +1775,11 @@ fn http(addr: &str, method: &str, path: &str, actor: Option<&str>, body: &str) -
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
     let text = String::from_utf8_lossy(&raw);
-    let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("status");
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status");
     let payload = text.split("\r\n\r\n").nth(1).unwrap_or("");
     (status, serde_json::from_str(payload).unwrap_or(Value::Null))
 }
@@ -1224,30 +1794,75 @@ fn timer_routes_default_the_delivery_target_to_the_caller() {
     probe.add(3, "other", 0);
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
     let addr = server.server_addr().to_string();
-    let state = ControlState { timers: service.clone(), ..ControlState::default() };
+    let state = ControlState {
+        timers: service.clone(),
+        ..ControlState::default()
+    };
     std::thread::spawn(move || control_http::serve(server, state, TOKEN.to_owned()));
 
-    let (status, reply) = http(&addr, "POST", "/timers", Some("12"), r#"{"delay_ms": 1000, "body": "wake"}"#);
+    let (status, reply) = http(
+        &addr,
+        "POST",
+        "/timers",
+        Some("12"),
+        r#"{"delay_ms": 1000, "body": "wake"}"#,
+    );
     assert_eq!(status, 200, "{reply}");
     let id = reply["timer_id"].as_i64().unwrap();
     assert_eq!(reply["delivery_process_id"], 12, "defaults to the caller");
-    assert_eq!(reply["delivery_uuid"], "u12", "pinned to the caller's spawn");
+    assert_eq!(
+        reply["delivery_uuid"], "u12",
+        "pinned to the caller's spawn"
+    );
     assert_eq!(reply["owner"], "12");
-    assert_eq!(reply["project_id"], 6, "review fix: the actor's project by default");
+    assert_eq!(
+        reply["project_id"], 6,
+        "review fix: the actor's project by default"
+    );
 
     // No identity and no explicit target: refused with the reason.
-    let (status, reply) = http(&addr, "POST", "/timers", None, r#"{"delay_ms": 1000, "body": "wake"}"#);
+    let (status, reply) = http(
+        &addr,
+        "POST",
+        "/timers",
+        None,
+        r#"{"delay_ms": 1000, "body": "wake"}"#,
+    );
     assert_eq!(status, 400);
-    assert!(reply["message"].as_str().unwrap().contains("delivery_process_id"), "{reply}");
+    assert!(
+        reply["message"]
+            .as_str()
+            .unwrap()
+            .contains("delivery_process_id"),
+        "{reply}"
+    );
 
     // An explicit target (and an explicit project) win.
-    let (_, explicit) = http(&addr, "POST", "/timers", Some("12"), r#"{"delay_ms": 5000, "body": "other", "delivery_process_id": 3, "project_id": 2}"#);
+    let (_, explicit) = http(
+        &addr,
+        "POST",
+        "/timers",
+        Some("12"),
+        r#"{"delay_ms": 5000, "body": "other", "delivery_process_id": 3, "project_id": 2}"#,
+    );
     assert_eq!(explicit["delivery_process_id"], 3);
     assert_eq!(explicit["project_id"], 2);
     // A target that is not live is a 404 naming what is.
-    let (status, missing) = http(&addr, "POST", "/timers", Some("12"), r#"{"delay_ms": 5000, "body": "x", "delivery_process_id": 44}"#);
+    let (status, missing) = http(
+        &addr,
+        "POST",
+        "/timers",
+        Some("12"),
+        r#"{"delay_ms": 5000, "body": "x", "delivery_process_id": 44}"#,
+    );
     assert_eq!(status, 404, "{missing}");
-    assert!(missing["message"].as_str().unwrap().contains("12:caller (project 6)"), "{missing}");
+    assert!(
+        missing["message"]
+            .as_str()
+            .unwrap()
+            .contains("12:caller (project 6)"),
+        "{missing}"
+    );
 
     clock.set(1_000);
     service.tick_now();
@@ -1258,16 +1873,40 @@ fn timer_routes_default_the_delivery_target_to_the_caller() {
     assert_eq!(listed["offset"], 0);
     let (_, other) = http(&addr, "GET", "/timers?include_fired=true", Some("99"), "");
     assert_eq!(other["total"], 0, "owner-scoped");
-    let (_, everyones) = http(&addr, "GET", "/timers?include_fired=true&all=true", Some("99"), "");
+    let (_, everyones) = http(
+        &addr,
+        "GET",
+        "/timers?include_fired=true&all=true",
+        Some("99"),
+        "",
+    );
     assert_eq!(everyones["total"], 2);
-    let (_, paged) = http(&addr, "GET", "/timers?include_fired=true&limit=1&offset=1", Some("12"), "");
+    let (_, paged) = http(
+        &addr,
+        "GET",
+        "/timers?include_fired=true&limit=1&offset=1",
+        Some("12"),
+        "",
+    );
     assert_eq!(paged["timers"].as_array().unwrap().len(), 1);
     assert_eq!(paged["total"], 2);
-    let (_, scoped) = http(&addr, "GET", "/timers?include_fired=true&project_id=2", Some("12"), "");
+    let (_, scoped) = http(
+        &addr,
+        "GET",
+        "/timers?include_fired=true&project_id=2",
+        Some("12"),
+        "",
+    );
     assert_eq!(scoped["total"], 1, "the project filter");
 
     // Lifecycle by id.
-    let (status, cancelled) = http(&addr, "POST", &format!("/timers/{id}/cancel"), Some("12"), "");
+    let (status, cancelled) = http(
+        &addr,
+        "POST",
+        &format!("/timers/{id}/cancel"),
+        Some("12"),
+        "",
+    );
     assert_eq!(status, 200);
     assert_eq!(cancelled["timer_id"], json!(id));
     let (status, missing) = http(&addr, "POST", "/timers/9999/cancel", Some("12"), "");
@@ -1283,7 +1922,10 @@ fn idle_routes_answer_already_idle_waiting_on_and_status() {
     probe.add(2, "busy", 1_000_000);
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
     let addr = server.server_addr().to_string();
-    let state = ControlState { timers: service, ..ControlState::default() };
+    let state = ControlState {
+        timers: service,
+        ..ControlState::default()
+    };
     std::thread::spawn(move || control_http::serve(server, state, TOKEN.to_owned()));
 
     let (status, any) = http(
@@ -1296,8 +1938,15 @@ fn idle_routes_answer_already_idle_waiting_on_and_status() {
     assert_eq!(status, 200, "{any}");
     assert_eq!(any["status"], "scheduled");
     assert_eq!(any["already_idle"], json!([1]));
-    assert_eq!(any["waiting_on"], json!([2]), "`any` ignores the already-idle one");
-    assert!(any["note"].as_str().unwrap().contains("NEW idle transition"));
+    assert_eq!(
+        any["waiting_on"],
+        json!([2]),
+        "`any` ignores the already-idle one"
+    );
+    assert!(any["note"]
+        .as_str()
+        .unwrap()
+        .contains("NEW idle transition"));
 
     let (status, all) = http(
         &addr,
@@ -1327,10 +1976,21 @@ fn idle_routes_answer_already_idle_waiting_on_and_status() {
 fn an_inert_service_refuses_loudly() {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
     let addr = server.server_addr().to_string();
-    std::thread::spawn(move || control_http::serve(server, ControlState::default(), TOKEN.to_owned()));
-    let (status, reply) = http(&addr, "POST", "/timers", Some("12"), r#"{"delay_ms": 1, "body": "x"}"#);
+    std::thread::spawn(move || {
+        control_http::serve(server, ControlState::default(), TOKEN.to_owned())
+    });
+    let (status, reply) = http(
+        &addr,
+        "POST",
+        "/timers",
+        Some("12"),
+        r#"{"delay_ms": 1, "body": "x"}"#,
+    );
     assert_eq!(status, 500);
-    assert!(reply["message"].as_str().unwrap().contains("not running"), "{reply}");
+    assert!(
+        reply["message"].as_str().unwrap().contains("not running"),
+        "{reply}"
+    );
 }
 
 /// The scheduler thread wakes on its own (the condvar park, not a sleep-poll):
@@ -1351,7 +2011,9 @@ fn the_scheduler_thread_fires_without_being_ticked() {
         Arc::new(Knobs::default),
     );
     service.spawn_scheduler();
-    service.set("7", None, 7, "wake".into(), 50, None, None).unwrap();
+    service
+        .set("7", None, 7, "wake".into(), 50, None, None)
+        .unwrap();
     wait_for(|| deliverer.sent() == vec![(7, "wake".to_owned())]);
 }
 
@@ -1364,7 +2026,11 @@ fn plan_wait_is_the_idle_tick_or_the_exact_delay() {
     s.insert(Timer::delay("7", 7, "go".into(), 90_000, 0));
     assert_eq!(s.plan_wait(), Some(Duration::from_millis(90_000)));
     let id = s.insert(idle_timer(TimerKind::IdleAny, vec![1], 600_000, 0));
-    assert_eq!(s.plan_wait(), Some(Duration::from_millis(1_000)), "1 s tick while watching");
+    assert_eq!(
+        s.plan_wait(),
+        Some(Duration::from_millis(1_000)),
+        "1 s tick while watching"
+    );
     s.cancel(id);
     clock.set(1_000);
     assert_eq!(s.plan_wait(), Some(Duration::from_millis(89_000)));
@@ -1383,10 +2049,23 @@ struct FakeHold {
 
 impl app_lib::timers::TimerHold for FakeHold {
     fn hold_reason(&self, process_id: u32) -> Option<String> {
-        self.blocked.lock().unwrap().contains(&process_id).then(|| "held".to_owned())
+        self.blocked
+            .lock()
+            .unwrap()
+            .contains(&process_id)
+            .then(|| "held".to_owned())
     }
-    fn hold(&self, process_id: u32, from: String, text: String, deliver: Box<dyn FnOnce() + Send>) -> usize {
-        assert!(from.starts_with("timer "), "a timer names itself as the sender: {from}");
+    fn hold(
+        &self,
+        process_id: u32,
+        from: String,
+        text: String,
+        deliver: Box<dyn FnOnce() + Send>,
+    ) -> usize {
+        assert!(
+            from.starts_with("timer "),
+            "a timer names itself as the sender: {from}"
+        );
         let mut q = self.queued.lock().unwrap();
         q.push((process_id, text, deliver));
         q.len()
@@ -1404,19 +2083,38 @@ fn a_held_target_gets_its_firing_when_the_hold_lifts() {
     let hold = Arc::new(FakeHold::default());
     hold.blocked.lock().unwrap().push(7);
     service.set_hold(hold.clone());
-    let held = service.set("7", None, 7, "keep going".into(), 1_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
-    let free = service.set("7", None, 8, "free".into(), 1_000, None, None).unwrap()["timer_id"].as_i64().unwrap();
+    let held = service
+        .set("7", None, 7, "keep going".into(), 1_000, None, None)
+        .unwrap()["timer_id"]
+        .as_i64()
+        .unwrap();
+    let free = service
+        .set("7", None, 8, "free".into(), 1_000, None, None)
+        .unwrap()["timer_id"]
+        .as_i64()
+        .unwrap();
     clock.set(1_000);
     service.tick_now();
     wait_for(|| last_delivery(&service, free)["delivered"] == json!(true));
     wait_for(|| hold.queued.lock().unwrap().len() == 1);
-    assert_eq!(deliverer.sent(), vec![(8, "free".to_owned())], "nothing reached the held target");
+    assert_eq!(
+        deliverer.sent(),
+        vec![(8, "free".to_owned())],
+        "nothing reached the held target"
+    );
     assert_ne!(last_delivery(&service, held)["delivered"], json!(true));
-    assert_ne!(last_delivery(&service, held)["delivered"], json!(false), "held is not failed");
+    assert_ne!(
+        last_delivery(&service, held)["delivered"],
+        json!(false),
+        "held is not failed"
+    );
     let (target, text, deliver) = hold.queued.lock().unwrap().pop().unwrap();
     assert_eq!((target, text.as_str()), (7, "keep going"));
     hold.blocked.lock().unwrap().clear();
     deliver();
     wait_for(|| last_delivery(&service, held)["delivered"] == json!(true));
-    assert_eq!(deliverer.sent(), vec![(8, "free".to_owned()), (7, "keep going".to_owned())]);
+    assert_eq!(
+        deliverer.sent(),
+        vec![(8, "free".to_owned()), (7, "keep going".to_owned())]
+    );
 }

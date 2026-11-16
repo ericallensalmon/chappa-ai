@@ -58,7 +58,10 @@ fn start_control(state: ControlState) -> (String, String) {
 #[cfg(windows)]
 fn shell_echoing_argv() -> (String, Vec<String>) {
     // `cmd /K echo a b c` prints the argument then stays interactive.
-    ("cmd".into(), vec!["/K".into(), "echo".into(), "a b c".into()])
+    (
+        "cmd".into(),
+        vec!["/K".into(), "echo".into(), "a b c".into()],
+    )
 }
 
 #[cfg(not(windows))]
@@ -78,7 +81,13 @@ fn shell_echoing_argv() -> (String, Vec<String>) {
 fn wait_for_text(addr: &str, token: &str, id: u64, needle: &str) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let (status, body) = http(addr, "GET", &format!("/processes/{id}/output"), Some(token), "");
+        let (status, body) = http(
+            addr,
+            "GET",
+            &format!("/processes/{id}/output"),
+            Some(token),
+            "",
+        );
         assert_eq!(status, 200);
         let rows: Vec<String> = body["rows"]
             .as_array()
@@ -219,7 +228,8 @@ fn spawn_input_receipt_journal_close_round_trip() {
         "POST",
         "/processes",
         Some(&token),
-        &json!({"command": command, "args": args, "name": "argv probe", "cols": 100, "rows": 10}).to_string(),
+        &json!({"command": command, "args": args, "name": "argv probe", "cols": 100, "rows": 10})
+            .to_string(),
     );
     assert_eq!(status, 200, "{body}");
     let id = body["id"].as_u64().unwrap();
@@ -268,7 +278,13 @@ fn spawn_input_receipt_journal_close_round_trip() {
 
     // BOTH DELIVERIES ARE in the journal, in order, with the
     // exact payload sizes.
-    let (_, journal) = http(&addr, "GET", &format!("/processes/{id}/input_journal"), Some(&token), "");
+    let (_, journal) = http(
+        &addr,
+        "GET",
+        &format!("/processes/{id}/input_journal"),
+        Some(&token),
+        "",
+    );
     let records = journal["records"].as_array().unwrap();
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["text"], "echo hi-from-control");
@@ -282,7 +298,13 @@ fn spawn_input_receipt_journal_close_round_trip() {
     for _ in 0..110 {
         registry.write_journaled(id as u32, b"", String::new(), false);
     }
-    let (_, journal) = http(&addr, "GET", &format!("/processes/{id}/input_journal"), Some(&token), "");
+    let (_, journal) = http(
+        &addr,
+        "GET",
+        &format!("/processes/{id}/input_journal"),
+        Some(&token),
+        "",
+    );
     assert_eq!(journal["records"].as_array().unwrap().len(), 100);
 
     // Explicit history window: offset>0 returns history only (no screen).
@@ -298,10 +320,19 @@ fn spawn_input_receipt_journal_close_round_trip() {
     assert!(out["rows"].as_array().unwrap().len() <= 5);
 
     // Close requires confirm.
-    let (status, body) = http(&addr, "POST", &format!("/processes/{id}/close"), Some(&token), "{}");
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{id}/close"),
+        Some(&token),
+        "{}",
+    );
     assert_eq!(status, 400);
     assert!(body["error"].as_str().unwrap().contains("confirm"));
-    assert!(registry.handle(id as u32).is_some(), "not closed without confirm");
+    assert!(
+        registry.handle(id as u32).is_some(),
+        "not closed without confirm"
+    );
     let (status, _) = http(
         &addr,
         "POST",
@@ -326,7 +357,13 @@ fn spawn_and_output_reject_out_of_range_sizes() {
     let (status, body) = http(&addr, "POST", "/processes", Some(&token), r#"{"rows": 0}"#);
     assert_eq!(status, 400);
     assert!(body["error"].as_str().unwrap().contains("rows"));
-    let (status, _) = http(&addr, "POST", "/processes", Some(&token), r#"{"cols": 70000}"#);
+    let (status, _) = http(
+        &addr,
+        "POST",
+        "/processes",
+        Some(&token),
+        r#"{"cols": 70000}"#,
+    );
     assert_eq!(status, 400, "u16 overflow is a bad body, not a spawn");
     assert!(registry.list().is_empty(), "nothing spawned");
 
@@ -348,7 +385,13 @@ fn spawn_and_output_reject_out_of_range_sizes() {
         "",
     );
     assert_eq!(status, 400, "overflowing window is refused, not wrapped");
-    let (status, out) = http(&addr, "GET", &format!("/processes/{id}/output?lines=5&offset=2"), Some(&token), "");
+    let (status, out) = http(
+        &addr,
+        "GET",
+        &format!("/processes/{id}/output?lines=5&offset=2"),
+        Some(&token),
+        "",
+    );
     assert_eq!(status, 200);
     assert!(out["rows"].as_array().unwrap().len() <= 5);
     registry.close(id as u32);
@@ -397,7 +440,12 @@ fn the_control_row_keeps_its_exact_wire_shape() {
     wait_for_text(&addr, &token, id, "a b c");
 
     let (_, row) = http(&addr, "GET", &format!("/processes/{id}"), Some(&token), "");
-    let keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+    let keys: Vec<&str> = row
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         keys,
         vec![
@@ -560,7 +608,9 @@ fn debug_routes_refuse_browser_requests() {
     let addr = server.server_addr().to_string();
     std::thread::spawn(move || app_lib::debug_http::serve(server, Registry::default()));
     let mut stream = TcpStream::connect(&addr).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
     let body = r#"{"command":"definitely-not-run"}"#;
     let req = format!(
         "POST /debug/terminals HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -594,9 +644,13 @@ fn control_api_doc_is_in_sync() {
 
 /// Bind an ephemeral port, publish its endpoint file into `dir` exactly as
 /// the app does after a successful bind, and serve.
-fn start_published(dir: &Path, token: &str) -> (String, std::sync::Arc<control_http::ServerIdentity>) {
+fn start_published(
+    dir: &Path,
+    token: &str,
+) -> (String, std::sync::Arc<control_http::ServerIdentity>) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-    let identity = std::sync::Arc::new(control_http::ServerIdentity::for_server(&server, token).unwrap());
+    let identity =
+        std::sync::Arc::new(control_http::ServerIdentity::for_server(&server, token).unwrap());
     control_http::publish_endpoint(dir, &identity).unwrap();
     let addr = identity.addr.clone();
     let state = ControlState {
@@ -655,11 +709,20 @@ fn the_identity_route_needs_no_token_and_proves_the_token() {
     let token = "t0ken-for-identity";
     let (addr, identity) = start_published(dir.path(), token);
     let challenge = "ab".repeat(32);
-    let (status, body) = http(&addr, "GET", &format!("/identity?challenge={challenge}"), None, "");
+    let (status, body) = http(
+        &addr,
+        "GET",
+        &format!("/identity?challenge={challenge}"),
+        None,
+        "",
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["addr"], addr);
     assert_eq!(body["nonce"], identity.nonce);
-    assert_eq!(body["proof"], chappa_ai_mcp::identity_proof(token, &challenge, &addr, &identity.nonce));
+    assert_eq!(
+        body["proof"],
+        chappa_ai_mcp::identity_proof(token, &challenge, &addr, &identity.nonce)
+    );
     // Everything else still requires the token.
     let (status, _) = http(&addr, "GET", "/", None, "");
     assert_eq!(status, 401);
@@ -706,14 +769,20 @@ fn an_impostor_holding_the_port_is_refused_and_never_sees_the_token() {
     );
     for client in [via_file, via_url] {
         let err = chappa_ai_mcp::call_tool(&client, "list_processes", &json!({})).unwrap_err();
-        assert!(matches!(err, chappa_ai_mcp::ToolError::Untrusted(_)), "{err:?}");
+        assert!(
+            matches!(err, chappa_ai_mcp::ToolError::Untrusted(_)),
+            "{err:?}"
+        );
     }
     let seen = seen.lock().unwrap();
     assert!(!seen.is_empty(), "the impostor was challenged");
     for request in seen.iter() {
         assert!(request.starts_with("GET /identity?challenge="), "{request}");
         assert!(!request.contains(token), "token leaked: {request}");
-        assert!(!request.to_ascii_lowercase().contains("authorization"), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
     }
 }
 
@@ -731,8 +800,16 @@ fn a_failed_bind_retires_only_a_stale_endpoint_file() {
 
     // Nothing listening any more: removed.
     let dead = tempfile::tempdir().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let ep = chappa_ai_mcp::Endpoint { addr: format!("127.0.0.1:{port}"), nonce: "old".into(), pid: None };
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let ep = chappa_ai_mcp::Endpoint {
+        addr: format!("127.0.0.1:{port}"),
+        nonce: "old".into(),
+        pid: None,
+    };
     std::fs::write(control_http::endpoint_path(dead.path()), ep.to_json()).unwrap();
     assert!(control_http::retire_stale_endpoint(dead.path(), token));
     assert!(!control_http::endpoint_path(dead.path()).exists());
@@ -740,7 +817,11 @@ fn a_failed_bind_retires_only_a_stale_endpoint_file() {
     // Something else holds the port: removed, and it never saw the token.
     let squatted = tempfile::tempdir().unwrap();
     let (impostor, seen) = start_impostor();
-    let ep = chappa_ai_mcp::Endpoint { addr: impostor, nonce: "old".into(), pid: None };
+    let ep = chappa_ai_mcp::Endpoint {
+        addr: impostor,
+        nonce: "old".into(),
+        pid: None,
+    };
     std::fs::write(control_http::endpoint_path(squatted.path()), ep.to_json()).unwrap();
     assert!(control_http::retire_stale_endpoint(squatted.path(), token));
     assert!(!control_http::endpoint_path(squatted.path()).exists());

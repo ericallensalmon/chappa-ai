@@ -315,8 +315,7 @@ impl ProjectYml {
             return Err(format!("{CHAPPA_YML_NAME} exceeds {MAX_YML_BYTES} bytes"));
         }
         let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         let yml = Self::parse(text)?;
         Ok((yml, crate::hash::content_hash(&bytes)))
     }
@@ -518,7 +517,10 @@ impl ProcessDef {
             return Err("command must not be blank".to_owned());
         }
         if let Some(key) = self.env.keys().find(|k| k.trim().is_empty()) {
-            return Err(format!("env variable name must not be blank (value `{}`)", self.env[key]));
+            return Err(format!(
+                "env variable name must not be blank (value `{}`)",
+                self.env[key]
+            ));
         }
         self.resolve_working_dir(project_root).map(|_| ())
     }
@@ -733,10 +735,7 @@ processes:
         assert_eq!(parsed, example_expected());
         // Process order is preserved (IndexMap) — index assertion is the point.
         let names: Vec<&str> = parsed.processes.keys().map(String::as_str).collect();
-        assert_eq!(
-            names,
-            vec!["dev server", "typecheck watch", "test runner"]
-        );
+        assert_eq!(names, vec!["dev server", "typecheck watch", "test runner"]);
     }
 
     #[test]
@@ -746,10 +745,7 @@ processes:
         let again = ProjectYml::from_str(&text).unwrap();
         assert_eq!(parsed, again);
         let names: Vec<&str> = again.processes.keys().map(String::as_str).collect();
-        assert_eq!(
-            names,
-            vec!["dev server", "typecheck watch", "test runner"]
-        );
+        assert_eq!(names, vec!["dev server", "typecheck watch", "test runner"]);
     }
 
     #[test]
@@ -759,7 +755,10 @@ processes:
         let yml = ProjectYml::from_str("processes:\n  build:\n    command: make build\n").unwrap();
         let p = &yml.processes["build"];
         assert_eq!(p.command, "make build");
-        assert!(p.auto_start, "auto_start defaults TRUE (documented default)");
+        assert!(
+            p.auto_start,
+            "auto_start defaults TRUE (documented default)"
+        );
         assert!(!p.auto_restart);
         assert!(p.restart_when_changed.is_empty());
         assert!(p.env.is_empty());
@@ -810,8 +809,8 @@ processes:
 
     #[test]
     fn working_dir_null_is_none_and_resolves_to_root() {
-        let yml =
-            ProjectYml::from_str("processes:\n  s:\n    command: a\n    working_dir: null\n").unwrap();
+        let yml = ProjectYml::from_str("processes:\n  s:\n    command: a\n    working_dir: null\n")
+            .unwrap();
         assert_eq!(yml.processes["s"].working_dir, None);
         let root = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -895,7 +894,10 @@ processes:
     #[test]
     fn load_reads_dir_and_refuses_oversized_files() {
         let root = tempfile::tempdir().unwrap();
-        assert!(ProjectYml::load(root.path()).is_none(), "missing file → None");
+        assert!(
+            ProjectYml::load(root.path()).is_none(),
+            "missing file → None"
+        );
 
         fs::write(
             root.path().join(CHAPPA_YML_NAME),
@@ -915,9 +917,15 @@ processes:
         let text = "processes:\n  test:\n    command: [cargo, test, \"a b\"]\n  dev:\n    command: npm run dev\n";
         let mut yml = ProjectYml::from_str(text).unwrap();
         let test = &yml.processes["test"].command;
-        assert_eq!(test.argv(), Some(&["cargo".to_owned(), "test".to_owned(), "a b".to_owned()][..]));
+        assert_eq!(
+            test.argv(),
+            Some(&["cargo".to_owned(), "test".to_owned(), "a b".to_owned()][..])
+        );
         assert_eq!(test.display(), r#"cargo test "a b""#);
-        assert_eq!(yml.processes["dev"].command, "npm run dev", "a string stays a shell line");
+        assert_eq!(
+            yml.processes["dev"].command, "npm run dev",
+            "a string stays a shell line"
+        );
 
         // Write-back keeps each spelling.
         let again = ProjectYml::from_str(&yml.to_yaml_string().unwrap()).unwrap();
@@ -925,14 +933,26 @@ processes:
 
         // The editor sends one line; a list command splits back into a list.
         let root = tempfile::tempdir().unwrap();
-        let edited = ProcessDef { command: r#"cargo test "c d" --release"#.into(), ..ProcessDef::default() };
-        yml.edit_process(root.path(), "test", "test", edited).unwrap();
+        let edited = ProcessDef {
+            command: r#"cargo test "c d" --release"#.into(),
+            ..ProcessDef::default()
+        };
+        yml.edit_process(root.path(), "test", "test", edited)
+            .unwrap();
         assert_eq!(
             yml.processes["test"].command,
-            CommandLine::Argv(vec!["cargo".into(), "test".into(), "c d".into(), "--release".into()])
+            CommandLine::Argv(vec![
+                "cargo".into(),
+                "test".into(),
+                "c d".into(),
+                "--release".into()
+            ])
         );
         // A shell command edited stays a shell line.
-        let edited = ProcessDef { command: "npm run dev -- --port 1".into(), ..ProcessDef::default() };
+        let edited = ProcessDef {
+            command: "npm run dev -- --port 1".into(),
+            ..ProcessDef::default()
+        };
         yml.edit_process(root.path(), "dev", "dev", edited).unwrap();
         assert_eq!(yml.processes["dev"].command, "npm run dev -- --port 1");
     }
@@ -956,13 +976,24 @@ processes:
         assert!(yml.processes["feed"].is_source());
         assert_eq!(yml.processes["feed"].source, Some(SourceOptions::default()));
         assert!(!yml.processes["plain"].is_source());
-        assert!(!yml.processes["bare"].is_source(), "a null source key is absent, not a source");
+        assert!(
+            !yml.processes["bare"].is_source(),
+            "a null source key is absent, not a source"
+        );
         let written = yml.to_yaml_string().unwrap();
         assert!(written.contains("source: {}"), "{written}");
-        assert!(!written.contains("plain:
+        assert!(
+            !written.contains(
+                "plain:
     command: npm test
-    source"), "{written}");
-        assert_eq!(ProjectYml::from_str(&written).unwrap().processes["feed"], yml.processes["feed"]);
+    source"
+            ),
+            "{written}"
+        );
+        assert_eq!(
+            ProjectYml::from_str(&written).unwrap().processes["feed"],
+            yml.processes["feed"]
+        );
 
         // Options under the key are kept verbatim through a round trip.
         let text = "processes:
@@ -982,29 +1013,48 @@ processes:
         // keeps the key, like it keeps unknown keys.
         let mut yml = yml;
         let root = tempfile::tempdir().unwrap();
-        let edited = ProcessDef { command: "y".into(), ..ProcessDef::default() };
-        yml.edit_process(root.path(), "feed", "feed", edited).unwrap();
+        let edited = ProcessDef {
+            command: "y".into(),
+            ..ProcessDef::default()
+        };
+        yml.edit_process(root.path(), "feed", "feed", edited)
+            .unwrap();
         assert_eq!(yml.processes["feed"].command, "y");
         assert!(yml.processes["feed"].is_source(), "the edit kept source:");
-        assert_eq!(yml.processes["feed"].source.as_ref().unwrap().options["later_option"], YamlValue::from(7));
+        assert_eq!(
+            yml.processes["feed"].source.as_ref().unwrap().options["later_option"],
+            YamlValue::from(7)
+        );
     }
 
     /// Adding or removing `source:` changes what the spawn feeds the process
     /// (the address and token in its environment), so it is a runtime change.
     #[test]
     fn toggling_source_is_a_runtime_change() {
-        let plain = ProcessDef { command: "x".into(), ..ProcessDef::default() };
-        let source = ProcessDef { source: Some(SourceOptions::default()), ..plain.clone() };
+        let plain = ProcessDef {
+            command: "x".into(),
+            ..ProcessDef::default()
+        };
+        let source = ProcessDef {
+            source: Some(SourceOptions::default()),
+            ..plain.clone()
+        };
         assert!(!plain.runtime_eq(&source));
         assert!(source.runtime_eq(&source.clone()));
-        let auto = ProcessDef { auto_restart: true, ..source.clone() };
+        let auto = ProcessDef {
+            auto_restart: true,
+            ..source.clone()
+        };
         assert!(source.runtime_eq(&auto), "policy fields still do not count");
     }
 
     #[test]
     fn an_empty_list_or_blank_program_is_a_blank_command() {
         let root = tempfile::tempdir().unwrap();
-        for text in ["processes:\n  x:\n    command: []\n", "processes:\n  x:\n    command: [\" \", a]\n"] {
+        for text in [
+            "processes:\n  x:\n    command: []\n",
+            "processes:\n  x:\n    command: [\" \", a]\n",
+        ] {
             let yml = ProjectYml::from_str(text).unwrap();
             assert!(yml.processes["x"].command.is_blank(), "{text}");
             assert!(yml.processes["x"].validate(root.path()).is_err(), "{text}");

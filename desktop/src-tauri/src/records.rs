@@ -54,8 +54,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use project_model::records::{
-    AgentRecord, AgentRecordPatch, JobRecord, RecordKind, Run, RunHead, RunUpdate, Session, SessionSource,
-    StoredRecord, SummarySource, TailKind, TerminalRecord, RUNS_RETAINED,
+    AgentRecord, AgentRecordPatch, JobRecord, RecordKind, Run, RunHead, RunUpdate, Session,
+    SessionSource, StoredRecord, SummarySource, TailKind, TerminalRecord, RUNS_RETAINED,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -66,14 +66,17 @@ use term_core::status::ProcessStatus;
 
 use crate::agent_json::machine_mode;
 use crate::agent_tools::{AgentToolsState, Transport};
-use crate::agents::{readiness, spawn_agent_with, IoView, ReadyGate, Readiness, ResumeSpec, SpawnAgentRequest, SpawnContext};
+use crate::agents::{
+    readiness, spawn_agent_with, IoView, Readiness, ReadyGate, ResumeSpec, SpawnAgentRequest,
+    SpawnContext,
+};
 use crate::control_http::{json, ControlState, Params, Resp};
 use crate::coordination::{CoordError, Coordination};
 use crate::coordination_http::Args;
 use crate::projects::{ControlError, Projects};
 use crate::registry::{
-    emit_created, emit_session, emit_summary, AppCreatedBroadcast, ChannelSink, CreatedEvent, EventSink, NullSink,
-    Registry, RunExit, RunRecorder, SummaryOutcome, TermId,
+    emit_created, emit_session, emit_summary, AppCreatedBroadcast, ChannelSink, CreatedEvent,
+    EventSink, NullSink, Registry, RunExit, RunRecorder, SummaryOutcome, TermId,
 };
 use crate::settings::SettingsState;
 use crate::workspace::Workspace;
@@ -165,7 +168,13 @@ impl RunLedger {
 
     /// Insert a run's row and prune the record to its newest
     /// [`RUNS_RETAINED`] runs.
-    pub fn insert(&self, record_id: &str, project_id: Option<u32>, kind: RecordKind, run: &Run) -> Result<(), CoordError> {
+    pub fn insert(
+        &self,
+        record_id: &str,
+        project_id: Option<u32>,
+        kind: RecordKind,
+        run: &Run,
+    ) -> Result<(), CoordError> {
         self.coord.with_tx(|tx| {
             tx.execute(
                 "INSERT OR REPLACE INTO runs (run_uuid, record_id, project_id, kind, status, started_at_ms, ended_at_ms,
@@ -236,7 +245,8 @@ impl RunLedger {
     /// history, so it takes the id whether or not the run is still open (an
     /// id printed on the way out lands after the exit is recorded).
     pub fn set_session(&self, run_uuid: &str, session: &Session) -> Result<bool, CoordError> {
-        let text = serde_json::to_string(session).map_err(|e| CoordError::Internal(e.to_string()))?;
+        let text =
+            serde_json::to_string(session).map_err(|e| CoordError::Internal(e.to_string()))?;
         self.coord.with_tx(|tx| {
             let changed = tx.execute(
                 "UPDATE runs SET session=?2 WHERE run_uuid=?1",
@@ -251,7 +261,12 @@ impl RunLedger {
     /// the row is still open: a finished run is not edited after the fact,
     /// so the row and the record head always agree. (A summary printed on
     /// the way out is handled before the exit, so it still finds it open.)
-    pub fn set_summary(&self, run_uuid: &str, text: &str, source: SummarySource) -> Result<bool, CoordError> {
+    pub fn set_summary(
+        &self,
+        run_uuid: &str,
+        text: &str,
+        source: SummarySource,
+    ) -> Result<bool, CoordError> {
         self.coord.with_tx(|tx| {
             let changed = tx.execute(
                 "UPDATE runs SET summary=?2, summary_source=?3 WHERE run_uuid=?1 AND status IN ('running','starting')",
@@ -408,7 +423,10 @@ pub enum ResumeCheck {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResumeFailure {
     /// The record's last run (or the named run) has no saved session.
-    NoSession { record_id: String, message: String },
+    NoSession {
+        record_id: String,
+        message: String,
+    },
     /// The provider refused: the child exited before it was ready.
     /// `provider_text` is what it printed (the last lines of the run's
     /// tail), `run_uuid` the failed run — readable through the ledger.
@@ -421,15 +439,25 @@ pub enum ResumeFailure {
         message: String,
     },
     /// Not an agent, no tool, no resume command, already running.
-    Unavailable { record_id: String, message: String },
-    NotFound { record_id: String, message: String },
-    Internal { message: String },
+    Unavailable {
+        record_id: String,
+        message: String,
+    },
+    NotFound {
+        record_id: String,
+        message: String,
+    },
+    Internal {
+        message: String,
+    },
 }
 
 impl ResumeFailure {
     pub fn status(&self) -> u16 {
         match self {
-            ResumeFailure::NoSession { .. } | ResumeFailure::Rejected { .. } | ResumeFailure::Unavailable { .. } => 409,
+            ResumeFailure::NoSession { .. }
+            | ResumeFailure::Rejected { .. }
+            | ResumeFailure::Unavailable { .. } => 409,
             ResumeFailure::NotFound { .. } => 404,
             ResumeFailure::Internal { .. } => 500,
         }
@@ -470,10 +498,14 @@ impl ResumeFailure {
 impl From<RecordError> for ResumeFailure {
     fn from(err: RecordError) -> Self {
         match err {
-            RecordError::NotFound(m) => ResumeFailure::NotFound { record_id: String::new(), message: m },
-            RecordError::Invalid(m) | RecordError::Unavailable(m) => {
-                ResumeFailure::Unavailable { record_id: String::new(), message: m }
-            }
+            RecordError::NotFound(m) => ResumeFailure::NotFound {
+                record_id: String::new(),
+                message: m,
+            },
+            RecordError::Invalid(m) | RecordError::Unavailable(m) => ResumeFailure::Unavailable {
+                record_id: String::new(),
+                message: m,
+            },
             RecordError::Internal(m) => ResumeFailure::Internal { message: m },
         }
     }
@@ -585,7 +617,11 @@ impl Records {
     /// code and whatever tail it had.
     fn reconcile_crashes(&self) {
         let parts = self.parts();
-        if let Err(e) = parts.projects.store_access(|s| s.reconcile_crashed_runs()).and_then(|r| r) {
+        if let Err(e) = parts
+            .projects
+            .store_access(|s| s.reconcile_crashed_runs())
+            .and_then(|r| r)
+        {
             log::warn!("[records] projects.json crash reconcile: {e}");
         }
         if let Ok(store) = parts.workspace.store() {
@@ -601,7 +637,8 @@ impl Records {
     /// Where `record_id` lives and what it is.
     pub fn locate(&self, record_id: &str) -> Option<(Scope, RecordKind, String)> {
         let parts = self.parts();
-        if let Ok(Some((project_id, r))) = parts.projects.store_access(|s| s.find_record(record_id)) {
+        if let Ok(Some((project_id, r))) = parts.projects.store_access(|s| s.find_record(record_id))
+        {
             return Some((Scope::Project(project_id), r.kind, r.name));
         }
         parts
@@ -615,7 +652,8 @@ impl Records {
     /// The stored record with its scope.
     pub fn get(&self, record_id: &str) -> Option<(Scope, StoredRecord)> {
         let parts = self.parts();
-        if let Ok(Some((project_id, record))) = parts.projects.store_access(|s| s.record(record_id)) {
+        if let Ok(Some((project_id, record))) = parts.projects.store_access(|s| s.record(record_id))
+        {
             return Some((Scope::Project(project_id), record));
         }
         parts
@@ -654,7 +692,9 @@ impl Records {
     pub fn add_agent_record(&self, scope: Scope, record: AgentRecord) -> Result<(), String> {
         let parts = self.parts();
         match scope {
-            Scope::Project(id) => parts.projects.store_access(|s| s.add_agent_record(id, record))?,
+            Scope::Project(id) => parts
+                .projects
+                .store_access(|s| s.add_agent_record(id, record))?,
             Scope::Workspace => parts.workspace.store()?.add_agent_record(record),
         }
     }
@@ -663,7 +703,9 @@ impl Records {
     pub fn add_terminal_record(&self, scope: Scope, record: TerminalRecord) -> Result<(), String> {
         let parts = self.parts();
         match scope {
-            Scope::Project(id) => parts.projects.store_access(|s| s.add_terminal_record(id, record))?,
+            Scope::Project(id) => parts
+                .projects
+                .store_access(|s| s.add_terminal_record(id, record))?,
             Scope::Workspace => parts.workspace.store()?.add_terminal_record(record),
         }
     }
@@ -673,11 +715,16 @@ impl Records {
     pub fn add_job_record(&self, scope: Scope, record: JobRecord) -> Result<(), String> {
         let parts = self.parts();
         let dropped = match scope {
-            Scope::Project(id) => parts.projects.store_access(|s| s.add_job_record(id, record))??,
+            Scope::Project(id) => parts
+                .projects
+                .store_access(|s| s.add_job_record(id, record))??,
             Scope::Workspace => parts.workspace.store()?.add_job_record(record)?,
         };
         if let Err(e) = parts.ledger.delete_records(&dropped) {
-            log::warn!("[records] ledger prune of {} dropped job records failed: {e}", dropped.len());
+            log::warn!(
+                "[records] ledger prune of {} dropped job records failed: {e}",
+                dropped.len()
+            );
         }
         Ok(())
     }
@@ -685,17 +732,31 @@ impl Records {
     /// A new run begins on `record_id`: the store head and a ledger row.
     /// Written BEFORE the terminal spawns, so the binding the registry gets
     /// already names a run the store knows.
-    pub fn begin_run(&self, scope: Scope, kind: RecordKind, record_id: &str, run: &Run) -> Result<(), String> {
+    pub fn begin_run(
+        &self,
+        scope: Scope,
+        kind: RecordKind,
+        record_id: &str,
+        run: &Run,
+    ) -> Result<(), String> {
         let parts = self.parts();
         let found = match scope {
-            Scope::Project(_) => parts.projects.store_access(|s| s.begin_run(record_id, run.clone()))??,
+            Scope::Project(_) => parts
+                .projects
+                .store_access(|s| s.begin_run(record_id, run.clone()))??,
             Scope::Workspace => parts.workspace.store()?.begin_run(record_id, run.clone())?,
         };
         if !found {
             return Err(format!("no such record: {record_id}"));
         }
-        if let Err(e) = parts.ledger.insert(record_id, scope.project_id(), kind, run) {
-            log::warn!("[records] ledger insert for run {} failed: {e}", run.run_uuid);
+        if let Err(e) = parts
+            .ledger
+            .insert(record_id, scope.project_id(), kind, run)
+        {
+            log::warn!(
+                "[records] ledger insert for run {} failed: {e}",
+                run.run_uuid
+            );
         }
         Ok(())
     }
@@ -707,7 +768,10 @@ impl Records {
     fn apply_late_fact(&self, record_id: &str, run_uuid: &str, fact: &LateFact) {
         let parts = self.parts();
         let edit = |run: &mut Run| fact.apply(run);
-        let outcome = match parts.projects.store_access(|s| s.update_run(record_id, run_uuid, edit)) {
+        let outcome = match parts
+            .projects
+            .store_access(|s| s.update_run(record_id, run_uuid, edit))
+        {
             Ok(Ok(RunUpdate::NotFound)) | Err(_) => match parts.workspace.store() {
                 Ok(store) => store.update_run(record_id, run_uuid, edit),
                 Err(e) => Err(e),
@@ -722,12 +786,19 @@ impl Records {
             Ok(RunUpdate::NotFound) => {
                 log::info!("[records] late fact for run {run_uuid}: record {record_id} is gone")
             }
-            Err(e) => log::warn!("[records] late fact for run {run_uuid} of {record_id} not stored: {e}"),
+            Err(e) => {
+                log::warn!("[records] late fact for run {run_uuid} of {record_id} not stored: {e}")
+            }
         }
         let ledger = match fact {
             LateFact::Exited(exit) => {
                 let mut row = Run::begin(run_uuid, 0, exit.tail_kind);
-                row.finish(exit.ended_at_ms, exit.exit_code, exit.success, exit.tail.clone());
+                row.finish(
+                    exit.ended_at_ms,
+                    exit.exit_code,
+                    exit.success,
+                    exit.tail.clone(),
+                );
                 parts.ledger.finish(run_uuid, &row)
             }
             LateFact::Stopped(ended_at_ms) => parts.ledger.stop(run_uuid, *ended_at_ms),
@@ -752,7 +823,9 @@ impl Records {
     /// The run history of a record, newest first.
     pub fn runs(&self, record_id: &str, limit: usize) -> Result<Vec<Run>, RecordError> {
         if self.locate(record_id).is_none() {
-            return Err(RecordError::NotFound(format!("no such record: {record_id}")));
+            return Err(RecordError::NotFound(format!(
+                "no such record: {record_id}"
+            )));
         }
         self.parts()
             .ledger
@@ -763,7 +836,12 @@ impl Records {
     /// Remove a record and its history. An attached terminal is closed
     /// first. A command record is its definition, so removing it deletes
     /// the command (through the same path the editor's delete takes).
-    pub fn remove(&self, registry: &Registry, app: Option<&AppHandle>, record_id: &str) -> Result<RemovedDto, RecordError> {
+    pub fn remove(
+        &self,
+        registry: &Registry,
+        app: Option<&AppHandle>,
+        record_id: &str,
+    ) -> Result<RemovedDto, RecordError> {
         let (scope, kind, name) = self
             .locate(record_id)
             .ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
@@ -776,8 +854,15 @@ impl Records {
                     .ok_or_else(|| RecordError::Internal("app handle not initialized".into()))?;
                 // The project runtime prunes the ledger itself (it holds the
                 // record id while it deletes the override).
-                parts.projects.delete_process(&app, registry, project_id, &name)?;
-                Ok(RemovedDto { record_id: record_id.to_owned(), kind, removed: true, runs_deleted: 0 })
+                parts
+                    .projects
+                    .delete_process(&app, registry, project_id, &name)?;
+                Ok(RemovedDto {
+                    record_id: record_id.to_owned(),
+                    kind,
+                    removed: true,
+                    runs_deleted: 0,
+                })
             }
             (RecordKind::Command, Scope::Workspace) => {
                 let app = app
@@ -785,7 +870,12 @@ impl Records {
                     .or_else(|| parts.workspace.app_handle().ok())
                     .ok_or_else(|| RecordError::Internal("app handle not initialized".into()))?;
                 parts.workspace.delete_command(&app, registry, &name)?;
-                Ok(RemovedDto { record_id: record_id.to_owned(), kind, removed: true, runs_deleted: 0 })
+                Ok(RemovedDto {
+                    record_id: record_id.to_owned(),
+                    kind,
+                    removed: true,
+                    runs_deleted: 0,
+                })
             }
             (_, scope) => {
                 if let Some((term_id, _)) = registry.term_of_record(record_id) {
@@ -793,7 +883,9 @@ impl Records {
                 }
                 match scope {
                     Scope::Project(_) => {
-                        parts.projects.store_access(|s| s.remove_record(record_id))??;
+                        parts
+                            .projects
+                            .store_access(|s| s.remove_record(record_id))??;
                     }
                     Scope::Workspace => {
                         parts.workspace.store()?.remove_record(record_id)?;
@@ -803,7 +895,12 @@ impl Records {
                     .ledger
                     .delete_records(&[record_id.to_owned()])
                     .map_err(|e| RecordError::Internal(e.to_string()))?;
-                Ok(RemovedDto { record_id: record_id.to_owned(), kind, removed: true, runs_deleted })
+                Ok(RemovedDto {
+                    record_id: record_id.to_owned(),
+                    kind,
+                    removed: true,
+                    runs_deleted,
+                })
             }
         }
     }
@@ -822,7 +919,9 @@ impl Records {
             .locate(record_id)
             .ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
         if kind != RecordKind::Agent {
-            return Err(RecordError::Invalid(format!("not an agent record: {record_id}")));
+            return Err(RecordError::Invalid(format!(
+                "not an agent record: {record_id}"
+            )));
         }
         patch.validate().map_err(RecordError::Invalid)?;
         let parts = self.parts();
@@ -831,9 +930,13 @@ impl Records {
                 .projects
                 .store_access(|s| s.update_agent_record(record_id, patch))??
                 .map(|(_, agent)| agent),
-            Scope::Workspace => parts.workspace.store()?.update_agent_record(record_id, patch)?,
+            Scope::Workspace => parts
+                .workspace
+                .store()?
+                .update_agent_record(record_id, patch)?,
         };
-        let agent = updated.ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
+        let agent =
+            updated.ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
         if patch.name.is_some() {
             if let Some((term_id, _)) = registry.term_of_record(record_id) {
                 registry.set_name(term_id, &agent.name);
@@ -863,13 +966,20 @@ impl Records {
             .get(record_id)
             .ok_or_else(|| RecordError::NotFound(format!("no such record: {record_id}")))?;
         if !record.kind.can_start() {
-            let source = record.job.as_ref().map(|j| j.source_label.as_str()).unwrap_or("its source");
+            let source = record
+                .job
+                .as_ref()
+                .map(|j| j.source_label.as_str())
+                .unwrap_or("its source");
             return Err(RecordError::Unavailable(format!(
                 "record {record_id} is a source job; it is not started from its record — run the action in {source} again"
             )));
         }
         if let Some((term_id, head)) = deps.registry.term_of_record(record_id) {
-            if matches!(head.status, ProcessStatus::Starting | ProcessStatus::Running) {
+            if matches!(
+                head.status,
+                ProcessStatus::Starting | ProcessStatus::Running
+            ) {
                 // Already live: idempotent, like every other start.
                 return Ok(StartDto {
                     record_id: record_id.to_owned(),
@@ -1013,7 +1123,12 @@ impl LateFact {
         match self {
             LateFact::Exited(exit) => {
                 run.tail_kind = exit.tail_kind;
-                run.finish(exit.ended_at_ms, exit.exit_code, exit.success, exit.tail.clone());
+                run.finish(
+                    exit.ended_at_ms,
+                    exit.exit_code,
+                    exit.success,
+                    exit.tail.clone(),
+                );
             }
             LateFact::Stopped(ended_at_ms) => run.stop(*ended_at_ms),
             LateFact::Session(session) => run.set_session(session.clone()),
@@ -1036,7 +1151,11 @@ impl RunRecorder for Records {
     }
 
     fn run_summary(&self, record_id: &str, run_uuid: &str, text: &str, source: SummarySource) {
-        self.apply_late_fact(record_id, run_uuid, &LateFact::Summary(text.to_owned(), source));
+        self.apply_late_fact(
+            record_id,
+            run_uuid,
+            &LateFact::Summary(text.to_owned(), source),
+        );
     }
 }
 
@@ -1066,7 +1185,10 @@ impl Records {
         if record.kind != RecordKind::Agent {
             return Err(ResumeFailure::Unavailable {
                 record_id: rid(),
-                message: format!("record {record_id} is a {}, only agents have a session to resume", record.kind.as_str()),
+                message: format!(
+                    "record {record_id} is a {}, only agents have a session to resume",
+                    record.kind.as_str()
+                ),
             });
         }
         let agent = record.agent.ok_or_else(|| ResumeFailure::Internal {
@@ -1074,7 +1196,11 @@ impl Records {
         })?;
         let session_id = match session_id.filter(|id| !id.trim().is_empty()) {
             Some(id) => id,
-            None => match record.last_run.as_ref().and_then(|run| run.session.as_ref()) {
+            None => match record
+                .last_run
+                .as_ref()
+                .and_then(|run| run.session.as_ref())
+            {
                 Some(session) => session.session_id.clone(),
                 None => {
                     return Err(ResumeFailure::NoSession {
@@ -1084,16 +1210,25 @@ impl Records {
                 }
             },
         };
-        let tool = deps.tools.get(agent.tool_id).ok_or_else(|| ResumeFailure::Unavailable {
-            record_id: rid(),
-            message: format!("agent tool {} of record {record_id} no longer exists", agent.tool_id),
-        })?;
+        let tool = deps
+            .tools
+            .get(agent.tool_id)
+            .ok_or_else(|| ResumeFailure::Unavailable {
+                record_id: rid(),
+                message: format!(
+                    "agent tool {} of record {record_id} no longer exists",
+                    agent.tool_id
+                ),
+            })?;
         let json_mode = match tool.transport {
             Transport::Json => machine_mode(tool.tool_type),
             Transport::Tty => None,
         };
         if let Some((term_id, head)) = deps.registry.term_of_record(record_id) {
-            if matches!(head.status, ProcessStatus::Starting | ProcessStatus::Running) {
+            if matches!(
+                head.status,
+                ProcessStatus::Starting | ProcessStatus::Running
+            ) {
                 return Err(ResumeFailure::Unavailable {
                     record_id: rid(),
                     message: format!("record {record_id} is running as terminal {term_id}; stop it before resuming"),
@@ -1109,7 +1244,9 @@ impl Records {
             extra_args: agent.extra_args,
             working_dir: agent.working_dir,
             record_id: Some(rid()),
-            resume: Some(ResumeSpec { session_id: session_id.clone() }),
+            resume: Some(ResumeSpec {
+                session_id: session_id.clone(),
+            }),
             ..SpawnAgentRequest::default()
         };
         let ctx = SpawnContext {
@@ -1120,14 +1257,20 @@ impl Records {
             records: self,
             actor: None,
         };
-        let (sink, on_notify): (Arc<dyn EventSink>, Option<AppHandle>) = match (frames, deps.app.clone()) {
-            (Some(frames), Some(app)) => (Arc::new(ChannelSink::new(frames, app.clone())), Some(app)),
-            _ => (Arc::new(NullSink), None),
-        };
+        let (sink, on_notify): (Arc<dyn EventSink>, Option<AppHandle>) =
+            match (frames, deps.app.clone()) {
+                (Some(frames), Some(app)) => {
+                    (Arc::new(ChannelSink::new(frames, app.clone())), Some(app))
+                }
+                _ => (Arc::new(NullSink), None),
+            };
         let headless = on_notify.is_none();
         let resp = spawn_agent_with(ctx, req, sink, on_notify).map_err(|e| {
             if e.contains("no resume command") || crate::data_safety::is_refusal(&e) {
-                ResumeFailure::Unavailable { record_id: rid(), message: e }
+                ResumeFailure::Unavailable {
+                    record_id: rid(),
+                    message: e,
+                }
             } else {
                 ResumeFailure::Internal { message: e }
             }
@@ -1169,7 +1312,10 @@ impl Records {
                 // recorded, then hand the caller the provider's words.
                 let deadline = Instant::now() + RESUME_TAIL_WAIT;
                 let run = loop {
-                    let run = self.get(record_id).and_then(|(_, r)| r.last_run).filter(|r| r.run_uuid == run_uuid);
+                    let run = self
+                        .get(record_id)
+                        .and_then(|(_, r)| r.last_run)
+                        .filter(|r| r.run_uuid == run_uuid);
                     match run {
                         Some(run) if !run.is_open() => break Some(run),
                         _ if Instant::now() >= deadline => break run,
@@ -1177,7 +1323,10 @@ impl Records {
                     }
                 };
                 let exit_code = run.as_ref().and_then(|r| r.exit_code);
-                let provider_text = run.as_ref().map(|r| rejection_text(&r.tail)).unwrap_or_default();
+                let provider_text = run
+                    .as_ref()
+                    .map(|r| rejection_text(&r.tail))
+                    .unwrap_or_default();
                 let message = if provider_text.is_empty() {
                     format!("the provider exited before it was ready (exit code {exit_code:?}) and printed nothing")
                 } else {
@@ -1207,7 +1356,13 @@ impl Records {
     /// the max wait) means the provider took the session; an exit first
     /// means it refused (`Err`). A child that prints nothing for
     /// [`RESUME_SILENT_MS`] but is alive is accepted as silent.
-    fn watch_resume(&self, registry: &Registry, term_id: TermId, quiet_ms: u64, max_wait_ms: u64) -> Result<ResumeCheck, ()> {
+    fn watch_resume(
+        &self,
+        registry: &Registry,
+        term_id: TermId,
+        quiet_ms: u64,
+        max_wait_ms: u64,
+    ) -> Result<ResumeCheck, ()> {
         let handle = registry.handle(term_id).ok_or(())?;
         let started = Instant::now();
         let mut first_output_ms: Option<u64> = None;
@@ -1217,12 +1372,18 @@ impl Records {
             if first_output_ms.is_none() && view.has_output {
                 first_output_ms = Some(now);
             }
-            let gate = ReadyGate { quiet_ms, max_wait_ms, first_output_ms };
+            let gate = ReadyGate {
+                quiet_ms,
+                max_wait_ms,
+                first_output_ms,
+            };
             match readiness(view, now, gate) {
                 Readiness::Exited => return Err(()),
                 Readiness::Ready => return Ok(ResumeCheck::Quiet),
                 Readiness::ReadyByTimeout => return Ok(ResumeCheck::ReadyByTimeout),
-                Readiness::Pending if started.elapsed() >= Duration::from_millis(RESUME_SILENT_MS) => {
+                Readiness::Pending
+                    if started.elapsed() >= Duration::from_millis(RESUME_SILENT_MS) =>
+                {
                     return Ok(ResumeCheck::Silent)
                 }
                 Readiness::Pending => std::thread::sleep(Duration::from_millis(25)),
@@ -1389,16 +1550,18 @@ pub fn route_resume_record(state: &ControlState, params: &Params, query: &str, b
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let result = record_id_of(params).map_err(ResumeFailure::from).and_then(|record_id| {
-        let session_id = a.str("session_id").map(str::to_owned);
-        let deps = StartDeps {
-            registry: &state.registry,
-            tools: &state.agent_tools,
-            settings: &state.settings,
-            app: state.app.clone(),
-        };
-        state.records.resume(deps, &record_id, session_id, None)
-    });
+    let result = record_id_of(params)
+        .map_err(ResumeFailure::from)
+        .and_then(|record_id| {
+            let session_id = a.str("session_id").map(str::to_owned);
+            let deps = StartDeps {
+                registry: &state.registry,
+                tools: &state.agent_tools,
+                settings: &state.settings,
+                app: state.app.clone(),
+            };
+            state.records.resume(deps, &record_id, session_id, None)
+        });
     match result {
         Ok(v) => json(200, json!(v)),
         Err(err) => json(err.status(), err.to_json()),
@@ -1416,10 +1579,18 @@ pub fn route_set_session(state: &ControlState, params: &Params, query: &str, bod
     let id = params.id.unwrap_or_default();
     let session_id = match a.str("session_id").map(str::trim) {
         Some(id) if !id.is_empty() => id.to_owned(),
-        _ => return json(400, json!({"error": "invalid", "message": "session_id is required"})),
+        _ => {
+            return json(
+                400,
+                json!({"error": "invalid", "message": "session_id is required"}),
+            )
+        }
     };
     let Some(provider) = state.registry.session_provider(id) else {
-        return json(404, json!({"error": "not_found", "message": format!("no such terminal: {id}")}));
+        return json(
+            404,
+            json!({"error": "not_found", "message": format!("no such terminal: {id}")}),
+        );
     };
     let session = Session::new(provider, session_id, SessionSource::Mcp, epoch_ms());
     match state.registry.record_session(id, session.clone()) {
@@ -1440,7 +1611,10 @@ pub fn route_set_session(state: &ControlState, params: &Params, query: &str, bod
                 }),
             )
         }
-        None => json(404, json!({"error": "not_found", "message": format!("no such terminal: {id}")})),
+        None => json(
+            404,
+            json!({"error": "not_found", "message": format!("no such terminal: {id}")}),
+        ),
     }
 }
 
@@ -1456,10 +1630,17 @@ pub fn route_set_summary(state: &ControlState, params: &Params, query: &str, bod
     let id = params.id.unwrap_or_default();
     let raw = a.str("text").unwrap_or_default();
     let Some(text) = term_core::scanner::cap_summary(raw) else {
-        return json(400, json!({"error": "invalid", "message": "text is required"}));
+        return json(
+            400,
+            json!({"error": "invalid", "message": "text is required"}),
+        );
     };
-    let truncated = raw.len() > term_core::scanner::SUMMARY_MAX_BYTES && text.ends_with(term_core::scanner::SUMMARY_TRUNCATED_MARKER);
-    match state.registry.record_summary(id, text.clone(), SummarySource::Mcp) {
+    let truncated = raw.len() > term_core::scanner::SUMMARY_MAX_BYTES
+        && text.ends_with(term_core::scanner::SUMMARY_TRUNCATED_MARKER);
+    match state
+        .registry
+        .record_summary(id, text.clone(), SummarySource::Mcp)
+    {
         SummaryOutcome::Stored { binding, changed } => {
             if changed {
                 if let Some(app) = state.app.as_ref() {
@@ -1483,7 +1664,10 @@ pub fn route_set_summary(state: &ControlState, params: &Params, query: &str, bod
             409,
             json!({"error": "not_running", "message": format!("terminal {id}'s run has ended; a finished run's summary cannot be changed")}),
         ),
-        SummaryOutcome::Unknown => json(404, json!({"error": "not_found", "message": format!("no such terminal: {id}")})),
+        SummaryOutcome::Unknown => json(
+            404,
+            json!({"error": "not_found", "message": format!("no such terminal: {id}")}),
+        ),
     }
 }
 
@@ -1494,10 +1678,15 @@ pub fn route_remove_record(state: &ControlState, params: &Params, query: &str, b
         Err(resp) => return resp,
     };
     let result = record_id_of(params).and_then(|record_id| {
-        if a.bool("confirm").map_err(|e| RecordError::Invalid(e.to_string()))? != Some(true) {
+        if a.bool("confirm")
+            .map_err(|e| RecordError::Invalid(e.to_string()))?
+            != Some(true)
+        {
             return Err(RecordError::Invalid("remove requires confirm=true".into()));
         }
-        state.records.remove(&state.registry, state.app.as_ref(), &record_id)
+        state
+            .records
+            .remove(&state.registry, state.app.as_ref(), &record_id)
     });
     match result {
         Ok(v) => json(200, json!(v)),
@@ -1585,7 +1774,11 @@ pub fn list_records(records: State<'_, Records>, registry: State<'_, Registry>) 
 
 /// A record's run history, newest first (each run with its tail).
 #[tauri::command]
-pub fn get_record_runs(records: State<'_, Records>, record_id: String, limit: Option<usize>) -> Result<Vec<Run>, String> {
+pub fn get_record_runs(
+    records: State<'_, Records>,
+    record_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<Run>, String> {
     Ok(records.runs(&record_id, limit.unwrap_or(RUNS_RETAINED))?)
 }
 
@@ -1655,7 +1848,9 @@ pub async fn resume_record(
         records.resume(deps, &record_id, session_id, Some(frames))
     })
     .await
-    .map_err(|e| ResumeFailure::Internal { message: e.to_string() })?
+    .map_err(|e| ResumeFailure::Internal {
+        message: e.to_string(),
+    })?
 }
 
 /// Edit an agent record's row state. Every field of `patch` is optional;

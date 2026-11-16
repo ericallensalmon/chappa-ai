@@ -101,9 +101,13 @@ pub fn resolve(base: Option<&Path>, text: &str, home: Option<&Path>) -> Resolved
             kind: None,
         };
     };
-    let kind = std::fs::metadata(&path)
-        .ok()
-        .map(|m| if m.is_dir() { PathKind::Dir } else { PathKind::File });
+    let kind = std::fs::metadata(&path).ok().map(|m| {
+        if m.is_dir() {
+            PathKind::Dir
+        } else {
+            PathKind::File
+        }
+    });
     ResolvedPath {
         path: path.to_string_lossy().into_owned(),
         exists: kind.is_some(),
@@ -281,9 +285,36 @@ fn find_with_pathext(
 /// execute it; with no editor configured those files are refused instead.
 #[cfg(windows)]
 const RUNNABLE_EXTENSIONS: &[&str] = &[
-    "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msc", "msi",
-    "msp", "scr", "pif", "lnk", "url", "hta", "cpl", "reg", "jar", "appref-ms", "application",
-    "appx", "msix", "inf", "scf", "settingcontent-ms",
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "msc",
+    "msi",
+    "msp",
+    "scr",
+    "pif",
+    "lnk",
+    "url",
+    "hta",
+    "cpl",
+    "reg",
+    "jar",
+    "appref-ms",
+    "application",
+    "appx",
+    "msix",
+    "inf",
+    "scf",
+    "settingcontent-ms",
 ];
 
 #[cfg(not(windows))]
@@ -300,15 +331,20 @@ fn default_open_refusal(path: &Path, kind: PathKind) -> Option<String> {
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    let refused = format!("not running {}: choose an editor in Settings to open it", path.display());
+    let refused = format!(
+        "not running {}: choose an editor in Settings to open it",
+        path.display()
+    );
     #[cfg(windows)]
     {
         if kind == PathKind::Dir {
             return None;
         }
         let in_pathext = std::env::var("PATHEXT").is_ok_and(|v| {
-            v.split(';')
-                .any(|e| e.strip_prefix('.').is_some_and(|e| e.eq_ignore_ascii_case(&ext)))
+            v.split(';').any(|e| {
+                e.strip_prefix('.')
+                    .is_some_and(|e| e.eq_ignore_ascii_case(&ext))
+            })
         });
         if !ext.is_empty() && (in_pathext || RUNNABLE_EXTENSIONS.contains(&ext.as_str())) {
             return Some(refused);
@@ -370,7 +406,11 @@ pub fn parse_mounts(json: &str) -> Vec<Mount> {
         .into_iter()
         .filter(|m| !m.destination.is_empty())
         .map(|m| Mount {
-            source: if m.kind == "bind" { m.source } else { String::new() },
+            source: if m.kind == "bind" {
+                m.source
+            } else {
+                String::new()
+            },
             destination: m.destination,
         })
         .collect()
@@ -399,7 +439,10 @@ mod tests {
         let missing = resolve(Some(base), "src/gone.rs", None);
         assert!(!missing.exists);
         assert_eq!(missing.kind, None);
-        assert_eq!(PathBuf::from(&missing.path), base.join("src").join("gone.rs"));
+        assert_eq!(
+            PathBuf::from(&missing.path),
+            base.join("src").join("gone.rs")
+        );
     }
 
     #[test]
@@ -447,8 +490,16 @@ mod tests {
 
     #[test]
     fn template_keeps_a_spaced_path_as_one_argument() {
-        let argv = editor_argv("code --goto {path}:{line}:{col}", r"C:\code\my proj\src\app.ts", 12, 5);
-        assert_eq!(argv, vec!["code", "--goto", r"C:\code\my proj\src\app.ts:12:5"]);
+        let argv = editor_argv(
+            "code --goto {path}:{line}:{col}",
+            r"C:\code\my proj\src\app.ts",
+            12,
+            5,
+        );
+        assert_eq!(
+            argv,
+            vec!["code", "--goto", r"C:\code\my proj\src\app.ts:12:5"]
+        );
     }
 
     #[test]
@@ -464,17 +515,34 @@ mod tests {
     #[test]
     fn template_location_defaults_and_quoted_program() {
         // No location in the output: the caller passes 1, and 0 clamps to 1.
-        assert_eq!(editor_argv("zed {path}:{line}:{col}", "/w/a.rs", 0, 0), vec!["zed", "/w/a.rs:1:1"]);
+        assert_eq!(
+            editor_argv("zed {path}:{line}:{col}", "/w/a.rs", 0, 0),
+            vec!["zed", "/w/a.rs:1:1"]
+        );
         // A quoted program path with spaces is one word; a lone brace is text.
         assert_eq!(
-            editor_argv(r#""C:\Program Files\Ed\ed.exe" -l {line} {path} {x}"#, r"C:\w\a.rs", 7, 1),
-            vec![r"C:\Program Files\Ed\ed.exe", "-l", "7", r"C:\w\a.rs", "{x}"]
+            editor_argv(
+                r#""C:\Program Files\Ed\ed.exe" -l {line} {path} {x}"#,
+                r"C:\w\a.rs",
+                7,
+                1
+            ),
+            vec![
+                r"C:\Program Files\Ed\ed.exe",
+                "-l",
+                "7",
+                r"C:\w\a.rs",
+                "{x}"
+            ]
         );
     }
 
     #[test]
     fn template_without_a_path_placeholder_appends_the_path() {
-        assert_eq!(editor_argv("notepad", r"C:\w\a b.txt", 1, 1), vec!["notepad", r"C:\w\a b.txt"]);
+        assert_eq!(
+            editor_argv("notepad", r"C:\w\a b.txt", 1, 1),
+            vec!["notepad", r"C:\w\a b.txt"]
+        );
     }
 
     #[cfg(windows)]
@@ -492,19 +560,34 @@ mod tests {
             Some(dir.path().join("code.CMD"))
         );
         // Named with an extension, or as a path: used as written.
-        assert_eq!(find_with_pathext("code.cmd", Some(&path), Some(pathext)), None);
-        assert_eq!(find_with_pathext(r"C:\x\code", Some(&path), Some(pathext)), None);
-        assert_eq!(find_with_pathext("nothing-here", Some(&path), Some(pathext)), None);
+        assert_eq!(
+            find_with_pathext("code.cmd", Some(&path), Some(pathext)),
+            None
+        );
+        assert_eq!(
+            find_with_pathext(r"C:\x\code", Some(&path), Some(pathext)),
+            None
+        );
+        assert_eq!(
+            find_with_pathext("nothing-here", Some(&path), Some(pathext)),
+            None
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn default_handler_refuses_runnable_files() {
         for name in ["setup.exe", "run.CMD", "x.ps1", "s.vbs", "link.lnk", "a.js"] {
-            assert!(default_open_refusal(Path::new(name), PathKind::File).is_some(), "{name}");
+            assert!(
+                default_open_refusal(Path::new(name), PathKind::File).is_some(),
+                "{name}"
+            );
         }
         for name in ["main.rs", "README", "notes.md", "app.ts"] {
-            assert!(default_open_refusal(Path::new(name), PathKind::File).is_none(), "{name}");
+            assert!(
+                default_open_refusal(Path::new(name), PathKind::File).is_none(),
+                "{name}"
+            );
         }
         assert!(default_open_refusal(Path::new(r"C:\w\tools.exe"), PathKind::Dir).is_none());
     }

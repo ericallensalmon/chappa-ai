@@ -15,9 +15,7 @@ use std::time::{Duration, Instant};
 use app_lib::agent_tools::{AgentTool, AgentToolsState, Runtime, ToolType};
 use app_lib::agents::{AgentMeta, Bridge, NsPid, SpawnAgentRequest, SpawnContext};
 use app_lib::projects::Projects;
-use app_lib::registry::{
-    ClosedBroadcast, ClosedEvent, EventSink, JsonEvent, Registry,
-};
+use app_lib::registry::{ClosedBroadcast, ClosedEvent, EventSink, JsonEvent, Registry};
 use app_lib::settings::SettingsState;
 use term_core::actor::ActorConfig;
 use term_core::pty::PtySpec;
@@ -148,7 +146,12 @@ fn agent_meta(project_id: Option<u32>, parent_process_id: Option<u32>) -> AgentM
 /// A plain terminal carrying the parent's role (any kind is a valid parent).
 fn parent_entry(registry: &Registry) -> u32 {
     registry
-        .create_terminal(cfg(lingering_spec()), Arc::new(MockSink::default()), None, "parent-claude".into())
+        .create_terminal(
+            cfg(lingering_spec()),
+            Arc::new(MockSink::default()),
+            None,
+            "parent-claude".into(),
+        )
         .expect("parent spawn")
 }
 
@@ -159,8 +162,7 @@ fn parent_entry(registry: &Registry) -> u32 {
 fn parent_surfaces_on_rail_row_and_control_row() {
     let registry = Registry::default();
     let parent = parent_entry(&registry);
-    let child = registry
-        .reserve_id();
+    let child = registry.reserve_id();
     registry
         .create_agent_terminal(
             cfg(lingering_spec()),
@@ -180,12 +182,14 @@ fn parent_surfaces_on_rail_row_and_control_row() {
         .into_iter()
         .find(|r| r.base.id == child)
         .expect("child rail row");
-    assert_eq!(row.parent_process_id, Some(parent), "rail_row carries the parent");
+    assert_eq!(
+        row.parent_process_id,
+        Some(parent),
+        "rail_row carries the parent"
+    );
 
     // /processes row: `parent_process_id` via the agent block.
-    let proc = registry
-        .control_snapshot(child)
-        .expect("child control row");
+    let proc = registry.control_snapshot(child).expect("child control row");
     assert_eq!(
         proc.agent.as_ref().and_then(|m| m.parent_process_id),
         Some(parent),
@@ -205,10 +209,17 @@ fn parent_surfaces_on_rail_row_and_control_row() {
             None,
         )
         .expect("root agent spawn");
-    let root_row = registry.list_rows().into_iter().find(|r| r.base.id == root).unwrap();
+    let root_row = registry
+        .list_rows()
+        .into_iter()
+        .find(|r| r.base.id == root)
+        .unwrap();
     assert_eq!(root_row.parent_process_id, None, "root is null on the rail");
     let root_proc = registry.control_snapshot(root).unwrap();
-    assert_eq!(root_proc.agent.as_ref().and_then(|m| m.parent_process_id), None);
+    assert_eq!(
+        root_proc.agent.as_ref().and_then(|m| m.parent_process_id),
+        None
+    );
 }
 
 /// `close_on_exit` = the entry closes through the SAME close
@@ -218,8 +229,7 @@ fn close_on_exit_closes_after_exit_with_reason_close_on_exit() {
     let registry = Registry::default();
     let closed = Arc::new(FakeClosed::default());
     registry.set_closed_broadcast(closed.clone());
-    let id = registry
-        .reserve_id();
+    let id = registry.reserve_id();
     registry
         .create_agent_terminal(
             cfg(exiting_spec()),
@@ -243,7 +253,11 @@ fn close_on_exit_closes_after_exit_with_reason_close_on_exit() {
     // The entry is really gone (list/control agree).
     assert!(registry.control_snapshot(id).is_none(), "entry closed");
     assert!(registry.list_rows().iter().all(|r| r.base.id != id));
-    assert_eq!(closed.events.lock().unwrap().len(), 1, "exactly one close_on_exit");
+    assert_eq!(
+        closed.events.lock().unwrap().len(),
+        1,
+        "exactly one close_on_exit"
+    );
 }
 
 /// An ordinary close (the frontend × / MCP close_terminal
@@ -256,7 +270,11 @@ fn ordinary_close_broadcasts_closed_exactly_once() {
     let id = parent_entry(&registry);
     assert!(registry.close(id).is_some());
     let events = closed.events.lock().unwrap();
-    assert_eq!(events.len(), 1, "the frontend-× / MCP close path emits exactly one");
+    assert_eq!(
+        events.len(),
+        1,
+        "the frontend-× / MCP close path emits exactly one"
+    );
     assert_eq!(events[0].term_id, id);
     assert_eq!(events[0].reason, "closed");
 }
@@ -315,11 +333,19 @@ fn spawn_records_parent_from_explicit_then_actor_else_none() {
 
     // Actor (the X-Chappa-Actor parses to a numeric id) → the parent.
     let by_actor = spawn(None, Some(parent));
-    assert_eq!(by_actor.agent.parent_process_id, Some(parent), "actor → parent");
+    assert_eq!(
+        by_actor.agent.parent_process_id,
+        Some(parent),
+        "actor → parent"
+    );
 
     // Explicit field beats the actor.
     let explicit = spawn(Some(parent), Some(999_999));
-    assert_eq!(explicit.agent.parent_process_id, Some(parent), "explicit wins");
+    assert_eq!(
+        explicit.agent.parent_process_id,
+        Some(parent),
+        "explicit wins"
+    );
 
     // Stale actor (a live id is required) → None.
     let stale = spawn(Some(999_999), Some(parent));

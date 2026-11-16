@@ -18,8 +18,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    new_record_id, prune_job_records, reconcile_runs, update_run, AgentRecord, AgentRecordPatch, JobRecord,
-    RecordKind, RecordRef, Run, RunUpdate, StoredRecord, TerminalRecord,
+    new_record_id, prune_job_records, reconcile_runs, update_run, AgentRecord, AgentRecordPatch,
+    JobRecord, RecordKind, RecordRef, Run, RunUpdate, StoredRecord, TerminalRecord,
 };
 use crate::yml::ProcessDef;
 
@@ -591,7 +591,11 @@ impl ProjectStore {
     /// Assign record ids to every listed command that lacks one, in ONE
     /// save (a project open touches every command at once). Nothing is
     /// written when every command already has its id.
-    pub fn ensure_command_record_ids(&mut self, id: u32, processes: &[String]) -> Result<(), String> {
+    pub fn ensure_command_record_ids(
+        &mut self,
+        id: u32,
+        processes: &[String],
+    ) -> Result<(), String> {
         let missing: Vec<&String> = processes
             .iter()
             .filter(|name| self.command_record_id(id, name).is_none())
@@ -599,7 +603,10 @@ impl ProjectStore {
         if missing.is_empty() {
             return Ok(());
         }
-        let ids: Vec<String> = missing.iter().map(|_| new_record_id()).collect::<Result<_, _>>()?;
+        let ids: Vec<String> = missing
+            .iter()
+            .map(|_| new_record_id())
+            .collect::<Result<_, _>>()?;
         let project = self.project_mut(id)?;
         for (name, record_id) in missing.into_iter().zip(ids) {
             Self::edit_override(project, name, |o| o.record_id = Some(record_id));
@@ -641,31 +648,56 @@ impl ProjectStore {
     /// it is (a command is named by its process key).
     pub fn find_record(&self, record_id: &str) -> Option<(u32, RecordRef)> {
         self.projects.iter().find_map(|p| {
-            if let Some((name, _)) = p
-                .process_overrides
-                .as_ref()
-                .and_then(|m| m.iter().find(|(_, o)| o.record_id.as_deref() == Some(record_id)))
-            {
-                return Some((p.id, RecordRef { kind: RecordKind::Command, name: name.clone() }));
+            if let Some((name, _)) = p.process_overrides.as_ref().and_then(|m| {
+                m.iter()
+                    .find(|(_, o)| o.record_id.as_deref() == Some(record_id))
+            }) {
+                return Some((
+                    p.id,
+                    RecordRef {
+                        kind: RecordKind::Command,
+                        name: name.clone(),
+                    },
+                ));
             }
             if let Some(a) = p.agents.iter().find(|a| a.record_id == record_id) {
-                return Some((p.id, RecordRef { kind: RecordKind::Agent, name: a.name.clone() }));
+                return Some((
+                    p.id,
+                    RecordRef {
+                        kind: RecordKind::Agent,
+                        name: a.name.clone(),
+                    },
+                ));
             }
             if let Some(t) = p.terminals.iter().find(|t| t.record_id == record_id) {
-                return Some((p.id, RecordRef { kind: RecordKind::Terminal, name: t.name.clone() }));
+                return Some((
+                    p.id,
+                    RecordRef {
+                        kind: RecordKind::Terminal,
+                        name: t.name.clone(),
+                    },
+                ));
             }
-            p.jobs
-                .iter()
-                .find(|j| j.record_id == record_id)
-                .map(|j| (p.id, RecordRef { kind: RecordKind::Job, name: j.name.clone() }))
+            p.jobs.iter().find(|j| j.record_id == record_id).map(|j| {
+                (
+                    p.id,
+                    RecordRef {
+                        kind: RecordKind::Job,
+                        name: j.name.clone(),
+                    },
+                )
+            })
         })
     }
 
     /// One record with its full state, and the project that owns it.
     pub fn record(&self, record_id: &str) -> Option<(u32, StoredRecord)> {
-        self.projects
-            .iter()
-            .find_map(|p| records_of(p).into_iter().find(|r| r.record_id == record_id).map(|r| (p.id, r)))
+        self.projects.iter().find_map(|p| {
+            records_of(p)
+                .into_iter()
+                .find(|r| r.record_id == record_id)
+                .map(|r| (p.id, r))
+        })
     }
 
     /// Every record of project `id`: commands with a record id first (in
@@ -749,10 +781,13 @@ impl ProjectStore {
         patch.validate()?;
         let updated = self.projects.iter_mut().find_map(|p| {
             let id = p.id;
-            p.agents.iter_mut().find(|a| a.record_id == record_id).map(|a| {
-                patch.apply(a);
-                (id, a.clone())
-            })
+            p.agents
+                .iter_mut()
+                .find(|a| a.record_id == record_id)
+                .map(|a| {
+                    patch.apply(a);
+                    (id, a.clone())
+                })
         });
         if updated.is_some() {
             self.save()?;
@@ -763,7 +798,10 @@ impl ProjectStore {
     /// Every record id project `id` owns — what a project removal prunes
     /// from the ledger.
     pub fn record_ids_of(&self, id: u32) -> Vec<String> {
-        self.records_of(id).into_iter().map(|r| r.record_id).collect()
+        self.records_of(id)
+            .into_iter()
+            .map(|r| r.record_id)
+            .collect()
     }
 
     /// At launch: every run still `running` was cut off by a crash or a hard
@@ -779,7 +817,9 @@ impl ProjectStore {
 
     /// The `last_run` slot of the record `record_id`, whatever its kind.
     fn run_slot(&mut self, record_id: &str) -> Option<&mut Option<Run>> {
-        self.projects.iter_mut().find_map(|p| run_slot_in(p, record_id))
+        self.projects
+            .iter_mut()
+            .find_map(|p| run_slot_in(p, record_id))
     }
 
     /// True when `hash` is the trusted hash on record for `id` — i.e. the
@@ -845,16 +885,19 @@ fn records_of(p: &Project) -> Vec<StoredRecord> {
         job: None,
     });
     let jobs = p.jobs.iter().map(StoredRecord::of_job);
-    commands.chain(agents).chain(terminals).chain(jobs).collect()
+    commands
+        .chain(agents)
+        .chain(terminals)
+        .chain(jobs)
+        .collect()
 }
 
 /// The `last_run` slot of `record_id` inside one project row.
 fn run_slot_in<'a>(p: &'a mut Project, record_id: &str) -> Option<&'a mut Option<Run>> {
-    if let Some(o) = p
-        .process_overrides
-        .as_mut()
-        .and_then(|m| m.values_mut().find(|o| o.record_id.as_deref() == Some(record_id)))
-    {
+    if let Some(o) = p.process_overrides.as_mut().and_then(|m| {
+        m.values_mut()
+            .find(|o| o.record_id.as_deref() == Some(record_id))
+    }) {
         return Some(&mut o.last_run);
     }
     if let Some(a) = p.agents.iter_mut().find(|a| a.record_id == record_id) {
@@ -863,7 +906,10 @@ fn run_slot_in<'a>(p: &'a mut Project, record_id: &str) -> Option<&'a mut Option
     if let Some(t) = p.terminals.iter_mut().find(|t| t.record_id == record_id) {
         return Some(&mut t.last_run);
     }
-    p.jobs.iter_mut().find(|j| j.record_id == record_id).map(|j| &mut j.last_run)
+    p.jobs
+        .iter_mut()
+        .find(|j| j.record_id == record_id)
+        .map(|j| &mut j.last_run)
 }
 
 /// Every stored run of one project row, mutably (the crash reconcile).
@@ -901,9 +947,13 @@ mod tests {
         // Untouched rows carry neither key.
         assert!(store.get(1).unwrap().initials.is_none());
         assert!(store.get(1).unwrap().color.is_none());
-        assert!(!fs::read_to_string(&store_path).unwrap().contains("initials"));
+        assert!(!fs::read_to_string(&store_path)
+            .unwrap()
+            .contains("initials"));
 
-        store.set_identity(1, Some(" CH ".into()), Some("Teal".into())).unwrap();
+        store
+            .set_identity(1, Some(" CH ".into()), Some("Teal".into()))
+            .unwrap();
         let reopened = ProjectStore::new(store_path.clone());
         assert_eq!(reopened.get(1).unwrap().initials.as_deref(), Some("CH"));
         assert_eq!(reopened.get(1).unwrap().color.as_deref(), Some("teal"));
@@ -1362,26 +1412,55 @@ mod tests {
         assert!(store.ensure_command_record_id(9, "server").is_err());
         assert_eq!(
             store.find_record(&id),
-            Some((1, RecordRef { kind: RecordKind::Command, name: "server".into() }))
+            Some((
+                1,
+                RecordRef {
+                    kind: RecordKind::Command,
+                    name: "server".into()
+                }
+            ))
         );
         // An override that only carries a record id is not "empty": it stays.
         assert!(store.get(1).unwrap().process_override("server").is_some());
 
-        assert!(store.begin_run(&id, Run::begin("run-1", 100, Default::default())).unwrap());
+        assert!(store
+            .begin_run(&id, Run::begin("run-1", 100, Default::default()))
+            .unwrap());
         assert_eq!(
-            store.update_run(&id, "run-1", |r| r.finish(200, Some(2), false, vec![serde_json::json!("boom")])).unwrap(),
+            store
+                .update_run(&id, "run-1", |r| r.finish(
+                    200,
+                    Some(2),
+                    false,
+                    vec![serde_json::json!("boom")]
+                ))
+                .unwrap(),
             RunUpdate::Applied
         );
         let reopened = ProjectStore::new(store_path.clone());
-        let run = reopened.get(1).unwrap().process_override("server").unwrap().last_run.clone().unwrap();
+        let run = reopened
+            .get(1)
+            .unwrap()
+            .process_override("server")
+            .unwrap()
+            .last_run
+            .clone()
+            .unwrap();
         assert_eq!(run.status, term_core::status::ProcessStatus::Failed);
         assert_eq!(run.tail, vec![serde_json::json!("boom")]);
         assert_eq!(reopened.records_of(1)[0].record_id, id);
 
         store.rename_process_override(1, "server", "api").unwrap();
-        assert_eq!(store.command_record_id(1, "api").as_deref(), Some(id.as_str()));
+        assert_eq!(
+            store.command_record_id(1, "api").as_deref(),
+            Some(id.as_str())
+        );
         assert_eq!(store.record_ids_of(1), vec![id.clone()]);
-        assert_eq!(store.remove_record(&id).unwrap(), None, "a command record is its definition");
+        assert_eq!(
+            store.remove_record(&id).unwrap(),
+            None,
+            "a command record is its definition"
+        );
         store.remove_process_override(1, "api").unwrap();
         assert_eq!(store.find_record(&id), None);
         assert_eq!(store.get(1).unwrap().process_overrides, None);
@@ -1393,7 +1472,14 @@ mod tests {
         )
         .unwrap();
         let sparse = ProjectStore::new(store_path);
-        let run = sparse.get(1).unwrap().process_override("x").unwrap().last_run.clone().unwrap();
+        let run = sparse
+            .get(1)
+            .unwrap()
+            .process_override("x")
+            .unwrap()
+            .last_run
+            .clone()
+            .unwrap();
         assert_eq!(run.ended_at_ms, None);
         assert!(run.tail.is_empty());
     }
@@ -1441,45 +1527,92 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(store.add_agent_record(9, AgentRecord {
-            record_id: "x".into(), name: "x".into(), tool_id: 1, favorite: false,
-            disable_auto_rename: false, notification_level: None, parent_record_id: None,
-            extra_args: vec![], prompt: None, working_dir: None, last_run: None,
-        }).is_err());
+        assert!(store
+            .add_agent_record(
+                9,
+                AgentRecord {
+                    record_id: "x".into(),
+                    name: "x".into(),
+                    tool_id: 1,
+                    favorite: false,
+                    disable_auto_rename: false,
+                    notification_level: None,
+                    parent_record_id: None,
+                    extra_args: vec![],
+                    prompt: None,
+                    working_dir: None,
+                    last_run: None,
+                }
+            )
+            .is_err());
 
         let reopened = ProjectStore::new(store_path.clone());
         let (owner, agent) = reopened.record("agent-1").unwrap();
         assert_eq!((owner, agent.kind), (2, RecordKind::Agent));
-        assert_eq!(agent.agent.as_ref().unwrap().prompt.as_deref(), Some("do the thing"));
+        assert_eq!(
+            agent.agent.as_ref().unwrap().prompt.as_deref(),
+            Some("do the thing")
+        );
         assert_eq!(agent.last_run.as_ref().unwrap().tail_kind, TailKind::Events);
         let (owner, terminal) = reopened.record("term-1").unwrap();
         assert_eq!((owner, terminal.kind), (1, RecordKind::Terminal));
-        assert_eq!(terminal.terminal.unwrap().shell_profile.as_deref(), Some("PowerShell"));
+        assert_eq!(
+            terminal.terminal.unwrap().shell_profile.as_deref(),
+            Some("PowerShell")
+        );
         assert_eq!(reopened.all_records().len(), 2);
         assert_eq!(reopened.record_ids_of(2), vec!["agent-1".to_owned()]);
 
         // Late facts: stale uuid dropped, current applied; a crash reconcile
         // on a fresh load closes the still-open run.
-        assert_eq!(store.update_run("agent-1", "run-z", |r| r.stop(6)).unwrap(), RunUpdate::Stale);
+        assert_eq!(
+            store.update_run("agent-1", "run-z", |r| r.stop(6)).unwrap(),
+            RunUpdate::Stale
+        );
         let mut crashed = ProjectStore::new(store_path.clone());
-        assert_eq!(crashed.reconcile_crashed_runs().unwrap(), vec!["run-a".to_owned()]);
+        assert_eq!(
+            crashed.reconcile_crashed_runs().unwrap(),
+            vec!["run-a".to_owned()]
+        );
         let run = crashed.record("agent-1").unwrap().1.last_run.unwrap();
         assert_eq!(run.status, term_core::status::ProcessStatus::Exited);
         assert_eq!((run.exit_code, run.success), (None, None));
         // After the reconcile the run is closed: a late exit for it is stale.
         assert_eq!(
-            crashed.update_run("agent-1", "run-a", |r| r.finish(7, Some(0), true, vec![])).unwrap(),
+            crashed
+                .update_run("agent-1", "run-a", |r| r.finish(7, Some(0), true, vec![]))
+                .unwrap(),
             RunUpdate::Stale
         );
         // A new run replaces the head.
-        assert!(crashed.begin_run("agent-1", Run::begin("run-b", 8, TailKind::Events)).unwrap());
-        assert_eq!(crashed.record("agent-1").unwrap().1.last_run.unwrap().run_uuid, "run-b");
+        assert!(crashed
+            .begin_run("agent-1", Run::begin("run-b", 8, TailKind::Events))
+            .unwrap());
+        assert_eq!(
+            crashed
+                .record("agent-1")
+                .unwrap()
+                .1
+                .last_run
+                .unwrap()
+                .run_uuid,
+            "run-b"
+        );
 
-        assert_eq!(crashed.remove_record("agent-1").unwrap(), Some((2, RecordKind::Agent)));
-        assert_eq!(crashed.remove_record("term-1").unwrap(), Some((1, RecordKind::Terminal)));
+        assert_eq!(
+            crashed.remove_record("agent-1").unwrap(),
+            Some((2, RecordKind::Agent))
+        );
+        assert_eq!(
+            crashed.remove_record("term-1").unwrap(),
+            Some((1, RecordKind::Terminal))
+        );
         assert_eq!(crashed.remove_record("term-1").unwrap(), None);
         let after = fs::read_to_string(&store_path).unwrap();
-        assert!(!after.contains("agents") && !after.contains("terminals"), "{after}");
+        assert!(
+            !after.contains("agents") && !after.contains("terminals"),
+            "{after}"
+        );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&after).unwrap(),
             serde_json::from_str::<serde_json::Value>(&before).unwrap(),
@@ -1513,40 +1646,68 @@ mod tests {
             cwd: Some("/code/a".into()),
             last_run: Some(Run::begin(format!("run-{id}"), 1, TailKind::Text)),
         };
-        assert_eq!(store.add_job_record(1, job("job-1")).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            store.add_job_record(1, job("job-1")).unwrap(),
+            Vec::<String>::new()
+        );
         assert!(store.add_job_record(9, job("x")).is_err());
         assert_eq!(
             store.find_record("job-1"),
-            Some((1, RecordRef { kind: RecordKind::Job, name: "local db: start".into() }))
+            Some((
+                1,
+                RecordRef {
+                    kind: RecordKind::Job,
+                    name: "local db: start".into()
+                }
+            ))
         );
         assert_eq!(
-            store.update_run("job-1", "run-job-1", |r| r.finish(5, Some(0), true, vec!["seeded".into()])).unwrap(),
+            store
+                .update_run("job-1", "run-job-1", |r| r.finish(
+                    5,
+                    Some(0),
+                    true,
+                    vec!["seeded".into()]
+                ))
+                .unwrap(),
             RunUpdate::Applied
         );
         let reopened = ProjectStore::new(store_path.clone());
         let (owner, rec) = reopened.record("job-1").unwrap();
         assert_eq!((owner, rec.kind), (1, RecordKind::Job));
         let facts = rec.job.unwrap();
-        assert_eq!((facts.source_label.as_str(), facts.job_id.as_str()), ("Stack local", "j-job-1"));
+        assert_eq!(
+            (facts.source_label.as_str(), facts.job_id.as_str()),
+            ("Stack local", "j-job-1")
+        );
         assert_eq!(rec.last_run.unwrap().exit_code, Some(0));
 
         // A crash reconcile reaches job runs too.
         store.add_job_record(1, job("job-2")).unwrap();
         let mut crashed = ProjectStore::new(store_path.clone());
-        assert_eq!(crashed.reconcile_crashed_runs().unwrap(), vec!["run-job-2".to_owned()]);
+        assert_eq!(
+            crashed.reconcile_crashed_runs().unwrap(),
+            vec!["run-job-2".to_owned()]
+        );
 
         // The cap: finished records go oldest first.
         let mut capped = ProjectStore::new(store_path.clone());
         for i in 0..JOB_RECORDS_RETAINED {
             let mut j = job(&format!("more-{i}"));
-            j.last_run.as_mut().unwrap().finish(2, Some(0), true, vec![]);
+            j.last_run
+                .as_mut()
+                .unwrap()
+                .finish(2, Some(0), true, vec![]);
             capped.add_job_record(1, j).unwrap();
         }
         assert!(capped.find_record("job-1").is_none() && capped.find_record("job-2").is_none());
         assert_eq!(capped.records_of(1).len(), JOB_RECORDS_RETAINED);
 
         for id in capped.record_ids_of(1) {
-            assert_eq!(capped.remove_record(&id).unwrap(), Some((1, RecordKind::Job)));
+            assert_eq!(
+                capped.remove_record(&id).unwrap(),
+                Some((1, RecordKind::Job))
+            );
         }
         let after = fs::read_to_string(&store_path).unwrap();
         assert_eq!(
@@ -1591,31 +1752,59 @@ mod tests {
             disable_auto_rename: Some(true),
             notification_level: Some(Some("important".into())),
         };
-        let (owner, agent) = store.update_agent_record("agent-1", &patch).unwrap().unwrap();
+        let (owner, agent) = store
+            .update_agent_record("agent-1", &patch)
+            .unwrap()
+            .unwrap();
         assert_eq!(owner, 1);
         assert_eq!(agent.name, "reviewer");
         assert!(agent.favorite && agent.disable_auto_rename);
         assert_eq!(agent.notification_level.as_deref(), Some("important"));
-        assert_eq!(agent.extra_args, vec!["--verbose".to_owned()], "untouched fields stay");
+        assert_eq!(
+            agent.extra_args,
+            vec!["--verbose".to_owned()],
+            "untouched fields stay"
+        );
 
         let reopened = ProjectStore::new(store_path.clone());
         let stored = reopened.record("agent-1").unwrap().1;
         assert_eq!(stored.name, "reviewer");
-        assert_eq!(stored.agent.unwrap().notification_level.as_deref(), Some("important"));
+        assert_eq!(
+            stored.agent.unwrap().notification_level.as_deref(),
+            Some("important")
+        );
 
         let before = fs::read_to_string(&store_path).unwrap();
-        let blank = AgentRecordPatch { name: Some("".into()), ..Default::default() };
+        let blank = AgentRecordPatch {
+            name: Some("".into()),
+            ..Default::default()
+        };
         assert!(store.update_agent_record("agent-1", &blank).is_err());
-        let loud = AgentRecordPatch { notification_level: Some(Some("All".into())), ..Default::default() };
+        let loud = AgentRecordPatch {
+            notification_level: Some(Some("All".into())),
+            ..Default::default()
+        };
         assert!(store.update_agent_record("agent-1", &loud).is_err());
         assert_eq!(store.update_agent_record("nope", &patch).unwrap(), None);
-        assert_eq!(fs::read_to_string(&store_path).unwrap(), before, "nothing written");
+        assert_eq!(
+            fs::read_to_string(&store_path).unwrap(),
+            before,
+            "nothing written"
+        );
 
         // Clearing the level is a null on the wire, and drops the key.
-        let clear = AgentRecordPatch { notification_level: Some(None), ..Default::default() };
-        let (_, agent) = store.update_agent_record("agent-1", &clear).unwrap().unwrap();
+        let clear = AgentRecordPatch {
+            notification_level: Some(None),
+            ..Default::default()
+        };
+        let (_, agent) = store
+            .update_agent_record("agent-1", &clear)
+            .unwrap()
+            .unwrap();
         assert_eq!(agent.notification_level, None);
-        assert!(!fs::read_to_string(&store_path).unwrap().contains("notification_level"));
+        assert!(!fs::read_to_string(&store_path)
+            .unwrap()
+            .contains("notification_level"));
     }
 
     /// Every vocabulary member is accepted; everything else is rejected and

@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 
 use crate::control_http::{json, percent_decode, ControlState, Params, Resp};
 use crate::coordination::{
-    pad_receipt, todo_receipt, CoordError, EditTarget, FindQuery, ReadMode, ResponseMode, Scratchpad,
-    ScratchpadListQuery, Todo, TodoListQuery, TodoPatch,
+    pad_receipt, todo_receipt, CoordError, EditTarget, FindQuery, ReadMode, ResponseMode,
+    Scratchpad, ScratchpadListQuery, Todo, TodoListQuery, TodoPatch,
 };
 
 /// Request fields from either transport.
@@ -29,19 +29,30 @@ impl Args {
     pub(crate) fn from(query: &str, body: &str) -> Result<Self, Resp> {
         if !body.trim().is_empty() {
             return serde_json::from_str::<Value>(body)
-                .map_err(|err| json(400, json!({"error": "invalid", "message": format!("bad body: {err}")})))
+                .map_err(|err| {
+                    json(
+                        400,
+                        json!({"error": "invalid", "message": format!("bad body: {err}")}),
+                    )
+                })
                 .and_then(|v| {
                     if v.is_object() {
                         Ok(Self(v))
                     } else {
-                        Err(json(400, json!({"error": "invalid", "message": "body must be a JSON object"})))
+                        Err(json(
+                            400,
+                            json!({"error": "invalid", "message": "body must be a JSON object"}),
+                        ))
                     }
                 });
         }
         let mut map = serde_json::Map::new();
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            map.insert(percent_decode(k), Value::String(percent_decode(&v.replace('+', " "))));
+            map.insert(
+                percent_decode(k),
+                Value::String(percent_decode(&v.replace('+', " "))),
+            );
         }
         Ok(Self(Value::Object(map)))
     }
@@ -110,9 +121,9 @@ impl Args {
             Some(Value::Array(items)) => items
                 .iter()
                 .map(|v| {
-                    v.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| CoordError::Invalid(format!("`{key}` must be an array of strings")))
+                    v.as_str().map(str::to_owned).ok_or_else(|| {
+                        CoordError::Invalid(format!("`{key}` must be an array of strings"))
+                    })
                 })
                 .collect(),
             Some(Value::String(s)) => Ok(s
@@ -121,7 +132,9 @@ impl Args {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect()),
-            Some(_) => Err(CoordError::Invalid(format!("`{key}` must be an array of strings"))),
+            Some(_) => Err(CoordError::Invalid(format!(
+                "`{key}` must be an array of strings"
+            ))),
         }
     }
 
@@ -131,17 +144,23 @@ impl Args {
             Some(Value::Array(items)) => items
                 .iter()
                 .map(|v| {
-                    v.as_i64()
-                        .ok_or_else(|| CoordError::Invalid(format!("`{key}` must be an array of integers")))
+                    v.as_i64().ok_or_else(|| {
+                        CoordError::Invalid(format!("`{key}` must be an array of integers"))
+                    })
                 })
                 .collect(),
             Some(Value::String(s)) => s
                 .split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(|s| s.parse::<i64>().map_err(|_| CoordError::Invalid(format!("`{key}` must be integers"))))
+                .map(|s| {
+                    s.parse::<i64>()
+                        .map_err(|_| CoordError::Invalid(format!("`{key}` must be integers")))
+                })
                 .collect(),
-            Some(_) => Err(CoordError::Invalid(format!("`{key}` must be an array of integers"))),
+            Some(_) => Err(CoordError::Invalid(format!(
+                "`{key}` must be an array of integers"
+            ))),
         }
     }
 
@@ -179,7 +198,11 @@ fn fail(err: CoordError) -> Resp {
 }
 
 /// Run a handler body that yields the reply value.
-pub(crate) fn run(query: &str, body: &str, f: impl FnOnce(&Args) -> Result<Value, CoordError>) -> Resp {
+pub(crate) fn run(
+    query: &str,
+    body: &str,
+    f: impl FnOnce(&Args) -> Result<Value, CoordError>,
+) -> Resp {
     let args = match Args::from(query, body) {
         Ok(a) => a,
         Err(resp) => return resp,
@@ -234,17 +257,30 @@ pub fn scratchpad_create(state: &ControlState, params: &Params, query: &str, bod
             &content,
             a.strings("tags")?,
         )?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("name", json!(pad.name)), ("created", json!(true))]))
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[("name", json!(pad.name)), ("created", json!(true))],
+        ))
     })
 }
 
 /// `scratchpad_write` overwrite half (`POST /scratchpads/{rid}`).
-pub fn scratchpad_overwrite(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+pub fn scratchpad_overwrite(
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     run(query, body, |a| {
         let id = record(params)?;
         let name = a.req_str("name")?;
         let content = a.str("content").unwrap_or("").to_owned();
-        let tags = if a.get("tags").is_some() { Some(a.strings("tags")?) } else { None };
+        let tags = if a.get("tags").is_some() {
+            Some(a.strings("tags")?)
+        } else {
+            None
+        };
         let pad = state.coordination.scratchpad_overwrite(
             &params.actor,
             id,
@@ -253,7 +289,11 @@ pub fn scratchpad_overwrite(state: &ControlState, params: &Params, query: &str, 
             tags,
             a.i64("expected_revision")?,
         )?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("name", json!(pad.name)), ("line_count", line_count(&pad))]))
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[("name", json!(pad.name)), ("line_count", line_count(&pad))],
+        ))
     })
 }
 
@@ -262,9 +302,12 @@ pub fn scratchpad_read(state: &ControlState, params: &Params, query: &str, body:
         let id = record(params)?;
         let heading = a.str("section_heading").or_else(|| a.str("heading"));
         let mode = ReadMode::parse(a.str("mode"), heading)?;
-        state
-            .coordination
-            .scratchpad_read(id, &mode, a.usize("offset")?.unwrap_or(0), a.usize("limit")?)
+        state.coordination.scratchpad_read(
+            id,
+            &mode,
+            a.usize("offset")?.unwrap_or(0),
+            a.usize("limit")?,
+        )
     })
 }
 
@@ -285,7 +328,11 @@ pub fn scratchpad_find(state: &ControlState, params: &Params, query: &str, body:
 }
 
 pub fn scratchpad_tail(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
-    run(query, body, |a| state.coordination.scratchpad_tail(record(params)?, a.usize("lines")?))
+    run(query, body, |a| {
+        state
+            .coordination
+            .scratchpad_tail(record(params)?, a.usize("lines")?)
+    })
 }
 
 pub fn scratchpad_rename(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
@@ -308,11 +355,20 @@ pub fn scratchpad_append(state: &ControlState, params: &Params, query: &str, bod
             &a.req_str("content")?,
             a.i64("expected_revision")?,
         )?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("line_count", line_count(&pad))]))
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[("line_count", line_count(&pad))],
+        ))
     })
 }
 
-pub fn scratchpad_append_section(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+pub fn scratchpad_append_section(
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     run(query, body, |a| {
         let heading = a.req_str("heading")?;
         let pad = state.coordination.scratchpad_append_section(
@@ -322,7 +378,14 @@ pub fn scratchpad_append_section(state: &ControlState, params: &Params, query: &
             &a.req_str("content")?,
             a.i64("expected_revision")?,
         )?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("heading", json!(heading.trim())), ("line_count", line_count(&pad))]))
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[
+                ("heading", json!(heading.trim())),
+                ("line_count", line_count(&pad)),
+            ],
+        ))
     })
 }
 
@@ -339,7 +402,11 @@ pub fn scratchpad_edit(state: &ControlState, params: &Params, query: &str, body:
             &a.req_str("content")?,
             a.i64("expected_revision")?,
         )?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("name", json!(pad.name)), ("line_count", line_count(&pad))]))
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[("name", json!(pad.name)), ("line_count", line_count(&pad))],
+        ))
     })
 }
 
@@ -355,7 +422,12 @@ pub fn scratchpad_add_tags(state: &ControlState, params: &Params, query: &str, b
     })
 }
 
-pub fn scratchpad_remove_tags(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
+pub fn scratchpad_remove_tags(
+    state: &ControlState,
+    params: &Params,
+    query: &str,
+    body: &str,
+) -> Resp {
     run(query, body, |a| {
         let pad = state.coordination.scratchpad_remove_tags(
             &params.actor,
@@ -370,9 +442,11 @@ pub fn scratchpad_remove_tags(state: &ControlState, params: &Params, query: &str
 pub fn scratchpad_clear(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         a.confirm("scratchpad_clear")?;
-        let pad = state
-            .coordination
-            .scratchpad_clear(&params.actor, record(params)?, a.i64("expected_revision")?)?;
+        let pad = state.coordination.scratchpad_clear(
+            &params.actor,
+            record(params)?,
+            a.i64("expected_revision")?,
+        )?;
         Ok(pad_receipt(&pad, a.mode()?, &[("cleared", json!(true))]))
     })
 }
@@ -380,27 +454,38 @@ pub fn scratchpad_clear(state: &ControlState, params: &Params, query: &str, body
 pub fn scratchpad_delete(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         a.confirm("scratchpad_delete")?;
-        let pad = state
-            .coordination
-            .scratchpad_delete(&params.actor, record(params)?, a.i64("expected_revision")?)?;
-        Ok(json!({"scratchpad_id": pad.scratchpad_id, "project_id": pad.project_id, "deleted": true}))
+        let pad = state.coordination.scratchpad_delete(
+            &params.actor,
+            record(params)?,
+            a.i64("expected_revision")?,
+        )?;
+        Ok(
+            json!({"scratchpad_id": pad.scratchpad_id, "project_id": pad.project_id, "deleted": true}),
+        )
     })
 }
 
 pub fn scratchpad_archive(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         let archived = a.bool("archived")?.unwrap_or(true);
-        let pad = state
-            .coordination
-            .scratchpad_archive(&params.actor, record(params)?, archived)?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("archived", json!(pad.archived))]))
+        let pad =
+            state
+                .coordination
+                .scratchpad_archive(&params.actor, record(params)?, archived)?;
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[("archived", json!(pad.archived))],
+        ))
     })
 }
 
 pub fn scratchpad_transfer(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         if a.0.get("target_project_id").is_none() {
-            return Err(CoordError::Invalid("`target_project_id` is required (null = global)".into()));
+            return Err(CoordError::Invalid(
+                "`target_project_id` is required (null = global)".into(),
+            ));
         }
         let target = a.i64("target_project_id")?;
         let pad = state.coordination.scratchpad_transfer(
@@ -409,7 +494,11 @@ pub fn scratchpad_transfer(state: &ControlState, params: &Params, query: &str, b
             target,
             a.i64("expected_revision")?,
         )?;
-        Ok(pad_receipt(&pad, a.mode()?, &[("project_id", json!(pad.project_id))]))
+        Ok(pad_receipt(
+            &pad,
+            a.mode()?,
+            &[("project_id", json!(pad.project_id))],
+        ))
     })
 }
 
@@ -433,7 +522,9 @@ pub fn todo_list(state: &ControlState, _: &Params, query: &str, body: &str) -> R
 }
 
 pub fn todo_tags_list(state: &ControlState, _: &Params, query: &str, body: &str) -> Resp {
-    run(query, body, |a| Ok(json!({"tags": state.coordination.todo_tags(a.project_scope()?)?})))
+    run(query, body, |a| {
+        Ok(json!({"tags": state.coordination.todo_tags(a.project_scope()?)?}))
+    })
 }
 
 pub fn todo_create(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
@@ -449,7 +540,11 @@ pub fn todo_create(state: &ControlState, params: &Params, query: &str, body: &st
             a.str("priority"),
             a.strings("tags")?,
         )?;
-        Ok(todo_receipt(&todo, a.mode()?, &[("title", json!(todo.title))]))
+        Ok(todo_receipt(
+            &todo,
+            a.mode()?,
+            &[("title", json!(todo.title))],
+        ))
     })
 }
 
@@ -459,7 +554,12 @@ pub fn todo_get(state: &ControlState, params: &Params, query: &str, body: &str) 
         let todo = state.coordination.todo_get(id)?;
         let mut v = serde_json::to_value(&todo).unwrap_or_default();
         if a.bool("include_comments")?.unwrap_or(false) {
-            v["comments"] = state.coordination.todo_comments(id, 0, Some(crate::coordination::MAX_LIST_LIMIT))?["comments"].clone();
+            v["comments"] = state.coordination.todo_comments(
+                id,
+                0,
+                Some(crate::coordination::MAX_LIST_LIMIT),
+            )?["comments"]
+                .clone();
         }
         Ok(v)
     })
@@ -472,10 +572,17 @@ pub fn todo_update(state: &ControlState, params: &Params, query: &str, body: &st
             body: a.str("body").map(str::to_owned),
             priority: a.str("priority").map(str::to_owned),
             status: a.str("status").map(str::to_owned),
-            tags: if a.get("tags").is_some() { Some(a.strings("tags")?) } else { None },
+            tags: if a.get("tags").is_some() {
+                Some(a.strings("tags")?)
+            } else {
+                None
+            },
             expected_revision: a.i64("expected_revision")?,
         };
-        let (todo, changed) = state.coordination.todo_update(&params.actor, record(params)?, &patch)?;
+        let (todo, changed) =
+            state
+                .coordination
+                .todo_update(&params.actor, record(params)?, &patch)?;
         let row = serde_json::to_value(&todo).unwrap_or_default();
         let fields: Vec<(&str, Value)> = changed.iter().map(|k| (*k, row[*k].clone())).collect();
         Ok(todo_receipt(&todo, a.mode()?, &fields))
@@ -485,16 +592,28 @@ pub fn todo_update(state: &ControlState, params: &Params, query: &str, body: &st
 pub fn todo_add_tag(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         let tag = a.req_str("tag")?;
-        let todo = state.coordination.todo_add_tag(&params.actor, record(params)?, &tag)?;
-        Ok(todo_receipt(&todo, a.mode()?, &[("tag", json!(tag.trim())), ("tags", json!(todo.tags))]))
+        let todo = state
+            .coordination
+            .todo_add_tag(&params.actor, record(params)?, &tag)?;
+        Ok(todo_receipt(
+            &todo,
+            a.mode()?,
+            &[("tag", json!(tag.trim())), ("tags", json!(todo.tags))],
+        ))
     })
 }
 
 pub fn todo_remove_tag(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         let tag = a.req_str("tag")?;
-        let todo = state.coordination.todo_remove_tag(&params.actor, record(params)?, &tag)?;
-        Ok(todo_receipt(&todo, a.mode()?, &[("tag", json!(tag.trim())), ("tags", json!(todo.tags))]))
+        let todo = state
+            .coordination
+            .todo_remove_tag(&params.actor, record(params)?, &tag)?;
+        Ok(todo_receipt(
+            &todo,
+            a.mode()?,
+            &[("tag", json!(tag.trim())), ("tags", json!(todo.tags))],
+        ))
     })
 }
 
@@ -502,33 +621,42 @@ fn blockers_reply(todo: &Todo, mode: ResponseMode) -> Value {
     todo_receipt(
         todo,
         mode,
-        &[("blocker_ids", json!(todo.blocker_ids)), ("is_blocked", json!(todo.is_blocked))],
+        &[
+            ("blocker_ids", json!(todo.blocker_ids)),
+            ("is_blocked", json!(todo.is_blocked)),
+        ],
     )
 }
 
 pub fn todo_set_blockers(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        let todo = state
-            .coordination
-            .todo_set_blockers(&params.actor, record(params)?, &a.ids("blocker_ids")?)?;
+        let todo = state.coordination.todo_set_blockers(
+            &params.actor,
+            record(params)?,
+            &a.ids("blocker_ids")?,
+        )?;
         Ok(blockers_reply(&todo, a.mode()?))
     })
 }
 
 pub fn todo_add_blocker(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        let todo = state
-            .coordination
-            .todo_add_blocker(&params.actor, record(params)?, a.req_i64("blocker_id")?)?;
+        let todo = state.coordination.todo_add_blocker(
+            &params.actor,
+            record(params)?,
+            a.req_i64("blocker_id")?,
+        )?;
         Ok(blockers_reply(&todo, a.mode()?))
     })
 }
 
 pub fn todo_remove_blocker(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        let todo = state
-            .coordination
-            .todo_remove_blocker(&params.actor, record(params)?, a.req_i64("blocker_id")?)?;
+        let todo = state.coordination.todo_remove_blocker(
+            &params.actor,
+            record(params)?,
+            a.req_i64("blocker_id")?,
+        )?;
         Ok(blockers_reply(&todo, a.mode()?))
     })
 }
@@ -539,9 +667,10 @@ pub fn todo_complete(state: &ControlState, params: &Params, query: &str, body: &
             .bool("completed")?
             .ok_or_else(|| CoordError::Invalid("`completed` is required".into()))?;
         let release = a.bool("release_lock")?.unwrap_or(true);
-        let (todo, affected) = state
-            .coordination
-            .todo_complete(&params.actor, record(params)?, completed, release)?;
+        let (todo, affected) =
+            state
+                .coordination
+                .todo_complete(&params.actor, record(params)?, completed, release)?;
         Ok(todo_receipt(
             &todo,
             a.mode()?,
@@ -562,32 +691,46 @@ pub fn todo_lock(state: &ControlState, params: &Params, query: &str, body: &str)
         // again).
         let lease = match a.i64("lease_ms")? {
             Some(ms) => Some(ms.max(0) as u64),
-            None => a
-                .i64("lease_ttl_seconds")?
-                .map(|s| (s.max(0) as u64).saturating_mul(1000).min(crate::coordination::MAX_LEASE_MS)),
+            None => a.i64("lease_ttl_seconds")?.map(|s| {
+                (s.max(0) as u64)
+                    .saturating_mul(1000)
+                    .min(crate::coordination::MAX_LEASE_MS)
+            }),
         };
-        let todo = state.coordination.todo_lock(&params.actor, record(params)?, lease)?;
+        let todo = state
+            .coordination
+            .todo_lock(&params.actor, record(params)?, lease)?;
         Ok(todo_receipt(
             &todo,
             a.mode()?,
-            &[("locked_by", json!(todo.locked_by)), ("lock_expires_at", json!(todo.lock_expires_at))],
+            &[
+                ("locked_by", json!(todo.locked_by)),
+                ("lock_expires_at", json!(todo.lock_expires_at)),
+            ],
         ))
     })
 }
 
 pub fn todo_unlock(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        let todo = state.coordination.todo_unlock(&params.actor, record(params)?)?;
-        Ok(todo_receipt(&todo, a.mode()?, &[("locked_by", json!(todo.locked_by))]))
+        let todo = state
+            .coordination
+            .todo_unlock(&params.actor, record(params)?)?;
+        Ok(todo_receipt(
+            &todo,
+            a.mode()?,
+            &[("locked_by", json!(todo.locked_by))],
+        ))
     })
 }
 
 pub fn todo_transfer(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         let target = a.req_i64("target_project_id")?;
-        let (todo, affected) = state
-            .coordination
-            .todo_transfer(&params.actor, record(params)?, target)?;
+        let (todo, affected) =
+            state
+                .coordination
+                .todo_transfer(&params.actor, record(params)?, target)?;
         Ok(todo_receipt(
             &todo,
             a.mode()?,
@@ -604,24 +747,32 @@ pub fn todo_transfer(state: &ControlState, params: &Params, query: &str, body: &
 pub fn todo_delete(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         a.confirm("todo_delete")?;
-        let (todo, affected) = state.coordination.todo_delete(&params.actor, record(params)?)?;
-        Ok(json!({"todo_id": todo.todo_id, "project_id": todo.project_id, "deleted": true, "affected_todo_ids": affected}))
+        let (todo, affected) = state
+            .coordination
+            .todo_delete(&params.actor, record(params)?)?;
+        Ok(
+            json!({"todo_id": todo.todo_id, "project_id": todo.project_id, "deleted": true, "affected_todo_ids": affected}),
+        )
     })
 }
 
 pub fn todo_comment_list(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        state
-            .coordination
-            .todo_comments(record(params)?, a.usize("offset")?.unwrap_or(0), a.usize("limit")?)
+        state.coordination.todo_comments(
+            record(params)?,
+            a.usize("offset")?.unwrap_or(0),
+            a.usize("limit")?,
+        )
     })
 }
 
 pub fn todo_comment_create(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        let c = state
-            .coordination
-            .todo_comment_create(&params.actor, record(params)?, &a.req_str("body")?)?;
+        let c = state.coordination.todo_comment_create(
+            &params.actor,
+            record(params)?,
+            &a.req_str("body")?,
+        )?;
         Ok(match a.mode()? {
             ResponseMode::Rich => serde_json::to_value(&c).unwrap_or_default(),
             ResponseMode::Slim => json!({"comment_id": c.comment_id, "todo_id": c.todo_id}),
@@ -631,9 +782,11 @@ pub fn todo_comment_create(state: &ControlState, params: &Params, query: &str, b
 
 pub fn todo_comment_update(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
-        let c = state
-            .coordination
-            .todo_comment_update(&params.actor, record(params)?, &a.req_str("body")?)?;
+        let c = state.coordination.todo_comment_update(
+            &params.actor,
+            record(params)?,
+            &a.req_str("body")?,
+        )?;
         Ok(match a.mode()? {
             ResponseMode::Rich => serde_json::to_value(&c).unwrap_or_default(),
             ResponseMode::Slim => json!({"comment_id": c.comment_id, "todo_id": c.todo_id}),
@@ -644,7 +797,9 @@ pub fn todo_comment_update(state: &ControlState, params: &Params, query: &str, b
 pub fn todo_comment_delete(state: &ControlState, params: &Params, query: &str, body: &str) -> Resp {
     run(query, body, |a| {
         a.confirm("todo_comment_delete")?;
-        let c = state.coordination.todo_comment_delete(&params.actor, record(params)?)?;
+        let c = state
+            .coordination
+            .todo_comment_delete(&params.actor, record(params)?)?;
         Ok(json!({"comment_id": c.comment_id, "todo_id": c.todo_id, "deleted": true}))
     })
 }

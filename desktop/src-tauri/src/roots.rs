@@ -45,7 +45,11 @@ impl Root {
     pub fn new(path: impl Into<PathBuf>, kind: RootKind) -> Self {
         let path = path.into();
         let resolved = resolve_best_effort(&path);
-        Self { path, resolved, kind }
+        Self {
+            path,
+            resolved,
+            kind,
+        }
     }
 }
 
@@ -54,7 +58,11 @@ impl Root {
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum RootsVerdict {
     /// `cwd` is the resolved folder to spawn in; `root` the root it is under.
-    Allowed { cwd: PathBuf, root: PathBuf, kind: RootKind },
+    Allowed {
+        cwd: PathBuf,
+        root: PathBuf,
+        kind: RootKind,
+    },
     /// Shown on the disabled button and in the refusal.
     Denied { reason: String },
 }
@@ -92,25 +100,43 @@ pub const CASE_INSENSITIVE: bool = cfg!(windows);
 pub fn check_cwd(roots: &[Root], cwd: &str) -> RootsVerdict {
     let text = cwd.trim();
     if text.is_empty() {
-        return RootsVerdict::Denied { reason: "no working directory was given".into() };
+        return RootsVerdict::Denied {
+            reason: "no working directory was given".into(),
+        };
     }
     let given = Path::new(text);
     if !given.is_absolute() {
-        return RootsVerdict::Denied { reason: format!("`{text}` is a relative path; the working directory must be an absolute folder") };
+        return RootsVerdict::Denied {
+            reason: format!(
+                "`{text}` is a relative path; the working directory must be an absolute folder"
+            ),
+        };
     }
     if given.components().any(|c| c == Component::ParentDir) {
-        return RootsVerdict::Denied { reason: format!("`{text}` climbs out of its folder with `..`") };
+        return RootsVerdict::Denied {
+            reason: format!("`{text}` climbs out of its folder with `..`"),
+        };
     }
     if roots.is_empty() {
-        return RootsVerdict::Denied { reason: format!("`{text}` cannot be used: no project is open and no trusted source names a folder") };
+        return RootsVerdict::Denied {
+            reason: format!(
+                "`{text}` cannot be used: no project is open and no trusted source names a folder"
+            ),
+        };
     }
     if !given.is_dir() {
-        return RootsVerdict::Denied { reason: format!("`{text}` does not exist or is not a folder") };
+        return RootsVerdict::Denied {
+            reason: format!("`{text}` does not exist or is not a folder"),
+        };
     }
     let resolved = resolve_best_effort(given);
     for root in roots {
         if same_or_inside(&root.resolved, &resolved, CASE_INSENSITIVE) {
-            return RootsVerdict::Allowed { cwd: resolved, root: root.path.clone(), kind: root.kind.clone() };
+            return RootsVerdict::Allowed {
+                cwd: resolved,
+                root: root.path.clone(),
+                kind: root.kind.clone(),
+            };
         }
     }
     let shown = display(&resolved);
@@ -131,8 +157,14 @@ pub fn check_cwd(roots: &[Root], cwd: &str) -> RootsVerdict {
 /// same folder, as Windows does; a parameter rather than a `cfg` so the
 /// rule is testable on every platform.
 pub fn same_or_inside(root: &Path, child: &Path, case_insensitive: bool) -> bool {
-    let root: Vec<String> = root.components().map(|c| component_key(c, case_insensitive)).collect();
-    let child: Vec<String> = child.components().map(|c| component_key(c, case_insensitive)).collect();
+    let root: Vec<String> = root
+        .components()
+        .map(|c| component_key(c, case_insensitive))
+        .collect();
+    let child: Vec<String> = child
+        .components()
+        .map(|c| component_key(c, case_insensitive))
+        .collect();
     child.len() >= root.len() && root.iter().zip(child.iter()).all(|(a, b)| a == b)
 }
 
@@ -228,7 +260,13 @@ mod tests {
     use super::*;
 
     fn project(path: &Path) -> Root {
-        Root::new(path, RootKind::Project { id: 1, name: "app".into() })
+        Root::new(
+            path,
+            RootKind::Project {
+                id: 1,
+                name: "app".into(),
+            },
+        )
     }
 
     #[test]
@@ -236,7 +274,11 @@ mod tests {
         let text = "worktree C:/code/app\nHEAD 0123\nbranch refs/heads/main\n\nworktree C:/code/app-wt/feature\nHEAD 4567\nbranch refs/heads/feature\n\nworktree /srv/detached\nHEAD 89ab\ndetached\n";
         assert_eq!(
             parse_worktree_list(text),
-            vec![PathBuf::from("C:/code/app"), PathBuf::from("C:/code/app-wt/feature"), PathBuf::from("/srv/detached")]
+            vec![
+                PathBuf::from("C:/code/app"),
+                PathBuf::from("C:/code/app-wt/feature"),
+                PathBuf::from("/srv/detached")
+            ]
         );
         assert!(parse_worktree_list("").is_empty());
         assert!(parse_worktree_list("fatal: not a git repository").is_empty());
@@ -247,7 +289,10 @@ mod tests {
         let root = Path::new("/code/app");
         assert!(same_or_inside(root, Path::new("/code/app"), false));
         assert!(same_or_inside(root, Path::new("/code/app/src/x"), false));
-        assert!(!same_or_inside(root, Path::new("/code/app-other"), false), "a prefix of the NAME is not inside");
+        assert!(
+            !same_or_inside(root, Path::new("/code/app-other"), false),
+            "a prefix of the NAME is not inside"
+        );
         assert!(!same_or_inside(root, Path::new("/code"), false));
         assert!(!same_or_inside(root, Path::new("/code/App"), false));
         assert!(same_or_inside(root, Path::new("/code/App/SRC"), true));
@@ -260,9 +305,16 @@ mod tests {
         assert!(same_or_inside(root, Path::new(r"c:\code\app\src"), true));
         assert!(same_or_inside(root, Path::new("C:/Code/App/src"), true));
         assert!(!same_or_inside(root, Path::new(r"D:\Code\App"), true));
-        assert!(!same_or_inside(root, Path::new(r"C:\Code\Application"), true));
+        assert!(!same_or_inside(
+            root,
+            Path::new(r"C:\Code\Application"),
+            true
+        ));
         assert_eq!(display(Path::new(r"\\?\C:\Code\App")), r"C:\Code\App");
-        assert_eq!(display(Path::new(r"\\?\UNC\server\share\x")), r"\\server\share\x");
+        assert_eq!(
+            display(Path::new(r"\\?\UNC\server\share\x")),
+            r"\\server\share\x"
+        );
     }
 
     #[test]
@@ -276,11 +328,22 @@ mod tests {
             RootsVerdict::Allowed { cwd, root: r, kind } => {
                 assert_eq!(cwd, resolve_best_effort(&root.join("src")));
                 assert_eq!(r, root);
-                assert_eq!(kind, RootKind::Project { id: 1, name: "app".into() });
+                assert_eq!(
+                    kind,
+                    RootKind::Project {
+                        id: 1,
+                        name: "app".into()
+                    }
+                );
             }
             other => panic!("{other:?}"),
         }
-        assert!(check_cwd(&roots, &root.display().to_string()).allowed().is_some(), "the root itself");
+        assert!(
+            check_cwd(&roots, &root.display().to_string())
+                .allowed()
+                .is_some(),
+            "the root itself"
+        );
         if CASE_INSENSITIVE {
             let upper = text.to_uppercase();
             assert!(check_cwd(&roots, &upper).allowed().is_some(), "{upper}");
@@ -295,7 +358,12 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
         let roots = [project(&root)];
-        let reason = |text: &str| check_cwd(&roots, text).reason().map(str::to_owned).unwrap_or_else(|| panic!("{text} allowed"));
+        let reason = |text: &str| {
+            check_cwd(&roots, text)
+                .reason()
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{text} allowed"))
+        };
         assert!(reason("").contains("no working directory"));
         assert!(reason("src").contains("relative"));
         let climb = root.join("src").join("..").join("..").join("other");
@@ -306,7 +374,10 @@ mod tests {
         std::fs::write(root.join("file.txt"), "x").unwrap();
         assert!(reason(&root.join("file.txt").display().to_string()).contains("not a folder"));
         // No roots at all is its own message.
-        assert!(check_cwd(&[], &root.display().to_string()).reason().unwrap().contains("no project is open"));
+        assert!(check_cwd(&[], &root.display().to_string())
+            .reason()
+            .unwrap()
+            .contains("no project is open"));
     }
 
     #[test]
@@ -318,15 +389,35 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         let roots = [
             Root::new(&wt, RootKind::Worktree { project_id: 1 }),
-            Root::new(&extra, RootKind::Source { source_id: "abc".into() }),
+            Root::new(
+                &extra,
+                RootKind::Source {
+                    source_id: "abc".into(),
+                },
+            ),
         ];
-        assert!(matches!(check_cwd(&roots, &wt.display().to_string()), RootsVerdict::Allowed { kind: RootKind::Worktree { project_id: 1 }, .. }));
+        assert!(matches!(
+            check_cwd(&roots, &wt.display().to_string()),
+            RootsVerdict::Allowed {
+                kind: RootKind::Worktree { project_id: 1 },
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                check_cwd(&roots, &extra.join("x").display().to_string()),
+                RootsVerdict::Denied { .. }
+            ),
+            "a folder that does not exist yet is refused even under a root"
+        );
+        std::fs::create_dir_all(extra.join("x")).unwrap();
         assert!(matches!(
             check_cwd(&roots, &extra.join("x").display().to_string()),
-            RootsVerdict::Denied { .. }
-        ), "a folder that does not exist yet is refused even under a root");
-        std::fs::create_dir_all(extra.join("x")).unwrap();
-        assert!(matches!(check_cwd(&roots, &extra.join("x").display().to_string()), RootsVerdict::Allowed { kind: RootKind::Source { .. }, .. }));
+            RootsVerdict::Allowed {
+                kind: RootKind::Source { .. },
+                ..
+            }
+        ));
     }
 
     #[cfg(unix)]
@@ -340,7 +431,10 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         let roots = [project(&root)];
         let verdict = check_cwd(&roots, &root.join("link").display().to_string());
-        assert!(verdict.reason().unwrap().contains("resolves to"), "{verdict:?}");
+        assert!(
+            verdict.reason().unwrap().contains("resolves to"),
+            "{verdict:?}"
+        );
     }
 
     #[test]
@@ -353,7 +447,11 @@ mod tests {
 
     #[test]
     fn worktrees_of_a_real_repository_include_the_main_one() {
-        let git = Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+        let git = Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         if !git {
             eprintln!("skipping: git is not on PATH");
             return;
@@ -365,22 +463,45 @@ mod tests {
             let out = Command::new("git")
                 .arg("-C")
                 .arg(&repo)
-                .args(["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         run(&["init", "-q"]);
         std::fs::write(repo.join("f"), "x").unwrap();
         run(&["add", "f"]);
         run(&["commit", "-q", "-m", "one"]);
         let wt = dir.path().join("wt");
-        run(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feature"]);
+        run(&[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ]);
         let list = git_worktrees(&repo).expect("a repository lists its worktrees");
         assert_eq!(list.len(), 2, "{list:?}");
         let resolved: Vec<PathBuf> = list.iter().map(|p| resolve_best_effort(p)).collect();
-        assert!(resolved.contains(&resolve_best_effort(&repo)), "{resolved:?}");
+        assert!(
+            resolved.contains(&resolve_best_effort(&repo)),
+            "{resolved:?}"
+        );
         assert!(resolved.contains(&resolve_best_effort(&wt)), "{resolved:?}");
         assert!(git_worktrees(dir.path()).is_none(), "not a repository");
     }

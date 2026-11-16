@@ -286,7 +286,8 @@ mod platform {
         // them back for debugging a crash locally; such a dump must be
         // treated as secret. (A full-memory dump would be hundreds of
         // megabytes and mostly web view either way.)
-        let mut kind = MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules;
+        let mut kind =
+            MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules;
         if RICH_DUMPS.load(std::sync::atomic::Ordering::Relaxed) {
             kind |= MiniDumpWithDataSegs | MiniDumpWithIndirectlyReferencedMemory;
         }
