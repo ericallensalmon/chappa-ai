@@ -24,7 +24,10 @@ pub const MAX_LINE: usize = 8 * 1024;
 /// when the line carries one. Supplied per spawn, so the engine knows
 /// nothing about any particular CLI's wording.
 #[derive(Clone)]
-pub struct SessionMatcher(pub Arc<dyn Fn(&str) -> Option<String> + Send + Sync>);
+pub struct SessionMatcher(pub Arc<MatchFn>);
+
+/// The recognizer's signature: a line in, the session id out.
+pub type MatchFn = dyn Fn(&str) -> Option<String> + Send + Sync;
 
 impl SessionMatcher {
     pub fn new(f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Self {

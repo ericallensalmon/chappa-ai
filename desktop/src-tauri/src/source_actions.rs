@@ -646,7 +646,7 @@ pub fn parse_run_block(run: &Value) -> Result<RunBlock, String> {
                 .ok_or_else(|| "the job's `run.argv` must hold strings".to_owned())
         })
         .collect::<Result<_, _>>()?;
-    if argv.first().map_or(true, |w| w.trim().is_empty()) {
+    if argv.first().is_none_or(|w| w.trim().is_empty()) {
         return Err("the job's `run.argv` names no program".into());
     }
     let cwd = run["cwd"]

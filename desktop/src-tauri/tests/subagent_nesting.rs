@@ -246,7 +246,7 @@ fn close_on_exit_closes_after_exit_with_reason_close_on_exit() {
     // and broadcasts `term://closed {reason: close_on_exit}`.
     let closed_event = wait_until(|| {
         let e = closed.events.lock().unwrap();
-        (e.len() >= 1).then(|| e[0].clone())
+        (!e.is_empty()).then(|| e[0].clone())
     });
     assert_eq!(closed_event.term_id, id);
     assert_eq!(closed_event.reason, "close_on_exit");

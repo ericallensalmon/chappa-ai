@@ -159,6 +159,9 @@ impl ProcessOverride {
 }
 
 /// The two on-disk shapes a `process_overrides` value can take.
+// Only ever a short-lived value while one record is read, so the size gap
+// between the variants costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ProcessOverrideRepr {

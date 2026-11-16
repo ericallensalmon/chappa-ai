@@ -158,7 +158,7 @@ impl CommandLine {
     pub fn is_blank(&self) -> bool {
         match self {
             CommandLine::Shell(line) => line.trim().is_empty(),
-            CommandLine::Argv(words) => words.first().map_or(true, |w| w.trim().is_empty()),
+            CommandLine::Argv(words) => words.first().is_none_or(|w| w.trim().is_empty()),
         }
     }
 
@@ -321,6 +321,9 @@ impl ProjectYml {
     }
 
     /// Parse `text`. Blank/comment-only → empty config (0.6.4).
+    // Not `FromStr`: this returns an Option, and `parse` below carries the
+    // error for callers that want it.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Option<ProjectYml> {
         Self::parse(text).ok()
     }
@@ -499,6 +502,7 @@ impl ProcessDef {
     /// - `None` → `Ok(None)` (caller uses the project root itself);
     /// - relative → `root.join(dir)`, must resolve inside `root`;
     /// - absolute → kept as-is, must resolve inside `root`.
+    ///
     /// Symlink escapes are rejected. `Err` marks THIS process invalid — the
     /// config still loads.
     pub fn resolve_working_dir(&self, project_root: &Path) -> Result<Option<PathBuf>, String> {

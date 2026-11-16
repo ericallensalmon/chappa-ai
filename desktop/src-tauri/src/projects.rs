@@ -335,7 +335,7 @@ impl Projects {
     pub fn shutdown(&self, registry: &Registry) {
         let mut inner = self.inner.lock().unwrap();
         inner.shutting_down = true;
-        for (_, runtime) in inner.runtimes.iter_mut() {
+        for runtime in inner.runtimes.values_mut() {
             for proc in runtime.processes.values_mut() {
                 proc.generation += 1; // cancels any scheduled respawn
                 if let Some(id) = proc.term_id.take() {
@@ -543,6 +543,10 @@ pub(crate) fn execution_command(command: &str, settings: &Settings) -> (String, 
     }
 }
 
+/// A resolved command: the program, its arguments, and the extra environment
+/// it runs with.
+pub(crate) type ProcessCommand = (String, Vec<String>, Vec<(String, String)>);
+
 /// Program, args and extra env for one project or workspace command. A list
 /// command runs its first word directly with the rest as arguments: no
 /// execution profile, no quote indirection, nothing re-parsed. A shell line
@@ -551,7 +555,7 @@ pub(crate) fn execution_command(command: &str, settings: &Settings) -> (String, 
 pub(crate) fn process_command(
     command: &CommandLine,
     settings: &Settings,
-) -> Result<(String, Vec<String>, Vec<(String, String)>), String> {
+) -> Result<ProcessCommand, String> {
     if let Some(words) = command.argv() {
         let (program, args) = words
             .split_first()
@@ -1100,6 +1104,12 @@ pub struct PickerGate(AtomicBool);
 
 /// Held for the lifetime of one picker; dropping it reopens the gate.
 pub struct PickerSlot<'a>(&'a PickerGate);
+
+impl Default for PickerGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PickerGate {
     pub const fn new() -> Self {
@@ -3299,8 +3309,8 @@ impl ProjectProcessDto {
                 .iter()
                 .map(|(k, v)| (k.clone(), stack_core::credentials::mask_env(k, v)))
                 .collect(),
-            favorite: record.map_or(false, |r| r.favorite),
-            disable_auto_rename: record.map_or(false, |r| r.disable_auto_rename),
+            favorite: record.is_some_and(|r| r.favorite),
+            disable_auto_rename: record.is_some_and(|r| r.disable_auto_rename),
             record_id: record.and_then(|r| r.record_id.clone()),
             last_run: record.and_then(|r| r.last_run.as_ref().map(Run::head)),
         }
@@ -3328,10 +3338,11 @@ mod tests {
     use project_model::settings::ShellProfile;
 
     fn settings_with(exec: &str, profiles: Vec<ShellProfile>) -> Settings {
-        let mut s = Settings::default();
-        s.default_exec_profile = exec.to_owned();
-        s.shell_profiles = profiles;
-        s
+        Settings {
+            default_exec_profile: exec.to_owned(),
+            shell_profiles: profiles,
+            ..Settings::default()
+        }
     }
 
     fn profile(name: &str, command: &str, enabled: bool) -> ShellProfile {

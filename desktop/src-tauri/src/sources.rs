@@ -868,7 +868,7 @@ impl Sources {
             || inner
                 .sources
                 .get(key)
-                .map_or(true, |s| s.cancelled(generation))
+                .is_none_or(|s| s.cancelled(generation))
     }
 
     /// Mark the source down with `error`; payloads stay.
@@ -929,7 +929,7 @@ impl Sources {
                 || guard
                     .sources
                     .get(key)
-                    .map_or(true, |s| s.cancelled(generation))
+                    .is_none_or(|s| s.cancelled(generation))
             {
                 return true;
             }

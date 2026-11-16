@@ -179,9 +179,10 @@ impl ToolType {
 
 /// Where the agent CLI runs. Internally tagged on `kind` so the UI's
 /// Host/Docker segmented picker maps one-to-one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Runtime {
+    #[default]
     Host,
     DockerExec {
         container: String,
@@ -200,12 +201,6 @@ pub enum Runtime {
 
 fn default_true() -> bool {
     true
-}
-
-impl Default for Runtime {
-    fn default() -> Self {
-        Runtime::Host
-    }
 }
 
 impl Runtime {

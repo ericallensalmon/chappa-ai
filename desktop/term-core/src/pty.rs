@@ -115,7 +115,7 @@ impl PtySession {
     pub fn take_reader(&mut self) -> Result<Box<dyn Read + Send>> {
         self.reader
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "pty reader already taken"))
+            .ok_or_else(|| io::Error::other("pty reader already taken"))
     }
 
     /// A writer usable from any thread; all returned handles share the one
@@ -327,6 +327,13 @@ fn guard_batch_args(spec: &PtySpec) -> Result<()> {
     Ok(())
 }
 
+/// portable-pty reports errors as anyhow; carry the message (including any
+/// underlying OS error text) into a plain io::Error. This stays generic so
+/// the crate never has to depend on anyhow directly.
+fn to_io_err<E: std::fmt::Display>(err: E) -> io::Error {
+    io::Error::other(format!("{err:#}"))
+}
+
 #[cfg(test)]
 mod batch_tests {
     use super::*;
@@ -436,11 +443,4 @@ mod batch_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// portable-pty reports errors as anyhow; carry the message (including any
-/// underlying OS error text) into a plain io::Error. This stays generic so
-/// the crate never has to depend on anyhow directly.
-fn to_io_err<E: std::fmt::Display>(err: E) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, format!("{err:#}"))
 }

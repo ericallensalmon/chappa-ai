@@ -230,7 +230,7 @@ fn pinned<'a>(
     id: u32,
     uuid: Option<&str>,
 ) -> Option<&'a Liveness> {
-    live.get(&id).filter(|l| uuid.map_or(true, |u| l.uuid == u))
+    live.get(&id).filter(|l| uuid.is_none_or(|u| l.uuid == u))
 }
 
 // ---- timer model -------------------------------------------------------------
@@ -922,7 +922,7 @@ fn condition_met(
             !rows.is_empty()
                 && rows
                     .iter()
-                    .all(|(_, l)| l.map_or(true, |l| !l.child_alive || is_idle(l, now, idle_ms)))
+                    .all(|(_, l)| l.is_none_or(|l| !l.child_alive || is_idle(l, now, idle_ms)))
         }
         TimerKind::Delay => false,
     }

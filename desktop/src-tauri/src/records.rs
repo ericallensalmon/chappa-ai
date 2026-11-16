@@ -1821,6 +1821,9 @@ pub async fn start_record(
 /// a [`ResumeFailure`] object — `kind: no_session` means fall through to a
 /// plain start, `kind: resume_rejected` carries the provider's text. Async +
 /// `spawn_blocking`: the start is watched through the ready gate.
+// Tauri injects each managed state and each IPC field as its own argument;
+// grouping the fields would change what the webview sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn resume_record(
     app: AppHandle,

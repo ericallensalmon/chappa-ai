@@ -818,9 +818,10 @@ impl Registry {
             if session.resumed_from.is_none() {
                 session.resumed_from = entry.session.as_ref().and_then(|s| s.resumed_from.clone());
             }
-            let changed = entry.session.as_ref().map_or(true, |s| {
-                s.session_id != session.session_id || s.source != session.source
-            });
+            let changed = entry
+                .session
+                .as_ref()
+                .is_none_or(|s| s.session_id != session.session_id || s.source != session.source);
             entry.session = Some(session.clone());
             let binding = entry.record.clone().map(|record_id| RecordBinding {
                 record_id,
@@ -865,7 +866,7 @@ impl Registry {
             let changed = entry
                 .summary
                 .as_ref()
-                .map_or(true, |(t, s)| *t != text || *s != source);
+                .is_none_or(|(t, s)| *t != text || *s != source);
             entry.summary = Some((text.clone(), source));
             let binding = entry.record.clone().map(|record_id| RecordBinding {
                 record_id,
@@ -1804,6 +1805,8 @@ pub const OSC52_MAX_BYTES: usize = 100 * 1024;
 /// it later served is now gated by the frontend (see the `Clipboard` arm). The
 /// parameter is left in place deliberately: `tests/pump.rs` pins the 4-arg
 /// `create_terminal(cfg, sink, None, name)` shape.
+// Everything the pump thread owns for the terminal's life, moved in once.
+#[allow(clippy::too_many_arguments)]
 fn spawn_pump(
     term_id: TermId,
     rx: Receiver<TermEvent>,

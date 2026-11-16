@@ -234,13 +234,19 @@ macro_rules! kebab_str {
 /// the whole timeout, then report a timeout) to simulate a wedged daemon.
 #[derive(Default)]
 pub struct FakeDocker {
-    rules: Mutex<Vec<(Vec<String>, Result<DockerOutput, String>)>>,
+    rules: Mutex<Vec<FakeRule>>,
     calls: Mutex<Vec<Vec<String>>>,
     hang: Mutex<bool>,
     /// Invoked before every call (tests assert invariants such as "the host
     /// client is still alive while the container-side kill runs").
-    on_call: Mutex<Option<Box<dyn Fn(&[String]) + Send + Sync>>>,
+    on_call: Mutex<Option<Box<CallHook>>>,
 }
+
+/// An argv prefix and what the fake answers to a call starting with it.
+type FakeRule = (Vec<String>, Result<DockerOutput, String>);
+
+/// Runs with the argv of every call the fake receives.
+type CallHook = dyn Fn(&[String]) + Send + Sync;
 
 impl FakeDocker {
     pub fn new() -> Arc<Self> {
@@ -826,8 +832,7 @@ pub fn deliver_prompt_when_ready(
         if first_output_ms.is_none() && view.has_output {
             first_output_ms = Some(epoch_ms());
         }
-        if view.has_output && screen_checked_at.map_or(true, |t| t.elapsed() >= SCREEN_CHECK_EVERY)
-        {
+        if view.has_output && screen_checked_at.is_none_or(|t| t.elapsed() >= SCREEN_CHECK_EVERY) {
             screen_checked_at = Some(Instant::now());
             question = crate::startup_questions::detect_startup_question(&handle.dump_text(0));
         }
@@ -1585,7 +1590,7 @@ pub fn reap_orphans(
     registry: &Registry,
     tools: &AgentToolsState,
     containers: Option<&HashSet<String>>,
-    emit_notify: Option<&(dyn Fn(&str, usize) + Send + Sync)>,
+    emit_notify: Option<&ReapNotify>,
 ) -> Vec<ReapResult> {
     let docker = registry.docker();
     // Bind the Arc before locking: `spawn_guard()` hands back a clone, so
@@ -1694,7 +1699,7 @@ pub fn spawn_bridge_probe(
     settings: SettingsState,
     tools: AgentToolsState,
     emit: Arc<dyn Fn(BridgeEvent) + Send + Sync>,
-    reap_emit: Arc<dyn Fn(&str, usize) + Send + Sync>,
+    reap_emit: Arc<ReapNotify>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let waker = registry.bridge_waker();
@@ -2642,10 +2647,13 @@ pub fn app_bridge_emitter(app: AppHandle) -> Arc<dyn Fn(BridgeEvent) + Send + Sy
     })
 }
 
+/// Told `(container, count)` once per container a sweep reaped anything in.
+pub type ReapNotify = dyn Fn(&str, usize) + Send + Sync;
+
 /// The `agent://reap` emitter for the real app: ONE notification
 /// per container a sweep reaped anything in, carrying the reaped count. The
 /// frontend records it into the notification center.
-pub fn app_reap_emitter(app: AppHandle) -> Arc<dyn Fn(&str, usize) + Send + Sync> {
+pub fn app_reap_emitter(app: AppHandle) -> Arc<ReapNotify> {
     Arc::new(move |container: &str, count: usize| {
         let _ = app.emit(
             "agent://reap",
@@ -2661,6 +2669,9 @@ pub fn app_reap_emitter(app: AppHandle) -> Arc<dyn Fn(&str, usize) + Send + Sync
 /// CLI calls (`sh` probe, inspect, stats — 2 s timeout each) and a `prompt`
 /// can wait on the ready gate; a sync command would run all of that on the
 /// MAIN thread and freeze the window (the `pick_directory` lesson).
+// Tauri injects each managed state and each IPC field as its own argument;
+// grouping the fields would change what the webview sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn spawn_agent(
     app: AppHandle,

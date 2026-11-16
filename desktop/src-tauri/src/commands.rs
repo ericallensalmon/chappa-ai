@@ -305,6 +305,9 @@ fn handle_for(registry: &Registry, id: TermId) -> Result<term_core::actor::TermH
 /// section, else in the workspace bucket. A terminal running an explicit
 /// command (the harness, a one-off) has no record: its restart recipe is
 /// not a shell's.
+// Tauri injects each managed state and each IPC field as its own argument;
+// grouping the fields would change what the webview sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn create_terminal(
     app: AppHandle,
@@ -575,8 +578,7 @@ pub fn copy_selection(
 ) -> Result<Option<String>, String> {
     let handle = handle_for(&registry, id)?;
     let text = handle.copy_selection();
-    if skip_whitespace_only.unwrap_or(false)
-        && text.as_deref().map_or(true, |t| t.trim().is_empty())
+    if skip_whitespace_only.unwrap_or(false) && text.as_deref().is_none_or(|t| t.trim().is_empty())
     {
         return Ok(None);
     }
@@ -733,6 +735,9 @@ pub fn attach_terminal(
 ///
 /// `profile` picks one of the settings shell profiles instead — the
 /// rail's new-terminal menu passes the name of an enabled profile.
+// Tauri injects each managed state and each IPC field as its own argument;
+// grouping the fields would change what the webview sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn spawn_shell(
     app: AppHandle,
@@ -783,9 +788,10 @@ mod tests {
     }
 
     fn settings_with(profiles: Vec<ShellProfile>) -> Settings {
-        let mut s = Settings::default();
-        s.shell_profiles = profiles;
-        s
+        Settings {
+            shell_profiles: profiles,
+            ..Settings::default()
+        }
     }
 
     #[test]

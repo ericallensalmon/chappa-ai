@@ -5,35 +5,194 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes the older run moot.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every desktop integration target is its own binary linking the whole
+  # webview stack; full debug info makes those links slow and memory-hungry.
+  # Line tables keep panic backtraces readable.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256_LINUX_X64: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  GITLEAKS_SHA256_WINDOWS_X64: d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e
+
 jobs:
-  engine:
-    name: engine (${{ matrix.os }})
+  rust:
+    name: rust (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Install the webview build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config file \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      # The source tests and the script-driver tests start `node`; without it
+      # they skip.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # The secret-scan tests drive the real gitleaks when it is on PATH and
+      # skip otherwise.
+      - name: Install gitleaks
+        run: |
+          dir="$RUNNER_TEMP/gitleaks-bin"
+          mkdir -p "$dir"
+          cd "$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then
+            archive="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip"
+            sum="$GITLEAKS_SHA256_WINDOWS_X64"
+          else
+            archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            sum="$GITLEAKS_SHA256_LINUX_X64"
+          fi
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "$sum  $archive" | sha256sum -c -
+          if [ "$RUNNER_OS" = Windows ]; then
+            unzip -q -o "$archive" gitleaks.exe -d "$dir"
+          else
+            tar -xzf "$archive" -C "$dir" gitleaks
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
+
+      # Tests that need git, node, gitleaks or a Linux docker daemon skip
+      # when the tool is missing. Fail here instead, so a changed runner image
+      # can't turn those tests into silent passes.
+      - name: Check the tools the tests rely on
+        run: |
+          git --version
+          node --version
+          gitleaks version | grep -Fx "$GITLEAKS_VERSION"
+          if [ "$RUNNER_OS" = Linux ]; then
+            test "$(docker info --format '{{.OSType}}')" = linux
+            docker compose version
+          fi
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: desktop
-      # These crates are headless — no webview libs needed.
-      # src-tauri needs the platform webview libraries; it is exercised locally, not in CI.
-      - run: cargo test -p term-core -p project-model -p chappa-ai-mcp
+
+      - name: cargo test
+        id: test
+        working-directory: desktop
+        # The real-docker round trips need a daemon running Linux containers;
+        # the Windows runner's daemon runs Windows containers.
+        env:
+          CHAPPA_TEST_DOCKER: ${{ runner.os == 'Linux' && '1' || '0' }}
+        run: cargo test --workspace --no-fail-fast
+
+      # Each OS compiles code the other doesn't (ConPTY and Win32 process
+      # handling, Unix ptys and sockets), so clippy runs on both. It also
+      # runs when tests failed, so one push reports both.
+      - name: cargo clippy
+        if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
+        working-directory: desktop
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
         working-directory: desktop
 
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: desktop/ui/package-lock.json
       - run: npm ci
         working-directory: desktop/ui
+      - run: npx tsc --noEmit
+        working-directory: desktop/ui
       - run: npm test
         working-directory: desktop/ui
+      # The bundled sources use only the Node standard library: no install.
+      - run: npm run test:sources
+        working-directory: desktop
+
+  # A second net only: the local pre-push scan is the gate, because by the
+  # time this runs a leak is already public. It must not be silenceable from
+  # inside the repository, so it reads no config or ignore file from the
+  # checkout: the rules are gitleaks' defaults from a file written outside
+  # it, and the ignore path is an empty directory.
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          dir="$RUNNER_TEMP/gitleaks-bin"
+          mkdir -p "$dir"
+          cd "$RUNNER_TEMP"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "$GITLEAKS_SHA256_LINUX_X64  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$dir" gitleaks
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: Write the default-rules config and an empty ignore directory
+        run: |
+          printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
+          mkdir -p "$RUNNER_TEMP/gitleaks-ignore"
+
+      - name: Scan the full history
+        run: >
+          gitleaks git --no-banner --redact --exit-code 1
+          --config "$RUNNER_TEMP/gitleaks.toml"
+          --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks-ignore"
+          .
+
+      - name: Scan the checkout
+        if: ${{ !cancelled() }}
+        run: >
+          gitleaks dir --no-banner --redact --exit-code 1
+          --config "$RUNNER_TEMP/gitleaks.toml"
+          --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks-ignore"
+          .

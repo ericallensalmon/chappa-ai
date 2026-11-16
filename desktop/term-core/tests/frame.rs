@@ -724,7 +724,7 @@ fn bench_encode_full_200x50() {
     println!(
         "bench_encode_full_200x50: {per_frame_us:.1} µs/frame, {} bytes ({:.0} MiB/s)",
         buf.len(),
-        buf.len() as f64 / per_frame_us as f64
+        buf.len() as f64 / per_frame_us
     );
 }
 
@@ -736,7 +736,11 @@ fn build_200x50() -> FrameData {
             col_start: 0,
             cells: (0..200)
                 .map(|c| Cell {
-                    ch: if (r as usize + c) % 2 == 0 { 'a' } else { ' ' },
+                    ch: if (r as usize + c).is_multiple_of(2) {
+                        'a'
+                    } else {
+                        ' '
+                    },
                     fg: Rgba::new((c % 251) as u8, 0x80, 0x40, 0xFF),
                     bg: Rgba::new(0x18, 0x18, 0x18, 0xFF),
                     flags: if c % 7 == 0 {

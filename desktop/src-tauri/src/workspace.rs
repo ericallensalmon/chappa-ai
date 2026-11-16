@@ -398,7 +398,8 @@ fn make_exit_handler(
                 .lifecycle
                 .on(ProcessEvent::Exited { success }, now_ms());
             emit_status(&app, &name, status, code, proc.term_id);
-            let plan = if proc.def.auto_restart
+
+            if proc.def.auto_restart
                 && proc.lifecycle.status() != ProcessStatus::Stopped
                 && proc.term_id.is_some()
             {
@@ -407,8 +408,7 @@ fn make_exit_handler(
                 Some((delay, proc.generation))
             } else {
                 None
-            };
-            plan
+            }
         };
         if let Some((delay, generation)) = restart_plan {
             let ws = ws.clone();
@@ -824,14 +824,15 @@ mod tests {
     use project_model::settings::ShellProfile;
 
     fn settings_with(exec: &str) -> Settings {
-        let mut s = Settings::default();
-        s.default_exec_profile = exec.to_owned();
-        s.shell_profiles = vec![ShellProfile {
-            name: exec.to_owned(),
-            command: "sh".to_owned(),
-            enabled: true,
-        }];
-        s
+        Settings {
+            default_exec_profile: exec.to_owned(),
+            shell_profiles: vec![ShellProfile {
+                name: exec.to_owned(),
+                command: "sh".to_owned(),
+                enabled: true,
+            }],
+            ..Settings::default()
+        }
     }
 
     /// The workspace working-dir rule at SPAWN time (independent of the store

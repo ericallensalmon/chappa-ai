@@ -2066,9 +2066,9 @@ impl Coordination {
                 None => Default::default(),
             };
             todos.retain(|t| {
-                q.is_blocked.map_or(true, |b| t.is_blocked == b)
+                q.is_blocked.is_none_or(|b| t.is_blocked == b)
                     && (q.tags.is_empty() || q.tags.iter().any(|tag| t.tags.contains(tag)))
-                    && needle.as_deref().map_or(true, |n| {
+                    && needle.as_deref().is_none_or(|n| {
                         t.title.to_lowercase().contains(n)
                             || t.body.to_lowercase().contains(n)
                             || comment_hits.contains(&t.todo_id)

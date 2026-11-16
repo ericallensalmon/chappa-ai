@@ -1350,13 +1350,10 @@ mod tests {
                 .path,
             "items[1].actions[0]"
         );
-        assert!(
-            find_action(&payload, Some("ABC-1"), "approve")
-                .unwrap()
-                .action
-                .is_unconfirmable_mutation()
-                == false
-        );
+        assert!(!find_action(&payload, Some("ABC-1"), "approve")
+            .unwrap()
+            .action
+            .is_unconfirmable_mutation());
         assert!(find_action(&payload, Some("ABC-2"), "approve")
             .unwrap()
             .action

@@ -805,9 +805,11 @@ mod tests {
     #[test]
     fn an_incomplete_scan_refuses_under_either_policy_until_launched_anyway_with_a_note() {
         let (_dir, root) = tree();
-        let mut settings = Settings::default();
-        settings.secret_scan_before_agents = Some(true);
-        settings.secret_scan_program = root.join("no-such-gitleaks").display().to_string();
+        let mut settings = Settings {
+            secret_scan_before_agents: Some(true),
+            secret_scan_program: root.join("no-such-gitleaks").display().to_string(),
+            ..Settings::default()
+        };
         for policy in [SecretScanPolicy::BlockAgents, SecretScanPolicy::Warn] {
             settings.secret_scan_policy = policy;
             let err = gate_launch(&settings, None, &root, &root, None).unwrap_err();
@@ -910,8 +912,10 @@ mod tests {
     #[test]
     fn decide_skips_when_off_and_reports_a_missing_scanner_when_forced_on() {
         let (_dir, root) = tree();
-        let mut settings = Settings::default();
-        settings.secret_scan_before_agents = Some(false);
+        let mut settings = Settings {
+            secret_scan_before_agents: Some(false),
+            ..Settings::default()
+        };
         assert_eq!(decide(&settings, None, &root, &root), GateOutcome::Skipped);
         // Forced on with a program that does not exist: the setting names a
         // path, nothing is found there, and the scan is incomplete, saying so.

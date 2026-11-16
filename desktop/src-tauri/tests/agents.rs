@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use app_lib::agent_tools::{AgentTool, AgentToolsState, Runtime, ToolType};
 use app_lib::agents::{
-    reap_orphans, AgentMeta, Bridge, CloseVerification, FakeDocker, NsPid, SpawnAgentRequest,
-    SpawnContext, INSPECT_FORMAT, ORPHAN_SCAN_SCRIPT,
+    reap_orphans, AgentMeta, Bridge, CloseVerification, FakeDocker, NsPid, ReapNotify,
+    SpawnAgentRequest, SpawnContext, INSPECT_FORMAT, ORPHAN_SCAN_SCRIPT,
 };
 use app_lib::control_http::{self, ControlState};
 use app_lib::projects::Projects;
@@ -1323,7 +1323,7 @@ fn sweep_reaps_orphans_one_scan_per_container_and_skips_a_down_one() {
     );
 
     let reaped_notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let emit: Arc<dyn Fn(&str, usize) + Send + Sync> = {
+    let emit: Arc<ReapNotify> = {
         let log = reaped_notifications.clone();
         Arc::new(move |container: &str, count: usize| {
             log.lock().unwrap().push((container.to_owned(), count))

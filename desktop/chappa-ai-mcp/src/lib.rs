@@ -176,11 +176,12 @@ impl Client {
 
     /// `CHAPPA_AI_CONTROL_URL` if set; otherwise the endpoint file
     /// (`CHAPPA_AI_CONTROL_ENDPOINT_FILE`, else `control_endpoint` beside the
-    /// token file). `CHAPPA_AI_CONTROL_TOKEN` > `CHAPPA_AI_CONTROL_TOKEN_FILE`
-    /// > the platform app-config token path. Identity from
-    /// `CHAPPA_AI_PROCESS_ID` / `CHAPPA_AI_PROJECT_ID`, read from THIS
-    /// process's environment — the agent that spawned us inherits them from
-    /// the app's spawn_agent, so the app can attribute our writes.
+    /// token file). Token: `CHAPPA_AI_CONTROL_TOKEN`, else
+    /// `CHAPPA_AI_CONTROL_TOKEN_FILE`, else the platform app-config token
+    /// path. Identity from `CHAPPA_AI_PROCESS_ID` / `CHAPPA_AI_PROJECT_ID`,
+    /// read from THIS process's environment — the agent that spawned us
+    /// inherits them from the app's spawn_agent, so the app can attribute
+    /// our writes.
     pub fn from_env() -> Self {
         let actor = std::env::var("CHAPPA_AI_PROCESS_ID")
             .ok()

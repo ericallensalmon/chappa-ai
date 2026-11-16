@@ -286,7 +286,7 @@ fn node_available() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_or(false, |s| s.success())
+        .is_ok_and(|s| s.success())
 }
 
 fn spawn_fixture(addr: &str, token: &str) -> Child {

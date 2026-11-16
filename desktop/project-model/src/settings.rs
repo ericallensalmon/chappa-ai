@@ -935,11 +935,13 @@ mod tests {
         let path = dir.path().join("appconfig").join("settings.json");
         let mut store = SettingsStore::new(path.clone());
 
-        let mut wanted = Settings::default();
-        wanted.scroll_wheel_speed = 250;
-        wanted.font_size = 2;
-        wanted.line_height = 5.0;
-        wanted.copy_on_select = true;
+        let wanted = Settings {
+            scroll_wheel_speed: 250,
+            font_size: 2,
+            line_height: 5.0,
+            copy_on_select: true,
+            ..Settings::default()
+        };
         let clamped = store.set(wanted).unwrap();
         assert_eq!(clamped.scroll_wheel_speed, 6);
         assert_eq!(clamped.font_size, 10);
@@ -956,8 +958,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let mut store = SettingsStore::new(path.clone());
-        let mut good = Settings::default();
-        good.font_size = 16;
+        let good = Settings {
+            font_size: 16,
+            ..Settings::default()
+        };
         store.set(good).unwrap();
 
         // Simulate a crash mid-write: the tmp file exists with the NEW
@@ -1129,8 +1133,10 @@ mod tests {
             assert_eq!(s.secret_scan_before_agents, enabled);
             assert_eq!(s.secret_scan_policy, policy);
         }
-        let mut s = Settings::default();
-        s.secret_scan_program = "  C:\\tools\\gitleaks.exe \n".into();
+        let mut s = Settings {
+            secret_scan_program: "  C:\\tools\\gitleaks.exe \n".into(),
+            ..Settings::default()
+        };
         s.normalize();
         assert_eq!(s.secret_scan_program, "C:\\tools\\gitleaks.exe");
         assert_eq!(defaults.secret_scan_config, "");
@@ -1178,19 +1184,21 @@ mod tests {
 
     #[test]
     fn enabled_profile_lookup_respects_the_toggle() {
-        let mut s = Settings::default();
-        s.shell_profiles = vec![
-            ShellProfile {
-                name: "On".into(),
-                command: "a b".into(),
-                enabled: true,
-            },
-            ShellProfile {
-                name: "Off".into(),
-                command: "c".into(),
-                enabled: false,
-            },
-        ];
+        let s = Settings {
+            shell_profiles: vec![
+                ShellProfile {
+                    name: "On".into(),
+                    command: "a b".into(),
+                    enabled: true,
+                },
+                ShellProfile {
+                    name: "Off".into(),
+                    command: "c".into(),
+                    enabled: false,
+                },
+            ],
+            ..Settings::default()
+        };
         assert!(s.enabled_profile("On").is_some());
         assert!(
             s.enabled_profile("Off").is_none(),
