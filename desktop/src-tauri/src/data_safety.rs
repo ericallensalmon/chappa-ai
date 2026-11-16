@@ -1,14 +1,20 @@
-//! Data safety, enforced by the app: agents are kept away from a database
-//! that may hold real data.
+//! A stack's verdicts, enforced by the app: agents are kept away from a
+//! database that may hold real data, and from folders where a secret scan
+//! found possible credentials (or could not finish).
 //!
-//! A stack source checks its databases and says what it found in the
-//! `dataSafety` block of its Environment payload (the block is documented
-//! in `desktop/sources/README.md`). The source owns detection; the app owns
-//! enforcement, here:
+//! A stack source checks its databases and its worktrees and says what it
+//! found in two blocks of its Environment payload, `dataSafety` and
+//! `secretScan` (both documented in `desktop/sources/README.md`). The
+//! source owns detection; the app owns enforcement, here, the same way for
+//! both ([`BlockKind`] says which check a block is; every refusal and
+//! reason names it):
 //!
-//! - **What blocks.** A block blocks agents when it says `blocksAgents`,
-//!   and also when its `state` is `error` whatever it says (a check that
-//!   cannot be judged fails closed). A source that sent a block and is now
+//! - **What blocks.** A block blocks agents when it says `blocksAgents`.
+//!   A data-safety block also blocks when its `state` is `error` whatever
+//!   it says (a check that cannot be judged fails closed); a secret-scan
+//!   block in `error` blocks only when it says so, since the source already
+//!   decided where an unfinished scan matters (the folders agents read). A
+//!   garbled block of either kind fails closed. A source that sent a block and is now
 //!   down, unreachable, untrusted or failing its Environment poll keeps its
 //!   LAST block in force ("last known: …, source unavailable") until it
 //!   answers again.
@@ -60,12 +66,46 @@ pub const WATCH_EVERY: Duration = Duration::from_secs(1);
 /// The view whose payload carries the block.
 pub const ENVIRONMENT_VIEW: &str = "environment";
 
-/// One finding as the block counts it (never a value).
+/// Which check a block is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockKind {
+    /// `dataSafety`: the data of a component may be real.
+    #[default]
+    DataSafety,
+    /// `secretScan`: possible secrets in what agents would read.
+    SecretScan,
+}
+
+impl BlockKind {
+    /// The payload field the block is sent in.
+    pub fn wire_key(self) -> &'static str {
+        match self {
+            BlockKind::DataSafety => "dataSafety",
+            BlockKind::SecretScan => "secretScan",
+        }
+    }
+
+    /// The check, in words: what a refusal says blocked.
+    pub fn check(self) -> &'static str {
+        match self {
+            BlockKind::DataSafety => "data safety",
+            BlockKind::SecretScan => "secret scan",
+        }
+    }
+}
+
+/// One finding as the block counts it (never a value). A secret-scan
+/// finding also names its file and line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireFinding {
     pub rule: String,
     pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
 }
 
 /// One component's reason line.
@@ -85,10 +125,14 @@ pub struct WireBound {
     pub folders: Vec<PathBuf>,
 }
 
-/// A `dataSafety` block as a source sent it, read leniently.
+/// A `dataSafety` or `secretScan` block as a source sent it, read leniently.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireBlock {
+    /// Which block it is (saved verdicts from before secret scans read as
+    /// data safety).
+    #[serde(default)]
+    pub kind: BlockKind,
     pub instance: String,
     pub state: String,
     pub blocks_agents: bool,
@@ -115,7 +159,20 @@ fn abs_path(v: &Value) -> Option<PathBuf> {
 /// enforce. A block whose `state` is missing or not a string reads as
 /// `error`, so a garbled block fails closed.
 pub fn parse_block(payload: &Value) -> Option<WireBlock> {
-    let b = payload.get("dataSafety").filter(|b| b.is_object())?;
+    parse_block_of(payload, BlockKind::DataSafety)
+}
+
+/// The `secretScan` block in an Environment payload, read like
+/// [`parse_block`]; a garbled one (no `state`) fails closed too.
+pub fn parse_secret_block(payload: &Value) -> Option<WireBlock> {
+    parse_block_of(payload, BlockKind::SecretScan)
+}
+
+/// The block of `kind` in an Environment payload.
+pub fn parse_block_of(payload: &Value, kind: BlockKind) -> Option<WireBlock> {
+    let b = payload.get(kind.wire_key()).filter(|b| b.is_object())?;
+    let state = str_of(b, "state");
+    let garbled = state.is_none();
     let list = |key: &str| b.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
     let bound = b.get("bound").filter(|v| v.is_object()).and_then(|v| {
         let key = str_of(v, "key")?;
@@ -123,12 +180,20 @@ pub fn parse_block(payload: &Value) -> Option<WireBlock> {
         Some(WireBound { source: str_of(v, "source"), key, folders })
     });
     Some(WireBlock {
+        kind,
         instance: str_of(b, "instance").unwrap_or_else(|| "the stack".to_owned()),
-        state: str_of(b, "state").unwrap_or_else(|| "error".to_owned()),
-        blocks_agents: b.get("blocksAgents").and_then(Value::as_bool).unwrap_or(false),
+        state: state.unwrap_or_else(|| "error".to_owned()),
+        blocks_agents: b.get("blocksAgents").and_then(Value::as_bool).unwrap_or(false) || (garbled && kind == BlockKind::SecretScan),
         findings: list("findings")
             .iter()
-            .filter_map(|f| Some(WireFinding { rule: str_of(f, "rule")?, count: f.get("count").and_then(Value::as_u64).unwrap_or(1) }))
+            .filter_map(|f| {
+                Some(WireFinding {
+                    rule: str_of(f, "rule")?,
+                    count: f.get("count").and_then(Value::as_u64).unwrap_or(1),
+                    file: str_of(f, "file"),
+                    line: f.get("line").and_then(Value::as_u64),
+                })
+            })
             .collect(),
         unscanned: list("unscanned").iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
         reasons: list("reasons")
@@ -142,10 +207,13 @@ pub fn parse_block(payload: &Value) -> Option<WireBlock> {
 }
 
 impl WireBlock {
-    /// Whether this block keeps agents out: the source says so, or its
-    /// check cannot be judged (failing closed).
+    /// Whether this block keeps agents out: the source says so, or (data
+    /// safety) its check cannot be judged, failing closed.
     pub fn enforces(&self) -> bool {
-        self.blocks_agents || self.state == "error"
+        match self.kind {
+            BlockKind::DataSafety => self.blocks_agents || self.state == "error",
+            BlockKind::SecretScan => self.blocks_agents,
+        }
     }
 
     /// What the block says, in one phrase: the source's reason lines, else
@@ -153,6 +221,21 @@ impl WireBlock {
     pub fn summary(&self) -> String {
         if !self.reasons.is_empty() {
             return self.reasons.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("; ");
+        }
+        if self.kind == BlockKind::SecretScan && !self.findings.is_empty() {
+            let n = self.findings.len();
+            let places: Vec<String> = self
+                .findings
+                .iter()
+                .take(5)
+                .map(|f| match (&f.file, f.line) {
+                    (Some(file), Some(l)) => format!("{file}:{l} ({})", f.rule),
+                    (Some(file), None) => format!("{file} ({})", f.rule),
+                    _ => f.rule.clone(),
+                })
+                .collect();
+            let more = if n > 5 { format!(", and {} more", n - 5) } else { String::new() };
+            return format!("{n} possible secret{} ({}{more})", if n == 1 { "" } else { "s" }, places.join(", "));
         }
         if !self.findings.is_empty() {
             let mut per_rule: Vec<(String, u64)> = Vec::new();
@@ -165,6 +248,13 @@ impl WireBlock {
             let total: u64 = per_rule.iter().map(|(_, n)| n).sum();
             let items: Vec<String> = per_rule.iter().map(|(r, n)| format!("{r} ×{n}")).collect();
             return format!("{total} finding{} ({})", if total == 1 { "" } else { "s" }, items.join(", "));
+        }
+        if self.kind == BlockKind::SecretScan {
+            return match self.state.as_str() {
+                "error" => "the secret scan did not finish".to_owned(),
+                "not-clean" => "possible secrets were found".to_owned(),
+                other => format!("the secret scan is `{other}`"),
+            };
         }
         match self.state.as_str() {
             "error" => "the data-safety check could not be judged".to_owned(),
@@ -195,7 +285,8 @@ pub fn removed_reason(block: &WireBlock) -> String {
 }
 
 fn what_and_where(block: &WireBlock) -> String {
-    let next = if block.state == "not-clean" { "acknowledge in Environment" } else { "see Environment" };
+    let acknowledgeable = block.state == "not-clean" || (block.kind == BlockKind::SecretScan && block.state == "error");
+    let next = if acknowledgeable { "acknowledge in Environment" } else { "see Environment" };
     format!("{} — {next}", block.summary())
 }
 
@@ -212,6 +303,8 @@ pub fn unheard_reason(source_label: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveBlock {
+    /// Which check keeps agents out.
+    pub kind: BlockKind,
     /// The source's registry id (what the views address it by).
     pub source_id: String,
     pub source_label: String,
@@ -255,10 +348,11 @@ pub fn active_block(source_id: &str, source_label: &str, block: &WireBlock, curr
         None => block.project.clone().or_else(|| fallback.map(Path::to_path_buf)).into_iter().collect(),
     };
     if covered.is_empty() {
-        log::warn!("[data-safety] {source_label}: a block for {} names no folder; nothing can be enforced", block.instance);
+        log::warn!("[data-safety] {source_label}: a {} block for {} names no folder; nothing can be enforced", block.kind.check(), block.instance);
         return None;
     }
     Some(ActiveBlock {
+        kind: block.kind,
         source_id: source_id.to_owned(),
         source_label: source_label.to_owned(),
         instance: block.instance.clone(),
@@ -315,20 +409,38 @@ pub fn is_refusal(error: &str) -> bool {
     error.starts_with(REFUSAL_LEAD)
 }
 
-/// The refusal of an agent launch in `cwd`.
+/// The refusal of an agent launch in `cwd`, naming the check that blocked.
 pub fn launch_refusal(block: &ActiveBlock, cwd: &Path) -> String {
-    format!(
-        "{REFUSAL_LEAD}{}`: the data on {} ({}) may be real; {}",
-        display(cwd),
-        block.instance,
-        block.source_label,
-        block.reason
-    )
+    match block.kind {
+        BlockKind::DataSafety => format!(
+            "{REFUSAL_LEAD}{}`: the data on {} ({}) may be real; {}",
+            display(cwd),
+            block.instance,
+            block.source_label,
+            block.reason
+        ),
+        BlockKind::SecretScan => format!(
+            "{REFUSAL_LEAD}{}`: the secret scan on {} ({}) keeps agents out of it; {}",
+            display(cwd),
+            block.instance,
+            block.source_label,
+            block.reason
+        ),
+    }
 }
 
 /// What a held delivery says about why.
 pub fn hold_text(block: &ActiveBlock) -> String {
-    format!("held until data safety on {} clears: {}", block.instance, block.reason)
+    let what = match block.kind {
+        BlockKind::DataSafety => "data safety",
+        BlockKind::SecretScan => "the secret scan",
+    };
+    format!("held until {what} on {} clears: {}", block.instance, block.reason)
+}
+
+/// What a disabled agent button says.
+pub fn disabled_text(block: &ActiveBlock) -> String {
+    format!("agents blocked — {} on {}: {}", block.kind.check(), block.instance, block.reason)
 }
 
 /// The spawn path's check: `Err` with the reason when `cwd` is blocked.
@@ -352,6 +464,8 @@ impl HoldGate for Sources {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockedAgent {
+    /// Which check its folder is blocked by.
+    pub kind: BlockKind,
     pub term_id: TermId,
     pub name: String,
     pub source_id: String,
@@ -387,6 +501,7 @@ pub fn state_of(sources: &Sources, registry: &Registry) -> DataSafetyState {
         .filter_map(|(term_id, name, cwd)| {
             let b = blocking(&blocks, &cwd)?;
             Some(BlockedAgent {
+                kind: b.kind,
                 term_id,
                 name,
                 source_id: b.source_id.clone(),
@@ -551,6 +666,58 @@ mod tests {
         let b = active_block("s1", "Stack", &block(bare.clone()), true, Some(&project)).unwrap();
         assert!(covers(&b.covered, &item));
         assert_eq!(active_block("s1", "Stack", &block(bare), true, None), None, "no folder named: nothing to enforce");
+    }
+
+    fn secret(v: Value) -> WireBlock {
+        parse_secret_block(&json!({ "secretScan": v })).expect("a block")
+    }
+
+    #[test]
+    fn a_secret_scan_block_enforces_only_what_it_says_and_names_its_check() {
+        for (state, blocks, enforces) in [
+            ("clean", false, false),
+            ("acknowledged", false, false),
+            ("unscanned", false, false),
+            ("not-clean", false, false),
+            ("not-clean", true, true),
+            ("error", false, false),
+            ("error", true, true),
+        ] {
+            let b = secret(base(state, blocks));
+            assert_eq!(b.kind, BlockKind::SecretScan);
+            assert_eq!(b.enforces(), enforces, "{state} blocksAgents={blocks}");
+        }
+        // Each payload field is read as its own kind; neither stands in for the other.
+        let payload = json!({ "secretScan": base("not-clean", true) });
+        assert_eq!(parse_block(&payload), None);
+        assert!(parse_secret_block(&json!({ "dataSafety": base("error", false) })).is_none());
+        // A garbled secret block fails closed.
+        let garbled = parse_secret_block(&json!({ "secretScan": { "instance": "app/0" } })).unwrap();
+        assert!(garbled.enforces());
+        // Reasons and the refusal name the check and the files, never a value.
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = base("not-clean", true);
+        v["project"] = json!(dir.path().display().to_string());
+        v["findings"] = json!([{ "rule": "github-pat", "file": ".work/ABC-1/src/api-1a2b3c4d/.env", "line": 1 }]);
+        let b = secret(v);
+        assert_eq!(reason_text(&b, true), "1 possible secret (.work/ABC-1/src/api-1a2b3c4d/.env:1 (github-pat)) — acknowledge in Environment");
+        let a = active_block("s1", "Stack", &b, true, None).unwrap();
+        assert_eq!(a.kind, BlockKind::SecretScan);
+        let text = launch_refusal(&a, dir.path());
+        assert!(text.starts_with(REFUSAL_LEAD) && text.contains("the secret scan on app/0 (Stack)"), "{text}");
+        assert!(!text.contains("may be real"), "{text}");
+        assert!(hold_text(&a).starts_with("held until the secret scan on app/0 clears"));
+        assert!(disabled_text(&a).starts_with("agents blocked — secret scan on app/0"));
+        let mut e = base("error", true);
+        e["project"] = json!(dir.path().display().to_string());
+        assert_eq!(reason_text(&secret(e), true), "the secret scan did not finish — acknowledge in Environment");
+        // A saved verdict from before the kind existed reads as data safety.
+        let old: WireBlock = serde_json::from_value(json!({
+            "instance": "app/0", "state": "not-clean", "blocksAgents": true, "findings": [], "unscanned": [],
+            "reasons": [], "bound": null, "project": null, "ackActionId": null
+        }))
+        .unwrap();
+        assert_eq!(old.kind, BlockKind::DataSafety);
     }
 
     #[test]

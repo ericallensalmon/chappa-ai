@@ -79,6 +79,7 @@ use crate::procs::{log_path, ProcessEntry, ProcessTable};
 use crate::project::Loaded;
 use crate::records::{JobRecord, JobResult, JobStatus, JobWork, StepOutcome};
 use crate::reviews::{self, ReviewOp};
+use crate::secret_scan;
 use crate::states::{self, Exists, ResumeWork, SaveSpec};
 use crate::timeouts::{self, StepKind};
 use crate::workspaces::{Git, WorkspaceOp};
@@ -217,7 +218,18 @@ fn execute(
         {
             auto_save(world, project_dir, rec, spec, out)?;
         }
-        return crate::workspaces::run_op(world, &loaded, op, &mut |l| out.say(l));
+        let done = crate::workspaces::run_op(world, &loaded, op, &mut |l| out.say(l));
+        // A worktree that now exists is scanned before anyone works in it.
+        let opened = match op {
+            WorkspaceOp::StartWork { item, .. }
+            | WorkspaceOp::AddRepo { item, .. }
+            | WorkspaceOp::Restore { item } => Some(item.as_str()),
+            _ => None,
+        };
+        if let (Ok(()), Some(item)) = (&done, opened) {
+            secret_scan::scan_item(world, &loaded, item, &mut |l| out.say(l));
+        }
+        return done;
     }
     if let JobWork::SaveState { spec } = &rec.work {
         return save_now(world, project_dir, rec, spec, out).map(|_| ());
@@ -287,6 +299,9 @@ fn execute(
     };
     if let Some(item) = &binds {
         loaded.bind_item(Some(item));
+        // Activating an item points agents and builds at its worktrees:
+        // scan them first.
+        secret_scan::scan_item(world, &loaded, item, &mut |l| out.say(l));
     }
     let now = utc_now();
     let runner = loaded.runner(world, &now);
@@ -378,6 +393,14 @@ fn execute(
                         ),
                     ));
                 }
+            }
+            // Secrets in a build context end up in the image: scan each
+            // context before anything runs (under `block-build` a finding
+            // stops the job here), and what the stack hands to components.
+            secret_scan::gate_builds(world, &loaded, &runner, &plan, &mut |l| out.say(l))
+                .map_err(|e| (EXIT_FAILED, e))?;
+            if starts || plan.steps.iter().any(|s| matches!(s, Step::Build { .. })) {
+                secret_scan::scan_env_for(world, &loaded, &runner, &inst, &mut |l| out.say(l));
             }
             let options = ApplyOptions {
                 remove_volumes: *remove_volumes,

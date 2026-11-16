@@ -168,6 +168,9 @@ pub fn fakes(cli: FakeCli, http: FakeHttp) -> Fakes {
         settle: Duration::ZERO,
         clock: Arc::new(SystemClock),
         hook_retry: Duration::ZERO,
+        scripts: cli.clone(),
+        running_scripts: Arc::new(chappa_stack::world::RunningScripts::default()),
+        secrets: Arc::new(chappa_stack::secret_scan::NoScanner),
     };
     Fakes {
         cli,

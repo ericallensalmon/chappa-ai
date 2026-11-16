@@ -55,6 +55,7 @@ use crate::project::{Loaded, ProjectConfig};
 use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
 use crate::reviews;
+use crate::secret_scan;
 use crate::states;
 use crate::workspaces::{
     self, Accepted, WorkCache, WorkInputs, ARCHIVED_PATH, OWNER_PATH, WORK_PATH,
@@ -132,6 +133,12 @@ pub struct Source {
     last_work_tick: Mutex<Option<std::time::Instant>>,
     /// What the last resume calls found blocked, for the next confirm.
     pub blocks: states::ResumeBlocks,
+    /// This source, for the secret rescan thread the refresher starts.
+    me: std::sync::OnceLock<Weak<Source>>,
+    /// When the secret rescan last started.
+    last_secret_tick: Mutex<Option<std::time::Instant>>,
+    /// A secret rescan is running (one at a time).
+    secret_busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The least time between two looks at the workspaces on the refresher
@@ -167,7 +174,11 @@ impl Source {
             work: WorkCache::default(),
             last_work_tick: Mutex::new(None),
             blocks: states::ResumeBlocks::default(),
+            me: std::sync::OnceLock::new(),
+            last_secret_tick: Mutex::new(None),
+            secret_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
+        let _ = source.me.set(Arc::downgrade(&source));
         let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
         background.add_periodic(weak);
         source
@@ -405,6 +416,22 @@ impl Source {
         ) {
             facts.push(section);
         }
+        let secrets = secret_scan::view_of(&self.world, loaded);
+        if let Some(alerts) = v.get_mut("alerts").and_then(Value::as_array_mut) {
+            alerts.extend(secrets.alerts());
+        }
+        if let (Some(banners), Some(b)) = (
+            v.get_mut("banners").and_then(Value::as_array_mut),
+            secrets.banner(),
+        ) {
+            banners.push(b);
+        }
+        if secrets.active() {
+            if let Some(facts) = v.get_mut("facts").and_then(Value::as_array_mut) {
+                facts.push(secrets.facts());
+            }
+        }
+        v["secretScan"] = secrets.wire(loaded);
         Ok(v)
     }
 
@@ -638,6 +665,9 @@ impl Source {
                 "definition",
                 "the stack definition has errors; fix them first",
             );
+        }
+        if id == secret_scan::ACK_ACTION_ID {
+            return self.secret_ack(body, caller, &loaded);
         }
         // A row a script component reports (`stack/api`) acts through the
         // script component's own verbs.
@@ -885,6 +915,128 @@ impl Source {
                 }),
             ),
             Err(e) => error(500, "data-safety", e),
+        }
+    }
+
+    /// `secret-scan-ack`: write the findings into the project's baseline and
+    /// acknowledge the worktree scans that did not finish. Offered while
+    /// there is something to acknowledge; refused unconfirmed, without a
+    /// note, or when what it would cover changed since the confirm.
+    fn secret_ack(&self, body: &Value, caller: &Caller, loaded: &Loaded) -> Reply {
+        let view = secret_scan::view_of(&self.world, loaded);
+        if view.ack_action().is_none() {
+            return error(
+                409,
+                "not-offered",
+                format!(
+                    "there is nothing to acknowledge: the secret scan of {} is {}",
+                    view.instance, view.state
+                ),
+            );
+        }
+        if body.get("confirmed").and_then(Value::as_bool) != Some(true) {
+            return error(
+                409,
+                "confirmation-required",
+                "an acknowledgement must be confirmed",
+            );
+        }
+        let fingerprint = body.pointer("/params/fingerprint").and_then(Value::as_str);
+        if fingerprint != Some(view.ack_fingerprint().as_str()) {
+            return error(
+                409,
+                "stale-plan",
+                format!(
+                    "the findings changed since this was shown; now: {}",
+                    view.ack_confirm()
+                ),
+            );
+        }
+        let note = data_safety::clean_text(
+            body.get("note").and_then(Value::as_str).unwrap_or(""),
+            NOTE_CAP,
+        );
+        if note.is_empty() {
+            return error(
+                409,
+                "note-required",
+                "an acknowledgement needs a note saying why",
+            );
+        }
+        let who = caller
+            .actor
+            .as_deref()
+            .map(|a| data_safety::clean_text(a, ACTOR_CAP))
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| DEFAULT_ACTOR.to_string());
+        match view.acknowledge(loaded, &who, &note, &self.world.clock.now_utc()) {
+            Ok((findings, errors)) => {
+                let mut parts = Vec::new();
+                if findings > 0 {
+                    parts.push(format!(
+                        "{findings} finding{}",
+                        if findings == 1 { "" } else { "s" }
+                    ));
+                }
+                if errors > 0 {
+                    parts.push(format!(
+                        "{errors} unfinished scan{}",
+                        if errors == 1 { "" } else { "s" }
+                    ));
+                }
+                (
+                    200,
+                    json!({ "message": format!("Acknowledged {} on {}", parts.join(" and "), view.instance) }),
+                )
+            }
+            Err(e) => error(500, "secret-scan", e),
+        }
+    }
+
+    /// One secret rescan pass now (the refresher starts it on its own
+    /// thread every [`secret_scan::RESCAN_EVERY`]; tests call it). Whether
+    /// anything was scanned.
+    pub fn secret_scan_pass(&self) -> bool {
+        let Ok(loaded) = self.load() else {
+            return false;
+        };
+        if loaded.has_errors() {
+            return false;
+        }
+        let now = self.world.clock.now_utc();
+        let runner = loaded.runner(&self.world, &now);
+        let inst = runner.instance(loaded.slot).ok().map(|(i, _)| i);
+        secret_scan::rescan(&self.world, &loaded, &runner, inst.as_ref())
+    }
+
+    /// Start a rescan pass on its own thread when one is due and none runs.
+    fn secret_scan_tick(&self) {
+        {
+            let mut last = self
+                .last_secret_tick
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if last.is_some_and(|t| t.elapsed() < secret_scan::RESCAN_EVERY) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        use std::sync::atomic::Ordering;
+        let Some(me) = self.me.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        if self.secret_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let busy = self.secret_busy.clone();
+        let spawned = thread::Builder::new()
+            .name("secret rescan".into())
+            .spawn(move || {
+                me.secret_scan_pass();
+                busy.store(false, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            self.secret_busy.store(false, Ordering::SeqCst);
         }
     }
 
@@ -1164,6 +1316,7 @@ fn respond(source: &Source, mut request: tiny_http::Request) {
 impl Periodic for Source {
     fn tick(&self) {
         self.data_safety_tick();
+        self.secret_scan_tick();
         let due = {
             let mut last = self
                 .last_work_tick

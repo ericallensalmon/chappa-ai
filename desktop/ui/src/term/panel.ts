@@ -147,6 +147,7 @@ export interface TerminalApi {
   spawnAgent(
     req: ipc.SpawnAgentRequestDto,
     frames: ipc.Channel<ArrayBuffer | number[]>,
+    launchAnyway?: string | null,
   ): Promise<ipc.SpawnAgentResponseDto>;
   /** One user message to a json-transport agent; the receipt is
    *  the CLI's next `turn_started`. */
@@ -231,7 +232,7 @@ export const tauriApi: TerminalApi = {
   upsertAgentTool: (tool) => ipc.upsertAgentTool(tool),
   deleteAgentTool: (id) => ipc.deleteAgentTool(id),
   parseAgentCommand: (line) => ipc.parseAgentCommand(line),
-  spawnAgent: (req, frames) => ipc.spawnAgent(req, frames),
+  spawnAgent: (req, frames, launchAnyway) => ipc.spawnAgent(req, frames, launchAnyway),
   sendAgentInput: (id, text, waitMs) => ipc.sendAgentInput(id, text, waitMs),
   getAgentEvents: (id, since) => ipc.getAgentEvents(id, since),
   listRecords: () => ipc.listRecords(),

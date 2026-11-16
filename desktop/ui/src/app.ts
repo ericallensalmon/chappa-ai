@@ -48,7 +48,7 @@ import {
 import * as ipc from "./ipc";
 import { registerDismiss } from "./dismiss";
 import { NotifyCenter, type CenterEntry } from "./notify_center";
-import { noticeText, offerAcknowledge, parseSecretScanBlock } from "./secret_scan";
+import { noticeText, offerAcknowledge, offerLaunchAnyway, parseSecretScanBlock } from "./secret_scan";
 import { NotifyBanners } from "./notify_banners";
 import { NotifyDrawer } from "./notify_drawer";
 import { StatsStore, statsChip, statsTooltip } from "./stats";
@@ -4265,7 +4265,7 @@ export class App {
    * project explicitly; the workspace spawner omits it (the
    * fallback chain, unchanged).
    */
-  async spawnAgent(toolId: number, projectId?: number): Promise<ipc.SpawnAgentResponseDto | null> {
+  async spawnAgent(toolId: number, projectId?: number, launchAnyway?: string): Promise<ipc.SpawnAgentResponseDto | null> {
     const tool = this.agentTools.byId(toolId);
     if (!tool) return null;
     const project = projectId ?? this.expandedProjectId ?? undefined;
@@ -4353,7 +4353,7 @@ export class App {
             active: false,
             spawn: async () => {
               const frames = ipc.makeProjectFramesChannel(() => {});
-              response = await this.api.spawnAgent({ agent_tool_id: toolId, project_id: project }, frames);
+              response = await this.api.spawnAgent({ agent_tool_id: toolId, project_id: project }, frames, launchAnyway ?? null);
               return response.term_id;
             },
             onCreated: (id) => adopt(id, panel),
@@ -4373,6 +4373,7 @@ export class App {
               response = await this.api.spawnAgent(
                 { agent_tool_id: toolId, project_id: project, cols: dims?.cols, rows: dims?.rows },
                 frames,
+                launchAnyway ?? null,
               );
               return response.term_id;
             },
@@ -4388,7 +4389,15 @@ export class App {
       // rule, never a value) and offer to acknowledge them; on Acknowledge
       // the same launch is tried once more.
       const block = parseSecretScanBlock(err);
-      if (block && project !== undefined) {
+      // The scan did not finish: no findings to acknowledge, but the person
+      // may launch this one agent anyway, with a note that goes on its
+      // journal. Asked once per launch; a second refusal is shown as is.
+      if (block?.incomplete && launchAnyway === undefined) {
+        const note = await offerLaunchAnyway(block);
+        if (note !== null) return this.spawnAgent(toolId, projectId, note);
+        return null;
+      }
+      if (block && !block.incomplete && project !== undefined) {
         const acknowledged = await offerAcknowledge(block, project).catch((e) => {
           void this.showError(String(e instanceof Error ? e.message : e));
           return false;

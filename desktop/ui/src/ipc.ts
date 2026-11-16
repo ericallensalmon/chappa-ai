@@ -499,11 +499,15 @@ export function parseAgentCommand(line: string): Promise<ParsedAgentCommandDto> 
 
 /** Spawn an agent into this webview: `frames` is the per-terminal channel
  *  (the project-process precedent). */
+/** `launchAnyway` is the person's note from the launch dialog's "Launch
+ *  anyway": it lets this one launch past a secret scan that did not finish
+ *  (Rust records it in the agent's journal; it is never an acknowledgement). */
 export function spawnAgent(
   req: SpawnAgentRequestDto,
   frames: Channel<ArrayBuffer | number[]>,
+  launchAnyway?: string | null,
 ): Promise<SpawnAgentResponseDto> {
-  return call("spawn_agent", { req, frames });
+  return call("spawn_agent", { req, frames, launchAnyway: launchAnyway ?? null });
 }
 
 // --- durable records ------------------------------------------------
@@ -1116,6 +1120,9 @@ export interface SecretScanBlockDto {
   cwd: string;
   findings: SecretFindingDto[];
   skipped: number;
+  /** Set when the scan did not finish: why. The dialog then offers
+   *  "Launch anyway" (there are no findings to acknowledge). */
+  incomplete?: string | null;
 }
 
 /** An `agent://secret-scan` payload: a launch that went ahead with
@@ -1125,7 +1132,7 @@ export interface SecretScanNoticeEvent {
   term_id: number;
   notice:
     | { kind: "warn"; cwd: string; findings: SecretFindingDto[]; skipped: number }
-    | { kind: "incomplete"; cwd: string; reason: string };
+    | { kind: "launched-anyway"; cwd: string; reason: string; note: string };
 }
 
 /** Acknowledge findings into the project's local baseline; answers how
@@ -1785,7 +1792,12 @@ export function detachSource(sourceId: string): Promise<SourcesListingDto> {
 
 /** A stack source's data-safety block that keeps agents out, as Rust
  *  enforces it (`data_safety.rs`). */
+/** Which check a block is: a stack's data safety, or its secret scan. */
+export type AgentBlockKind = "dataSafety" | "secretScan";
+
 export interface DataSafetyBlockDto {
+  /** Which check keeps agents out (absent = data safety). */
+  kind?: AgentBlockKind;
   /** The source's registry id. */
   sourceId: string;
   sourceLabel: string;
@@ -1808,6 +1820,7 @@ export interface DataSafetyBlockDto {
 
 /** A running agent inside a blocked folder. */
 export interface DataSafetyAgentDto {
+  kind?: AgentBlockKind;
   termId: number;
   name: string;
   sourceId: string;

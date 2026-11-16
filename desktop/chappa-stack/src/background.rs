@@ -66,7 +66,7 @@ use stack_core::script::{
     run_plan, run_status, PlanPreview, ScriptOutputs, ScriptReport, ScriptRun,
 };
 
-use crate::world::World;
+use crate::world::{RunningScripts, World};
 
 /// How long a channel digest is trusted before it is asked again.
 pub const DIGEST_TTL: Duration = Duration::from_secs(10 * 60);
@@ -84,7 +84,8 @@ pub const SCRIPT_IDLE: Duration = Duration::from_secs(10 * 60);
 /// The threads status and plan scripts run on.
 pub const SCRIPT_WORKERS: usize = 4;
 /// How long shutdown waits for a script worker to finish its run before
-/// leaving it behind (its run's own time limit still ends the script).
+/// leaving it behind. Shutdown stops every script in flight first, so a
+/// worker normally ends well within it.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// How often each kind of answer is asked again.
@@ -177,6 +178,8 @@ pub struct Background {
     /// Where the turn grids start.
     epoch: Instant,
     seed: u64,
+    /// The scripts the started workers have in flight, ended on shutdown.
+    running: Mutex<Option<Arc<RunningScripts>>>,
 }
 
 /// The threads [`Background::start`] started.
@@ -188,7 +191,7 @@ pub struct Workers {
 impl Workers {
     /// Wait for the refresher, and for each script worker up to
     /// [`SHUTDOWN_GRACE`]; one still inside a script is left behind (the
-    /// process is ending, and the script's time limit stops it).
+    /// process is ending, and [`Background::shutdown`] stopped the script).
     pub fn join(self) -> thread::Result<()> {
         self.join_within(SHUTDOWN_GRACE)
     }
@@ -278,6 +281,7 @@ impl Background {
             intervals,
             epoch: Instant::now(),
             seed,
+            running: Mutex::new(None),
         })
     }
 
@@ -294,6 +298,8 @@ impl Background {
     /// Start the refresher and the script workers; they end after
     /// [`Background::shutdown`].
     pub fn start(self: &Arc<Self>, world: World) -> Workers {
+        *self.running.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(world.running_scripts.clone());
         let me = self.clone();
         let w = world.clone();
         let refresher = thread::spawn(move || me.run(&w));
@@ -307,9 +313,26 @@ impl Background {
         Workers { refresher, scripts }
     }
 
+    /// Stop the threads, and end every status or plan script still
+    /// running (with what it started) rather than leave it to its own time
+    /// limit after this process is gone.
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.wake.notify_all();
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(r) = running {
+            let killed = r.kill_all();
+            if !killed.is_empty() {
+                eprintln!(
+                    "chappa-stack: stopped {} script(s) still running at shutdown",
+                    killed.len()
+                );
+            }
+        }
     }
 
     fn stopped(&self) -> bool {
@@ -348,9 +371,9 @@ impl Background {
 
     fn answer(world: &World, job: &ScriptJob) -> ScriptAnswer {
         if job.plan {
-            ScriptAnswer::Plan(run_plan(&*world.cli, &job.run))
+            ScriptAnswer::Plan(run_plan(&*world.scripts, &job.run))
         } else {
-            ScriptAnswer::Status(run_status(&*world.cli, &job.run))
+            ScriptAnswer::Status(run_status(&*world.scripts, &job.run))
         }
     }
 

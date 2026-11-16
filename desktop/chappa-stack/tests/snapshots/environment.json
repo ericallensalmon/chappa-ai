@@ -797,5 +797,19 @@
       "id": "jobs",
       "label": "Jobs"
     }
-  ]
+  ],
+  "secretScan": {
+    "ack": null,
+    "ackActionId": "secret-scan-ack",
+    "blocksAgents": false,
+    "bound": null,
+    "findings": [],
+    "instance": "env/0",
+    "lastScanUtc": null,
+    "policy": null,
+    "project": "<project>",
+    "reasons": [],
+    "skipped": 0,
+    "state": "unscanned"
+  }
 }

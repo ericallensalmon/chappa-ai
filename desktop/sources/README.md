@@ -408,6 +408,61 @@ it cannot tell, and the app treats it as blocking (it fails closed).
   polls the view again right after an action answers `200`, so a lifted
   block clears at once.
 
+## Secret scan on the Environment view
+
+A stack source also says whether the folders agents work in, and what it
+builds from, hold possible credentials, in a top-level `secretScan`
+block beside `dataSafety`:
+
+```json
+"secretScan": {
+  "instance": "app/0",
+  "state": "not-clean",
+  "policy": "block-agents",
+  "blocksAgents": true,
+  "lastScanUtc": "2026-11-15T12:00:00Z",
+  "findings": [
+    { "rule": "github-pat", "file": ".work/ABC-1/src/api-1a2b3c4d/.env", "line": 1 },
+    { "rule": "generic-api-key", "file": ".work/ABC-1/src/api-1a2b3c4d/cfg.txt", "line": 2, "commit": "f6bb19e1c0de…" }
+  ],
+  "skipped": 0,
+  "bound": { "source": "tracker", "key": "ABC-1", "folders": ["/srv/example/.work/ABC-1", "/srv/example/.work/ABC-1/src/api-1a2b3c4d"] },
+  "project": "/srv/example",
+  "reasons": [{ "component": null, "text": "api worktree: 2 possible secrets (…)" }],
+  "ack": null,
+  "ackActionId": "secret-scan-ack"
+}
+```
+
+| field | meaning |
+|---|---|
+| `instance`, `bound`, `project`, `reasons`, `ack`, `ackActionId`, `lastScanUtc` | as in `dataSafety` |
+| `state` | `clean`, `not-clean` (findings), `acknowledged` (findings or an unfinished scan acknowledged), `unscanned` (a bound worktree not scanned yet, or no scanner and no `secrets:` in the definition), `error` (a scan did not finish: no scanner while `secrets:` is declared, a timeout, a scanner error, or the scan's total size limit reached so readable files went unread) |
+| `policy` | `secrets.onFinding` (`warn`, `block-agents` default, `block-build`) while the state is `not-clean` or `error`, else `null` |
+| `blocksAgents` | the one field the app enforces on: a finding under a policy other than `warn`, or a scan of a bound worktree's files that did not finish (whatever the policy, until acknowledged). An unfinished scan of commits, a build context or env files only warns |
+| `findings` | what no acknowledgement covers: rule, file (relative to the stack project), line, and the commit for one found in a commit ahead of the base. Never a value |
+| `skipped` | files left out for the per-file size cap or for being links (a warning only) |
+
+A finding's file is named from the stack project's folder, the way the
+app's own scan before an agent launch names it, so acknowledging it on
+either side (the `secret-scan-ack` action, or the launch dialog) writes
+the same entry in `<project>/.work/secrets-baseline.json` and silences
+both. `secret-scan-ack` is view-level, `mutates: true`, `note:
+"required"`; its confirm lists every finding as `file:line (rule)` and
+every unfinished worktree scan with its reason. An acknowledged
+unfinished scan lasts until that worktree's next scan succeeds.
+
+The app enforces a `secretScan` block exactly like a `dataSafety` one
+(where, new agents, running agents, held deliveries, last known while
+down, across restarts, removal; see above), with two differences: a
+block in `error` blocks only when `blocksAgents` says so (the source
+already decided where an unfinished scan matters), and the never-heard
+hold of a new stack source is data safety's alone. A garbled block (no
+`state`) fails closed. Every refusal, disabled button and held message
+says which check it is ("the secret scan on app/0 …" or "the data on
+app/0 … may be real"). A source's Needs you row offers `secret-scan-ack`
+while the source answers and says `not-clean` or `error`.
+
 ## Run the fixture by hand
 
 ```sh

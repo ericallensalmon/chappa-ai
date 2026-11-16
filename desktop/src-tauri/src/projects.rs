@@ -3051,7 +3051,7 @@ mod tests {
             "reasons": [{ "component": "db", "text": "db: 1 finding (card-number ×1)" }],
         }}));
         VerdictStore::beside(&sources_file)
-            .put(&id, SavedVerdict { block, source_label: "Stack app".into(), manifest_id: "stack:app".into(), fallback: Some(root.clone()), saved_ms: 1 })
+            .put(&id, SavedVerdict { block, secret_scan: None, source_label: "Stack app".into(), manifest_id: "stack:app".into(), fallback: Some(root.clone()), saved_ms: 1 })
             .unwrap();
         let start = || {
             let sources = Sources::default();

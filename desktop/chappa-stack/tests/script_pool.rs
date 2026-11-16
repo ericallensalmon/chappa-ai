@@ -111,7 +111,8 @@ impl EngineCli for Timed {
 
 fn world_with(cli: Arc<Timed>) -> chappa_stack::world::World {
     let mut f = fakes(FakeCli::new(), FakeHttp::default());
-    f.world.cli = cli;
+    f.world.cli = cli.clone();
+    f.world.scripts = cli;
     f.world
 }
 
@@ -357,4 +358,84 @@ fn stack_wide_first_turns_spread_across_the_interval() {
     seconds.sort();
     seconds.dedup();
     assert!(seconds.len() >= 6, "{seconds:?}");
+}
+
+/// A real status script that never ends and has started a child of its
+/// own: shutdown stops both, instead of leaving them to the script's own
+/// time limit after the source is gone.
+#[test]
+fn shutdown_stops_a_running_script_and_everything_it_started() {
+    let node_ok = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !node_ok {
+        eprintln!("skipped: node is not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let pids = dir.path().join("pids.txt");
+    let script = dir.path().join("forever.js");
+    std::fs::write(
+        &script,
+        r#"const { spawn } = require("child_process");
+const fs = require("fs");
+const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { stdio: "ignore" });
+fs.writeFileSync(process.argv[2], process.pid + " " + child.pid + "\n");
+setTimeout(() => {}, 120000);
+"#,
+    )
+    .unwrap();
+    let running = Arc::new(chappa_stack::world::RunningScripts::default());
+    let mut f = fakes(FakeCli::new(), FakeHttp::default());
+    f.world.scripts = Arc::new(chappa_stack::world::ScriptCli {
+        running: running.clone(),
+    });
+    f.world.running_scripts = running.clone();
+    let mut env = IndexMap::new();
+    env.insert("CHAPPA_STACK_INSTANCE".to_string(), "app-0".to_string());
+    let forever = ScriptRun {
+        component: "api".into(),
+        verb: ScriptVerb::Status,
+        argv: vec![
+            "node".into(),
+            script.display().to_string(),
+            pids.display().to_string(),
+        ],
+        cwd: dir.path().to_path_buf(),
+        env,
+        timeout_secs: 300,
+    };
+    let bg = Background::new();
+    let workers = bg.start(f.world.clone());
+    assert!(bg.status(&forever).is_none());
+    assert!(
+        eventually(
+            || std::fs::read_to_string(&pids).is_ok_and(|t| t.trim().split(' ').count() == 2)
+        ),
+        "the script started its child"
+    );
+    let both: Vec<u32> = std::fs::read_to_string(&pids)
+        .unwrap()
+        .split_whitespace()
+        .map(|p| p.parse().unwrap())
+        .collect();
+    assert_eq!(
+        running.pids().len(),
+        1,
+        "the script is listed while it runs"
+    );
+    assert!(both.iter().all(|p| chappa_stack::world::pid_alive(*p)));
+    let t = Instant::now();
+    bg.shutdown();
+    workers.join_within(Duration::from_secs(5)).unwrap();
+    assert!(
+        t.elapsed() < Duration::from_secs(10),
+        "shutdown did not wait for the script's time limit"
+    );
+    assert!(
+        eventually(|| both.iter().all(|p| !chappa_stack::world::pid_alive(*p))),
+        "the script and its child are gone: {both:?}"
+    );
+    assert!(running.pids().is_empty());
 }

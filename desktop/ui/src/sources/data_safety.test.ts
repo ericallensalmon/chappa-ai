@@ -11,6 +11,7 @@ import {
   heldText,
   markDataSafety,
   normFolder,
+  SECRETS_BADGE_TEXT,
 } from "./data_safety";
 import type { Chip } from "./prs_model";
 
@@ -37,6 +38,46 @@ const row = (over: Partial<{ key: string; folder: string | null; owner: { manife
   ownerRef: null,
   badges: [] as Chip[],
   ...over,
+});
+
+describe("a secret-scan block in the views", () => {
+  const secret = (over: Partial<ipc.DataSafetyBlockDto> = {}) =>
+    block({
+      kind: "secretScan",
+      reason: "api worktree: 1 possible secret (.work/ABC-1/src/api-1a2b3c4d/.env:1 (github-pat)) — acknowledge in Environment",
+      component: null,
+      ackActionId: "secret-scan-ack",
+      ...over,
+    });
+
+  it("wears its own badge and banner and leaves data safety's as they were", () => {
+    const rows = [row()];
+    markDataSafety(rows, [secret()]);
+    expect(rows[0].badges.map((b) => b.text)).toEqual([SECRETS_BADGE_TEXT]);
+    expect(blockedBanner(secret()).title).toContain("secret scan of app/0");
+    expect(blockedBanner(block()).title).toBe("Agents are blocked here: the data on app/0 may be real");
+    const plain = [row()];
+    markDataSafety(plain, [block()]);
+    expect(plain[0].badges.map((b) => b.text)).toEqual([BLOCKED_BADGE_TEXT]);
+  });
+
+  it("raises a Needs you row with its acknowledge while not clean or unfinished, and names the agents inside", () => {
+    expect(ackTargets(secret())).toEqual([{ sourceId: "st", sourceLabel: "Stack", view: "environment", key: null, only: ["secret-scan-ack"] }]);
+    expect(ackTargets(secret({ state: "error" }))).toHaveLength(1);
+    expect(ackTargets(block({ state: "error" }))).toEqual([]);
+    expect(ackTargets(secret({ current: false }))).toEqual([]);
+    const section = dataSafetySection({
+      blocks: [secret()],
+      agents: [{ kind: "secretScan", termId: 7, name: "worker", sourceId: "st", instance: "app/0", reason: "r", cwd: "/srv/example/.work/ABC-1" }],
+      held: [{ termId: 7, count: 2 }],
+    })!;
+    expect(section.title).toBe("Secret scan");
+    expect(section.rows.map((r) => r.title)).toEqual(["Agents blocked on app/0: secret scan", "worker"]);
+    expect(section.rows[1].detail).toBe("working where possible secrets were found in app/0 · held: 2 messages");
+    const both = dataSafetySection({ blocks: [block(), secret()], agents: [], held: [] })!;
+    expect(both.title).toBe("Data safety and secret scan");
+    expect(new Set(both.rows.map((r) => r.id)).size).toBe(2);
+  });
 });
 
 describe("data safety in the views", () => {

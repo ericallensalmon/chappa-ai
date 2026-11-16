@@ -1,10 +1,12 @@
 // The webview side of the pre-launch secret scan: reading a refused spawn's
 // findings out of its error, the dialog that names them (file and rule,
 // never a value) and offers to acknowledge them into the project's local
-// baseline, and the notification text for a launch that went ahead with a
-// warning or without a complete scan.
+// baseline, the "Launch anyway" confirm for a scan that did not finish (a
+// required note, good for that one launch, never written to the baseline),
+// and the notification text for a launch that went ahead with a warning or
+// past an unfinished scan.
 
-import { confirmDialog } from "./dialog";
+import { confirmDialog, promptDialog } from "./dialog";
 import * as ipc from "./ipc";
 
 /** Rust's refusal prefix; the JSON after it is a `SecretScanBlockDto`. */
@@ -23,6 +25,7 @@ export function parseSecretScanBlock(err: unknown): ipc.SecretScanBlockDto | nul
       cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
       findings: parsed.findings.filter((f) => f && typeof f.file === "string" && typeof f.rule === "string"),
       skipped: typeof parsed.skipped === "number" ? parsed.skipped : 0,
+      ...(typeof parsed.incomplete === "string" && parsed.incomplete ? { incomplete: parsed.incomplete } : {}),
     };
   } catch {
     return null;
@@ -36,6 +39,15 @@ export function findingLine(f: ipc.SecretFindingDto): string {
 
 /** The dialog text for a refused launch. */
 export function blockMessage(block: ipc.SecretScanBlockDto): string {
+  if (block.incomplete) {
+    return [
+      `The agent was not launched: the secret scan of ${block.cwd} did not finish.`,
+      "",
+      block.incomplete,
+      "",
+      "The agent would read files nobody checked. Fix the scanner (Settings ▸ Security), or launch anyway: say why below. That lets this one launch through and is recorded in the agent's journal; it acknowledges nothing.",
+    ].join("\n");
+  }
   const n = block.findings.length;
   const lines = [
     `The agent was not launched: ${n} possible secret${n === 1 ? "" : "s"} in ${block.cwd}.`,
@@ -50,14 +62,30 @@ export function blockMessage(block: ipc.SecretScanBlockDto): string {
 
 /** The notification for a launch that went ahead. */
 export function noticeText(notice: ipc.SecretScanNoticeEvent["notice"]): { title: string; body: string } {
-  if (notice.kind === "incomplete") {
-    return { title: "Secret scan did not run", body: `Launched in ${notice.cwd} unscanned: ${notice.reason}` };
+  if (notice.kind === "launched-anyway") {
+    return { title: "Launched without a complete secret scan", body: `Launched in ${notice.cwd} anyway: ${notice.reason}. Note: ${notice.note}` };
   }
   const n = notice.findings.length;
   return {
     title: `${n} possible secret${n === 1 ? "" : "s"} in the agent's folder`,
     body: `Launched in ${notice.cwd} anyway (policy: warn). ${notice.findings.map(findingLine).join("; ")}`,
   };
+}
+
+/**
+ * The "Launch anyway" confirm for a scan that did not finish: the reason and
+ * a required note. Resolves the note, or null when cancelled.
+ */
+export async function offerLaunchAnyway(
+  block: ipc.SecretScanBlockDto,
+  opts: { container?: HTMLElement } = {},
+): Promise<string | null> {
+  const message = `${blockMessage(block)}\n\nA note is required.`;
+  for (;;) {
+    const note = await promptDialog(message, { okLabel: "Launch anyway", placeholder: "why it is safe to launch now", ...opts });
+    if (note === null) return null;
+    if (note.trim() !== "") return note.trim();
+  }
 }
 
 /**

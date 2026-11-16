@@ -1740,6 +1740,11 @@ pub struct SpawnAgentRequest {
     /// wire.
     #[serde(skip)]
     pub journal_actor: Option<String>,
+    /// Internal: the person's note from the launch dialog's "Launch
+    /// anyway", letting THIS launch past a secret scan that did not finish.
+    /// Only the Tauri command sets it (never the control surface or MCP).
+    #[serde(skip)]
+    pub launch_anyway: Option<String>,
     /// Internal: continue a saved provider session instead of starting a
     /// fresh one (`records::Records::resume` sets it). Never on the wire.
     #[serde(skip)]
@@ -1836,7 +1841,7 @@ pub fn spawn_agent_with(
         Some(dir) if tool.runtime.container().is_none() => {
             let project_root = project.as_ref().map(|(_, root)| root.as_path()).unwrap_or(dir.as_path());
             let pref = req.project_id.and_then(|id| ctx.projects.secret_scan_pref(id));
-            crate::secret_scan::gate_launch(&settings, pref, project_root, dir)?
+            crate::secret_scan::gate_launch(&settings, pref, project_root, dir, req.launch_anyway.as_deref())?
         }
         _ => None,
     };
@@ -2063,6 +2068,12 @@ pub fn spawn_agent_with(
         ctx.registry.record_input_as(id, 0, launch, false, Some(actor), Some("launch"));
     }
     if let Some(notice) = &scan_notice {
+        // A launch past an unfinished scan is on the row's journal, under
+        // the person who chose it.
+        if let Some(line) = crate::secret_scan::launch_anyway_record(notice) {
+            let actor = crate::sources::CallActor::human().header_value();
+            ctx.registry.record_input_as(id, 0, line, false, Some(&actor), Some("launch-anyway"));
+        }
         crate::secret_scan::emit_notice(created_app.as_ref(), id, notice);
     }
     let prompt_receipt = match &json_agent {
@@ -2382,9 +2393,13 @@ pub async fn spawn_agent(
     settings: State<'_, SettingsState>,
     projects: State<'_, Projects>,
     records: State<'_, Records>,
-    req: SpawnAgentRequest,
+    mut req: SpawnAgentRequest,
     frames: Channel<InvokeResponseBody>,
+    launch_anyway: Option<String>,
 ) -> Result<SpawnAgentResponse, String> {
+    // The launch dialog's "Launch anyway" (a confirm with a required note):
+    // only this webview command carries it.
+    req.launch_anyway = launch_anyway.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
     let (registry, tools, settings, projects, records) = (
         registry.inner().clone(),
         tools.inner().clone(),

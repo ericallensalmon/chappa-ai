@@ -74,7 +74,7 @@ use store::{AttachedSource, SourceStore};
 use verdicts::{RememberedStack, SavedVerdict, Undeclared, VerdictStore};
 
 use crate::agent_tools::AgentTool;
-use crate::data_safety::{self, active_block, parse_block, ActiveBlock, ENVIRONMENT_VIEW};
+use crate::data_safety::{self, active_block, parse_block, parse_secret_block, ActiveBlock, ENVIRONMENT_VIEW};
 use crate::roots::Root;
 
 /// Sent on every actions call: this app hosts a pane for a job's `run`
@@ -1159,6 +1159,7 @@ impl Sources {
         let info = Self::info_of(state);
         SavedVerdict {
             block: parse_block(payload),
+            secret_scan: parse_secret_block(payload),
             source_label: info.label,
             manifest_id: info.manifest_id,
             fallback: state.launch_folder.clone().or(info.project_path),
@@ -1752,6 +1753,11 @@ impl Sources {
     ///   a trusted manifest this run;
     /// - a saved verdict of a source not registered (yet) this run, last
     ///   known.
+    ///
+    /// Each source can hold two blocks at once, its `dataSafety` and its
+    /// `secretScan`; both follow these rules, each on its own. The "never
+    /// heard from" hold is data safety's alone (it already keeps agents out
+    /// of the whole folder until the first answer, which carries both).
     pub fn data_safety_blocks(&self) -> Vec<ActiveBlock> {
         let inner = self.lock();
         let saved = |id: &str| inner.verdicts.as_ref().and_then(|v| v.get(id));
@@ -1762,15 +1768,16 @@ impl Sources {
             let fallback = state.launch_folder.clone().or_else(|| info.project_path.clone());
             let view = state.views.get(ENVIRONMENT_VIEW);
             if let Some(payload) = view.and_then(|v| v.payload.as_ref()) {
-                let Some(block) = parse_block(payload) else { continue };
                 let current = state.trusted && state.status == SourceStatus::Up && view.is_some_and(|v| v.last_error.is_none());
-                out.extend(active_block(&state.id, &info.label, &block, current, fallback.as_deref()));
+                for block in [parse_block(payload), parse_secret_block(payload)].into_iter().flatten() {
+                    out.extend(active_block(&state.id, &info.label, &block, current, fallback.as_deref()));
+                }
                 continue;
             }
             match saved(&state.id) {
                 Some(v) => {
                     let label = state.manifest.as_ref().map(|m| m.label.as_str()).unwrap_or(&v.source_label);
-                    out.extend(saved_block(&state.id, label, v));
+                    out.extend(saved_blocks(&state.id, label, v));
                 }
                 None => out.extend(Self::unheard_block(state, &info, fallback, remembered(&state.id))),
             }
@@ -1778,14 +1785,14 @@ impl Sources {
         if let Some(store) = &inner.verdicts {
             for (id, v) in store.all() {
                 if !inner.sources.values().any(|s| &s.id == id) {
-                    let block = saved_block(id, &v.source_label, v);
-                    out.extend(match (block, v.block.as_ref()) {
-                        (Some(mut b), Some(wire)) if store.undeclared(id).is_some() => {
+                    let removed = store.undeclared(id).is_some();
+                    for wire in [v.block.as_ref(), v.secret_scan.as_ref()].into_iter().flatten() {
+                        let Some(mut b) = active_block(id, &v.source_label, wire, false, v.fallback.as_deref()) else { continue };
+                        if removed {
                             b.reason = data_safety::removed_reason(wire);
-                            Some(b)
                         }
-                        (block, _) => block,
-                    });
+                        out.push(b);
+                    }
                 }
             }
         }
@@ -1806,6 +1813,7 @@ impl Sources {
         };
         let folder = folder?;
         Some(ActiveBlock {
+            kind: data_safety::BlockKind::DataSafety,
             source_id: state.id.clone(),
             source_label: label.to_owned(),
             instance: manifest_id.strip_prefix(STACK_SOURCE_PREFIX).unwrap_or(manifest_id).to_owned(),
@@ -1849,9 +1857,14 @@ fn remember_kind(inner: &mut Inner, key: &str) {
     }
 }
 
-/// A saved verdict in force, as the last known one.
-fn saved_block(id: &str, label: &str, v: &SavedVerdict) -> Option<ActiveBlock> {
-    active_block(id, label, v.block.as_ref()?, false, v.fallback.as_deref())
+/// A saved verdict's blocks in force (data safety and secret scan), as the
+/// last known ones.
+fn saved_blocks(id: &str, label: &str, v: &SavedVerdict) -> Vec<ActiveBlock> {
+    [v.block.as_ref(), v.secret_scan.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|b| active_block(id, label, b, false, v.fallback.as_deref()))
+        .collect()
 }
 
 /// An agent action whose folder data safety blocks is disabled with the
@@ -1860,7 +1873,7 @@ fn data_safety_verdict(action: &SourceAction, mut verdict: ActionVerdict, blocks
     if let (SourceAction::Agent { .. }, true, Some(cwd)) = (action, verdict.enabled, verdict.cwd.as_ref()) {
         if let Some(b) = data_safety::blocking(blocks, cwd) {
             verdict.enabled = false;
-            verdict.reason = Some(format!("agents blocked — data safety on {}: {}", b.instance, b.reason));
+            verdict.reason = Some(data_safety::disabled_text(b));
         }
     }
     verdict
@@ -2498,6 +2511,85 @@ mod tests {
 
     fn answer(sources: &Sources, payload: Value) {
         assert!(!sources.apply_poll("stack", 0, ENVIRONMENT_VIEW, Duration::from_secs(120), Ok(payload)), "not cancelled");
+    }
+
+    fn secret_payload(project: &Path, folder: &Path, state: &str, blocks: bool) -> Value {
+        json!({ "components": [],
+            "dataSafety": { "instance": "app/0", "state": "clean", "blocksAgents": false, "bound": null,
+                            "project": project.display().to_string(), "reasons": [] },
+            "secretScan": {
+                "instance": "app/0", "state": state, "blocksAgents": blocks, "policy": "block-agents",
+                "findings": [{ "rule": "github-pat", "file": ".work/ABC-1/src/api-1a2b3c4d/.env", "line": 1 }],
+                "bound": { "source": "tracker", "key": "ABC-1", "folders": [folder.display().to_string()] },
+                "project": project.display().to_string(),
+                "reasons": [{ "component": null, "text": "api worktree: 1 possible secret (.work/ABC-1/src/api-1a2b3c4d/.env:1 (github-pat))" }],
+                "ackActionId": "secret-scan-ack",
+            }})
+    }
+
+    #[test]
+    fn a_secret_scan_block_is_enforced_like_data_safety_and_kept_across_a_restart() {
+        use crate::data_safety::BlockKind;
+        use crate::delivery_hold::HoldGate;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = dir.path().join("stack");
+        let item = project.join(".work").join("ABC-1");
+        let wt = item.join("src").join("api-1a2b3c4d");
+        std::fs::create_dir_all(&wt).unwrap();
+
+        let first = started(&config);
+        put_environment(&first, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&first, "stack:app");
+        answer(&first, secret_payload(&project, &item, "not-clean", true));
+        let blocks = first.data_safety_blocks();
+        assert_eq!(blocks.len(), 1, "the clean data-safety block keeps nothing out");
+        assert_eq!(blocks[0].kind, BlockKind::SecretScan);
+        assert!(blocks[0].current);
+        // The one spawn path refuses, naming the check; deliveries are held.
+        let refusal = crate::data_safety::check_launch(&first, &wt).unwrap_err();
+        assert!(refusal.starts_with(crate::data_safety::REFUSAL_LEAD), "{refusal}");
+        assert!(refusal.contains("the secret scan on app/0") && refusal.contains(".env:1 (github-pat)"), "{refusal}");
+        assert!(first.hold_reason(&wt).unwrap().starts_with("held until the secret scan on app/0 clears"));
+        assert!(crate::data_safety::check_launch(&first, &project).is_ok(), "the project itself is not the bound item");
+        let agent = actions::parse_action(&json!({ "kind": "agent", "id": "a", "label": "Agent here", "cwd": "/x", "prompt": "go" })).unwrap();
+        let ok = ActionVerdict { enabled: true, reason: None, hidden: false, cwd: Some(wt.clone()), tool: Some((1, "claude".into())) };
+        let judged = data_safety_verdict(&agent, ok, &blocks);
+        assert!(!judged.enabled);
+        assert!(judged.reason.unwrap().starts_with("agents blocked — secret scan on app/0: api worktree"));
+        // An unfinished scan the source says does not block (commits, build
+        // contexts) keeps nothing out: unlike data safety, `error` alone is not a block.
+        answer(&first, secret_payload(&project, &item, "error", false));
+        assert!(first.data_safety_blocks().is_empty());
+        answer(&first, secret_payload(&project, &item, "error", true));
+        assert_eq!(first.data_safety_blocks().len(), 1);
+        // Both checks blocking: one block each.
+        let mut both = secret_payload(&project, &item, "not-clean", true);
+        both["dataSafety"]["state"] = "not-clean".into();
+        both["dataSafety"]["blocksAgents"] = true.into();
+        answer(&first, both);
+        let kinds: Vec<BlockKind> = first.data_safety_blocks().iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, [BlockKind::DataSafety, BlockKind::SecretScan]);
+        answer(&first, secret_payload(&project, &item, "not-clean", true));
+        let saved = std::fs::read_to_string(config.join(verdicts::FILE_NAME)).unwrap();
+        assert!(saved.contains("\"secretScan\""), "kept in its own field: {saved}");
+
+        // Restart: the saved secret block is in force before any answer.
+        let second = started(&config);
+        let blocks = second.data_safety_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::SecretScan);
+        assert!(!blocks[0].current);
+        assert!(blocks[0].reason.starts_with("last known: api worktree"), "{}", blocks[0].reason);
+        assert!(crate::data_safety::check_launch(&second, &wt).is_err());
+        // Its acknowledgement lifts it.
+        put_environment(&second, &project, None, SourceStatus::Up, true, None);
+        with_manifest(&second, "stack:app");
+        answer(&second, secret_payload(&project, &item, "acknowledged", false));
+        assert!(second.data_safety_blocks().is_empty());
+        assert!(crate::data_safety::check_launch(&second, &wt).is_ok());
+        assert_eq!(second.hold_reason(&wt), None);
     }
 
     #[test]

@@ -268,6 +268,8 @@ struct ComposeService {
     ports: Vec<Yaml>,
     #[serde(default)]
     expose: Vec<Yaml>,
+    #[serde(default)]
+    env_file: Option<Yaml>,
 }
 
 fn port_number(s: &str) -> Option<u16> {
@@ -333,6 +335,33 @@ pub fn base_targets(compose_text: &str, service: &str) -> Result<Vec<PortTarget>
         }
     }
     Ok(out)
+}
+
+/// The `env_file` entries of `service` in a base compose file, as written
+/// (relative paths are relative to that file's folder). Compose takes a
+/// string, a list of strings, or a list of `{path, required}` maps; a file
+/// that does not parse, or a service it does not name, has none.
+pub fn base_env_files(compose_text: &str, service: &str) -> Vec<PathBuf> {
+    let Ok(doc) = serde_yaml::from_str::<ComposeDoc>(compose_text) else {
+        return Vec::new();
+    };
+    let Some(entry) = doc.services.get(service).and_then(|s| s.env_file.as_ref()) else {
+        return Vec::new();
+    };
+    let one = |y: &Yaml| -> Option<PathBuf> {
+        match y {
+            Yaml::String(s) => Some(PathBuf::from(s)),
+            Yaml::Mapping(m) => m
+                .get(Yaml::String("path".into()))
+                .and_then(Yaml::as_str)
+                .map(PathBuf::from),
+            _ => None,
+        }
+    };
+    match entry {
+        Yaml::Sequence(list) => list.iter().filter_map(one).collect(),
+        other => one(other).into_iter().collect(),
+    }
 }
 
 /// Services whose base file publishes ports itself: those would be
@@ -967,6 +996,32 @@ pub fn instances_in(ps_names: &[PsEntry]) -> BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn env_files_are_read_in_each_shape_compose_takes() {
+        let text = "services:
+  api:
+    env_file: .env
+  web:
+    env_file:
+      - web.env
+      - path: ./secrets/extra.env
+        required: false
+  db:
+    image: postgres
+";
+        assert_eq!(base_env_files(text, "api"), vec![PathBuf::from(".env")]);
+        assert_eq!(
+            base_env_files(text, "web"),
+            vec![
+                PathBuf::from("web.env"),
+                PathBuf::from("./secrets/extra.env")
+            ]
+        );
+        assert!(base_env_files(text, "db").is_empty());
+        assert!(base_env_files(text, "nope").is_empty());
+        assert!(base_env_files("not: [yaml", "api").is_empty());
+    }
+
     use super::*;
     use crate::cli::FakeCli;
     use crate::definition::StacksDocument;

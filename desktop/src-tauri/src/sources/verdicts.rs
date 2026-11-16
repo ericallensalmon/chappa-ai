@@ -1,12 +1,14 @@
 //! `data-safety.json` in the app-config dir: each source's last data-safety
-//! verdict, kept so a restart does not open a window in which agents may
-//! start next to data a stack said may be real.
+//! and secret-scan verdicts, kept so a restart does not open a window in
+//! which agents may start next to data a stack said may be real, or in a
+//! folder where it found possible secrets.
 //!
 //! ```json
 //! {
 //!   "verdicts": {
 //!     "<source registry id>": {
 //!       "block": { "instance": "app/0", "state": "not-clean", "blocksAgents": true, … },
+//!       "secretScan": { "kind": "secretScan", "instance": "app/0", "state": "clean", … },
 //!       "sourceLabel": "Stack app", "manifestId": "stack:app",
 //!       "fallback": "/srv/example/stack", "savedMs": 1794657600000
 //!     }
@@ -14,6 +16,10 @@
 //! }
 //! ```
 //!
+//! - **Two blocks per source, one field each.** `block` is the
+//!   `dataSafety` block, `secretScan` the `secretScan` one (absent when the
+//!   last answer carried none, and in files written before secret scans).
+//!   Both follow every rule below the same way.
 //! - **Every answer is kept, clean or not.** A fresh Environment answer
 //!   replaces the record (`block: null` when the answer carried none); the
 //!   file is rewritten only when what it says changed, not on every poll.
@@ -52,8 +58,13 @@ pub const FILE_NAME: &str = "data-safety.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedVerdict {
-    /// The block as last sent; `None` when the last answer carried none.
+    /// The `dataSafety` block as last sent; `None` when the last answer
+    /// carried none.
     pub block: Option<WireBlock>,
+    /// The `secretScan` block as last sent; `None` when the last answer
+    /// carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_scan: Option<WireBlock>,
     /// The source's label when it answered (shown before it is back).
     pub source_label: String,
     pub manifest_id: String,
@@ -68,6 +79,7 @@ impl SavedVerdict {
     /// The same verdict, saved at another time.
     fn same_as(&self, other: &SavedVerdict) -> bool {
         self.block == other.block
+            && self.secret_scan == other.secret_scan
             && self.source_label == other.source_label
             && self.manifest_id == other.manifest_id
             && self.fallback == other.fallback
@@ -235,6 +247,7 @@ mod tests {
                 "project": if cfg!(windows) { "C:\\srv\\example" } else { "/srv/example" },
                 "ackActionId": "data-safety-ack",
             }})),
+            secret_scan: None,
             source_label: "Stack app".into(),
             manifest_id: "stack:app".into(),
             fallback: Some(PathBuf::from("/srv/example")),

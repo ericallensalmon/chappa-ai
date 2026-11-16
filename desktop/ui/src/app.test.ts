@@ -4193,6 +4193,34 @@ describe("App agents", () => {
   type BridgeDriver = { applyBridge: (p: ipc.AgentBridgeEvent) => void; activeId: number | null };
   const bridgeDrive = (app: App): BridgeDriver => app as unknown as BridgeDriver;
 
+  it("secret scan: a launch refused because the scan did not finish offers Launch anyway and retries with the note", async () => {
+    const { api, app } = await mountedWithAgents([dockerTool(3)]);
+    const refusal = `secret-scan-blocked:${JSON.stringify({ projectRoot: "/p", cwd: "/p", findings: [], skipped: 0, incomplete: "the secret scan did not finish within 60 s" })}`;
+    let first = true;
+    (api.spawnAgent as ReturnType<typeof vi.fn>).mockImplementation(async (req: ipc.SpawnAgentRequestDto) => {
+      if (first) {
+        first = false;
+        throw new Error(refusal);
+      }
+      return fakeSpawnResponse(810, req);
+    });
+    const launched = app.spawnAgent(3);
+    for (let i = 0; i < 5 && !document.querySelector(".chappa-dialog-input"); i++) await FLUSH();
+    const message = document.querySelector(".chappa-dialog-message")!.textContent!;
+    expect(message).toContain("did not finish within 60 s");
+    expect(message).toContain("A note is required");
+    expect(document.querySelector(".chappa-dialog-ok")!.textContent).toBe("Launch anyway");
+    document.querySelector<HTMLInputElement>(".chappa-dialog-input")!.value = "the scanner is being reinstalled";
+    document.querySelector<HTMLButtonElement>(".chappa-dialog-ok")!.click();
+    const resp = await launched;
+    expect(resp?.term_id).toBe(810);
+    const calls = (api.spawnAgent as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBe(2);
+    expect(calls[0][2]).toBeNull();
+    expect(calls[1][2]).toBe("the scanner is being reinstalled");
+    panelDispose(app);
+  });
+
   it("the New agent menu lists ENABLED tools only, with the model", async () => {
     const { root, app } = await mountedWithAgents([
       dockerTool(3),

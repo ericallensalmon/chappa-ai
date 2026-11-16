@@ -7,6 +7,7 @@
 //! another, so every tool here is `Send + Sync`. Tests swap any of them for
 //! a fake ([`Locked`] makes stack-core's single-threaded fakes shareable).
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -58,6 +59,13 @@ pub struct World {
     /// The pause between attempts of a data-safety hook run right after
     /// up, while a database may still be starting.
     pub hook_retry: Duration,
+    /// How status and plan scripts run (the background pool's runs).
+    pub scripts: Shared<dyn EngineCli + Send + Sync>,
+    /// The scripts [`World::scripts`] has in flight, so shutdown can end
+    /// them instead of leaving them to their own time limits.
+    pub running_scripts: Shared<RunningScripts>,
+    /// The secret scanner: gitleaks on `PATH` for real, a fake in tests.
+    pub secrets: Shared<dyn crate::secret_scan::ScannerSource + Send + Sync>,
 }
 
 /// The default for [`World::settle`].
@@ -69,7 +77,12 @@ impl World {
     /// The real machine: engines, git and HTTP for real.
     pub fn real() -> World {
         let cli: Shared<dyn EngineCli + Send + Sync> = Arc::new(CliRunner);
+        let running_scripts = Arc::new(RunningScripts::default());
         World {
+            scripts: Arc::new(ScriptCli {
+                running: running_scripts.clone(),
+            }),
+            running_scripts,
             cli: cli.clone(),
             registry: cli.clone(),
             git: Arc::new(GitCli::default()),
@@ -85,6 +98,7 @@ impl World {
             settle: PROCESS_SETTLE,
             clock: Arc::new(SystemClock),
             hook_retry: HOOK_RETRY,
+            secrets: Arc::new(crate::secret_scan::GitleaksOnPath),
         }
     }
 }
@@ -297,6 +311,147 @@ impl StepExec for ChildSteps {
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String> {
         run_child(run, limit, out, true)
+    }
+}
+
+/// The status and plan scripts in flight, by process id.
+#[derive(Debug, Default)]
+pub struct RunningScripts(Mutex<HashSet<u32>>);
+
+impl RunningScripts {
+    fn add(&self, pid: u32) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).insert(pid);
+    }
+
+    fn remove(&self, pid: u32) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&pid);
+    }
+
+    /// The scripts running now.
+    pub fn pids(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Stop every script in flight and everything each one started (on
+    /// shutdown). The ids stopped.
+    pub fn kill_all(&self) -> Vec<u32> {
+        let pids = self.pids();
+        for pid in &pids {
+            kill_tree(*pid);
+        }
+        pids
+    }
+}
+
+/// Runs status and plan scripts: like stack-core's `CliRunner` (argv only,
+/// captured, capped, under the invocation's time limit), but each script
+/// leads its own process group on Unix, is listed in [`RunningScripts`]
+/// while it runs, and is stopped with every process it started when it runs
+/// out of time or the source shuts down.
+pub struct ScriptCli {
+    pub running: Arc<RunningScripts>,
+}
+
+/// Most stdout and stderr kept from one script run.
+const SCRIPT_STDOUT_CAP: usize = 8 * 1024 * 1024;
+const SCRIPT_STDERR_CAP: usize = 1024 * 1024;
+
+fn read_capped(mut pipe: impl Read, cap: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = pipe.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        if out.len() < cap {
+            let room = cap - out.len();
+            out.extend_from_slice(&buf[..n.min(room)]);
+        }
+    }
+    out
+}
+
+impl EngineCli for ScriptCli {
+    fn run(&self, inv: &Invocation) -> Result<CliOutput, CliError> {
+        let mut cmd = Command::new(&inv.program);
+        cmd.args(&inv.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in &inv.env {
+            cmd.env(k, v);
+        }
+        if let Some(cwd) = &inv.cwd {
+            cmd.current_dir(cwd);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd.spawn().map_err(|e| CliError::Spawn {
+            program: inv.program.clone(),
+            message: e.to_string(),
+        })?;
+        let pid = child.id();
+        self.running.add(pid);
+        let (out_tx, out_rx) = std::sync::mpsc::channel();
+        let stdout = child.stdout.take().expect("stdout is piped");
+        thread::spawn(move || {
+            let _ = out_tx.send(read_capped(stdout, SCRIPT_STDOUT_CAP));
+        });
+        let (err_tx, err_rx) = std::sync::mpsc::channel();
+        let stderr = child.stderr.take().expect("stderr is piped");
+        thread::spawn(move || {
+            let _ = err_tx.send(read_capped(stderr, SCRIPT_STDERR_CAP));
+        });
+        let deadline = Instant::now() + Duration::from_secs(inv.timeout_secs);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(e) => {
+                    kill_tree(pid);
+                    let _ = child.kill();
+                    self.running.remove(pid);
+                    return Err(CliError::Spawn {
+                        program: inv.program.clone(),
+                        message: format!("waiting: {e}"),
+                    });
+                }
+            }
+            if Instant::now() >= deadline {
+                kill_tree(pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                self.running.remove(pid);
+                return Err(CliError::Timeout {
+                    command: inv.to_string(),
+                    seconds: inv.timeout_secs,
+                });
+            }
+            thread::sleep(Duration::from_millis(15));
+        };
+        self.running.remove(pid);
+        let grace = Duration::from_secs(2);
+        let stdout = out_rx.recv_timeout(grace).unwrap_or_default();
+        let stderr = err_rx.recv_timeout(grace).unwrap_or_default();
+        Ok(CliOutput {
+            status: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
     }
 }
 

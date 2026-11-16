@@ -91,6 +91,7 @@ fn policy_table() {
     assert_eq!(policy_for(None), Policy::BlockAgents);
     let def = crate::definition::SecretsDef {
         on_finding: Policy::BlockBuild,
+        excludes: Vec::new(),
     };
     assert_eq!(policy_for(Some(&def)), Policy::BlockBuild);
 }

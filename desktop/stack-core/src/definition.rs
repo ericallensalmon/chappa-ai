@@ -650,6 +650,11 @@ fn default_unscanned_policy() -> Policy {
 pub struct SecretsDef {
     #[serde(default = "default_data_policy")]
     pub on_finding: Policy,
+    /// Paths a working-tree scan of an item's worktrees leaves out, as
+    /// patterns that match at any depth (`fixtures/`, `*.snap`), on top of
+    /// the directories every scan skips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excludes: Vec<String>,
 }
 
 /// Which image labels fill which provenance field, each a list tried in
@@ -3544,6 +3549,7 @@ stacks:
         doc.stacks["app"].data_safety.as_mut().unwrap().unscanned = Policy::Stop;
         doc.stacks["app"].secrets = Some(SecretsDef {
             on_finding: Policy::BlockUp,
+            excludes: Vec::new(),
         });
         let errs = errors(&doc);
         let p: Vec<&str> = by_rule(&errs, Rule::PolicyNotAllowed)

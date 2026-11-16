@@ -16,6 +16,7 @@
 //! | `facts` | the stack (instance, slot, port block, bound item, channel, with the stack-wide actions), engines and versions, the memory budget, relay listeners, data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
 //! | `banners` | definition warnings or errors; the hosts-file fix; agents blocked by data safety (with the acknowledge action) |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
+//! | `secretScan` | the instance's secret-scan block, added by the server with its alerts, banner and facts section (see [`crate::secret_scan`]) |
 //!
 //! A script component shows as one row, or, when its status script reports
 //! several components (a wrapped whole stack), as one row per reported
@@ -1109,6 +1110,7 @@ pub fn unavailable(reason: &str, now_utc: &str, instance: &str, project: &Path) 
             "project": data_safety::project_dir(project),
             "reasons": [{ "component": null, "text": format!("the stack cannot be read: {reason}") }],
         },
+        "secretScan": crate::secret_scan::unavailable_block(instance, project, reason),
         "freshness": { "asOf": now_utc, "errors": [{ "source": "definition", "message": reason }] },
         "groups": [],
         "components": [],

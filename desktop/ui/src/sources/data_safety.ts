@@ -22,8 +22,18 @@ import type { Chip } from "./prs_model";
 
 export const EMPTY_DATA_SAFETY: ipc.DataSafetyStateDto = { blocks: [], agents: [], held: [] };
 
-/** The badge a covered Work row wears. */
+/** The badge a covered Work row wears, per check. */
 export const BLOCKED_BADGE_TEXT = "agents blocked — data safety";
+export const SECRETS_BADGE_TEXT = "agents blocked — possible secrets";
+
+/** Whether a block is the stack's secret scan (else its data safety). */
+export function isSecretBlock(b: { kind?: ipc.AgentBlockKind }): boolean {
+  return b.kind === "secretScan";
+}
+
+function badgeText(b: ipc.DataSafetyBlockDto): string {
+  return isSecretBlock(b) ? SECRETS_BADGE_TEXT : BLOCKED_BADGE_TEXT;
+}
 
 /** A folder for comparison: forward slashes, no trailing slash, no Windows
  *  verbatim prefix, and lowercase when it is a Windows path (Rust compares
@@ -74,17 +84,23 @@ export function markDataSafety(
   for (const row of rows) {
     const block = blockForRow(row, blocks);
     row.dataSafety = block;
-    if (block && !row.badges.some((b) => b.text === BLOCKED_BADGE_TEXT)) row.badges = [...row.badges, blockedBadge(block)];
+    if (block && !row.badges.some((b) => b.text === badgeText(block))) row.badges = [...row.badges, blockedBadge(block)];
   }
 }
 
 /** The row's badge for a block: the reason is its tooltip. */
 export function blockedBadge(block: ipc.DataSafetyBlockDto): Chip {
-  return { text: BLOCKED_BADGE_TEXT, tone: "bad", title: block.reason };
+  return { text: badgeText(block), tone: "bad", title: block.reason };
 }
 
 /** The item panel's banner for a block. */
 export function blockedBanner(block: ipc.DataSafetyBlockDto): { title: string; lines: string[] } {
+  if (isSecretBlock(block)) {
+    return {
+      title: `Agents are blocked here: the secret scan of ${block.instance} found possible secrets or did not finish`,
+      lines: [block.reason, "No new agent starts in this item's folders until the scan is clean or acknowledged in Environment."],
+    };
+  }
   return {
     title: `Agents are blocked here: the data on ${block.instance} may be real`,
     lines: [block.reason, "No new agent starts in this item's folders until the check is clean or acknowledged in Environment."],
@@ -106,7 +122,10 @@ export function heldCount(state: ipc.DataSafetyStateDto, termId: number): number
  *  finding listed) and the same required note, and Rust sends the person as
  *  `X-Chappa-Actor`. Only while the source answers and says `not-clean`. */
 export function ackTargets(b: ipc.DataSafetyBlockDto): NeedsYouRow["actions"] {
-  if (!b.ackActionId || !b.current || b.state !== "not-clean") return [];
+  // A secret scan that did not finish is acknowledged too ("let agents start
+  // without a complete scan"); a data-safety error is not.
+  const acknowledgeable = b.state === "not-clean" || (isSecretBlock(b) && b.state === "error");
+  if (!b.ackActionId || !b.current || !acknowledgeable) return [];
   return [{ sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "environment", key: null, only: [b.ackActionId] }];
 }
 
@@ -116,9 +135,9 @@ export function dataSafetySection(state: ipc.DataSafetyStateDto): NeedsYouSectio
   const rows: NeedsYouRow[] = [];
   for (const b of state.blocks) {
     rows.push({
-      id: `ds:${b.sourceId}|${b.instance}`,
+      id: `${isSecretBlock(b) ? "ss" : "ds"}:${b.sourceId}|${b.instance}`,
       kind: "environment",
-      title: `Agents blocked on ${b.instance}`,
+      title: isSecretBlock(b) ? `Agents blocked on ${b.instance}: secret scan` : `Agents blocked on ${b.instance}`,
       detail: b.reason,
       tone: "bad",
       folded: false,
@@ -135,7 +154,12 @@ export function dataSafetySection(state: ipc.DataSafetyStateDto): NeedsYouSectio
       id: `ds-agent:${a.termId}`,
       kind: "terminal",
       title: a.name,
-      detail: [`working next to unscanned/real data in ${a.instance}`, held ? heldText(held) : ""].filter(Boolean).join(" · "),
+      detail: [
+        isSecretBlock(a) ? `working where possible secrets were found in ${a.instance}` : `working next to unscanned/real data in ${a.instance}`,
+        held ? heldText(held) : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
       tone: "bad",
       folded: false,
       counted: true,
@@ -146,5 +170,8 @@ export function dataSafetySection(state: ipc.DataSafetyStateDto): NeedsYouSectio
       opens: null,
     });
   }
-  return rows.length ? { id: "data-safety", title: "Data safety", rows } : null;
+  const secrets = state.blocks.some(isSecretBlock);
+  const data = state.blocks.some((b) => !isSecretBlock(b));
+  const title = secrets && !data ? "Secret scan" : secrets ? "Data safety and secret scan" : "Data safety";
+  return rows.length ? { id: "data-safety", title, rows } : null;
 }

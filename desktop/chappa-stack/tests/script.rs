@@ -252,7 +252,9 @@ const ONE: &str = "stacks:\n  app:\n    components:\n      app:\n        driver:
 fn the_environment_never_waits_for_a_slow_status_script() {
     let p = Project::with(ONE, &[]);
     let mut f = fakes(FakeCli::new(), FakeHttp::default());
-    f.world.cli = Arc::new(SlowCli(Duration::from_secs(3)));
+    let slow = Arc::new(SlowCli(Duration::from_secs(3)));
+    f.world.cli = slow.clone();
+    f.world.scripts = slow;
     let src = source(f.world.clone(), &p.dir);
     let t = Instant::now();
     let e = env(&src);

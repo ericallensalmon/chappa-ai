@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { BLOCK_PREFIX, blockMessage, findingLine, noticeText, offerAcknowledge, parseSecretScanBlock } from "./secret_scan";
+import { BLOCK_PREFIX, blockMessage, findingLine, noticeText, offerAcknowledge, offerLaunchAnyway, parseSecretScanBlock } from "./secret_scan";
 
 const block = {
   projectRoot: "C:\\code\\app",
@@ -43,9 +43,20 @@ describe("messages", () => {
     expect(warn.title).toBe("2 possible secrets in the agent's folder");
     expect(warn.body).toContain("policy: warn");
     expect(warn.body).toContain(".env:1  (github-pat)");
-    const incomplete = noticeText({ kind: "incomplete", cwd: "/w", reason: "the secret scan did not finish within 60 s" });
-    expect(incomplete.title).toBe("Secret scan did not run");
-    expect(incomplete.body).toContain("did not finish within 60 s");
+    const anyway = noticeText({ kind: "launched-anyway", cwd: "/w", reason: "the secret scan did not finish within 60 s", note: "scanner being replaced" });
+    expect(anyway.title).toBe("Launched without a complete secret scan");
+    expect(anyway.body).toContain("did not finish within 60 s");
+    expect(anyway.body).toContain("scanner being replaced");
+  });
+
+  it("read and explain a refusal for a scan that did not finish", () => {
+    const incomplete = { projectRoot: "/p", cwd: "/p/wt", findings: [], skipped: 0, incomplete: "gitleaks was not found" };
+    expect(parseSecretScanBlock(`${BLOCK_PREFIX}${JSON.stringify(incomplete)}`)).toEqual(incomplete);
+    const text = blockMessage(incomplete);
+    expect(text).toContain("did not finish");
+    expect(text).toContain("gitleaks was not found");
+    expect(text).toContain("launch anyway");
+    expect(text).not.toContain("acknowledge them");
   });
 });
 
@@ -66,5 +77,30 @@ describe("offerAcknowledge", () => {
     okButton().click();
     expect(await accepted).toBe(true);
     expect(acknowledge).toHaveBeenCalledWith(4, block.findings, null);
+  });
+});
+
+describe("offerLaunchAnyway", () => {
+  const ok = () => document.querySelector<HTMLButtonElement>(".chappa-dialog-ok")!;
+  const input = () => document.querySelector<HTMLInputElement>(".chappa-dialog-input")!;
+  const incomplete = { projectRoot: "/p", cwd: "/p", findings: [], skipped: 0, incomplete: "the scan did not finish within 60 s" };
+
+  it("needs a note, answers it, and answers null when cancelled", async () => {
+    const asked = offerLaunchAnyway(incomplete);
+    await Promise.resolve();
+    expect(ok().textContent).toBe("Launch anyway");
+    input().value = "   ";
+    ok().click();
+    await Promise.resolve();
+    await Promise.resolve();
+    // An empty note asks again.
+    expect(input()).not.toBeNull();
+    input().value = "the scanner is being reinstalled";
+    ok().click();
+    await expect(asked).resolves.toBe("the scanner is being reinstalled");
+    const cancelled = offerLaunchAnyway(incomplete);
+    await Promise.resolve();
+    document.querySelector<HTMLButtonElement>(".chappa-dialog-cancel")!.click();
+    await expect(cancelled).resolves.toBeNull();
   });
 });
