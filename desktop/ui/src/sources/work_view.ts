@@ -61,6 +61,9 @@ export interface WorkViewInput {
   loadedPrs: ReadonlySet<string>;
   /** Labels of the trusted sources serving Work (empty: none does). */
   servedBy: string[];
+  /** Why no source serves it, when none does (`unservedText`). Absent:
+   *  the general line. */
+  unserved?: string;
   /** Bumped per source whenever its payload was re-read. */
   versions: Record<string, number>;
   /** The listed sources in the Settings order: whose `ref` is whose, why an
@@ -133,7 +136,7 @@ function injectStyles(): void {
 /** The empty-state line: why there is nothing to show. */
 export function workEmptyText(input: WorkViewInput, model: WorkModel, filter: WorkFilter): string {
   if (input.servedBy.length === 0) {
-    return "No trusted source serves work items. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
+    return input.unserved ?? "No trusted source serves work items. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
   }
   if (!model.hasData) return `Waiting for the first answer from ${input.servedBy.join(", ")}.`;
   if (model.all.length === 0) return "No work items.";

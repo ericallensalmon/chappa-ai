@@ -70,7 +70,7 @@ import {
 } from "./record_pane";
 import { firstLine } from "./markdown";
 import { Dashboard, tailLine, type CardActionId, type CardInput, type CardLive, type DashGroupInput } from "./dashboard";
-import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, visibleViews, type RailView, type SourcesStore } from "./sources_store";
+import { RAIL_VIEWS, VIEW_LABELS, servedBy, sourcesStore, unservedText, visibleViews, type RailView, type SourcesStore } from "./sources_store";
 import { buildPrsModel, prsNeedingYou, type PrRow, type PrsModel } from "./sources/prs_model";
 import { buildWorkModel, type WorkModel } from "./sources/work_model";
 import { keyMatchOf } from "./sources/work_view";
@@ -7027,6 +7027,7 @@ export class App {
         needsUpdate: data.needsUpdate(),
         loadedPrs,
         servedBy: servedBy(data.current, "work").map((s) => s.label),
+        unserved: unservedText(data.current, "work", "work items"),
         versions: data.versions(),
         sources: data.current.sources,
         prRows: prs ? this.currentPrRows() : [],
@@ -7037,6 +7038,7 @@ export class App {
       this.environmentView.update({
         model: this.pickedEnvironmentModel(),
         servedBy: servedBy(this.viewsData.current, "environment").map((s) => s.label),
+        unserved: unservedText(this.viewsData.current, "environment", "an environment"),
         versions: this.viewsData.versions(),
       });
     }
@@ -7047,6 +7049,7 @@ export class App {
       this.prsView.update({
         model: isAll(pick) ? this.currentPrsModel() : buildPrsModel(filterPayloads(this.viewsData.payloadsFor("prs"), pick), this.viewsData.needsUpdate()),
         servedBy: servedBy(this.viewsData.current, "prs").map((s) => s.label),
+        unserved: unservedText(this.viewsData.current, "prs", "pull requests"),
         versions: this.viewsData.versions(),
         workItems: work?.joins.byPr,
         sources: this.viewsData.current.sources,

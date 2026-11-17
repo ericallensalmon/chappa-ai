@@ -7,6 +7,7 @@ import {
   servedBy,
   statusLabel,
   trustMessage,
+  unservedText,
   visibleViews,
   type Source,
   type SourcesApi,
@@ -244,5 +245,38 @@ describe("SourcesStore", () => {
     });
     const store = new SourcesStore(api);
     expect(await store.load()).toEqual({ sources: [], hiddenViews: [] });
+  });
+});
+
+describe("unservedText", () => {
+  const listing = (...sources: Source[]): SourcesListing => ({ sources, hiddenViews: [] });
+
+  it("names a source that serves the view but waits for review", () => {
+    const text = unservedText(listing(source("Stack scripted", { trusted: false, status: "needs_review", views: [view("environment")] })), "environment", "an environment");
+    expect(text).toBe("Stack scripted serves an environment but is waiting for review.");
+  });
+
+  it("names several, and says when they wait on an update", () => {
+    const a = source("A", { trusted: false, status: "needs_update", views: [view("prs")] });
+    const b = source("B", { trusted: false, status: "needs_update", views: [view("prs")] });
+    expect(unservedText(listing(a, b), "prs", "pull requests")).toBe("A and B serve pull requests but are waiting for you to review an update.");
+  });
+
+  it("ignores a waiting source that serves another view", () => {
+    const text = unservedText(listing(source("T", { trusted: false, status: "needs_review", views: [view("work")] })), "environment", "an environment");
+    expect(text).toMatch(/^No trusted source serves an environment\. Add one/);
+  });
+
+  it("says which source never answered, with its error", () => {
+    const dead = source("stack", { status: "down", manifestId: null, views: [], trusted: false, trust: null, lastError: "the source process could not be started: program not found" });
+    expect(unservedText(listing(dead), "environment", "an environment")).toBe(
+      "No trusted source serves an environment. A source did not start (stack: the source process could not be started: program not found).",
+    );
+  });
+
+  it("falls back to the general line, saying when a project's source starts", () => {
+    expect(unservedText(listing(), "work", "work items")).toBe(
+      "No trusted source serves work items. Add one as a source command in a project's chappa.yml (it starts once the project is open and trusted), or attach one in Settings ▸ Sources.",
+    );
   });
 });

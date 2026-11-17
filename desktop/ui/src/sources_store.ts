@@ -81,6 +81,37 @@ export function servedBy(listing: SourcesListing, view: string): Source[] {
   return listing.sources.filter((s) => s.trusted && s.views.some((v) => v.name === view));
 }
 
+/** A list of names as a sentence: "A", "A and B", "A, B and C". */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/**
+ * The empty state of a view no trusted source serves: what is in the way,
+ * most specific first. A source that declares the view but waits for the
+ * trust answer is named; so is one that never answered (its process could
+ * not start, or exited before it said what it serves), with its error,
+ * since it may well be the one meant to serve the view. Otherwise the
+ * general line, which also says when a project's own source starts.
+ */
+export function unservedText(listing: SourcesListing, view: RailView, what: string): string {
+  const waiting = listing.sources.filter(
+    (s) => !s.trusted && (s.status === "needs_review" || s.status === "needs_update") && s.views.some((v) => v.name === view),
+  );
+  if (waiting.length > 0) {
+    const one = waiting.length === 1;
+    const update = waiting.every((s) => s.status === "needs_update");
+    return `${joinNames(waiting.map((s) => s.label))} ${one ? "serves" : "serve"} ${what} but ${one ? "is" : "are"} waiting for ${update ? "you to review an update" : "review"}.`;
+  }
+  const silent = listing.sources.filter((s) => s.status === "down" && s.manifestId === null && s.views.length === 0);
+  if (silent.length > 0) {
+    const lines = silent.map((s) => (s.lastError ? `${s.label}: ${s.lastError}` : `${s.label} has not answered`));
+    return `No trusted source serves ${what}. ${silent.length === 1 ? "A source did not start" : "Some sources did not start"} (${lines.join("; ")}).`;
+  }
+  return `No trusted source serves ${what}. Add one as a source command in a project's chappa.yml (it starts once the project is open and trusted), or attach one in Settings ▸ Sources.`;
+}
+
 /** The status word the list shows. */
 export function statusLabel(status: SourceStatus): string {
   switch (status) {

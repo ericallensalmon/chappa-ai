@@ -41,6 +41,9 @@ export interface PrsViewInput {
   model: PrsModel;
   /** Labels of the trusted sources serving PRs (empty: none does). */
   servedBy: string[];
+  /** Why no source serves it, when none does (`unservedText`). Absent:
+   *  the general line. */
+  unserved?: string;
   /** Bumped per source whenever its payload was re-read, so a row's
    *  actions are read again after a poll. */
   versions: Record<string, number>;
@@ -87,7 +90,7 @@ interface RowRefs {
 /** The empty-state line: why there is nothing to show. */
 export function prsEmptyText(input: PrsViewInput, tab: PrsTab): string {
   if (input.servedBy.length === 0) {
-    return "No trusted source serves pull requests. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
+    return input.unserved ?? "No trusted source serves pull requests. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
   }
   if (!input.model.hasData) return `Waiting for the first answer from ${input.servedBy.join(", ")}.`;
   if (tab === "mine") return "None of your pull requests is open or recent.";

@@ -36,6 +36,9 @@ export interface EnvironmentViewInput {
   model: EnvironmentModel;
   /** Labels of the trusted sources serving the view (empty: none does). */
   servedBy: string[];
+  /** Why no source serves it, when none does (`unservedText`). Absent:
+   *  the general line. */
+  unserved?: string;
   /** Bumped per source whenever its payload was re-read. */
   versions: Record<string, number>;
 }
@@ -137,7 +140,7 @@ function injectStyles(): void {
 /** The empty-state line: why there is nothing to show. */
 export function environmentEmptyText(input: EnvironmentViewInput): string {
   if (input.servedBy.length === 0) {
-    return "No trusted source serves an environment. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
+    return input.unserved ?? "No trusted source serves an environment. Add one as a source command in a project's chappa.yml, or attach one in Settings ▸ Sources.";
   }
   if (!input.model.hasData) return `Waiting for the first answer from ${input.servedBy.join(", ")}.`;
   return "";
