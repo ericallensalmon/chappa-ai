@@ -211,6 +211,11 @@ mod tests {
         std::env::join_paths(dirs).unwrap()
     }
 
+    /// A PATH as the shell would print it, in this system's list syntax.
+    fn shell_path(dirs: &[&str]) -> String {
+        joined(dirs).into_string().unwrap()
+    }
+
     fn split(path: &OsStr) -> Vec<String> {
         std::env::split_paths(path)
             .map(|p| p.to_string_lossy().into_owned())
@@ -307,7 +312,7 @@ mod tests {
             Some(&joined(&["/usr/bin", "/bin"])),
             |interactive| {
                 asked.push(interactive);
-                Some("/opt/homebrew/bin:/usr/bin".to_owned())
+                Some(shell_path(&["/opt/homebrew/bin", "/usr/bin"]))
             },
             all_tools_in("/opt/homebrew/bin"),
         );
@@ -326,9 +331,9 @@ mod tests {
             |interactive| {
                 asked.push(interactive);
                 Some(if interactive {
-                    "/opt/nodes/current/bin:/opt/homebrew/bin:/usr/bin".to_owned()
+                    shell_path(&["/opt/nodes/current/bin", "/opt/homebrew/bin", "/usr/bin"])
                 } else {
-                    "/opt/homebrew/bin:/usr/bin".to_owned()
+                    shell_path(&["/opt/homebrew/bin", "/usr/bin"])
                 })
             },
             all_tools_in("/opt/nodes/current/bin"),
