@@ -26,6 +26,18 @@ function fakeApi(
   } as SettingsApi & { setSettings: ReturnType<typeof vi.fn> };
 }
 
+describe("at launch", () => {
+  it("defaults to nothing; the three modes stay, anything else is nothing", () => {
+    expect(defaultSettings().atLaunch).toBe("nothing");
+    for (const m of ["nothing", "select-last", "reopen-last"] as const) {
+      expect(clampSettings({ ...defaultSettings(), atLaunch: m }).atLaunch).toBe(m);
+    }
+    for (const bad of ["always", "REOPEN-LAST", 1, null, undefined]) {
+      expect(clampSettings({ ...defaultSettings(), atLaunch: bad as never }).atLaunch).toBe("nothing");
+    }
+  });
+});
+
 describe("defaults", () => {
   it("ships synthetic prompt marks OFF — the opt-in is deliberate", () => {
     expect(defaultSettings().syntheticPromptMarks).toBe(false);

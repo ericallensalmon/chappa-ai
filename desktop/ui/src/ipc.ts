@@ -1091,6 +1091,11 @@ export interface SettingsDto {
    *  ("allow"). Frontend-only consumer (clipboard_gate.ts); any other value
    *  loads as "ask". */
   clipboardWrites: ClipboardWritesMode;
+  /** What the app does with the project expanded when it last closed:
+   *  nothing (the default), show it without starting anything, or open it
+   *  as a click on its tile would. Frontend-only consumer; any other value
+   *  loads as "nothing". */
+  atLaunch: AtLaunchMode;
   /** How a ctrl+clicked file path opens: a command template with `{path}`,
    *  `{line}` and `{col}` placeholders (`code --goto {path}:{line}:{col}`),
    *  split into words before the path is substituted and run without a
@@ -1112,6 +1117,7 @@ export interface SettingsDto {
 }
 
 export type ClipboardWritesMode = "off" | "ask" | "allow";
+export type AtLaunchMode = "nothing" | "select-last" | "reopen-last";
 export type SecretScanPolicy = "warn" | "block-agents";
 
 /** `secret_scan_info`: whether a scanner was found and the switch's

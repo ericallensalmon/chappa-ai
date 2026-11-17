@@ -105,7 +105,7 @@ describe("PanelPage", () => {
     expect(panel).toHaveBeenCalledTimes(3);
   });
 
-  it("pages stack in the frame that opened the first: each back steps one page, Escape too, and leaving the view drops them", async () => {
+  it("pages stack in the frame that opened the first: each back steps one page, Escape too; leaving the view keeps them, and a page whose source left is dropped on return", async () => {
     const onClose = vi.fn();
     const frame = new ViewFrame("Work", "work", onClose);
     document.body.appendChild(frame.host);
@@ -126,8 +126,13 @@ describe("PanelPage", () => {
     expect(onClose).not.toHaveBeenCalled();
     frame.host.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(onClose).toHaveBeenCalledTimes(1);
-    openPanelIn(frame, d, origin, panelBody(), 0);
+    const kept = openPanelIn(frame, d, origin, panelBody(), 0);
     frame.setActive(false);
+    expect(frame.subpages).toEqual([kept]);
+    frame.setActive(true);
+    frame.dropStale(() => true);
+    expect(frame.subpages).toEqual([kept]);
+    frame.dropStale((id) => id !== origin.sourceId);
     expect(frame.subpages).toEqual([]);
     expect(frame.host.querySelector(".chappa-panel-page")).toBeNull();
     frame.dispose();

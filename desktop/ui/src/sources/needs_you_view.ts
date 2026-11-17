@@ -77,6 +77,22 @@ export class NeedsYouView {
     return this.frame.host;
   }
 
+  /** Where the app puts its source selector. */
+  get pickerSlot(): HTMLElement {
+    return this.frame.picker;
+  }
+
+  /** Back on screen: pages drilled into that show something gone (or a
+   *  source that left) give way to the view's top. */
+  dropStale(sourceLive: (sourceId: string) => boolean): void {
+    this.frame.dropStale(sourceLive);
+  }
+
+  /** Forget where the view was left: its top shows next time. */
+  resetPlace(): void {
+    this.frame.clearSubpages();
+  }
+
   get active(): boolean {
     return this.frame.active;
   }

@@ -12,3 +12,22 @@ if (typeof HTMLCanvasElement !== "undefined") {
     return null;
   } as unknown as typeof HTMLCanvasElement.prototype.getContext;
 }
+
+// The activity bar remembers the last tab, project and source picks in
+// localStorage, and a mounted app restores them: drop them before every test
+// so one test's navigation never leaks into the next one's start.
+import { beforeEach } from "vitest";
+
+/** `NAV_STORAGE_PREFIX` in nav_bar.ts (not imported: this file loads before
+ *  every test file and stays free of app modules). */
+const NAV_STORAGE_PREFIX = "chappa-ai.nav.";
+
+beforeEach(() => {
+  if (typeof window === "undefined") return;
+  try {
+    const storage = window.localStorage;
+    for (const key of Object.keys(storage)) if (key.startsWith(NAV_STORAGE_PREFIX)) storage.removeItem(key);
+  } catch {
+    // No storage in this environment: nothing to leak.
+  }
+});

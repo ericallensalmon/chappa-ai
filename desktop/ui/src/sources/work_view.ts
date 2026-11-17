@@ -39,6 +39,7 @@ import {
   ViewFrame,
   chipEl,
   openChecked,
+  paintEmpty,
   placeAt,
   truncate,
   type SourceViewDeps,
@@ -295,6 +296,23 @@ export class WorkView {
     return this.frame.host;
   }
 
+  /** Where the app puts its source selector. */
+  get pickerSlot(): HTMLElement {
+    return this.frame.picker;
+  }
+
+  /** Back on screen: pages drilled into that show something gone (or a
+   *  source that left) give way to the view's top. */
+  dropStale(sourceLive: (sourceId: string) => boolean): void {
+    this.frame.dropStale(sourceLive);
+  }
+
+  /** Forget where the view was left: its top shows next time. */
+  resetPlace(): void {
+    this.frame.clearSubpages();
+    if (this.selected !== null) this.select(null);
+  }
+
   get active(): boolean {
     return this.frame.active;
   }
@@ -428,7 +446,11 @@ export class WorkView {
       r.el.classList.toggle("focused", id === this.focused);
       r.title.setAttribute("aria-current", String(id === this.selected));
     }
-    this.frame.empty.textContent = model.groups.length === 0 ? workEmptyText(input, model, this.filter) : "";
+    paintEmpty(
+      this.frame.empty,
+      model.groups.length === 0 ? workEmptyText(input, model, this.filter) : "",
+      input.servedBy.length === 0 ? this.deps.openSourcesSettings : undefined,
+    );
   }
 
   private folded(g: WorkGroup): boolean {

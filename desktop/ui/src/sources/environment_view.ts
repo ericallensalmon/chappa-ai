@@ -30,7 +30,7 @@ import { groupCountText, type EnvAlert, type EnvBlock, type EnvGroup, type EnvRo
 import { withPanels } from "./panel_view";
 import { SectionsBlock, paintBanners } from "./sections";
 import type { Section } from "./types";
-import { ActionsCell, ViewFrame, chipEl, openChecked, placeAt, truncate, type SourceViewDeps, type Subpage } from "./view_common";
+import { ActionsCell, ViewFrame, chipEl, openChecked, paintEmpty, placeAt, truncate, type SourceViewDeps, type Subpage } from "./view_common";
 
 export interface EnvironmentViewInput {
   model: EnvironmentModel;
@@ -240,6 +240,22 @@ export class EnvironmentView {
     return this.frame.host;
   }
 
+  /** Where the app puts its source selector. */
+  get pickerSlot(): HTMLElement {
+    return this.frame.picker;
+  }
+
+  /** Back on screen: pages drilled into that show something gone (or a
+   *  source that left) give way to the view's top. */
+  dropStale(sourceLive: (sourceId: string) => boolean): void {
+    this.frame.dropStale(sourceLive);
+  }
+
+  /** Forget where the view was left: its top shows next time. */
+  resetPlace(): void {
+    this.frame.clearSubpages();
+  }
+
   get active(): boolean {
     return this.frame.active;
   }
@@ -365,7 +381,7 @@ export class EnvironmentView {
     for (const k of [...this.groups.keys()]) if (!liveGroups.has(k)) this.groups.delete(k);
     for (const k of [...this.rows.keys()]) if (!liveRows.has(k)) this.rows.delete(k);
     if (this.menu && !liveRows.has(this.menu.key)) this.closeMenu();
-    this.frame.empty.textContent = environmentEmptyText(input);
+    paintEmpty(this.frame.empty, environmentEmptyText(input), input.servedBy.length === 0 ? this.deps.openSourcesSettings : undefined);
   }
 
   private blockRefs(sourceId: string): BlockRefs {
@@ -781,6 +797,10 @@ class ComponentPage implements Subpage {
     this.el.remove();
   }
 
+  gone(): boolean {
+    return this.sig === "gone";
+  }
+
   /** Show `row` as of the last poll; `null` once it is no longer reported. */
   update(row: EnvRow | null, version: string): void {
     if (!row) {
@@ -841,6 +861,7 @@ class ComponentPage implements Subpage {
 class FactsPage implements Subpage {
   readonly el: HTMLElement;
   readonly sourceId: string;
+  private missing = false;
   private readonly header: PageHeader;
   private readonly sections: SectionsBlock;
 
@@ -867,7 +888,12 @@ class FactsPage implements Subpage {
     this.el.remove();
   }
 
+  gone(): boolean {
+    return this.missing;
+  }
+
   update(b: EnvBlock | null, version: string): void {
+    this.missing = b === null;
     const sections: Section[] = b?.facts ?? [];
     const target: ActionTarget | null = b ? { sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "environment", key: null } : null;
     this.sections.update(sections, { sourceId: this.sourceId, target, version });

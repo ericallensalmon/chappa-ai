@@ -146,6 +146,22 @@ describe("SettingsPane — Option as Meta", () => {
   });
 });
 
+describe("SettingsPane — at launch", () => {
+  it("leads the Terminal tab with the three start-up choices, Nothing on fresh defaults, and writes a pick", async () => {
+    const { pane, harness } = await makePane();
+    const picker = control<HTMLElement>(pane, "atLaunch");
+    const buttons = [...picker.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Nothing", "Select the last project", "Re-open the last project"]);
+    expect(buttons.map((b) => b.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    buttons[1].click();
+    await Promise.resolve();
+    expect(harness.saved()!.atLaunch).toBe("select-last");
+    await harness.store.update({ atLaunch: "reopen-last" });
+    expect(picker.querySelectorAll("button")[2].getAttribute("aria-checked")).toBe("true");
+    pane.dispose();
+  });
+});
+
 describe("SettingsPane — clipboard keys", () => {
   it("renders both toggles ON on fresh defaults (the deliberate upgrade default)", async () => {
     const { pane } = await makePane();

@@ -35,6 +35,9 @@ export interface SourceViewDeps {
   openPanel?(origin: PanelOrigin, payload: unknown): void;
   /** The view's back arrow or Escape, with no page drilled into it left. */
   onClose(): void;
+  /** Open Settings where sources are added and trusted (the empty state's
+   *  link when no trusted source serves the view). Absent: no link. */
+  openSourcesSettings?(): void;
   /** One line for the user: an action's outcome or a failure. */
   say(text: string, kind?: "info" | "error"): void;
   now(): number;
@@ -59,6 +62,7 @@ export const SOURCE_VIEW_CSS = `
 .chappa-sv-error{font:12px system-ui,sans-serif;color:#f0b429;}
 .chappa-sv-banner{padding:6px 10px;border:1px solid #5c4813;border-radius:6px;background:#1d1708;color:#f0d68a;font:12px system-ui,sans-serif;}
 .chappa-sv-empty{padding:24px 0;color:#6b7280;font:13px system-ui,sans-serif;}
+.chappa-sv-empty-link{padding:0;border:0;background:none;color:#5ea6ff;font:inherit;cursor:pointer;text-decoration:underline;}
 .chappa-sv-empty:empty{display:none;}
 .chappa-sv-group{margin-bottom:14px;}
 .chappa-sv-group-head{display:flex;align-items:center;gap:8px;width:100%;margin:4px 0 6px;padding:0;border:0;background:none;text-align:left;font:600 12px system-ui,sans-serif;color:#adb3bd;text-transform:none;cursor:default;}
@@ -136,6 +140,23 @@ export function chipEl(chip: Chip): HTMLElement {
   return el;
 }
 
+/** The empty state: its text and, when given, a link to Settings ▸ Sources
+ *  (where a source for the view is added or trusted). Untouched when
+ *  nothing changed, so a focused link keeps its focus across repaints. */
+export function paintEmpty(el: HTMLElement, text: string, openSettings?: () => void): void {
+  const sig = `${openSettings ? "1" : "0"}:${text}`;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  el.textContent = text;
+  if (!text || !openSettings) return;
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "chappa-sv-empty-link";
+  link.textContent = "Open Settings ▸ Sources";
+  link.addEventListener("click", () => openSettings());
+  el.append(" ", link);
+}
+
 /** Replace `parent`'s children with one line element per text. */
 export function fillLines(parent: HTMLElement, cls: string, lines: string[]): void {
   parent.textContent = "";
@@ -166,6 +187,10 @@ export interface Subpage {
   readonly title: string;
   setBackTo(where: string): void;
   dispose(): void;
+  /** The source the page belongs to: a page whose source left is stale. */
+  readonly sourceId?: string;
+  /** What the page shows is no longer reported. */
+  gone?(): boolean;
 }
 
 /** The page frame every view uses: the back arrow and the view's name, a
@@ -182,6 +207,8 @@ export class ViewFrame {
   readonly notices: HTMLElement;
   readonly content: HTMLElement;
   readonly empty: HTMLElement;
+  /** Above everything else in the body: the app's source selector. */
+  readonly picker: HTMLElement;
   private sig = "";
   private readonly pages: Subpage[] = [];
   /** A level inside the view itself (a work item's detail) that Escape
@@ -206,6 +233,8 @@ export class ViewFrame {
     this.header = mountPageHeader(header, { title: name, backTo: "the workspace", onBack: () => this.onClose() });
     const body = document.createElement("div");
     body.className = "chappa-sv-body";
+    this.picker = document.createElement("div");
+    this.picker.className = "chappa-sv-picker";
     this.banners = document.createElement("div");
     this.banners.className = "chappa-sv-banners";
     this.errors = document.createElement("div");
@@ -216,7 +245,7 @@ export class ViewFrame {
     this.content.className = "chappa-sv-content";
     this.empty = document.createElement("div");
     this.empty.className = "chappa-sv-empty";
-    body.append(this.banners, this.errors, this.notices, this.content, this.empty);
+    body.append(this.picker, this.banners, this.errors, this.notices, this.content, this.empty);
     this.host.append(header, body);
   }
 
@@ -234,10 +263,9 @@ export class ViewFrame {
     fillLines(this.notices, "chappa-sv-notice", f.notices);
   }
 
-  /** A view leaving the screen drops the pages drilled into from it: it
-   *  comes back as itself. */
+  /** A view leaving the screen keeps the pages drilled into from it: its
+   *  tab comes back where it was left. */
   setActive(active: boolean): void {
-    if (!active) this.clearSubpages();
     this.host.classList.toggle("active", active);
     if (active) this.host.focus({ preventScroll: true });
   }
@@ -287,6 +315,12 @@ export class ViewFrame {
 
   clearSubpages(): void {
     while (this.pages.length) this.popSubpage();
+  }
+
+  /** Coming back to the view: when any page drilled into shows something
+   *  that is gone (its item, or its source), fall back to the view's top. */
+  dropStale(sourceLive: (sourceId: string) => boolean): void {
+    if (this.pages.some((p) => p.gone?.() || (p.sourceId !== undefined && !sourceLive(p.sourceId)))) this.clearSubpages();
   }
 
   /** One step back: the top drilled-in page, else the view's own inner

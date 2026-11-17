@@ -83,6 +83,8 @@ import { buildEnvironmentModel, type EnvironmentModel } from "./sources/environm
 import { EnvironmentView } from "./sources/environment_view";
 import { EMPTY_DATA_SAFETY, heldCount, heldText } from "./sources/data_safety";
 import type { SourceViewDeps } from "./sources/view_common";
+import { SOURCE_PICKER_CSS, SourcePicker, filterPayloads, isAll, resolvePick, ALL_SOURCES, type PickerOption } from "./sources/source_picker";
+import { ActivityBar, NAV_BAR_CSS, navTabFor, readNavProject, readNavTab, readViewSource, writeNavProject, writeNavTab, writeViewSource, type NavTab, type NavTabState, type NavViewTab } from "./nav_bar";
 
 /** The process-status vocabulary. */
 export type RailStatus = "starting" | "running" | "stopped" | "exited" | "failed";
@@ -510,6 +512,10 @@ export interface ProjectState {
   summaryPill: HTMLElement | null;
   summaryBellEl: HTMLElement | null;
   summaryActivityEl: HTMLElement | null;
+  /** Opened only to be shown (the "select the last project" start-up): the
+   *  open answer whose trust gate and auto-start wait for the user to open
+   *  the project. Absent once it ran. */
+  deferredLaunch?: ipc.OpenProjectResult;
 }
 
 /**
@@ -882,17 +888,22 @@ const tauriSourceActions: Pick<SourceViewDeps, "actions" | "run" | "openLink" | 
 
 const APP_CSS = `
 .chappa-app{position:fixed;inset:0;display:flex;background:#0d0e10;color:#d6d8dc;font-family:system-ui,sans-serif;}
-/* The badge bar: every stored project as its badge, down the left edge.
-   The expanded project wears a ring; a project that is not open is dimmed. */
-.chappa-badge-bar{flex:none;width:48px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 0;box-sizing:border-box;border-right:1px solid #22252a;background:#0b0c0e;}
-.chappa-badge-bar-list{display:flex;flex-direction:column;align-items:center;gap:8px;}
+/* The project tiles: every stored project as its badge, in a row atop the
+   Projects tab's sidebar, then the add button. The expanded project wears a
+   ring; a project that is not open is dimmed. */
+.chappa-badge-bar{flex:none;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 10px 6px;box-sizing:border-box;}
+.chappa-badge-bar-list{display:contents;}
 .chappa-badge-bar-item{border:0;background:none;padding:2px;border-radius:10px;cursor:pointer;opacity:.5;line-height:0;}
 .chappa-badge-bar-item.open{opacity:1;}
+/* Shown at start-up but not opened yet: its launch waits for a click. */
+.chappa-badge-bar-item.deferred{opacity:.75;}
+.chappa-badge-bar-item.expanded.deferred{box-shadow:0 0 0 2px #8b949e;}
 .chappa-badge-bar-item:hover{opacity:1;}
 .chappa-badge-bar-item.expanded{box-shadow:0 0 0 2px #e6e8ec;}
-.chappa-badge-bar-add{margin-top:auto;width:32px;height:32px;border:1px solid #262a31;border-radius:8px;background:#16181d;color:#8b949e;font:16px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
+.chappa-badge-bar-add{width:32px;height:32px;border:1px solid #262a31;border-radius:8px;background:#16181d;color:#8b949e;font:16px ui-monospace,monospace;line-height:1;cursor:pointer;padding:0;}
 .chappa-badge-bar-add:hover{background:#1d2127;color:#d6d8dc;}
 .chappa-rail{width:260px;min-width:260px;border-right:1px solid #22252a;display:flex;flex-direction:column;background:#101216;}
+.chappa-rail[hidden]{display:none;}
 .chappa-rail-header{padding:5px 10px 4px;border-top:1px solid #1c1f24;font:11px ui-monospace,monospace;color:#6b7280;letter-spacing:.06em;}
 .chappa-project-bar{position:relative;padding:8px 8px 4px;border-bottom:1px solid #1c1f24;}
 .chappa-project-switcher{display:block;width:100%;padding:6px 8px;border:1px solid #262a31;border-radius:6px;background:#16181d;color:#d6d8dc;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
@@ -1104,21 +1115,6 @@ const APP_CSS = `
 .chappa-active-row.attention{box-shadow:inset 0 0 0 1px #5ea6ff;}
 .chappa-active-attention{flex:none;color:#f0b429;font-size:11px;line-height:1;}
 .chappa-active-activity{width:8px;height:8px;border-radius:50%;flex:none;background:#5ea6ff;}
-/* The source views (Needs you, PRs, ...): one compact row each, under the
-   project bar. The open view's row is marked; Needs you carries its count. */
-.chappa-views-section{display:flex;flex-direction:column;padding:2px 8px 4px;}
-.chappa-views-section:empty{display:none;}
-.chappa-view-entry{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:0;border-radius:6px;background:none;color:#d6d8dc;font:13px system-ui,sans-serif;text-align:left;cursor:pointer;}
-.chappa-view-entry:hover{background:#171a1f;}
-.chappa-view-entry.open{background:#1d232b;}
-.chappa-view-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.chappa-view-badge{flex:none;min-width:16px;height:16px;border-radius:8px;background:#f0b429;color:#0d0e10;font:600 10px ui-monospace,monospace;line-height:16px;text-align:center;padding:0 4px;box-sizing:border-box;}
-.chappa-view-badge:empty{display:none;}
-.chappa-view-dot{flex:none;width:8px;height:8px;border-radius:50%;margin-right:4px;}
-.chappa-view-dot[data-level="bad"]{background:#f85149;}
-.chappa-view-dot[data-level="warn"]{background:#f0b429;}
-.chappa-views-hint{align-self:flex-start;margin:2px 8px 0;padding:2px 0;border:0;background:none;color:#f0b429;font:12px system-ui,sans-serif;text-align:left;cursor:pointer;}
-.chappa-views-hint:hover{text-decoration:underline;}
 /* The rail footer's notification bell + unread count, NEXT TO the
    settings gear. The banner stack and center drawer style themselves
    (notify_banners.ts / notify_drawer.ts). */
@@ -1279,7 +1275,7 @@ function injectAppStyles(): void {
   if (appStylesInjected || typeof document === "undefined") return;
   appStylesInjected = true;
   const el = document.createElement("style");
-  el.textContent = APP_CSS + SIDEBAR_SECTIONS_CSS;
+  el.textContent = APP_CSS + SIDEBAR_SECTIONS_CSS + NAV_BAR_CSS + SOURCE_PICKER_CSS;
   document.head.appendChild(el);
 }
 
@@ -1493,17 +1489,31 @@ export class App {
   /** The cached payloads the views read, kept current from the store. */
   private readonly viewsData: SourceViewsData;
   private readonly sourceActionsApi: Pick<SourceViewDeps, "actions" | "run" | "openLink" | "panel">;
-  /** The rail's views section: one row per visible view. */
-  private readonly viewsSection: HTMLElement;
-  private viewsSig = " never-rendered";
+  /** The activity bar: a tab per view and one for the projects. */
+  private readonly activityBar: ActivityBar;
+  /** The project sidebar, shown while the Projects tab is selected. */
+  private readonly rail: HTMLElement;
+  /** The "N sources need review" hint at the foot of the activity bar. */
+  private readonly reviewHint: HTMLButtonElement;
+  /** Each view's source selector, built with its page. */
+  private readonly pickers = new Map<NavViewTab, SourcePicker>();
+  /** The Environment model of the one picked stack, rebuilt with the full
+   *  model (or when the pick moves). */
+  private environmentPickModel: { pick: string; model: EnvironmentModel } | null = null;
   /** The pages, built on first open and mounted in the stack. */
   private prsView: PrsView | null = null;
   private needsYouView: NeedsYouView | null = null;
   private workView: WorkView | null = null;
   private environmentView: EnvironmentView | null = null;
-  /** Which view is on screen, and what it covered (restored on Back). */
+  /** Which view is on screen, and where its arrow returns. */
   private openViewName: RailView | null = null;
   private viewPrev: PagePrev = null;
+  /** Each view off screen: where its arrow returned when it was left, so
+   *  its tab comes back to the same place (session only). */
+  private readonly viewPlaces = new Map<RailView, PagePrev>();
+  /** What the Projects tab showed when a view was opened over it: the
+   *  terminal or card it returns to. */
+  private projectsPlace: PagePrev = null;
   /** The merged PRs model, rebuilt when a PRs payload moves. */
   private prsModel: PrsModel | null = null;
   /** The merged Work rows with the PRs joined to them (for the PRs view's
@@ -1649,6 +1659,11 @@ export class App {
 
     const rail = document.createElement("aside");
     rail.className = "chappa-rail";
+    rail.setAttribute("aria-label", "Projects");
+    this.rail = rail;
+    // The activity bar: the views span every project, so they live here
+    // rather than in one project's sidebar; the Projects tab is the sidebar.
+    this.activityBar = new ActivityBar((tab) => this.selectTab(tab));
 
     // Project switcher dropdown + process section atop the rail.
     const projectBar = document.createElement("div");
@@ -1714,13 +1729,6 @@ export class App {
       storageKey: "workspace.active",
       icon: "active",
     });
-
-    // The source views, right under the project bar (they span every
-    // project): Needs you always (terminals can need you with no source at
-    // all), the others while a trusted source serves them.
-    this.viewsSection = document.createElement("section");
-    this.viewsSection.className = "chappa-views-section";
-    this.viewsSection.setAttribute("aria-label", "Views");
 
     // Collapsed open projects: one-line summary rows, kept above
     // the expanded project's full section.
@@ -1978,12 +1986,15 @@ export class App {
       icon: "agents",
     });
 
-    // Rail footer: the gear, beneath the launcher hint.
-    // `.chappa-rail` is a column flexbox and
-    // `.chappa-rail-list` is flex:1, so appending after the list pins this to
-    // the bottom.
-    const footer = document.createElement("div");
-    footer.className = "chappa-rail-footer";
+    // The activity bar's foot: the review hint, the gear, the bell.
+    const footer = this.activityBar.footer;
+    this.reviewHint = document.createElement("button");
+    this.reviewHint.type = "button";
+    this.reviewHint.className = "chappa-views-hint";
+    this.reviewHint.hidden = true;
+    this.reviewHint.title = "Review what a new source asks for in Settings ▸ Sources";
+    this.reviewHint.addEventListener("mousedown", (e) => e.preventDefault());
+    this.reviewHint.addEventListener("click", () => this.openSettings("sources"));
     this.gear = document.createElement("button");
     this.gear.className = "chappa-rail-gear";
     this.gear.title = "Settings";
@@ -2006,7 +2017,7 @@ export class App {
     this.bellBtn.append(bellGlyph, this.bellCount);
     this.bellBtn.addEventListener("mousedown", (e) => e.preventDefault());
     this.bellBtn.addEventListener("click", () => this.toggleDrawer());
-    footer.append(this.gear, this.bellBtn);
+    footer.append(this.reviewHint, this.gear, this.bellBtn);
 
     // The workspace COMMANDS subsection. House header DIRECTLY ABOVE
     // the workspace TERMINALS section (label + count + the header-line add
@@ -2050,7 +2061,6 @@ export class App {
     // (`header`) and its rail list, then AGENTS.
     rail.append(
       projectBar,
-      this.viewsSection,
       this.projectSummariesEl,
       this.projectSection,
       wsGroupHeader,
@@ -2059,7 +2069,6 @@ export class App {
       header,
       this.railList,
       this.wsAgentsEl,
-      footer,
     );
 
     this.stack = document.createElement("main");
@@ -2234,11 +2243,12 @@ export class App {
       }),
     );
 
-    // The badge bar, left of the rail: built once, repainted with the
-    // switcher (renderProjectBar).
-    this.badgeBar = document.createElement("nav");
+    // The project tiles, atop the Projects sidebar: built once, repainted
+    // with the switcher (renderProjectBar).
+    this.badgeBar = document.createElement("div");
     this.badgeBar.className = "chappa-badge-bar";
-    this.badgeBar.setAttribute("aria-label", "Projects");
+    this.badgeBar.setAttribute("role", "group");
+    this.badgeBar.setAttribute("aria-label", "Project tiles");
     this.badgeBarList = document.createElement("div");
     this.badgeBarList.className = "chappa-badge-bar-list";
     const barAdd = document.createElement("button");
@@ -2249,9 +2259,10 @@ export class App {
     barAdd.addEventListener("mousedown", (e) => e.preventDefault());
     barAdd.addEventListener("click", () => void this.addProjectFlow());
     this.badgeBar.append(this.badgeBarList, barAdd);
+    rail.insertBefore(this.badgeBar, rail.firstChild);
 
     this.root.append(
-      this.badgeBar,
+      this.activityBar.el,
       rail,
       this.stack,
       this.rowMenu,
@@ -2389,6 +2400,25 @@ export class App {
     void this.sources.load();
     void this.sources.listen();
     void this.startDataSafety();
+    this.restoreNav();
+  }
+
+  /** Come back where the last run left off: its tab selected and, as the
+   *  At launch setting says, its project shown (opened without starting
+   *  anything) or re-opened. A project with live terminals after a reload is
+   *  left for the user to expand: opening it again would reset its runtime
+   *  and stop them. */
+  private restoreNav(): void {
+    const mode = this.settings.get().atLaunch;
+    const id = readNavProject();
+    if (mode !== "nothing" && id !== null && this.projects.has(id) && this.expandedProjectId === null) {
+      const live = [...this.entries.values()].some((e) => this.centerAttribution(e).projectId === id);
+      if (this.openProjects.has(id)) this.expandProject(id);
+      else if (!live) void this.openProject(id, mode === "select-last");
+    }
+    const tab = readNavTab();
+    if (tab !== null && tab !== "projects" && this.tabViews().includes(tab)) this.openSourceView(tab);
+    this.renderRailViews();
   }
 
   /** Follow what data safety holds back: the state now, then every change.
@@ -3091,6 +3121,13 @@ export class App {
   }
 
   private onWindowKeydown = (e: KeyboardEvent): void => {
+    const tab = navTabFor(e);
+    if (tab !== null) {
+      // Ctrl+Shift+1…5 (Cmd+1…5 on macOS): the activity bar's tabs.
+      e.preventDefault();
+      this.selectTab(tab);
+      return;
+    }
     if (isPanelShortcut(e)) {
       e.preventDefault();
       if (e.key === "PageUp") this.cycle(-1);
@@ -3521,7 +3558,7 @@ export class App {
   private focusCenterEntry(entry: CenterEntry): void {
     this.center.markRead(entry);
     if (entry.view !== undefined) {
-      if (BUILT_VIEWS.includes(entry.view as RailView) && this.railViews().includes(entry.view as RailView)) {
+      if (BUILT_VIEWS.includes(entry.view as RailView) && this.tabViews().includes(entry.view as RailView)) {
         this.openSourceView(entry.view as RailView);
       }
       return;
@@ -4744,9 +4781,11 @@ export class App {
       item.className = "chappa-badge-bar-item";
       item.dataset.id = String(p.id);
       const open = this.openProjects.has(p.id);
+      const shownOnly = !!this.openProjects.get(p.id)?.deferredLaunch;
       item.classList.toggle("open", open);
       item.classList.toggle("expanded", p.id === this.expandedProjectId);
-      item.title = open ? p.name : `${p.name} (closed)`;
+      item.classList.toggle("deferred", shownOnly);
+      item.title = shownOnly ? `${p.name} (not started: click to open)` : open ? p.name : `${p.name} (closed)`;
       item.setAttribute("aria-pressed", String(p.id === this.expandedProjectId));
       item.appendChild(projectBadge(p, "bar"));
       // preventDefault keeps the terminal textarea focused (the switcher's
@@ -4755,7 +4794,8 @@ export class App {
       item.addEventListener("click", () => {
         // The ringed badge is a pressed toggle: clicking it again collapses
         // the project, leaving the workspace overview.
-        if (p.id === this.expandedProjectId) this.collapseProject();
+        if (this.openProjects.get(p.id)?.deferredLaunch) void this.openProject(p.id);
+        else if (p.id === this.expandedProjectId) this.collapseProject();
         else if (this.openProjects.has(p.id)) this.expandProject(p.id);
         else void this.openProject(p.id);
       });
@@ -4909,9 +4949,17 @@ export class App {
    *  (it closes the project's live terminals and rebuilds process state from
    *  a fresh yml read), which would kill exactly the background processes a
    *  switch must keep. */
-  async openProject(id: number): Promise<void> {
-    if (this.openProjects.has(id)) {
+  async openProject(id: number, deferLaunch = false): Promise<void> {
+    const open = this.openProjects.get(id);
+    if (open) {
       this.expandProject(id);
+      // Shown at start-up without its launch: opening it is that launch.
+      const deferred = open.deferredLaunch;
+      if (deferred && !deferLaunch) {
+        delete open.deferredLaunch;
+        this.renderProjectBar();
+        await this.runLaunchGate(id, deferred);
+      }
       return;
     }
     // In-flight guard: the check above runs BEFORE the first await, so a
@@ -4921,14 +4969,14 @@ export class App {
     if (this.pendingProjectOpens.has(id)) return;
     this.pendingProjectOpens.add(id);
     try {
-      await this.openProjectInner(id);
+      await this.openProjectInner(id, deferLaunch);
     } finally {
       this.pendingProjectOpens.delete(id);
     }
   }
 
   /** The body of {@link openProject}, guarded by `pendingProjectOpens`. */
-  private async openProjectInner(id: number): Promise<void> {
+  private async openProjectInner(id: number, deferLaunch: boolean): Promise<void> {
     let result: ipc.OpenProjectResult;
     try {
       result = await this.api.openProject(id);
@@ -4968,7 +5016,18 @@ export class App {
     // The fresh project expands; the previously expanded one (if any)
     // collapses to a summary row — its processes, panels and terminals are
     // untouched.
+    if (deferLaunch) state.deferredLaunch = result;
     this.expandProject(id);
+    if (deferLaunch) {
+      this.renderProjectBar();
+      return;
+    }
+    await this.runLaunchGate(id, result);
+  }
+
+  /** An opened project's launch: the trust gate, then its auto-start
+   *  commands. */
+  private async runLaunchGate(id: number, result: ipc.OpenProjectResult): Promise<void> {
     // Trust gate: an untrusted chappa.yml
     // hash arms one Run/Skip confirm listing the auto-start commands; Run
     // records the hash and proceeds. A trusted hash skips straight to
@@ -5042,6 +5101,7 @@ export class App {
     this.openProjects.delete(id);
     if (this.expandedProjectId === id) {
       this.expandedProjectId = null;
+      writeNavProject(null);
       this.switcher.textContent = "Project…";
       this.renderProject();
     }
@@ -5532,7 +5592,7 @@ export class App {
     const dash = this.ensureDashboard();
     if (dash.active) return;
     // One page at a time: a source view on screen hands over what IT covered.
-    const fromView = this.openViewName !== null ? this.viewPrev : undefined;
+    const fromView = this.openViewName !== null ? this.projectsPlace : undefined;
     this.hideSourceView();
     this.dashboardPrev =
       fromView !== undefined
@@ -5571,13 +5631,11 @@ export class App {
       this.showRecordPane(prev.pane);
       return;
     }
-    if (!BUILT_VIEWS.includes(prev.view) || !this.railViews().includes(prev.view)) {
+    if (!BUILT_VIEWS.includes(prev.view) || !this.tabViews().includes(prev.view)) {
       this.returnTo(prev.prev);
       return;
     }
-    this.openSourceView(prev.view);
-    this.viewPrev = prev.prev;
-    this.sourcePage(prev.view)?.setBackTo(this.backToText(prev.prev));
+    this.openSourceView(prev.view, { prev: prev.prev });
   }
 
   /** How a back arrow names what it returns to ("Back to …"). */
@@ -6362,6 +6420,7 @@ export class App {
     const state = this.openProjects.get(id);
     if (!state || this.expandedProjectId === id) return;
     this.expandedProjectId = id;
+    writeNavProject(id);
     // Badge-clearing rule (decided): the AGGREGATED summary badge
     // clears on expand — it means "something happened while collapsed", and
     // expanding is looking. Per-terminal / per-card badges persist until that
@@ -6395,6 +6454,7 @@ export class App {
   collapseProject(): void {
     if (this.expandedProjectId === null) return;
     this.expandedProjectId = null;
+    writeNavProject(null);
     // A command's card is project-scoped; nothing is expanded now.
     if (this.paneFor?.kind === "command") this.hideRecordPane();
     this.switcher.textContent = "Project…";
@@ -6595,8 +6655,9 @@ export class App {
   // cached payloads (`viewsData`) and, for Needs you, the attention the
   // ACTIVE section derives, read from the same render hooks.
 
-  /** The views the rail lists, in rail order: Needs you unless switched
-   *  off, the others while a trusted source serves them. */
+  /** The views with live data, in rail order: Needs you unless switched
+   *  off, the others while a trusted source serves them. Links between
+   *  views (a Needs you row, a PR chip) only lead into these. */
   private railViews(): RailView[] {
     const listing = this.viewsData.current;
     const served = new Set(visibleViews(listing));
@@ -6605,120 +6666,186 @@ export class App {
     );
   }
 
-  /** Rebuild the rail's views section behind its signature: one entry per
-   *  view (Needs you with its badge, PRs with the count of PRs that need
-   *  the user), then, while any source awaits the trust answer, a hint that
-   *  opens Settings ▸ Sources. A source that is merely down adds nothing:
-   *  its kept data still shows. */
+  /** The views the activity bar lists: every built view not switched off
+   *  in Settings, served or not (an unserved one says how to add a source),
+   *  so the bar keeps its shape as sources come and go. */
+  private tabViews(): RailView[] {
+    const hidden = new Set(this.viewsData.current.hiddenViews);
+    return RAIL_VIEWS.filter((v) => BUILT_VIEWS.includes(v) && !hidden.has(v));
+  }
+
+  /** The tab on screen: the open view's, else Projects. */
+  private currentTab(): NavTab {
+    return this.openViewName ?? "projects";
+  }
+
+  /** Repaint the activity bar behind its signature (Needs you with its
+   *  badge, PRs with the PRs that need the user, Environment with its alert
+   *  dot), show the project sidebar only under the Projects tab, and, while
+   *  any source awaits the trust answer, the hint that opens Settings ▸
+   *  Sources. A source that is merely down adds nothing: its kept data
+   *  still shows. */
   private renderRailViews(): void {
-    const views = this.railViews();
+    const tabs = this.tabViews();
+    const served = new Set(this.railViews());
     const count = this.needsYouModel?.count ?? 0;
-    const prsCount = views.includes("prs") ? prsNeedingYou(this.currentPrsModel()).yes.length : 0;
+    const prsCount = tabs.includes("prs") ? prsNeedingYou(this.currentPrsModel()).yes.length : 0;
+    const envLevel = tabs.includes("environment") ? this.currentEnvironmentModel().alertLevel : null;
+    const from = (view: RailView): string => {
+      const labels = servedBy(this.viewsData.current, view).map((s) => s.label);
+      return labels.length > 0 ? `${VIEW_LABELS[view]} from ${labels.join(", ")}` : `${VIEW_LABELS[view]}: no source serves it yet`;
+    };
+    const view = (v: RailView, extra: Partial<NavTabState>): NavTabState => ({
+      visible: tabs.includes(v),
+      idle: v !== "attention" && !served.has(v),
+      title: from(v),
+      ...extra,
+    });
+    this.activityBar.update(this.currentTab(), {
+      work: view("work", {}),
+      attention: view("attention", { count, title: count > 0 ? `${count} waiting on you` : "Nothing needs you" }),
+      prs: view("prs", { count: prsCount, ...(prsCount > 0 ? { title: `${from("prs")}: ${prsCount} need you` } : {}) }),
+      environment: view("environment", {
+        dot: envLevel,
+        ...(envLevel ? { title: `${from("environment")}: ${envLevel === "bad" ? "something is broken" : "a warning"}` } : {}),
+      }),
+      projects: { visible: true, title: "Projects: commands, terminals, agents and scratchpads" },
+    });
+    this.rail.hidden = this.openViewName !== null;
     const review = this.viewsData.current.sources.filter((s) => s.status === "needs_review").length;
-    const envLevel = views.includes("environment") ? this.currentEnvironmentModel().alertLevel : null;
-    const sig = `${views.join(",")}\u001f${count}\u001f${prsCount}\u001f${review}\u001f${envLevel ?? ""}\u001f${this.openViewName ?? ""}`;
-    if (sig === this.viewsSig) return;
-    this.viewsSig = sig;
-    this.viewsSection.textContent = "";
-    for (const view of views) {
-      const el = document.createElement("button");
-      el.type = "button";
-      el.className = "chappa-view-entry";
-      el.dataset.view = view;
-      el.classList.toggle("open", this.openViewName === view);
-      const name = document.createElement("span");
-      name.className = "chappa-view-name";
-      name.textContent = VIEW_LABELS[view];
-      const badge = document.createElement("span");
-      badge.className = "chappa-view-badge";
-      const shown = view === "attention" ? count : view === "prs" ? prsCount : 0;
-      if (shown > 0) badge.textContent = shown > 99 ? "99+" : String(shown);
-      el.append(name, badge);
-      // Environment shows a dot, not a count: red for a broken component or a
-      // bad alert, amber for a warning.
-      if (view === "environment" && envLevel) {
-        const dot = document.createElement("span");
-        dot.className = "chappa-view-dot";
-        dot.dataset.level = envLevel;
-        el.appendChild(dot);
-      }
-      const from = `${VIEW_LABELS[view]} from ${servedBy(this.viewsData.current, view).map((s) => s.label).join(", ")}`;
-      el.title =
-        view === "attention"
-          ? count > 0
-            ? `${count} waiting on you`
-            : "Nothing needs you"
-          : view === "prs" && prsCount > 0
-            ? `${from}: ${prsCount} need you`
-            : view === "environment" && envLevel
-              ? `${from}: ${envLevel === "bad" ? "something is broken" : "a warning"}`
-              : from;
-      el.addEventListener("mousedown", (e) => e.preventDefault());
-      el.addEventListener("click", () => this.toggleSourceView(view));
-      this.viewsSection.appendChild(el);
-    }
-    if (review > 0) {
-      const hint = document.createElement("button");
-      hint.type = "button";
-      hint.className = "chappa-views-hint";
-      hint.textContent = review === 1 ? "1 source needs review" : `${review} sources need review`;
-      hint.title = "Review what a new source asks for in Settings ▸ Sources";
-      hint.addEventListener("mousedown", (e) => e.preventDefault());
-      hint.addEventListener("click", () => this.openSettings("sources"));
-      this.viewsSection.appendChild(hint);
-    }
+    this.reviewHint.hidden = review === 0;
+    this.reviewHint.textContent = review === 1 ? "1 source to review" : `${review} sources to review`;
   }
 
-  /** A rail view row: open the view, or leave it when it is showing. */
-  toggleSourceView(view: RailView): void {
-    if (this.openViewName === view) this.closeSourceView();
-    else this.openSourceView(view);
+  /** An activity bar tab (a click, Enter, or its Ctrl+Shift+digit / Cmd+digit). */
+  selectTab(tab: NavTab): void {
+    if (tab === "projects") this.showProjectsTab();
+    else if (this.tabViews().includes(tab)) this.openSourceView(tab);
   }
 
-  /** Front a source view. What was on screen steps back and returns on
-   *  Back; coming from the dashboard (or, through the rail, another view),
-   *  what THAT covered is what Back returns to. `drill`: opened from a row
-   *  of the view on screen, so Back returns to that view. */
-  openSourceView(view: RailView, drill = false): void {
+  /** The Projects tab: the view on screen keeps its place for its own tab,
+   *  and the project sidebar comes back with what was on screen when it
+   *  was left (a terminal, a card, or nothing). */
+  showProjectsTab(): void {
+    if (!this.hideSourceView()) return;
+    this.returnTo(this.projectsPlace);
+  }
+
+  /** The sources a view's selector offers: every trusted source serving
+   *  it (for Needs you, serving anything Needs you reads). */
+  private pickerOptions(view: RailView): PickerOption[] {
+    const listing = this.viewsData.current;
+    const names = view === "attention" ? ["work", "prs", "attention", "environment"].filter((v) => !this.viewsData.hidden(v)) : [view];
+    const seen = new Set<string>();
+    const out: PickerOption[] = [];
+    for (const s of listing.sources) {
+      if (!s.trusted || seen.has(s.id) || !s.views.some((v) => names.includes(v.name))) continue;
+      seen.add(s.id);
+      out.push({ id: s.id, label: s.label });
+    }
+    return out;
+  }
+
+  /** The source a view is narrowed to: the remembered pick while it is
+   *  still offered, else every source (Environment: the first stack). */
+  private viewPick(view: RailView): string | null {
+    return resolvePick(this.pickerOptions(view), readViewSource(view), view !== "environment");
+  }
+
+  /** The selector above a view's page, built with the page. */
+  private paintPicker(view: RailView): void {
+    const picker = this.pickers.get(view);
+    picker?.update(this.pickerOptions(view), this.viewPick(view), view !== "environment");
+  }
+
+  /** A pick in a view's selector: remembered, and the page repaints. */
+  private pickSource(view: RailView, id: string): void {
+    writeViewSource(view, id === ALL_SOURCES && view !== "environment" ? null : id);
+    this.renderSourceViews();
+  }
+
+  /**
+   * Front a source view. Each tab keeps its own place: a view left for
+   * another tab comes back as it was (its drilled-in pages, and the view it
+   * was drilled into from), unless what that place shows is gone. Leaving
+   * the Projects tab remembers what it showed (the record of where its
+   * sidebar's content was), which is what a view's arrow returns to.
+   * `drill`: opened from a row of the view on screen, so Back returns to
+   * that view. `prev`: where Back returns, when the caller knows (a step
+   * back through a chain of views).
+   */
+  openSourceView(view: RailView, opts: { drill?: boolean; prev?: PagePrev } = {}): void {
     if (!BUILT_VIEWS.includes(view) || this.openViewName === view) return;
-    let prev: PagePrev;
+    const from: PagePrev = this.openViewName !== null ? { view: this.openViewName, prev: this.viewPrev } : null;
     if (this.openViewName !== null) {
-      prev = drill ? { view: this.openViewName, prev: this.viewPrev } : this.viewPrev;
       this.hideSourceView();
     } else if (this.dashboard?.active) {
-      prev = this.dashboardPrev;
+      this.projectsPlace = this.dashboardPrev;
       this.hideDashboard();
     } else {
-      prev = this.paneFor !== null ? { pane: this.paneFor } : this.activeId !== null ? { termId: this.activeId } : null;
+      this.projectsPlace = this.paneFor !== null ? { pane: this.paneFor } : this.activeId !== null ? { termId: this.activeId } : null;
     }
+    const kept = this.viewPlaces.get(view);
+    this.viewPlaces.delete(view);
+    const prev: PagePrev =
+      opts.prev !== undefined
+        ? opts.prev
+        : opts.drill
+          ? (from ?? this.projectsPlace)
+          : kept && "view" in kept
+            ? kept
+            : this.projectsPlace;
     const page = this.ensureSourceView(view);
     this.stepBackForPage();
     this.viewPrev = prev;
     this.openViewName = view;
     page.setBackTo(this.backToText(prev));
     page.setActive(true);
+    writeNavTab(view);
     this.renderSourceViews();
+    // After the repaint, so the kept pages have seen the latest answers.
+    const listed = new Set(this.viewsData.current.sources.filter((s) => s.trusted).map((s) => s.id));
+    page.dropStale((id) => listed.has(id));
     // Clears the rows' active markers and the strip.
     this.renderRail();
     this.renderRailViews();
   }
 
-  /** Back (or Escape): leave the view for what it covered. */
+  /** Back (or Escape) at a view's top: the view it was drilled into from,
+   *  else the Projects tab with what the view covered. The view's place is
+   *  spent: its tab opens at the top next time. */
   closeSourceView(): void {
-    const prev = this.viewPrev;
-    if (!this.hideSourceView()) return;
-    this.returnTo(prev);
+    const view = this.openViewName;
+    if (view === null) return;
+    let prev = this.viewPrev;
+    while (prev && "view" in prev && !this.tabViews().includes(prev.view)) prev = prev.prev;
+    if (prev && "view" in prev) {
+      this.openSourceView(prev.view, { prev: prev.prev });
+    } else {
+      this.hideSourceView();
+      this.returnTo(prev);
+    }
+    this.viewPlaces.delete(view);
   }
 
-  /** Take the open view off screen. Answers whether one was showing. */
+  /** Take the open view off screen, keeping its place for its tab. Answers
+   *  whether one was showing. */
   private hideSourceView(): boolean {
     const view = this.openViewName;
     if (view === null) return false;
     this.sourcePage(view)?.setActive(false);
+    this.viewPlaces.set(view, this.viewPrev);
     this.openViewName = null;
     this.viewPrev = null;
+    writeNavTab("projects");
     this.renderRailViews();
     return true;
+  }
+
+  /** Forget where a view was left (it was switched off): its top next time. */
+  private resetViewPlace(view: RailView): void {
+    this.viewPlaces.delete(view);
+    this.sourcePage(view)?.resetPlace();
   }
 
   /** Every panel and the record card step back for a page (the dashboard
@@ -6749,27 +6876,35 @@ export class App {
     const deps: SourceViewDeps = {
       ...this.sourceActionsApi,
       onClose: () => this.closeSourceView(),
+      openSourcesSettings: () => this.openSettings("sources"),
       say: (text, kind) => this.showToast(text, kind === "error" ? "error" : "info"),
       now: this.now,
+    };
+    // Every page carries the selector its sources fill (hidden with one).
+    const mount = (page: PrsView | NeedsYouView | WorkView | EnvironmentView): void => {
+      const picker = new SourcePicker(view === "environment" ? "Stack" : "Source", (id) => this.pickSource(view, id));
+      page.pickerSlot.appendChild(picker.el);
+      this.pickers.set(view, picker);
+      this.stack.appendChild(page.host);
     };
     if (view === "work") {
       if (!this.workView) {
         this.workView = new WorkView({ ...deps, openView: (target, key) => this.openViewAt(target, key) });
-        this.stack.appendChild(this.workView.host);
+        mount(this.workView);
       }
       return this.workView;
     }
     if (view === "prs") {
       if (!this.prsView) {
         this.prsView = new PrsView({ ...deps, openView: (target, key) => this.openViewAt(target, key) });
-        this.stack.appendChild(this.prsView.host);
+        mount(this.prsView);
       }
       return this.prsView;
     }
     if (view === "environment") {
       if (!this.environmentView) {
         this.environmentView = new EnvironmentView(deps);
-        this.stack.appendChild(this.environmentView.host);
+        mount(this.environmentView);
       }
       return this.environmentView;
     }
@@ -6779,7 +6914,7 @@ export class App {
         selectTerminal: (key) => this.selectAttentionRow(key),
         openView: (target, key, sourceId) => this.openViewAt(target, key, sourceId),
       });
-      this.stack.appendChild(this.needsYouView.host);
+      mount(this.needsYouView);
     }
     return this.needsYouView;
   }
@@ -6791,7 +6926,17 @@ export class App {
   private openViewAt(target: string, key: string, sourceId?: string | null): boolean {
     const v = target as RailView;
     if (!BUILT_VIEWS.includes(v) || !this.railViews().includes(v)) return false;
-    this.openSourceView(v, true);
+    // The item may sit outside the source the view is narrowed to: Work and
+    // PRs widen to every source, Environment turns to the stack that has it.
+    if (v === "work" || v === "prs") {
+      if (!isAll(this.viewPick(v))) writeViewSource(v, null);
+    } else if (v === "environment") {
+      const stack = sourceId ?? this.currentEnvironmentModel().blocks.find((b) => b.groups.some((g) => g.rows.some((r) => r.id === key)))?.sourceId;
+      if (stack && this.pickerOptions(v).some((o) => o.id === stack)) writeViewSource(v, stack);
+    }
+    this.openSourceView(v, { drill: true });
+    // Already on screen: repaint under the pick made above.
+    this.renderSourceViews();
     if (v === "work" && this.workView && !this.workView.focus(key)) this.showToast(`${key} is not in the Work list.`, "error");
     if (v === "prs" && this.prsView) {
       if (!this.prsView.focus(key)) this.showToast(`${key} is not in the PRs list.`, "error");
@@ -6805,7 +6950,10 @@ export class App {
   private onSourceData(change: { sourceId: string; view: DataView } | null): void {
     if (change === null || change.view === "prs") this.prsModel = null;
     if (change === null || change.view === "prs" || change.view === "work") this.workJoinModel = null;
-    if (change === null || change.view === "environment") this.environmentModel = null;
+    if (change === null || change.view === "environment") {
+      this.environmentModel = null;
+      this.environmentPickModel = null;
+    }
     if (change) {
       this.noteSourceNews(change.sourceId, change.view);
     } else {
@@ -6813,9 +6961,10 @@ export class App {
       for (const id of this.baselineSources) if (!ids.has(id)) this.baselines.forget(id);
       this.baselineSources = ids;
     }
-    // A view that left the rail (its last source went, or it was switched
-    // off) closes back to what it covered.
-    if (this.openViewName !== null && !this.railViews().includes(this.openViewName)) this.closeSourceView();
+    // A view switched off in Settings closes back to what it covered and
+    // forgets its place (one that merely lost its sources stays, saying so).
+    if (this.openViewName !== null && !this.tabViews().includes(this.openViewName)) this.closeSourceView();
+    for (const v of [...this.viewPlaces.keys()]) if (!this.tabViews().includes(v)) this.resetViewPlace(v);
     this.renderSourceViews();
   }
 
@@ -6852,16 +7001,29 @@ export class App {
     return this.environmentModel;
   }
 
+  /** The Environment model of the picked stack (the full model when
+   *  nothing narrower is picked). */
+  private pickedEnvironmentModel(): EnvironmentModel {
+    const pick = this.viewPick("environment");
+    if (isAll(pick) || this.pickerOptions("environment").length < 2) return this.currentEnvironmentModel();
+    if (this.environmentPickModel?.pick !== pick) {
+      const payloads = filterPayloads(this.viewsData.payloadsFor("environment"), pick);
+      this.environmentPickModel = { pick: pick!, model: buildEnvironmentModel(payloads, this.viewsData.needsUpdate()) };
+    }
+    return this.environmentPickModel.model;
+  }
+
   /** Repaint the open view and the Needs you badge. */
   private renderSourceViews(): void {
     this.renderNeedsYou();
+    if (this.openViewName !== null) this.paintPicker(this.openViewName);
     if (this.workView?.active) {
       const data = this.viewsData;
       // PR chips open in the PRs view only while it is in the rail and lists them.
       const prs = this.railViews().includes("prs") ? this.currentPrsModel() : null;
       const loadedPrs = new Set(prs ? [...prs.mine, ...prs.reviewing, ...prs.all].flatMap((g) => g.rows.map((r) => r.id)) : []);
       this.workView.update({
-        payloads: data.payloadsFor("work"),
+        payloads: filterPayloads(data.payloadsFor("work"), this.viewPick("work")),
         needsUpdate: data.needsUpdate(),
         loadedPrs,
         servedBy: servedBy(data.current, "work").map((s) => s.label),
@@ -6873,7 +7035,7 @@ export class App {
     }
     if (this.environmentView?.active) {
       this.environmentView.update({
-        model: this.currentEnvironmentModel(),
+        model: this.pickedEnvironmentModel(),
         servedBy: servedBy(this.viewsData.current, "environment").map((s) => s.label),
         versions: this.viewsData.versions(),
       });
@@ -6881,8 +7043,9 @@ export class App {
     if (this.prsView?.active) {
       // Item-key chips open Work only while it is in the rail.
       const work = this.railViews().includes("work") ? this.currentWorkJoins() : null;
+      const pick = this.viewPick("prs");
       this.prsView.update({
-        model: this.currentPrsModel(),
+        model: isAll(pick) ? this.currentPrsModel() : buildPrsModel(filterPayloads(this.viewsData.payloadsFor("prs"), pick), this.viewsData.needsUpdate()),
         servedBy: servedBy(this.viewsData.current, "prs").map((s) => s.label),
         versions: this.viewsData.versions(),
         workItems: work?.joins.byPr,
@@ -6908,7 +7071,21 @@ export class App {
     });
     this.needsYouModel = model;
     this.renderRailViews();
-    if (this.needsYouView?.active) this.needsYouView.update({ model, versions: data.versions() });
+    if (!this.needsYouView?.active) return;
+    // The badge counts every source; the page shows the picked one (with no
+    // terminals or app-level rows, which belong to no source).
+    const pick = this.viewPick("attention");
+    const shown = isAll(pick)
+      ? model
+      : buildNeedsYou({
+          terminals: [],
+          work: data.hidden("work") ? [] : filterPayloads(data.payloadsFor("work"), pick),
+          prs: data.hidden("prs") ? null : buildPrsModel(filterPayloads(data.payloadsFor("prs"), pick), data.needsUpdate()),
+          attention: filterPayloads(data.payloadsFor("attention"), pick),
+          environment: data.hidden("environment") ? [] : filterPayloads(data.payloadsFor("environment"), pick),
+          needsUpdate: data.needsUpdate().filter((n) => n.sourceId === pick),
+        });
+    this.needsYouView.update({ model: shown, versions: data.versions() });
   }
 
   /** The ACTIVE rows that want the user, as Needs you lists them: the rail's

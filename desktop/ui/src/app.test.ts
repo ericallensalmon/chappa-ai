@@ -9,7 +9,9 @@ import { AgentToolsStore, type AgentToolsApi } from "./agent_tools";
 import type * as ipc from "./ipc";
 import type { CommandForm } from "./dialog";
 import { SourcesStore, type SourcesApi, type SourcesListing } from "./sources_store";
-import { fixture as sourceFixture, source as sourceRow } from "./sources/test-utils";
+import { fixture as sourceFixture, pr as prItem, source as sourceRow } from "./sources/test-utils";
+import { readNavProject, readNavTab, readViewSource, writeNavProject, writeNavTab } from "./nav_bar";
+import type { Settings } from "./settings";
 
 function makeEntry(id: number, over: Partial<RailEntry> = {}): RailEntry {
   return {
@@ -1773,9 +1775,9 @@ describe("App add-project flow", () => {
     });
     await app.mount();
     const items = () => [...root.querySelectorAll<HTMLButtonElement>(".chappa-badge-bar-item")];
-    // The bar sits left of the rail and lists the stored project, dimmed
-    // (not open) and unringed.
-    expect(root.firstElementChild?.classList.contains("chappa-badge-bar")).toBe(true);
+    // The tiles sit atop the project sidebar and list the stored project,
+    // dimmed (not open) and unringed.
+    expect(root.querySelector(".chappa-rail")?.firstElementChild?.classList.contains("chappa-badge-bar")).toBe(true);
     expect(items().map((i) => i.dataset.id)).toEqual(["1"]);
     expect(items()[0].querySelector(".chappa-project-badge")?.textContent).toBe("CA");
     expect(items()[0].classList.contains("open")).toBe(false);
@@ -1789,6 +1791,111 @@ describe("App add-project flow", () => {
     expect(items()[0].classList.contains("open")).toBe(true);
     expect(items()[0].classList.contains("expanded")).toBe(true);
     expect(items()[0].getAttribute("aria-pressed")).toBe("true");
+    panelDispose(app);
+  });
+
+  /** An open answer whose chappa.yml awaits trust, with one auto-start command. */
+  const untrustedOpen = (): ipc.OpenProjectResult => ({
+    project: { id: 1, name: "chappa-ai", path: "/p/chappa-ai", icon: null, notificationLevel: null },
+    trustPending: true,
+    trustCommands: ["py app/summarize.py"],
+    trustHash: "h",
+    processes: [
+      { name: "s", command: "py app/summarize.py", status: "stopped", autoStart: true, autoRestart: false, restartWhenChanged: [], termId: null, exitCode: null, notificationLevel: null, workingDir: null, env: {}, favorite: false, disableAutoRename: false },
+    ],
+  });
+
+  /** Start an app whose last run had project 1 expanded, under `atLaunch`. */
+  async function launchWith(atLaunch: Settings["atLaunch"]) {
+    writeNavProject(1);
+    const { api, calls } = projectApi({ openResult: untrustedOpen() });
+    const asked: string[][] = [];
+    const root = document.createElement("div");
+    const app = new App({
+      root,
+      api,
+      settings: stubSettings({ atLaunch }).store,
+      confirm: async () => false,
+      confirmProjectTrust: async (commands) => {
+        asked.push(commands);
+        return true;
+      },
+    });
+    await app.mount();
+    await FLUSH();
+    await FLUSH();
+    const tile = (): HTMLButtonElement => root.querySelector<HTMLButtonElement>(".chappa-badge-bar-item")!;
+    return { app, root, calls, asked, tile };
+  }
+
+  it("At launch, Nothing (the default): the last project is neither opened nor selected", async () => {
+    const { app, calls, asked, tile } = await launchWith("nothing");
+    expect(calls.openProject).toEqual([]);
+    expect(asked).toEqual([]);
+    expect(tile().classList.contains("expanded")).toBe(false);
+    expect(tile().classList.contains("open")).toBe(false);
+    panelDispose(app);
+  });
+
+  it("At launch, Select the last project: its tile and sections show, nothing starts and no trust question until it is clicked", async () => {
+    const { app, root, calls, asked, tile } = await launchWith("select-last");
+    expect(calls.openProject).toEqual([1]);
+    expect(tile().classList.contains("expanded")).toBe(true);
+    expect(tile().classList.contains("deferred")).toBe(true);
+    expect(tile().title).toBe("chappa-ai (not started: click to open)");
+    expect(root.querySelector(".chappa-project-name")?.textContent).toBe("chappa-ai");
+    expect(asked).toEqual([]);
+    expect(calls.confirmTrust).toEqual([]);
+    expect(calls.startProcess).toEqual([]);
+    // Clicking the tile is the launch: the trust question, then auto-start.
+    tile().click();
+    await FLUSH();
+    await FLUSH();
+    expect(asked).toEqual([["py app/summarize.py"]]);
+    expect(calls.confirmTrust).toEqual([[1, true]]);
+    expect(calls.openProject).toEqual([1]);
+    expect(tile().classList.contains("deferred")).toBe(false);
+    expect(tile().classList.contains("expanded")).toBe(true);
+    panelDispose(app);
+  });
+
+  it("At launch, Re-open the last project: it opens as a tile click would, trust question included", async () => {
+    const { app, calls, asked, tile } = await launchWith("reopen-last");
+    expect(calls.openProject).toEqual([1]);
+    expect(asked).toEqual([["py app/summarize.py"]]);
+    expect(calls.confirmTrust).toEqual([[1, true]]);
+    expect(tile().classList.contains("expanded")).toBe(true);
+    expect(tile().classList.contains("deferred")).toBe(false);
+    // Collapsing forgets the project for the next start.
+    tile().click();
+    expect(readNavProject()).toBeNull();
+    panelDispose(app);
+  });
+
+  it("the expanded project is remembered for the next start whatever At launch says", async () => {
+    const { api } = projectApi();
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => false, confirmProjectTrust: async () => false });
+    await app.mount();
+    expect(readNavProject()).toBeNull();
+    root.querySelector<HTMLButtonElement>(".chappa-badge-bar-item")!.click();
+    await FLUSH();
+    await FLUSH();
+    expect(readNavProject()).toBe(1);
+    panelDispose(app);
+  });
+
+  it("a remembered project that is not stored any more is forgotten quietly; the remembered tab still comes back", async () => {
+    writeNavProject(42);
+    writeNavTab("prs");
+    const { api, calls } = projectApi();
+    const root = document.createElement("div");
+    const app = new App({ root, api, settings: stubSettings({ atLaunch: "reopen-last" }).store, confirm: async () => false, confirmProjectTrust: async () => false });
+    await app.mount();
+    await FLUSH();
+    expect(calls.openProject).toEqual([]);
+    // PRs is not switched off, so its tab comes back even with no source.
+    expect(root.querySelector('.chappa-nav-tab[data-tab="prs"]')?.classList.contains("selected")).toBe(true);
     panelDispose(app);
   });
 
@@ -1829,19 +1936,20 @@ describe("App add-project flow", () => {
 // --- settings: gear, pane, new-terminal profiles -------------------
 
 describe("App settings", () => {
-  it("puts a gear + Settings entry at the BOTTOM of the rail", async () => {
+  it("puts a gear + Settings entry at the BOTTOM of the activity bar", async () => {
     const { api } = stubApi();
     const settings = stubSettings();
     const root = document.createElement("div");
     const app = new App({ root, api, settings: settings.store, confirm: async () => false });
     await app.mount();
 
-    const rail = root.querySelector(".chappa-rail")!;
-    const gear = rail.querySelector<HTMLButtonElement>(".chappa-rail-gear")!;
+    const bar = root.querySelector(".chappa-activity-bar")!;
+    const gear = bar.querySelector<HTMLButtonElement>(".chappa-rail-gear")!;
     expect(gear.textContent).toContain("Settings");
-    // The footer is the rail's LAST child, after the flex:1 terminal list —
-    // that is what pins the gear to the bottom.
-    expect(rail.lastElementChild?.classList.contains("chappa-rail-footer")).toBe(true);
+    // The footer is the bar's LAST child, after the tabs (its auto top margin
+    // pins it to the bottom).
+    expect(bar.lastElementChild?.classList.contains("chappa-rail-footer")).toBe(true);
+    expect(root.querySelector(".chappa-rail .chappa-rail-gear")).toBeNull();
     panelDispose(app);
   });
 
@@ -4352,7 +4460,7 @@ describe("App agents", () => {
     const agentRow = () => [...root.querySelectorAll<HTMLElement>(".chappa-rail-item")].find((r) => r.classList.contains("agent"))!;
     const termId = Number([...phaseB(app).entries.entries()].find(([, e]) => e.agent)![0]);
     expect(agentRow().querySelector(".chappa-rail-held")).toBeNull();
-    const badge = () => root.querySelector<HTMLElement>('.chappa-view-entry[data-view="attention"] .chappa-view-badge')?.textContent ?? "";
+    const badge = () => root.querySelector<HTMLElement>('.chappa-nav-tab[data-tab="attention"] .chappa-nav-badge')?.textContent ?? "";
     expect(badge()).toBe("");
     push!({
       blocks: [
@@ -7213,11 +7321,16 @@ describe("App source views", () => {
     return { api, root, app, sources, actions };
   }
 
+  /** The view tabs the activity bar shows, in bar order. */
   const entries = (root: HTMLElement): string[] =>
-    [...root.querySelectorAll<HTMLElement>(".chappa-views-section .chappa-view-entry")].map((e) => e.dataset.view!);
+    [...root.querySelectorAll<HTMLElement>(".chappa-activity-bar .chappa-nav-tab:not([hidden])")]
+      .map((e) => e.dataset.tab!)
+      .filter((t) => t !== "projects");
   const entry = (root: HTMLElement, view: string): HTMLButtonElement =>
-    root.querySelector<HTMLButtonElement>(`.chappa-view-entry[data-view="${view}"]`)!;
-  const badge = (root: HTMLElement): string => entry(root, "attention").querySelector(".chappa-view-badge")?.textContent ?? "";
+    root.querySelector<HTMLButtonElement>(`.chappa-activity-bar .chappa-nav-tab[data-tab="${view}"]`)!;
+  const idle = (root: HTMLElement): string[] => entries(root).filter((v) => entry(root, v).classList.contains("idle"));
+  const badge = (root: HTMLElement): string => entry(root, "attention").querySelector(".chappa-nav-badge")?.textContent ?? "";
+  const BAR = ["work", "attention", "prs", "environment"];
   const page = (root: HTMLElement, view: string): HTMLElement | null =>
     root.querySelector<HTMLElement>(`.chappa-stack > .chappa-source-view[data-view="${view}"]`);
   const ALL = ["work", "prs", "attention", "environment"];
@@ -7225,22 +7338,27 @@ describe("App source views", () => {
     el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
   };
 
-  it("with no source, the rail lists Needs you alone, under the project bar, with no badge", async () => {
+  it("with no source, the activity bar still lists every view, the unserved ones quieter, and Needs you has no badge", async () => {
     const { root, app } = await mountedWithSources({ sources: [], hiddenViews: [] });
-    expect(entries(root)).toEqual(["attention"]);
-    expect(entry(root, "attention").querySelector(".chappa-view-name")?.textContent).toBe("Needs you");
+    expect(root.firstElementChild?.classList.contains("chappa-activity-bar")).toBe(true);
+    expect(entries(root)).toEqual(BAR);
+    expect(idle(root)).toEqual(["work", "prs", "environment"]);
+    expect(entry(root, "attention").querySelector(".chappa-nav-label")?.textContent).toBe("Needs you");
     expect(badge(root)).toBe("");
-    expect(root.querySelector(".chappa-views-section")?.previousElementSibling?.classList.contains("chappa-project-bar")).toBe(true);
+    // The views are no longer listed inside the project sidebar.
+    expect(root.querySelector(".chappa-rail .chappa-nav-tab")).toBeNull();
+    expect(entry(root, "projects").classList.contains("selected")).toBe(true);
     panelDispose(app);
     root.remove();
   });
 
-  it("a trusted source serving PRs adds its entry in rail order; the badge counts the yes rows; untrusted sources add nothing", async () => {
+  it("a trusted source wakes the tabs it serves; the badge counts the yes rows; untrusted sources add nothing", async () => {
     const { root, app } = await mountedWithSources({
       sources: [sourceRow("fx", ALL), sourceRow("raw", ["prs"], { trusted: false, status: "needs_review" })],
       hiddenViews: [],
     });
-    expect(entries(root)).toEqual(["work", "prs", "attention", "environment"]);
+    expect(entries(root)).toEqual(BAR);
+    expect(idle(root)).toEqual([]);
     // 1 work approval + 5 PRs in yes buckets (waiting folded, not counted) + 4 attention items.
     expect(badge(root)).toBe("10");
     panelDispose(app);
@@ -7273,7 +7391,10 @@ describe("App source views", () => {
     const prs = page(root, "prs")!;
     expect(prs.classList.contains("active")).toBe(true);
     expect(vd(app).activeId).toBeNull();
-    expect(entry(root, "prs").classList.contains("open")).toBe(true);
+    expect(entry(root, "prs").classList.contains("selected")).toBe(true);
+    expect(entry(root, "prs").getAttribute("aria-selected")).toBe("true");
+    // A view fills the right side: the project sidebar steps away.
+    expect(root.querySelector<HTMLElement>(".chappa-rail")!.hidden).toBe(true);
     expect(prs.querySelectorAll(".chappa-pr-row").length).toBeGreaterThan(0);
     // The dashboard takes over; a view opened from it inherits what it covered.
     root.querySelector<HTMLButtonElement>(".chappa-dashboard-open")!.click();
@@ -7286,19 +7407,26 @@ describe("App source views", () => {
     needs.querySelector<HTMLButtonElement>(".chappa-back-arrow")!.click();
     expect(needs.classList.contains("active")).toBe(false);
     expect(vd(app).activeId).toBe(shellId);
-    // The entry toggles; a row activation hides the view.
+    expect(root.querySelector<HTMLElement>(".chappa-rail")!.hidden).toBe(false);
+    expect(entry(root, "projects").classList.contains("selected")).toBe(true);
+    // The selected tab stays selected on a second click; Projects leaves it.
     entry(root, "prs").click();
     entry(root, "prs").click();
+    expect(prs.classList.contains("active")).toBe(true);
+    entry(root, "projects").click();
     expect(prs.classList.contains("active")).toBe(false);
+    expect(vd(app).activeId).toBe(shellId);
+    // A row activation hides the view too.
     entry(root, "prs").click();
     expect(prs.classList.contains("active")).toBe(true);
     app.activate(shellId!);
     expect(prs.classList.contains("active")).toBe(false);
+    expect(entry(root, "projects").classList.contains("selected")).toBe(true);
     panelDispose(app);
     root.remove();
   });
 
-  it("a view whose last source goes away closes back to what it covered", async () => {
+  it("a view whose last source goes away stays on its tab and says so; switched off in Settings, it closes back to what it covered", async () => {
     const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
     await app.newShell();
     await FLUSH();
@@ -7307,19 +7435,27 @@ describe("App source views", () => {
     sources.setListing({ sources: [], hiddenViews: [] });
     sources.emit({ event: "sources" });
     await FLUSH();
-    expect(entries(root)).toEqual(["attention"]);
+    expect(entries(root)).toEqual(BAR);
+    expect(idle(root)).toEqual(["work", "prs", "environment"]);
+    expect(page(root, "prs")?.classList.contains("active")).toBe(true);
+    expect(page(root, "prs")?.querySelector(".chappa-sv-empty")?.textContent).toMatch(/^No trusted source serves pull requests/);
+    sources.setListing({ sources: [], hiddenViews: ["prs"] });
+    sources.emit({ event: "sources" });
+    await FLUSH();
+    expect(entries(root)).toEqual(["work", "attention", "environment"]);
     expect(page(root, "prs")?.classList.contains("active")).toBe(false);
     expect(vd(app).activeId).toBe(shellId);
     panelDispose(app);
     root.remove();
   });
 
-  it("a trusted source serving work adds the Work entry first, with no count; its page lists the items", async () => {
+  it("a trusted source serving work wakes the Work tab, first in the bar, with no count; its page lists the items", async () => {
     const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ["work"])], hiddenViews: [] });
-    expect(entries(root)).toEqual(["work", "attention"]);
-    expect(entry(root, "work").querySelector(".chappa-view-name")?.textContent).toBe("Work");
-    expect(entry(root, "work").querySelector(".chappa-view-badge")?.textContent).toBe("");
-    expect(entry(root, "work").title).toBe("Work from fx");
+    expect(entries(root)[0]).toBe("work");
+    expect(idle(root)).toEqual(["prs", "environment"]);
+    expect(entry(root, "work").querySelector(".chappa-nav-label")?.textContent).toBe("Work");
+    expect(entry(root, "work").querySelector(".chappa-nav-badge")?.textContent).toBe("");
+    expect(entry(root, "work").title).toBe("Work from fx (Ctrl+Shift+1)");
     entry(root, "work").click();
     const work = page(root, "work")!;
     expect(work.classList.contains("active")).toBe(true);
@@ -7410,7 +7546,7 @@ describe("App source views", () => {
       entry(root, view).click();
       const p = page(root, view)!;
       expect(leadsWithArrow(p.querySelector(":scope > .chappa-sv-header"))).toMatch(/^Back to “.+”$/);
-      entry(root, view).click();
+      entry(root, "projects").click();
     }
     root.querySelector<HTMLButtonElement>(".chappa-dashboard-open")!.click();
     expect(leadsWithArrow(root.querySelector(".chappa-dashboard .chappa-dash-header"))).toMatch(/^Back to “.+”$/);
@@ -7454,10 +7590,10 @@ describe("App source views", () => {
   it("the PRs entry counts the PRs that need you; team-only and optional reviews never do", async () => {
     const answers = fixtureAnswers();
     const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
-    const prsBadge = (): string => entry(root, "prs").querySelector(".chappa-view-badge")?.textContent ?? "";
+    const prsBadge = (): string => entry(root, "prs").querySelector(".chappa-nav-badge")?.textContent ?? "";
     // #1-#3 mine (action, draft, ready), #6 replied, #7 required vote.
     expect(prsBadge()).toBe("5");
-    expect(entry(root, "prs").title).toBe("PRs from fx: 5 need you");
+    expect(entry(root, "prs").title).toBe("PRs from fx: 5 need you (Ctrl+Shift+3)");
     const prs = sourceFixture("prs");
     // #7 becomes optional, #10 (team-only) moves to the vote bucket: neither counts.
     prs.items[6] = { ...prs.items[6], me: { required: false, vote: "none" } };
@@ -7474,31 +7610,31 @@ describe("App source views", () => {
     await FLUSH();
     await FLUSH();
     expect(prsBadge()).toBe("");
-    expect(entry(root, "prs").title).toBe("PRs from fx");
+    expect(entry(root, "prs").title).toBe("PRs from fx (Ctrl+Shift+3)");
     panelDispose(app);
     root.remove();
   });
 
-  it("a source awaiting review shows a rail hint that opens Settings ▸ Sources; it goes once answered, and a down source adds none", async () => {
+  it("a source awaiting review shows a hint at the foot of the activity bar that opens Settings ▸ Sources; it goes once answered, and a down source adds none", async () => {
     const pending = sourceRow("raw", ["prs"], { trusted: false, status: "needs_review" });
     const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL), pending], hiddenViews: [] });
-    const hint = (): HTMLButtonElement | null => root.querySelector<HTMLButtonElement>(".chappa-views-section .chappa-views-hint");
-    expect(hint()?.textContent).toBe("1 source needs review");
-    // The hint sits after the view entries.
-    expect(root.querySelector(".chappa-views-section")?.lastElementChild).toBe(hint());
+    const hint = (): HTMLButtonElement | null => root.querySelector<HTMLButtonElement>(".chappa-activity-bar .chappa-views-hint:not([hidden])");
+    expect(hint()?.textContent).toBe("1 source to review");
+    // The hint sits in the bar's foot, above Settings.
+    expect(hint()?.nextElementSibling?.classList.contains("chappa-rail-gear")).toBe(true);
     hint()!.click();
     expect(app.settingsPaneElement?.style.display).toBe("flex");
     expect(app.settingsPaneElement?.querySelector('.chappa-settings-tab[data-tab="sources"]')?.getAttribute("aria-selected")).toBe("true");
     sources.setListing({ sources: [sourceRow("fx", ALL), pending, sourceRow("raw2", ["work"], { trusted: false, status: "needs_review" })], hiddenViews: [] });
     sources.emit({ event: "sources" });
     await FLUSH();
-    expect(hint()?.textContent).toBe("2 sources need review");
+    expect(hint()?.textContent).toBe("2 sources to review");
     // Answered (trusted) and one down: no hint.
     sources.setListing({ sources: [sourceRow("fx", ALL, { status: "down" }), sourceRow("raw", ["prs"])], hiddenViews: [] });
     sources.emit({ event: "sources" });
     await FLUSH();
     expect(hint()).toBeNull();
-    expect(entries(root)).toEqual(["work", "prs", "attention", "environment"]);
+    expect(entries(root)).toEqual(BAR);
     panelDispose(app);
     root.remove();
   });
@@ -7546,11 +7682,11 @@ describe("App source views", () => {
   it("the Environment entry shows a dot, red for a broken component, amber for a warning, never a count", async () => {
     const answers: Record<string, unknown> = { ...fixtureAnswers(), "fx/environment": sourceFixture("environment") };
     const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
-    const dot = (): string | undefined => entry(root, "environment").querySelector<HTMLElement>(".chappa-view-dot")?.dataset.level;
-    expect(entries(root)).toEqual(["work", "prs", "attention", "environment"]);
+    const dot = (): string | undefined => entry(root, "environment").querySelector<HTMLElement>(".chappa-nav-dot")?.dataset.level;
+    expect(entries(root)).toEqual(BAR);
     expect(dot()).toBe("bad");
-    expect(entry(root, "environment").querySelector(".chappa-view-badge")?.textContent).toBe("");
-    expect(entry(root, "environment").title).toBe("Environment from fx: something is broken");
+    expect(entry(root, "environment").querySelector(".chappa-nav-badge")?.textContent).toBe("");
+    expect(entry(root, "environment").title).toBe("Environment from fx: something is broken (Ctrl+Shift+4)");
     // The four red components join Needs you: 10 + 4.
     expect(badge(root)).toBe("14");
     const env = sourceFixture("environment");
@@ -7565,7 +7701,7 @@ describe("App source views", () => {
     await FLUSH();
     await FLUSH();
     expect(dot()).toBeUndefined();
-    expect(entry(root, "environment").title).toBe("Environment from fx");
+    expect(entry(root, "environment").title).toBe("Environment from fx (Ctrl+Shift+4)");
     panelDispose(app);
     root.remove();
   });
@@ -7582,6 +7718,209 @@ describe("App source views", () => {
     expect(envPage.classList.contains("active")).toBe(true);
     expect(needs.classList.contains("active")).toBe(false);
     expect(envPage.querySelector('.chappa-env-row[data-key="fx|db"]')?.classList.contains("focused")).toBe(true);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("Ctrl+Shift+1…5 select the tabs in bar order, from anywhere in the window; plain Ctrl+digit does not", async () => {
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    await app.newShell();
+    await FLUSH();
+    const shellId = vd(app).activeId;
+    const press = (digit: number): void => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "!", code: `Digit${digit}`, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    };
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "2", code: "Digit2", ctrlKey: true, bubbles: true, cancelable: true }));
+    expect(page(root, "attention")?.classList.contains("active") ?? false).toBe(false);
+    press(2);
+    expect(page(root, "attention")?.classList.contains("active")).toBe(true);
+    expect(entry(root, "attention").classList.contains("selected")).toBe(true);
+    press(4);
+    expect(page(root, "environment")?.classList.contains("active")).toBe(true);
+    expect(page(root, "attention")?.classList.contains("active")).toBe(false);
+    press(1);
+    expect(page(root, "work")?.classList.contains("active")).toBe(true);
+    press(5);
+    expect(page(root, "work")?.classList.contains("active")).toBe(false);
+    expect(entry(root, "projects").classList.contains("selected")).toBe(true);
+    expect(vd(app).activeId).toBe(shellId);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("each tab keeps its place: a view drilled into comes back as it was after Projects; only its arrow steps up", async () => {
+    const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    await app.newShell();
+    await FLUSH();
+    const shellId = vd(app).activeId;
+    const arrow = (p: HTMLElement) => p.querySelector<HTMLButtonElement>(":scope > .chappa-sv-header > .chappa-back-arrow")!;
+    entry(root, "attention").click();
+    page(root, "attention")!.querySelector<HTMLButtonElement>('.chappa-needs-row[data-id="att:fx|review-note-1"] .chappa-sv-title')!.click();
+    const work = page(root, "work")!;
+    expect(work.classList.contains("active")).toBe(true);
+    expect(work.querySelector(".chappa-work-detail-title")?.textContent).toBe("ABC-2 Rename the web build step");
+    // Projects shows the shell; nothing is unwound.
+    entry(root, "projects").click();
+    expect(work.classList.contains("active")).toBe(false);
+    expect(vd(app).activeId).toBe(shellId);
+    expect(root.querySelector<HTMLElement>(".chappa-rail")!.hidden).toBe(false);
+    // Work comes back on its item, still drilled in from Needs you.
+    entry(root, "work").click();
+    expect(work.classList.contains("active")).toBe(true);
+    expect(work.querySelector(".chappa-work-detail-title")?.textContent).toBe("ABC-2 Rename the web build step");
+    expect(arrow(work).getAttribute("aria-label")).toBe("Back to Needs you");
+    // Another tab and back: the same.
+    entry(root, "prs").click();
+    entry(root, "work").click();
+    expect(work.querySelector(".chappa-work-detail-title")?.textContent).toBe("ABC-2 Rename the web build step");
+    expect(arrow(work).getAttribute("aria-label")).toBe("Back to Needs you");
+    // The arrow steps up one level.
+    arrow(work).click();
+    const needs = page(root, "attention")!;
+    expect(needs.classList.contains("active")).toBe(true);
+    // Needs you itself returns to the shell the Projects tab showed.
+    expect(arrow(needs).getAttribute("aria-label")).toMatch(/^Back to “.+”$/);
+    // Work's place was spent by its arrow: its tab opens at the top.
+    entry(root, "work").click();
+    expect(arrow(work).getAttribute("aria-label")).not.toBe("Back to Needs you");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a page drilled into inside a view survives switching tabs, and falls back to the view's top once what it shows is gone", async () => {
+    const answers: Record<string, unknown> = { ...fixtureAnswers(), "fx/environment": sourceFixture("environment") };
+    const { root, app, sources } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
+    entry(root, "environment").click();
+    const env = page(root, "environment")!;
+    env.querySelector<HTMLButtonElement>('.chappa-env-row[data-key="fx|api"] .chappa-env-name')!.click();
+    expect(env.querySelector<HTMLElement>(".chappa-env-page")?.dataset.key).toBe("fx|api");
+    entry(root, "prs").click();
+    entry(root, "environment").click();
+    expect(env.querySelector<HTMLElement>(".chappa-env-page")?.dataset.key).toBe("fx|api");
+    entry(root, "projects").click();
+    entry(root, "environment").click();
+    expect(env.querySelector<HTMLElement>(".chappa-env-page")?.dataset.key).toBe("fx|api");
+    // Away again; the component stops being reported meanwhile.
+    entry(root, "projects").click();
+    const gone = sourceFixture("environment") as unknown as Record<string, unknown> & { components: Record<string, unknown>[] };
+    answers["fx/environment"] = { ...gone, components: gone.components.filter((c) => c.id !== "api") };
+    sources.emit({ event: "view", source_id: "fx", view: "environment" });
+    await FLUSH();
+    await FLUSH();
+    entry(root, "environment").click();
+    expect(env.querySelector(".chappa-env-page")).toBeNull();
+    expect(env.classList.contains("covered")).toBe(false);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("with no trusted source, a view's empty state links to Settings ▸ Sources, which leaves by its back arrow", async () => {
+    const { root, app } = await mountedWithSources({ sources: [], hiddenViews: [] });
+    for (const view of ["work", "prs", "environment"]) {
+      entry(root, view).click();
+      const link = page(root, view)!.querySelector<HTMLButtonElement>(".chappa-sv-empty .chappa-sv-empty-link");
+      expect(link?.textContent, view).toBe("Open Settings ▸ Sources");
+    }
+    page(root, "environment")!.querySelector<HTMLButtonElement>(".chappa-sv-empty-link")!.click();
+    expect(app.settingsPaneElement?.style.display).toBe("flex");
+    expect(app.settingsPaneElement?.querySelector('.chappa-settings-tab[data-tab="sources"]')?.getAttribute("aria-selected")).toBe("true");
+    const back = app.settingsPaneElement!.querySelector<HTMLElement>(".chappa-settings-title-row")?.firstElementChild as HTMLButtonElement;
+    expect(back.classList.contains("chappa-back-arrow")).toBe(true);
+    back.click();
+    expect(app.settingsPaneElement?.style.display).toBe("none");
+    expect(page(root, "environment")?.classList.contains("active")).toBe(true);
+    panelDispose(app);
+    root.remove();
+    const served = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    // Served, the link goes.
+    entry(served.root, "work").click();
+    expect(served.root.querySelector(".chappa-sv-empty-link")).toBeNull();
+    panelDispose(served.app);
+    served.root.remove();
+  });
+
+
+  it("the selected tab is remembered and comes back on the next start", async () => {
+    const first = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    entry(first.root, "prs").click();
+    expect(readNavTab()).toBe("prs");
+    panelDispose(first.app);
+    first.root.remove();
+    const second = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] });
+    expect(page(second.root, "prs")?.classList.contains("active")).toBe(true);
+    expect(entry(second.root, "prs").classList.contains("selected")).toBe(true);
+    expect(second.root.querySelector<HTMLElement>(".chappa-rail")!.hidden).toBe(true);
+    // Back on Projects: that is what the next start shows.
+    entry(second.root, "projects").click();
+    expect(readNavTab()).toBe("projects");
+    panelDispose(second.app);
+    second.root.remove();
+  });
+
+  it("with several sources each view has a selector: PRs narrows to the picked one, remembered; one source shows none", async () => {
+    const two = { freshness: { asOf: "2026-01-15T10:00:00Z" }, items: [prItem("#99", { repo: "other/repo" })] };
+    const { root, app } = await mountedWithSources(
+      { sources: [sourceRow("fx", ALL), sourceRow("two", ["prs"])], hiddenViews: [] },
+      { ...fixtureAnswers(), "two/prs": two },
+    );
+    entry(root, "prs").click();
+    const prs = page(root, "prs")!;
+    const picks = (): string[] => [...prs.querySelectorAll<HTMLButtonElement>(".chappa-source-pick")].map((b) => b.textContent ?? "");
+    const rowIds = (): string[] => [...prs.querySelectorAll<HTMLElement>(".chappa-pr-row")].map((r) => r.dataset.id!);
+    expect(prs.querySelector<HTMLElement>(".chappa-source-picker")?.hidden).toBe(false);
+    expect(picks()).toEqual(["All", "fx", "two"]);
+    expect(rowIds()).toContain("github/other/repo/#99");
+    expect(rowIds()).toContain("github/owner/repo/#1");
+    prs.querySelector<HTMLButtonElement>('.chappa-source-pick[data-source="two"]')!.click();
+    expect(rowIds()).toEqual(["github/other/repo/#99"]);
+    expect(readViewSource("prs")).toBe("two");
+    // The tab's count still covers every source.
+    expect(entry(root, "prs").querySelector(".chappa-nav-badge")?.textContent).toBe("6");
+    prs.querySelector<HTMLButtonElement>('.chappa-source-pick[data-source="*"]')!.click();
+    expect(rowIds()).toContain("github/owner/repo/#1");
+    expect(readViewSource("prs")).toBeNull();
+    // Work has one source: no selector.
+    entry(root, "work").click();
+    expect(page(root, "work")?.querySelector<HTMLElement>(".chappa-source-picker")?.hidden).toBe(true);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("Environment shows one stack at a time, the first by default, with a selector to switch", async () => {
+    const { root, app } = await mountedWithSources(
+      { sources: [sourceRow("fx", ALL), sourceRow("two", ["environment"])], hiddenViews: [] },
+      { ...fixtureAnswers(), "fx/environment": sourceFixture("environment"), "two/environment": sourceFixture("environment") },
+    );
+    entry(root, "environment").click();
+    const env = page(root, "environment")!;
+    const blocks = (): string[] => [...env.querySelectorAll<HTMLElement>(".chappa-env-block")].map((b) => b.dataset.source!);
+    const picks = (): string[] => [...env.querySelectorAll<HTMLButtonElement>(".chappa-source-pick")].map((b) => b.textContent ?? "");
+    expect(picks()).toEqual(["fx", "two"]);
+    expect(env.querySelector(".chappa-source-picker-label")?.textContent).toBe("Stack");
+    expect(blocks()).toEqual(["fx"]);
+    env.querySelector<HTMLButtonElement>('.chappa-source-pick[data-source="two"]')!.click();
+    expect(blocks()).toEqual(["two"]);
+    expect(readViewSource("environment")).toBe("two");
+    // The dot still reads every stack.
+    expect(entry(root, "environment").querySelector<HTMLElement>(".chappa-nav-dot")?.dataset.level).toBe("bad");
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a Needs you source selector narrows the page to that source's rows and leaves the terminals to All; the badge keeps counting everything", async () => {
+    const { root, app } = await mountedWithSources(
+      { sources: [sourceRow("fx", ALL), sourceRow("two", ["attention"])], hiddenViews: [] },
+      { ...fixtureAnswers(), "two/attention": { freshness: { asOf: "2026-01-15T10:00:00Z" }, items: [{ id: "nightly", title: "Nightly failed", detail: "", group: "Builds" }] } },
+    );
+    entry(root, "attention").click();
+    const needs = page(root, "attention")!;
+    const ids = (): string[] => [...needs.querySelectorAll<HTMLElement>(".chappa-needs-row")].map((r) => r.dataset.id!);
+    expect(ids()).toContain("att:two|nightly");
+    expect(ids()).toContain("att:fx|review-note-1");
+    const total = badge(root);
+    needs.querySelector<HTMLButtonElement>('.chappa-source-pick[data-source="two"]')!.click();
+    expect(ids()).toEqual(["att:two|nightly"]);
+    expect(badge(root)).toBe(total);
     panelDispose(app);
     root.remove();
   });

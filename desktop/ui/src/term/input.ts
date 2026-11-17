@@ -314,8 +314,24 @@ export function isAppChord(
     isMarkNavShortcut(e) ||
     isHudShortcut(e) ||
     isPanelShortcut(e) ||
-    isProjectShortcut(e)
+    isProjectShortcut(e) ||
+    navTabShortcut(e) !== null
   );
+}
+
+/**
+ * The activity bar's tabs, in bar order: Cmd+1 … Cmd+5 on macOS, and
+ * Ctrl+Shift+1 … Ctrl+Shift+5 elsewhere, so plain Ctrl+digit stays the
+ * terminal's. The position (1-based), or null for any other key. Read from
+ * the physical key when the event carries one: with Shift held (or on a
+ * layout whose digit row types other characters) `key` is not the digit.
+ */
+export function navTabShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey"> & { code?: string },
+): number | null {
+  if (!hasAppMod(e) || e.altKey || e.shiftKey !== !isMac()) return null;
+  const m = /^Digit([1-5])$/.exec(e.code ?? "") ?? /^([1-5])$/.exec(e.key);
+  return m ? Number(m[1]) : null;
 }
 
 /** Mod+←/↑/↓ (no shift/alt) — the focus/nav ring. */

@@ -834,6 +834,8 @@ describe("keyboard on macOS", () => {
       { key: "S", shiftKey: true },
       { key: "A", shiftKey: true },
       { key: "P", shiftKey: true },
+      { key: "1", code: "Digit1" },
+      { key: "5", code: "Digit5" },
     ];
     for (const init of chords) {
       const label = JSON.stringify(init);

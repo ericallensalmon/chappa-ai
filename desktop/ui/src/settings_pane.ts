@@ -35,8 +35,9 @@ import { TimersSection } from "./timers_section";
 import { ProjectsSection, type ProjectsSettingsApi } from "./projects_section";
 import { agentToolsStore, type AgentToolsStore } from "./agent_tools";
 import { sourcesStore, type SourcesStore } from "./sources_store";
-import type { ClipboardWritesMode } from "./ipc";
+import type { AtLaunchMode, ClipboardWritesMode } from "./ipc";
 import {
+  AT_LAUNCH_MODES,
   BUILTIN_EXEC_PROFILES,
   CLIPBOARD_WRITES_MODES,
   BUNDLED_FONTS,
@@ -183,6 +184,7 @@ export class SettingsPane {
   private readonly wheelPicker: Segmented<number>;
   /** OSC 52 clipboard writes from terminal output: Off | Ask | Allow. */
   private readonly clipboardWritesPicker: Segmented<ClipboardWritesMode>;
+  private readonly atLaunchPicker: Segmented<AtLaunchMode>;
   private readonly lineHeightPicker: Segmented<number>;
   private readonly fontSizeValue: HTMLSpanElement;
   private readonly fontSizeDown: HTMLButtonElement;
@@ -287,6 +289,29 @@ export class SettingsPane {
 
     // --- Terminal tab --------------------------------------------------------
     const terminal = this.panels.get("terminal")!;
+
+    // The app's own start-up, ahead of the terminal behaviour.
+    const startup = settingsSection("Start-up");
+    this.atLaunchPicker = new Segmented<AtLaunchMode>({
+      label: "At launch",
+      options: AT_LAUNCH_MODES.map((m) => ({
+        value: m,
+        label: m === "nothing" ? "Nothing" : m === "select-last" ? "Select the last project" : "Re-open the last project",
+      })),
+      value: "nothing",
+      onChange: (m) => void this.store.update({ atLaunch: m }),
+    });
+    this.atLaunchPicker.element.dataset.setting = "atLaunch";
+    startup.card.appendChild(
+      settingsRow(
+        "At launch",
+        this.atLaunchPicker.element,
+        "What happens to the project you last had selected when the app starts. Nothing: no project is " +
+          "opened or selected. Select: its tile and sections show, nothing starts and no trust question " +
+          "is asked until you open it. Re-open: it opens as a click on its tile would, starting its " +
+          "auto-start commands once its chappa.yml is trusted.",
+      ),
+    );
 
     const behavior = settingsSection("Behavior");
     this.copyToggle = this.toggle("copyOnSelect");
@@ -495,7 +520,7 @@ export class SettingsPane {
     shells.card.appendChild(
       settingsRow("Default execution profile", this.execSelect, "The shell that runs chappa.yml command lines."),
     );
-    terminal.append(behavior.element, opening.element, appearance.element, shells.element);
+    terminal.append(startup.element, behavior.element, opening.element, appearance.element, shells.element);
 
     // --- Projects tab ----------------------------------------------------------
     if (opts.projects) {
@@ -635,6 +660,7 @@ export class SettingsPane {
     this.close();
     this.wheelPicker.dispose();
     this.clipboardWritesPicker.dispose();
+    this.atLaunchPicker.dispose();
     this.lineHeightPicker.dispose();
     this.agents.dispose();
     this.sources.dispose();
@@ -655,6 +681,7 @@ export class SettingsPane {
     this.marksToggle.checked = s.syntheticPromptMarks;
     this.wheelPicker.setValue(s.scrollWheelSpeed);
     this.clipboardWritesPicker.setValue(s.clipboardWrites);
+    this.atLaunchPicker.setValue(s.atLaunch);
     // An off-ladder stored value (hand-edited config; Rust round-trips those)
     // displays as its nearest step — the store keeps the exact number.
     this.lineHeightPicker.setValue(nearestLineHeight(s.lineHeight));

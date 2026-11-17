@@ -9,9 +9,33 @@ attention.
 suite runs on Windows, Linux and macOS in CI; see [Platforms](#platforms) for
 what has and has not been tried by hand.
 
-<!-- screenshot: assets/screenshots/rail.png — The rail with the ACTIVE area on top, several projects open and their terminal and agent panes, one of them selected -->
+<!-- screenshot: assets/screenshots/rail.png — The activity bar on the left, the Projects tab with its project tiles, the expanded project's sections and the ACTIVE area, and a selected terminal pane -->
 
 ## What it does
+
+### The window
+
+- **Activity bar.** A slim column on the far left with a tab for each
+  cross-project view (**Work**, **Needs you** with its count, **PRs** with
+  the number that need you, **Environment** with its alert dot) and one for
+  **Projects**; Settings and the notification bell sit at its bottom.
+  Ctrl+Shift+1 … Ctrl+Shift+5 select the tabs in that order (Cmd+1 … Cmd+5
+  on macOS); plain Ctrl+digit still reaches the terminal. The arrow keys
+  move along the bar once it has focus.
+- **Projects tab.** Your projects as tiles in a row at the top (their
+  initials and colour, **+** to add one), the project picker under them,
+  then the selected project's commands, terminals, agents and scratchpads,
+  and the workspace with the cross-project ACTIVE area. A tile click opens
+  or selects that project; clicking the selected one again folds it away.
+- **Every tab keeps its place.** A view's page fills the window right of
+  the bar. Switch away from a page you drilled into (an item, a component,
+  a source's page) and back, and you land on it again; only its back arrow
+  moves up a level. The selected tab is remembered across restarts.
+- **At launch** (Settings ▸ Terminal ▸ Start-up): **Nothing** (the
+  default: no project opened or selected), **Select the last project** (its
+  tile and sections show; nothing starts and no trust question is asked
+  until you open it), or **Re-open the last project** (as a click on its
+  tile, auto-start commands included once its `chappa.yml` is trusted).
 
 ### Terminals, projects and agents
 
@@ -41,7 +65,7 @@ what has and has not been tried by hand.
   and the project, with the focused pane suppressed and per-project and
   per-process levels.
 - **A cross-project ACTIVE area.** Everything running or wanting attention,
-  across every open project, at the top of the rail.
+  across every open project, in the workspace part of the Projects tab.
 
 <!-- screenshot: assets/screenshots/agent-notification.png — An agent pane asking whether to go ahead with its plan, with the notification banner naming the agent and its project -->
 
@@ -75,7 +99,11 @@ JSON on a loopback port. The app owns the views, polling, notifications and
 every safety check; the source owns the data. A source is a `chappa.yml`
 command marked `source: {}` (or a server started elsewhere and attached in
 Settings ▸ Sources), and nothing is polled until you have reviewed and
-trusted what it asks for.
+trusted what it asks for. Each view has its own tab and shows every trusted
+source across the open projects; with more than one, a selector at the top
+narrows the page to one of them (Environment shows one stack at a time). A
+tab no trusted source serves yet is drawn dimmed, and its page links to
+Settings ▸ Sources.
 
 - **Work**: work items from every trusted source, the active one pinned on
   top and the rest grouped by status, with each item's actions, its local
@@ -84,7 +112,7 @@ trusted what it asks for.
 - **PRs**: your pull requests and the ones you review (**My PRs**,
   **Reviewing**, **All**).
 - **Needs you**: everything waiting on you across terminals, agents and
-  sources, with a count on its rail entry.
+  sources, with a count on its tab.
 - **Environment**: each stack as a header (state counts, endpoints
   answering, facts, alerts, data-safety and secret-scan status, the
   stack-wide actions) over a dense table: one line per component (state,
@@ -438,7 +466,9 @@ Supported, with these notes:
 - **Keys.** Cmd is the app's modifier: Cmd+C copies a selection, Cmd+V
   pastes, Cmd+A selects the whole buffer, and the app shortcuts that are
   Ctrl chords elsewhere are Cmd chords (Cmd+Shift+T for a new terminal,
-  Cmd+F to search). Cmd+W closes the pane, not the window; Cmd+Q quits.
+  Cmd+F to search); the activity bar's tabs are Cmd+1 … Cmd+5 (Ctrl+Shift+1
+  … Ctrl+Shift+5 elsewhere). Cmd+W closes the pane, not the window; Cmd+Q
+  quits.
   Every Ctrl chord goes to the terminal, so Ctrl+C interrupts. Option types
   the character it makes on your keyboard layout, unless **Settings ▸
   Terminal ▸ Option is Meta** is on: then Option+key sends Esc and the key,

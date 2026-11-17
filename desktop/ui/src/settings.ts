@@ -105,6 +105,8 @@ export function defaultSettings(): Settings {
     // unseen, but tools that use OSC 52 on purpose keep working after one
     // confirmation (matches `project_model`).
     clipboardWrites: "ask",
+    // Starting the app opens nothing on its own (matches `project_model`).
+    atLaunch: "nothing",
     // Empty = the OS default handler (matches `project_model`).
     editorCommand: "",
     // Automatic: on when gitleaks is installed (matches `project_model`).
@@ -164,6 +166,15 @@ export function clampClipboardWrites(v: unknown): ipc.ClipboardWritesMode {
   return (CLIPBOARD_WRITES_MODES as readonly unknown[]).includes(v)
     ? (v as ipc.ClipboardWritesMode)
     : "ask";
+}
+
+/** The three launch behaviours, in picker order. */
+export const AT_LAUNCH_MODES = ["nothing", "select-last", "reopen-last"] as const;
+
+/** Anything but a known mode is "nothing": a hand-edited or newer value must
+ *  never start a project on its own. */
+export function clampAtLaunch(v: unknown): ipc.AtLaunchMode {
+  return (AT_LAUNCH_MODES as readonly unknown[]).includes(v) ? (v as ipc.AtLaunchMode) : "nothing";
 }
 
 function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
@@ -278,6 +289,7 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     // default, mirroring the ctrl-v/ctrl-c deliberate-upgrade shape.
     agentReapOrphans: s.agentReapOrphans !== false,
     clipboardWrites: clampClipboardWrites(s.clipboardWrites),
+    atLaunch: clampAtLaunch(s.atLaunch),
     editorCommand: clampEditorCommand(s.editorCommand),
     secretScanBeforeAgents: clampTristate(s.secretScanBeforeAgents),
     secretScanPolicy: clampSecretScanPolicy(s.secretScanPolicy),

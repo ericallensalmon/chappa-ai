@@ -257,6 +257,44 @@ impl<'de> Deserialize<'de> for ClipboardWrites {
     }
 }
 
+/// `at_launch` — what the app does with the project the user had expanded
+/// when it last closed. Default [`AtLaunch::Nothing`]: starting the app never
+/// opens a project (and so never starts its auto-start commands) on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AtLaunch {
+    /// No project opened or selected.
+    #[default]
+    Nothing,
+    /// Show the last project's tile and sections; nothing is started and no
+    /// trust prompt appears until the user opens it.
+    SelectLast,
+    /// Open the last project as a click on its tile would: trust gate and
+    /// auto-start included.
+    ReopenLast,
+}
+
+impl AtLaunch {
+    /// Lenient parse: anything but the three known words is the default.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "nothing" => Self::Nothing,
+            "select-last" => Self::SelectLast,
+            "reopen-last" => Self::ReopenLast,
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Same lenient rule as [`ClipboardWrites`]: a bad value loads as the
+/// default instead of resetting every other setting.
+impl<'de> Deserialize<'de> for AtLaunch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().map(Self::parse).unwrap_or_default())
+    }
+}
+
 /// What a secret finding in an agent's working tree does to the launch.
 /// Default [`SecretScanPolicy::BlockAgents`]: a credential sitting in the
 /// folder an agent is about to read is one `cat` away from its context and
@@ -379,6 +417,9 @@ pub struct Settings {
     /// FRONTEND-ONLY consumer — the prompt and the per-terminal memory live
     /// in the UI, which is the only layer that can ask the user.
     pub clipboard_writes: ClipboardWrites,
+    /// What happens to the last expanded project when the app starts.
+    /// FRONTEND-ONLY consumer: the webview remembers which project that was.
+    pub at_launch: AtLaunch,
     /// The file-open command template (empty = OS default handler).
     /// Consumed Rust-side at click time, so there is no broadcast work.
     #[serde(deserialize_with = "deserialize_editor_command")]
@@ -436,6 +477,7 @@ impl Default for Settings {
             option_as_meta: false,
             agent_reap_orphans: default_agent_reap_orphans(),
             clipboard_writes: ClipboardWrites::default(),
+            at_launch: AtLaunch::default(),
             editor_command: String::new(),
             secret_scan_before_agents: None,
             secret_scan_policy: SecretScanPolicy::default(),
@@ -1054,6 +1096,54 @@ mod tests {
     }
 
     #[test]
+    fn at_launch_defaults_to_nothing_and_parses_the_three_words() {
+        assert_eq!(Settings::default().at_launch, AtLaunch::Nothing);
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(json["atLaunch"], "nothing");
+        for (word, want) in [
+            ("nothing", AtLaunch::Nothing),
+            ("select-last", AtLaunch::SelectLast),
+            ("reopen-last", AtLaunch::ReopenLast),
+        ] {
+            let s: Settings =
+                serde_json::from_value(serde_json::json!({ "atLaunch": word })).unwrap();
+            assert_eq!(s.at_launch, want);
+            assert_eq!(serde_json::to_value(&s).unwrap()["atLaunch"], word);
+        }
+    }
+
+    #[test]
+    fn at_launch_unknown_loads_as_nothing_without_resetting_the_rest() {
+        for raw in [
+            serde_json::json!({ "fontSize": 16, "atLaunch": "always" }),
+            serde_json::json!({ "fontSize": 16, "atLaunch": "ReopenLast" }),
+            serde_json::json!({ "fontSize": 16, "atLaunch": 2 }),
+            serde_json::json!({ "fontSize": 16, "atLaunch": null }),
+        ] {
+            let s: Settings = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(s.at_launch, AtLaunch::Nothing, "{raw}");
+            assert_eq!(
+                s.font_size, 16,
+                "a bad atLaunch must not reset other fields"
+            );
+        }
+    }
+
+    #[test]
+    fn at_launch_survives_a_store_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut store = SettingsStore::new(path.clone());
+        let mut next = store.get().clone();
+        next.at_launch = AtLaunch::SelectLast;
+        store.set(next).unwrap();
+        assert_eq!(
+            SettingsStore::new(path).get().at_launch,
+            AtLaunch::SelectLast
+        );
+    }
+
+    #[test]
     fn clipboard_writes_survives_a_store_reload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -1115,6 +1205,7 @@ mod tests {
             "optionAsMeta",
             "agentReapOrphans",
             "clipboardWrites",
+            "atLaunch",
             "editorCommand",
             "secretScanBeforeAgents",
             "secretScanPolicy",

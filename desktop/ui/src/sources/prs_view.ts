@@ -21,6 +21,7 @@ import {
   chipEl,
   fillLines,
   openChecked,
+  paintEmpty,
   placeAt,
   truncate,
   type SourceViewDeps,
@@ -180,6 +181,22 @@ export class PrsView {
     return this.frame.host;
   }
 
+  /** Where the app puts its source selector. */
+  get pickerSlot(): HTMLElement {
+    return this.frame.picker;
+  }
+
+  /** Back on screen: pages drilled into that show something gone (or a
+   *  source that left) give way to the view's top. */
+  dropStale(sourceLive: (sourceId: string) => boolean): void {
+    this.frame.dropStale(sourceLive);
+  }
+
+  /** Forget where the view was left: its top shows next time. */
+  resetPlace(): void {
+    this.frame.clearSubpages();
+  }
+
   get active(): boolean {
     return this.frame.active;
   }
@@ -287,7 +304,11 @@ export class PrsView {
     }
     if (this.focused !== null && !all.has(this.focused)) this.focused = null;
     for (const [id, r] of this.rows) r.el.classList.toggle("focused", id === this.focused);
-    this.frame.empty.textContent = groups.length === 0 ? prsEmptyText(input, this.tab) : "";
+    paintEmpty(
+      this.frame.empty,
+      groups.length === 0 ? prsEmptyText(input, this.tab) : "",
+      input.servedBy.length === 0 ? this.deps.openSourcesSettings : undefined,
+    );
   }
 
   private folded(tab: PrsTab, g: PrGroup): boolean {

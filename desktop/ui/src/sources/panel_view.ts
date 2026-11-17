@@ -115,6 +115,10 @@ export class PanelPage implements Subpage {
     return this.header.title.textContent ?? this.origin.label;
   }
 
+  get sourceId(): string {
+    return this.origin.sourceId;
+  }
+
   setBackTo(where: string): void {
     this.header.setBackTo(where);
   }
