@@ -144,6 +144,7 @@ pub enum SelectionOpDto {
         point: PointDto,
         kind: SelectionKindDto,
     },
+    All,
     Clear,
 }
 
@@ -206,9 +207,10 @@ fn to_mouse(dto: MouseEventDto) -> MouseEvent {
 /// The user's shell. Windows: pwsh (PowerShell 7) when it's on PATH, else
 /// powershell.exe — pwsh is an optional install and CreateProcessW does not
 /// search PATH the way a shell would, so probe the PATH entries ourselves.
-/// Elsewhere: `$SHELL` falling back to /bin/sh. The webview cannot read
-/// `$SHELL` (or PATH), which is why this policy lives Rust-side. Shared with
-/// the control surface (`spawn_terminal` with no command).
+/// Elsewhere: `$SHELL` falling back to /bin/zsh on macOS (its default shell)
+/// and /bin/sh otherwise. The webview cannot read `$SHELL` (or PATH), which
+/// is why this policy lives Rust-side. Shared with the control surface
+/// (`spawn_terminal` with no command).
 pub(crate) fn default_shell() -> String {
     if cfg!(windows) {
         let has_pwsh = std::env::var_os("PATH").is_some_and(|path| {
@@ -220,7 +222,12 @@ pub(crate) fn default_shell() -> String {
             "powershell.exe".into()
         }
     } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        let fallback = if cfg!(target_os = "macos") {
+            "/bin/zsh"
+        } else {
+            "/bin/sh"
+        };
+        std::env::var("SHELL").unwrap_or_else(|_| fallback.into())
     }
 }
 
@@ -283,6 +290,7 @@ fn to_selection_op(op: SelectionOpDto) -> SelectionOp {
             point: to_point(point),
             kind: to_selection_kind(kind),
         },
+        SelectionOpDto::All => SelectionOp::All,
         SelectionOpDto::Clear => SelectionOp::Clear,
     }
 }

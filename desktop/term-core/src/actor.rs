@@ -363,8 +363,16 @@ pub enum SelectionKind {
 /// Selection commands. Points are viewport coordinates (row 0 = top).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionOp {
-    Start { point: Point, kind: SelectionKind },
-    Update { point: Point, kind: SelectionKind },
+    Start {
+        point: Point,
+        kind: SelectionKind,
+    },
+    Update {
+        point: Point,
+        kind: SelectionKind,
+    },
+    /// The whole buffer: every scrollback line and the screen.
+    All,
     Clear,
 }
 
@@ -1612,6 +1620,13 @@ impl Actor {
         match op {
             SelectionOp::Clear => {
                 self.term.selection = None;
+            }
+            SelectionOp::All => {
+                let top = Point::new(self.term.grid().topmost_line(), Column(0));
+                let bottom = Point::new(self.term.bottommost_line(), self.term.last_column());
+                let mut selection = Selection::new(SelectionType::Simple, top, Side::Left);
+                selection.update(bottom, Side::Right);
+                self.term.selection = Some(selection);
             }
             SelectionOp::Start { point, kind } => {
                 let kind = match kind {

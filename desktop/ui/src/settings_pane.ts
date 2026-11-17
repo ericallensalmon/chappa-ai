@@ -27,6 +27,7 @@
 
 import { isBackKey, mountPageHeader } from "./page_header";
 import { Segmented } from "./segmented";
+import { isMac } from "./platform";
 import { AgentsSection } from "./agents_section";
 import { SourcesSection } from "./sources_section";
 import { SecuritySection } from "./security_section";
@@ -291,26 +292,31 @@ export class SettingsPane {
     behavior.card.appendChild(settingsRow("Copy on select", this.copyToggle));
     // The two clipboard keys, next to their clipboard sibling. Both default ON
     // and are frontend-only consumers — the terminal input layer reads the
-    // live store.
+    // live store. macOS has no use for them (Cmd copies and pastes, every
+    // Ctrl chord reaches the terminal), so they are hidden there.
+    const ctrlKeyRow = (row: HTMLElement): HTMLElement => {
+      row.hidden = isMac();
+      return row;
+    };
     this.ctrlVToggle = this.toggle("ctrlVPastes");
     behavior.card.appendChild(
-      settingsRow(
+      ctrlKeyRow(settingsRow(
         "Ctrl+V pastes",
         this.ctrlVToggle,
         "Ctrl+V (no Alt/Shift) pastes the clipboard into the terminal; otherwise it sends the raw 0x16 " +
           "character (vim's literal-insert). On by default: while on, ^V never reaches a TUI — deliberate.",
-      ),
+      )),
     );
     this.ctrlCToggle = this.toggle("ctrlCCopyOnly");
     behavior.card.appendChild(
-      settingsRow(
+      ctrlKeyRow(settingsRow(
         "Ctrl+C is copy-only",
         this.ctrlCToggle,
         "Ctrl+C never reaches the terminal; stop a process from its rail row. With a selection it copies; " +
-          "without one it does nothing. Cmd+C on macOS keeps its usual behavior either way. On by default: " +
+          "without one it does nothing. On by default: " +
           "a reflexive ^C must not kill a long agent run — Escape and the rail stop are the remaining " +
           "cancel paths. Deliberate.",
-      ),
+      )),
     );
     this.clipboardWritesPicker = new Segmented<ClipboardWritesMode>({
       label: "Programs can set the clipboard",
@@ -360,7 +366,7 @@ export class SettingsPane {
 
     const opening = settingsSection(
       "Opening files",
-      "Ctrl+click (Cmd+click on macOS) a file path in terminal or agent output to open it at the line it names. " +
+      `${isMac() ? "Cmd+click" : "Ctrl+click"} a file path in terminal or agent output to open it at the line it names. ` +
         "A folder opens in the file manager.",
     );
     this.editorSelect = document.createElement("select");

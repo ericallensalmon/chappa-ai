@@ -8,15 +8,17 @@
 // scrollback `scroll(delta)` calls.
 //
 // Shortcut policy: a small allowlist is kept local — F11/F12 stay with the
-// browser, the focus nav (Ctrl+←/↑/↓) and Ctrl/Cmd+C-with-a-
-// selection are app-level — everything else goes to the terminal. There
-// are two SETTINGS-GATED app shortcuts (both default ON, read LIVE from the
-// settings store by the controller — the pane's toggle changes an open
-// panel's behavior without a rebuild): Ctrl+V pastes the clipboard (OFF =
-// today's 0x16 passthrough) and Ctrl+C becomes copy-only — a no-op without a
-// selection, so 0x03 never reaches the pty (OFF = today's rule). Both are
-// deliberate departures from terminal convention; the predicates below
-// document the consequences.
+// browser, the focus nav (Mod+←/↑/↓) and copy-with-a-selection are
+// app-level — everything else goes to the terminal. Mod is the platform's
+// app modifier (../platform.ts): Cmd on macOS, where every Cmd chord stays
+// with the app or the system and every Ctrl chord reaches the terminal;
+// Ctrl elsewhere. Off macOS there are two SETTINGS-GATED app shortcuts (both
+// default ON, read LIVE from the settings store by the controller — the
+// pane's toggle changes an open panel's behavior without a rebuild): Ctrl+V
+// pastes the clipboard (OFF = today's 0x16 passthrough) and Ctrl+C becomes
+// copy-only — a no-op without a selection, so 0x03 never reaches the pty
+// (OFF = today's rule). Both are deliberate departures from terminal
+// convention; the predicates below document the consequences.
 //
 // Mouse protocol: the frame header now carries the terminal's
 // mouse/alt-screen modes (flags bits 1/2), so a mouse-capturing TUI (vim,
@@ -35,6 +37,7 @@ import {
   type SelectionKindDto,
   type SelectionOpDto,
 } from "../ipc";
+import { hasAppMod, isMac } from "../platform";
 
 // Scroll wheel speed (1x…6x, default 3x) lives ENTIRELY outside
 // this file: the multiplier is applied Rust-side in
@@ -67,6 +70,8 @@ export interface InputControllerOptions {
   onScroll: (deltaLines: number) => void;
   onSelection: (op: SelectionOpDto) => void;
   onCopy: () => void;
+  /** Cmd+A on macOS: select the whole buffer, scrollback included. */
+  onSelectAll?: () => void;
   /** A left-button drag-selection just ended (mouseup). The panel's
    *  copy-on-select hook — it fires for a bare click too, since a
    *  click also starts and ends a selection; the copy path's
@@ -158,34 +163,56 @@ export function dtoFromKeyboardEvent(e: KeyboardEvent): KeyEventDto | null {
   }
 
   if (key.length === 1) {
+    if (isMac() && e.altKey && !e.ctrlKey && !e.metaKey && key.toLowerCase() !== baseChar(e.code)) {
+      // macOS Option types characters (Option+L is `@` on a German layout,
+      // Option+2 is `€` on a British one): send what it typed, not an
+      // Alt chord with an ESC in front of it.
+      return { key: { kind: "char", ch: key }, mods: mods & ~MOD_ALT };
+    }
     return { key: { kind: "char", ch: key }, mods };
   }
   return null;
 }
 
+/** The unshifted character a letter or digit key's `code` names ("KeyL" →
+ *  "l", "Digit2" → "2"); "" for other keys. */
+function baseChar(code: string | undefined): string {
+  const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code ?? "");
+  if (!m) return "";
+  return (m[1] ?? m[2]).toLowerCase();
+}
+
 /**
  * Browser-reserved / app-level shortcuts that must NOT reach the terminal.
  * True → the controller keeps the event local (and the caller decides
- * whether to preventDefault). The split:
+ * whether to preventDefault). "Mod" is the app modifier (`hasAppMod`): Cmd
+ * on macOS, Ctrl elsewhere. The split:
  * - F11/F12 stay with the browser (fullscreen/devtools) — no preventDefault.
- * - Ctrl+←/↑/↓ are the focus/nav ring (`Ctrl+← Unfocus · Ctrl+↑ Prev ·
- *   Ctrl+↓ Next`) — not terminal keys.
- * - Ctrl/Cmd+C while a selection exists → copy_selection.
- * - Ctrl+Shift+D → debug HUD toggle (hud.ts).
- * - Ctrl+PgUp/PgDn → panel cycle, Ctrl+Shift+T → new shell, Ctrl+Shift+W →
+ * - Mod+←/↑/↓ are the focus/nav ring (`Unfocus · Prev · Next`) — not
+ *   terminal keys.
+ * - Copy while a selection exists → copy_selection: Ctrl/Cmd+C elsewhere,
+ *   Cmd+C on macOS (where Ctrl+C is always the interrupt).
+ * - Mod+Shift+D → debug HUD toggle (hud.ts).
+ * - Mod+PgUp/PgDn → panel cycle, Mod+Shift+T → new shell, Mod+Shift+W →
  *   close panel — the terminal never sees them.
- * - Ctrl+F → per-terminal search overlay, Ctrl+Alt+↑/↓ → prompt-mark nav
+ * - Mod+F → per-terminal search overlay, Mod+Alt+↑/↓ → prompt-mark nav
  * — the panel performs them.
  * Ctrl+Shift+arrows deliberately fall through to the terminal (word-select
  * sequences in TUIs).
  *
- * Clipboard keys (settings, both default ON — see {@link ClipboardShortcutSettings}):
+ * macOS only ({@link macKeyAction}): Cmd+A selects everything, Cmd+V
+ * pastes through the Edit menu, Cmd+C without a selection does nothing, and
+ * every other Cmd chord (Cmd+Q, Cmd+W, Cmd+H, …) is left to the app menu and
+ * the system. No Cmd chord reaches the terminal there, and no Ctrl chord is
+ * taken from it.
+ *
+ * Clipboard keys elsewhere (settings, both default ON — see
+ * {@link ClipboardShortcutSettings}); they do not apply on macOS:
  * - `ctrl_c_copy_only` on: the Ctrl+C reflex WITHOUT a selection is an
  *   app-level no-op — 0x03 never reaches the pty; stopping a process is a
  *   deliberate act on its rail row. With a selection the existing copy
  *   shortcut above still wins. OFF = today's rule (copy iff selection, else
- *   interrupt). Cmd+C (mac) keeps today's behavior in BOTH modes — the
- *   setting is about the Windows/Linux Ctrl reflex.
+ *   interrupt).
  * - `ctrl_v_pastes` on: Ctrl+V (no alt/shift/meta) is an app shortcut that
  *   pastes the clipboard through the existing paste path. OFF = today's
  *   passthrough (0x16 — vim's literal-next, etc.).
@@ -217,62 +244,104 @@ export function isAppShortcut(
   clipboard: ClipboardShortcutSettings = DEFAULT_CLIPBOARD_SHORTCUTS,
 ): boolean {
   if (e.key === "F11" || e.key === "F12") return true;
-  if (
-    e.ctrlKey &&
+  if (isCopyShortcut(e, hasSelection)) return true;
+  if (isMac()) {
+    if (macKeyAction(e) !== null) return true;
+  } else {
+    if (clipboard.ctrlCCopyOnly && !hasSelection && isCtrlCCopyOnlyShortcut(e)) return true;
+    if (clipboard.ctrlVPastes && isCtrlVPasteShortcut(e)) return true;
+  }
+  return isAppChord(e);
+}
+
+/** One of the app's own chords (focus nav, search, mark nav, HUD, panel and
+ *  project chords), which the app performs and the terminal never sees. */
+export function isAppChord(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
+): boolean {
+  return (
+    isFocusNavShortcut(e) ||
+    isSearchShortcut(e) ||
+    isMarkNavShortcut(e) ||
+    isHudShortcut(e) ||
+    isPanelShortcut(e) ||
+    isProjectShortcut(e)
+  );
+}
+
+/** Mod+←/↑/↓ (no shift/alt) — the focus/nav ring. */
+export function isFocusNavShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
+): boolean {
+  return (
+    hasAppMod(e) &&
     !e.altKey &&
     !e.shiftKey &&
-    !e.metaKey &&
     (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "ArrowDown")
-  ) {
-    return true;
-  }
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "c" && hasSelection) {
-    return true;
-  }
-  if (clipboard.ctrlCCopyOnly && !hasSelection && isCtrlCCopyOnlyShortcut(e)) return true;
-  if (clipboard.ctrlVPastes && isCtrlVPasteShortcut(e)) return true;
-  if (isSearchShortcut(e)) return true;
-  if (isMarkNavShortcut(e)) return true;
-  if (isHudShortcut(e)) return true;
-  if (isPanelShortcut(e)) return true;
-  if (isProjectShortcut(e)) return true;
-  return false;
+  );
 }
 
 /**
- * Ctrl+F — the search overlay. Recognized so the terminal never sees
+ * What a Cmd chord does on macOS, or null when the key is not a Cmd chord
+ * (or this is not macOS):
+ * - `select-all`: Cmd+A selects the whole buffer, scrollback included.
+ * - `paste-native`: Cmd+V is left to the Edit menu's Paste, which fires a
+ *   paste event on the focused textarea; the controller's paste handler
+ *   sends it. Reading the clipboard from script instead would make the
+ *   webview ask for permission on every paste.
+ * - `swallow`: Cmd+C without a selection — nothing to copy, nothing sent.
+ * - `system`: any other Cmd chord the app has no shortcut for (Cmd+Q, Cmd+W,
+ *   Cmd+H, Cmd+M, …), left to the app menu and the system untouched.
+ * Cmd+C with a selection is {@link isCopyShortcut}, checked first.
+ */
+export type MacKeyAction = "select-all" | "paste-native" | "swallow" | "system";
+
+export function macKeyAction(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
+): MacKeyAction | null {
+  if (!isMac() || !e.metaKey) return null;
+  if (hasAppMod(e) && !e.altKey && !e.shiftKey) {
+    const k = e.key.toLowerCase();
+    if (k === "a") return "select-all";
+    if (k === "v") return "paste-native";
+    if (k === "c") return "swallow";
+  }
+  return "system";
+}
+
+/**
+ * Mod+F — the search overlay. Recognized so the terminal never sees
  * it; the panel's document-level listener performs the open/refocus.
  */
 export function isSearchShortcut(
   e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
 ): boolean {
-  return e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.key.toLowerCase() === "f";
+  return hasAppMod(e) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f";
 }
 
 /**
- * Ctrl+Alt+↑/↓ — prompt-mark navigation. Same reserved-for-the-panel
+ * Mod+Alt+↑/↓ — prompt-mark navigation. Same reserved-for-the-panel
  * pattern as the search shortcut.
  */
 export function isMarkNavShortcut(
   e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
 ): boolean {
   return (
-    e.ctrlKey &&
+    hasAppMod(e) &&
     e.altKey &&
     !e.shiftKey &&
-    !e.metaKey &&
     (e.key === "ArrowUp" || e.key === "ArrowDown")
   );
 }
 
 /**
- * The panel chords: Ctrl+PgUp/PgDn (cycle), Ctrl+Shift+T (new shell),
- * Ctrl+Shift+W (close active panel). Recognized here so the terminal never
+ * The panel chords: Mod+PgUp/PgDn (cycle), Mod+Shift+T (new shell),
+ * Mod+Shift+W (close active panel). Recognized here so the terminal never
  * sees them; the App listens on window for the same combos to perform the
- * action (same pattern as the HUD and its Ctrl+Shift+D).
+ * action (same pattern as the HUD and its Mod+Shift+D).
  */
 export function isPanelShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">): boolean {
-  if (!e.ctrlKey || e.altKey || e.metaKey) return false;
+  if (!hasAppMod(e) || e.altKey) return false;
   if (e.shiftKey) {
     const k = e.key.toLowerCase();
     return k === "t" || k === "w";
@@ -282,7 +351,7 @@ export function isPanelShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shif
 
 /**
  * The project chords:
- * Ctrl+Shift+S (start auto-starting), Ctrl+Shift+A (start all), Ctrl+Shift+P
+ * Mod+Shift+S (start auto-starting), Mod+Shift+A (start all), Mod+Shift+P
  * (stop all).
  * Same shape as {@link isPanelShortcut} so the terminal never sees them; the
  * App listens on window for the same combos to perform the action.
@@ -290,23 +359,36 @@ export function isPanelShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shif
 export function isProjectShortcut(
   e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
 ): boolean {
-  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return false;
+  if (!hasAppMod(e) || !e.shiftKey || e.altKey) return false;
   const k = e.key.toLowerCase();
   return k === "s" || k === "a" || k === "p";
 }
 
 /**
- * True for the HUD toggle specifically: Ctrl+Shift+D (no alt/meta). Kept in
+ * True for the HUD toggle specifically: Mod+Shift+D (no alt). Kept in
  * `isAppShortcut` so the terminal never sees it; the HUD listens for the same
  * combo on window (hud.ts) to flip its overlay.
  */
 export function isHudShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">): boolean {
-  return e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "d";
+  return hasAppMod(e) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "d";
 }
 
-/** True for the copy shortcut specifically (Ctrl/Cmd+C with a selection). */
+/**
+ * The new-agent chord on a record pane: Mod+T (no shift/alt).
+ */
+export function isNewAgentShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
+): boolean {
+  return hasAppMod(e) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "t";
+}
+
+/**
+ * True for the copy shortcut specifically, with a selection: Cmd+C on
+ * macOS (Ctrl+C stays the interrupt there), Ctrl/Cmd+C elsewhere.
+ */
 export function isCopyShortcut(e: KeyboardEvent, hasSelection: boolean): boolean {
-  return (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "c" && hasSelection;
+  if (!hasSelection || e.altKey || e.key.toLowerCase() !== "c") return false;
+  return isMac() ? hasAppMod(e) : e.ctrlKey || e.metaKey;
 }
 
 /**
@@ -317,9 +399,10 @@ export function isCopyShortcut(e: KeyboardEvent, hasSelection: boolean): boolean
  * leave a keyboard-interrupt path and break the "0x03 never reaches the pty
  * while ON" contract. Alt is EXCLUDED: Alt+Ctrl+C carries an ESC prefix
  * (a different gesture) and Alt combos stay unchanged. Cmd-without-
- * Ctrl (the mac Cmd+C) never sets the ctrl bit and so is untouched in both
- * modes. The controller turns this into a no-op only while `ctrlCCopyOnly`
- * is on AND no selection is active (with a selection, the copy shortcut wins).
+ * Ctrl never sets the ctrl bit and so is untouched in both modes. The
+ * controller turns this into a no-op only while `ctrlCCopyOnly` is on AND
+ * no selection is active (with a selection, the copy shortcut wins), and
+ * never on macOS.
  */
 export function isCtrlCCopyOnlyShortcut(
   e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
@@ -331,9 +414,9 @@ export function isCtrlCCopyOnlyShortcut(
  * Ctrl+V with no alt/shift/meta — the paste-the-clipboard shortcut.
  * The setting is checked by the caller (it reads the live settings store,
  * exactly the way the copy-on-select UI half does); this predicate is the
- * pure modifier discipline. Cmd+V (mac) is NOT covered — this is about the
- * Windows/Linux reflex — and Ctrl+Shift+V / Alt variants reach the terminal
- * untouched, as today.
+ * pure modifier discipline. Cmd+V is NOT covered (on macOS it is the Edit
+ * menu's paste) — this is about the Windows/Linux reflex — and Ctrl+Shift+V
+ * / Alt variants reach the terminal untouched, as today.
  */
 export function isCtrlVPasteShortcut(
   e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">,
@@ -479,16 +562,27 @@ export class InputController {
       this.opts.shortcuts?.(e, hasSelection) ??
       isAppShortcut(e, hasSelection, clipboard);
     if (isShortcut) {
+      const mac = macKeyAction(e);
       if (isCopyShortcut(e, hasSelection)) {
         e.preventDefault();
         this.opts.onCopy();
-      } else if (clipboard.ctrlVPastes && isCtrlVPasteShortcut(e)) {
+      } else if (mac === "select-all") {
+        e.preventDefault();
+        this.opts.onSelectAll?.();
+      } else if (mac === "paste-native") {
+        // The Edit menu's Paste fires a paste event on this textarea;
+        // `onPaste` sends it. Preventing the key would cancel that.
+      } else if (mac === "swallow") {
+        e.preventDefault();
+      } else if (mac === "system" && !isAppChord(e)) {
+        // Cmd+Q, Cmd+W, Cmd+H…: the app menu and the system act on these.
+      } else if (!isMac() && clipboard.ctrlVPastes && isCtrlVPasteShortcut(e)) {
         // `ctrl_v_pastes`: pull the clipboard and push it through the
         // EXISTING paste path (the panel reads navigator.clipboard and calls
         // its `paste(text)` — bracketed-paste handling stays Rust-side).
         e.preventDefault();
         this.opts.onClipboardPaste?.();
-      } else if (clipboard.ctrlCCopyOnly && !hasSelection && isCtrlCCopyOnlyShortcut(e)) {
+      } else if (!isMac() && clipboard.ctrlCCopyOnly && !hasSelection && isCtrlCCopyOnlyShortcut(e)) {
         // `ctrl_c_copy_only`: the reflex ^C is a deliberate no-op —
         // 0x03 never reaches the pty; stopping a process is a deliberate act
         // on its rail row.

@@ -784,9 +784,16 @@ mod tests {
             &bound.covered,
             &project.join(".work").join("ABC-10")
         ));
-        // Case: Windows ignores it, so does the check there.
+        // Case: Windows ignores it, so does the check there. A
+        // case-insensitive filesystem elsewhere (the macOS default) resolves
+        // the other spelling to the same folder, which is then covered too.
         let shouted = PathBuf::from(item.display().to_string().to_uppercase());
-        assert_eq!(covers(&bound.covered, &shouted), cfg!(windows));
+        // Nothing was created under that spelling: if it exists, it is `item`.
+        let same_folder = shouted.is_dir();
+        assert_eq!(
+            covers(&bound.covered, &shouted),
+            cfg!(windows) || same_folder
+        );
         // A launched source with no `project` in its block falls back to its project's folder.
         let mut bare = base("error", false);
         bare.as_object_mut().unwrap().remove("project");

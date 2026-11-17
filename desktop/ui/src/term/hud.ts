@@ -1,4 +1,4 @@
-// Debug HUD overlay. Ctrl+Shift+D toggles it (the shortcut is
+// Debug HUD overlay. Mod+Shift+D (Cmd on macOS) toggles it (the shortcut is
 // routed through `isAppShortcut` in input.ts so it never reaches the
 // terminal; this controller just listens for it on window). Shows the
 // actor-side `FrameStats` (polled via the `debug_stats(id)` command) overlaid
@@ -8,6 +8,8 @@
 //
 // Rendering is one fixed div updated on a 1s cadence (and on toggle) — the
 // per-frame record calls only bump counters.
+
+import { isHudShortcut } from "./input";
 
 export interface DebugStatsDto {
   /** Frames emitted by the actor. */
@@ -79,7 +81,7 @@ export class Hud {
     this.keyHandler = (e) => {
       // e.repeat keeps Ctrl+Shift+D held from toggling every autorepeat.
       if (e.repeat) return;
-      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "d") {
+      if (isHudShortcut(e)) {
         e.preventDefault();
         this.toggle();
       }

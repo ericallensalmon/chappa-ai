@@ -20,6 +20,7 @@
 import { TerminalPanel, tauriApi, type OpenPathTarget, type PanelHost, type TerminalApi } from "./term/panel";
 import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
+import { shortcutLabel } from "./platform";
 import { baseFor, type Mount, type PathBase } from "./term/paths";
 import { openFileTarget, tauriFileOpener, type FileOpenerApi } from "./open_file";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
@@ -1761,7 +1762,7 @@ export class App {
     });
     const projectHeader = document.createElement("div");
     projectHeader.className = "chappa-project-header";
-    projectHeader.title = "project header actions: Ctrl+Shift+S/A/P";
+    projectHeader.title = `project header actions: ${shortcutLabel("Mod+Shift+S/A/P")}`;
     // Right-click the expanded project header for the project
     // context menu (Edit project… / Close project / Remove project…).
     projectHeader.addEventListener("contextmenu", (e) =>
@@ -1899,7 +1900,7 @@ export class App {
     const newTerm = document.createElement("button");
     newTerm.className = "chappa-new-term";
     newTerm.textContent = PLUS_GLYPH;
-    newTerm.title = "New terminal (Ctrl+Shift+T)";
+    newTerm.title = `New terminal (${shortcutLabel("Mod+Shift+T")})`;
     newTerm.addEventListener("mousedown", (e) => e.preventDefault());
     newTerm.addEventListener("click", () => {
       this.hideNewTermMenu();
