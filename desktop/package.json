@@ -9,6 +9,6 @@
     "test:sources": "node --test \"sources/**/*.test.mjs\""
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4"
+    "@tauri-apps/cli": "^2.12.5"
   }
 }
