@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   STATE_ORDER,
   buildEnvironmentModel,
+  groupCountText,
   headerCounts,
   readProbe,
   readSourceCell,
@@ -241,5 +242,62 @@ describe("environment model: lenient reads", () => {
   it("a payload that is not an object, or has no components, does not crash", () => {
     expect(buildEnvironmentModel([payload("s", [1, 2])]).blocks[0].groups).toEqual([]);
     expect(buildEnvironmentModel([payload("s", { groups: "x" })]).blocks[0].groups).toEqual([]);
+  });
+});
+
+describe("environment model: the dense table", () => {
+  it("chips carry each state's tone, then the endpoints that answer", () => {
+    const b = buildEnvironmentModel([
+      env([
+        { id: "a", group: "g", state: "up", probe: { url: "https://x.test/h", rule: "health", up: true, status: 200 } },
+        { id: "b", group: "g", state: "stopped-problem", probe: { url: "https://x.test/h2", rule: "health", up: true, status: 200 } },
+        { id: "c", group: "g", state: "not-deployed" },
+      ]),
+    ]).blocks[0];
+    expect(b.chips.map((c) => `${c.tone}:${c.text}`)).toEqual(["ok:1 up", "bad:1 deployed but not running", "muted:1 not deployed", "ok:endpoints 2/2"]);
+    // The text-only counts leave the endpoints out.
+    expect(b.header).toEqual(["1 up", "1 deployed but not running", "1 not deployed"]);
+    const none = buildEnvironmentModel([env([{ id: "a", group: "g", state: "up", probe: { url: "https://x.test/h", rule: "web", up: false, status: null } }])]).blocks[0];
+    expect(none.chips.at(-1)).toEqual({ text: "endpoints 0/1", tone: "bad", title: "0 of 1 checked endpoints answer" });
+    const unprobed = buildEnvironmentModel([env([{ id: "a", group: "g", state: "up" }])]).blocks[0];
+    expect(unprobed.chips.map((c) => c.text)).toEqual(["1 up"]);
+  });
+
+  it("a row's columns: uptime, mode with a short commit and ref, and the endpoint pill", () => {
+    const r = rows(buildEnvironmentModel([fx()]).blocks[0]);
+    const api = r.find((x) => x.id === "api")!;
+    expect([api.uptime, api.source?.mode, api.sourceLine]).toEqual(["3h 12m", "dev", "1a2b3c4 abc-1-health"]);
+    expect(api.endpoint.text).toBe("answers");
+    expect(r.find((x) => x.id === "web")!.endpoint).toMatchObject({ text: "no answer", tone: "bad" });
+    expect(r.find((x) => x.id === "queue")!.endpoint).toMatchObject({ text: "–", tone: "muted" });
+    expect(r.find((x) => x.id === "queue")!.sourceLine).toBe("");
+  });
+
+  it("reads the stack-wide and the groups' action ids, and the facts as one line", () => {
+    const b = buildEnvironmentModel([
+      env([{ id: "a", group: "g", state: "up" }], {
+        actions: [{ kind: "endpoint", id: "up", label: "Up" }, { label: "no id" }],
+        groups: [{ id: "g", label: "G", actions: [{ kind: "endpoint", id: "app:up", label: "Up" }] }],
+        facts: [
+          { id: "stack", title: "Stack", rows: [{ label: "Slot", value: "0" }, { label: "Host" }] },
+          { id: "quiet", title: "Quiet", collapsed: true, rows: [{ label: "Hidden", value: "x" }] },
+        ],
+      }),
+    ]).blocks[0];
+    expect(b.actionIds).toEqual(["up"]);
+    expect(b.groups[0].actionIds).toEqual(["app:up"]);
+    expect(b.factsLine).toEqual([
+      { label: "Slot", value: "0", section: "Stack" },
+      { label: "Host", value: "", section: "Stack" },
+    ]);
+    expect(buildEnvironmentModel([fx()]).blocks[0].actionIds).toEqual(["bring-up"]);
+    expect(buildEnvironmentModel([fx()]).blocks[0].groups.map((g) => g.actionIds)).toEqual([[], [], ["run-jobs"]]);
+  });
+
+  it("a group's count is up out of deployed, else how many are not deployed", () => {
+    const r = (state: string, id: string) => ({ id, group: "g", state });
+    const g = (components: unknown[]) => groupCountText(rows(buildEnvironmentModel([env(components)]).blocks[0]));
+    expect(g([r("up", "a"), r("up", "b"), r("stopped-idle", "c"), r("not-deployed", "d")])).toBe("(2/3 up)");
+    expect(g([r("not-deployed", "a"), r("not-deployed", "b")])).toBe("(2 not deployed)");
   });
 });

@@ -691,7 +691,7 @@ fn env_files_and_the_instance_env_are_scanned_by_name_never_by_value() {
 
 fn up(s: &Sec) -> (i32, String, Vec<String>) {
     let env = s.env();
-    let action = env["facts"][0]["actions"]
+    let action = env["actions"]
         .as_array()
         .unwrap()
         .iter()

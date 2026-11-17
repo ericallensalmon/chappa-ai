@@ -915,7 +915,18 @@ fn steps(p: &crate::planner::Plan) -> Vec<String> {
     p.steps
         .iter()
         .map(|s| match s {
-            Step::Script { component, verb } => format!("{component}:{verb}"),
+            Step::Script {
+                component,
+                verb,
+                row: None,
+                ..
+            } => format!("{component}:{verb}"),
+            Step::Script {
+                component,
+                verb,
+                row: Some(r),
+                ..
+            } => format!("{component}:{verb}:{r}"),
             other => format!(
                 "{}:{}",
                 other.component(),
@@ -1051,6 +1062,8 @@ fn one_script_verb_is_its_own_change_and_a_missing_one_is_refused() {
         &Change::Script {
             component: "stack".into(),
             verb: ScriptVerb::Restart,
+            row: None,
+            rows: Vec::new(),
         },
     )
     .unwrap();
@@ -1064,7 +1077,9 @@ fn one_script_verb_is_its_own_change_and_a_missing_one_is_refused() {
                 &st,
                 &Change::Script {
                     component: "stack".into(),
-                    verb
+                    verb,
+                    row: None,
+                    rows: Vec::new(),
                 }
             )
             .unwrap_err(),
@@ -1238,4 +1253,344 @@ fn the_runner_observes_through_script_outputs_and_applies_script_steps() {
         runner.script_confirm(&inst, &obs2, "stack", ScriptVerb::Stop),
         "Run the `stop` script for stack: node stop.js."
     );
+}
+
+// ------------------------------------------- groups, rows and picked rows
+
+#[test]
+fn status_groups_pass_through_in_order_with_each_components_group() {
+    let s = parse_status(
+        r#"{"groups": [{"id": "apis", "label": "APIs"}, {"id": "web"}],
+            "components": [{"name": "api", "group": "apis", "state": "up"},
+                           {"name": "portal", "group": "web", "state": "up"},
+                           {"name": "tools", "state": "up"}]}"#,
+        "stack",
+    )
+    .unwrap();
+    assert_eq!(
+        s.groups,
+        vec![
+            ReportedGroup {
+                id: "apis".into(),
+                label: "APIs".into()
+            },
+            ReportedGroup {
+                id: "web".into(),
+                label: "web".into()
+            },
+        ]
+    );
+    let groups: Vec<Option<&str>> = s.components.iter().map(|c| c.group.as_deref()).collect();
+    assert_eq!(groups, [Some("apis"), Some("web"), None]);
+    // The view keeps both.
+    let report = ScriptReport::Status { status: s };
+    let v = view(
+        "stack",
+        ComponentKind::Service,
+        Desired::Running,
+        true,
+        Some(&report),
+        None,
+    );
+    assert_eq!(v.groups.len(), 2);
+    assert_eq!(v.rows[0].group.as_deref(), Some("apis"));
+    assert_eq!(v.rows[2].group, None);
+    // Bad shapes are refused, without quoting the output.
+    for (text, says) in [
+        (
+            r#"{"groups": [{"id": "a b"}], "components": []}"#,
+            "`id` must match",
+        ),
+        (
+            r#"{"groups": [{"id": "a"}, {"id": "a"}], "components": []}"#,
+            "listed twice",
+        ),
+        (
+            r#"{"groups": [{"label": "x"}], "components": []}"#,
+            "has no `id`",
+        ),
+        (
+            r#"{"components": [{"name": "a", "group": "x/y", "state": "up"}]}"#,
+            "`group` must match",
+        ),
+    ] {
+        let e = parse_status(text, "stack").unwrap_err();
+        assert!(e.contains(says), "{text}: {e}");
+    }
+}
+
+#[test]
+fn row_placeholders_are_checked_where_they_are_written() {
+    let base = "stacks:\n  app:\n    components:\n      s:\n        driver: script\n        up: [node, up.js, \"{rows}\"]\n";
+    let find = |extra: &str, path: &str| -> Option<Diagnostic> {
+        diags(&format!("{base}{extra}"))
+            .into_iter()
+            .find(|d| d.path == path && d.rule == Rule::ScriptArgv)
+    };
+    assert!(
+        find("", "stacks.app.components.s.up").is_none(),
+        "{:?}",
+        diags(base)
+    );
+    assert!(find(
+        "        restart: [node, r.js, \"{row}\"]\n",
+        "stacks.app.components.s.restart"
+    )
+    .is_none());
+    assert!(find(
+        "        status: [node, s.js, \"{row}\"]\n",
+        "stacks.app.components.s.status"
+    )
+    .is_some());
+    assert!(find(
+        "        stop: [node, s.js, \"{rows}\"]\n",
+        "stacks.app.components.s.stop"
+    )
+    .is_some());
+    assert!(find(
+        "        env: { R: \"{row}\" }\n",
+        "stacks.app.components.s.env.R"
+    )
+    .is_some());
+    let inside = "stacks:\n  app:\n    components:\n      s:\n        driver: script\n        up: [node, up.js, \"--only={rows}\"]\n";
+    assert!(diags(inside)
+        .iter()
+        .any(|d| d.path == "stacks.app.components.s.up" && d.message.contains("whole word")));
+    let stack = stack_of(&format!(
+        "{base}        restart: [node, r.js, \"--name={{row}}\"]\n"
+    ));
+    let def = &stack.components["s"];
+    assert!(takes_row(def, ScriptVerb::Restart));
+    assert!(!takes_row(def, ScriptVerb::Up));
+    assert!(takes_rows(def, ScriptVerb::Up));
+    assert!(!takes_rows(def, ScriptVerb::Restart));
+}
+
+#[test]
+fn row_and_rows_become_argv_elements_and_unsafe_names_are_refused() {
+    let mut stack = stack_of(MIXED);
+    let s = stack.components.get_mut("stack").unwrap();
+    s.restart = Some(words(&[
+        "node",
+        "scripts/restart.js",
+        "--name={row}",
+        "{row}",
+    ]));
+    s.up = Some(words(&["node", "scripts/up.js", "{rows}", "{slot}"]));
+    let inst = instance(&stack, 1, None);
+    let project = Path::new("/srv/example");
+    let run = |verb: ScriptVerb, row: Option<&str>, rows: &[&str]| {
+        let mut b = bound();
+        b.row = row.map(str::to_string);
+        b.rows = words(rows);
+        prepare(
+            &inst,
+            &stack,
+            project,
+            "stack",
+            verb,
+            &b,
+            &IndexMap::new(),
+            &[],
+        )
+    };
+    assert_eq!(
+        run(ScriptVerb::Restart, Some("api"), &[]).unwrap().argv,
+        words(&["node", "scripts/restart.js", "--name=api", "api"])
+    );
+    // Each picked row one word; none picked, no words.
+    assert_eq!(
+        run(ScriptVerb::Up, None, &["api", "web.ui"]).unwrap().argv,
+        words(&["node", "scripts/up.js", "api", "web.ui", "1"])
+    );
+    assert_eq!(
+        run(ScriptVerb::Up, None, &[]).unwrap().argv,
+        words(&["node", "scripts/up.js", "1"])
+    );
+    // A row verb with no row cannot run.
+    let e = run(ScriptVerb::Restart, None, &[]).unwrap_err();
+    assert!(e.to_string().contains("names one reported row"), "{e}");
+    // A name a program would read as an option, or that is no name.
+    for bad in ["-rf", "a b", "x;y"] {
+        assert!(run(ScriptVerb::Restart, Some(bad), &[]).is_err(), "{bad}");
+        assert!(run(ScriptVerb::Up, None, &["api", bad]).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_reported_component_fills_every_column_and_its_probe_is_judged_by_the_rules() {
+    let s = parse_status(
+        r#"{"components": [
+            {"name": "api", "state": "up", "uptime": "2d 7h", "restarts": 3, "exitCode": 0,
+             "source": {"mode": "source", "ref": "main", "commit": "9B10002F"},
+             "probe": {"url": "https://dev.example.test:14090/health", "rule": "health", "status": 200}},
+            {"name": "web", "state": "up", "probe": {"url": "http://localhost:14091/", "rule": "web", "status": 302, "up": false}},
+            {"name": "jobs", "state": "up", "probe": {"url": "http://localhost:14092/health", "status": 404, "up": true}},
+            {"name": "mail", "state": "up", "probe": {"url": "http://localhost:14093/", "rule": "any"}}]}"#,
+        "stack",
+    )
+    .unwrap();
+    let api = &s.components[0];
+    assert_eq!(api.uptime.as_deref(), Some("2d 7h"));
+    assert_eq!(api.restarts, Some(3));
+    assert_eq!(
+        api.source,
+        Some(ReportedSource {
+            mode: Mode::Source,
+            git_ref: Some("main".into()),
+            commit: Some("9b10002f".into())
+        })
+    );
+    // The rule decides, never the script's own `up`; no status is down.
+    let ups: Vec<bool> = s
+        .components
+        .iter()
+        .map(|c| c.probe.as_ref().unwrap().up())
+        .collect();
+    assert_eq!(ups, [true, true, false, false]);
+    assert_eq!(
+        s.components[2].probe.as_ref().unwrap().rule,
+        ProbeRule::Health
+    );
+    // The view carries it all.
+    let report = ScriptReport::Status { status: s };
+    let v = view(
+        "stack",
+        ComponentKind::Service,
+        Desired::Running,
+        true,
+        Some(&report),
+        None,
+    );
+    assert_eq!(v.rows[0].restarts, Some(3));
+    assert_eq!(v.rows[0].source.as_ref().unwrap().mode, Mode::Source);
+    assert!(v.rows[0].probe.as_ref().unwrap().up());
+    for (text, says) in [
+        (
+            r#"{"components": [{"name": "a", "state": "up", "restarts": -1}]}"#,
+            "`restarts`",
+        ),
+        (
+            r#"{"components": [{"name": "a", "state": "up", "source": {"mode": "built"}}]}"#,
+            "`mode`",
+        ),
+        (
+            r#"{"components": [{"name": "a", "state": "up", "source": {"mode": "dev", "commit": "not a sha"}}]}"#,
+            "commit hash",
+        ),
+        (
+            r#"{"components": [{"name": "a", "state": "up", "probe": {"url": "file:///etc"}}]}"#,
+            "http(s)",
+        ),
+        (
+            r#"{"components": [{"name": "a", "state": "up", "probe": {"url": "http://x.test", "rule": "ok"}}]}"#,
+            "`rule`",
+        ),
+        (
+            r#"{"components": [{"name": "a", "state": "up", "probe": {"url": "http://x.test", "status": 99}}]}"#,
+            "HTTP status",
+        ),
+    ] {
+        let e = parse_status(text, "stack").unwrap_err();
+        assert!(e.contains(says), "{text}: {e}");
+    }
+}
+
+#[test]
+fn a_rows_own_desired_state_judges_it_until_the_whole_component_is_asked_again() {
+    let report = ScriptReport::Status {
+        status: parse_status(
+            r#"{"components": [{"name": "api", "state": "stopped-idle"}, {"name": "web", "state": "stopped-idle"}]}"#,
+            "stack",
+        )
+        .unwrap(),
+    };
+    let mut rows = IndexMap::new();
+    rows.insert("api".to_string(), Desired::Stopped);
+    let v = view_with_rows(
+        "stack",
+        ComponentKind::Service,
+        Desired::Running,
+        &rows,
+        true,
+        Some(&report),
+        None,
+    );
+    let states: Vec<ComponentState> = v.rows.iter().map(|r| r.state).collect();
+    assert_eq!(
+        states,
+        [ComponentState::StoppedIdle, ComponentState::StoppedProblem]
+    );
+    // The other way: the stack stopped, one row brought up on its own.
+    rows.insert("api".to_string(), Desired::Running);
+    let v = view_with_rows(
+        "stack",
+        ComponentKind::Service,
+        Desired::Stopped,
+        &rows,
+        true,
+        Some(&report),
+        None,
+    );
+    let states: Vec<ComponentState> = v.rows.iter().map(|r| r.state).collect();
+    assert_eq!(
+        states,
+        [ComponentState::StoppedProblem, ComponentState::StoppedIdle]
+    );
+
+    // The plan records it per row, and a verb on the whole component
+    // clears it.
+    let mut stack = stack_of(MIXED);
+    stack.components.get_mut("stack").unwrap().stop =
+        Some(ComponentStop::Script(words(&["node", "stop.js", "{row}"])));
+    let st = InstanceState::new("app", 0);
+    let one = plan(
+        &stack,
+        &st,
+        &Change::Script {
+            component: "stack".into(),
+            verb: ScriptVerb::Stop,
+            row: Some("api".into()),
+            rows: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert!(one.desired.is_empty());
+    assert_eq!(one.row_desired["stack"]["api"], Desired::Stopped);
+    let mut intent = IntentRecord::new("app", 0, NOW);
+    intent.components.entry("stack".into()).or_default().desired = Desired::Running;
+    intent.record_plan(&one, NOW);
+    assert_eq!(intent.components["stack"].desired, Desired::Running);
+    assert_eq!(intent.components["stack"].rows["api"], Desired::Stopped);
+    let picked = plan(
+        &stack,
+        &st,
+        &Change::Script {
+            component: "stack".into(),
+            verb: ScriptVerb::Up,
+            row: None,
+            rows: words(&["web"]),
+        },
+    )
+    .unwrap();
+    intent.record_plan(&picked, NOW);
+    assert_eq!(
+        intent.components["stack"].rows.len(),
+        2,
+        "picked rows add to what was asked"
+    );
+    let whole = plan(
+        &stack,
+        &st,
+        &Change::Script {
+            component: "stack".into(),
+            verb: ScriptVerb::Up,
+            row: None,
+            rows: Vec::new(),
+        },
+    )
+    .unwrap();
+    intent.record_plan(&whole, NOW);
+    assert_eq!(intent.components["stack"].desired, Desired::Running);
+    assert!(intent.components["stack"].rows.is_empty());
 }

@@ -26,6 +26,12 @@
 //! | | `logs` | a terminal following its output (not a job) |
 //! | | `open-<output>` | a link to one of its URLs |
 //! | script component | `up` / `start` / `stop` / `restart` / `rebuild` / `down` | run that script; only the verbs the definition names a script for |
+//! | reported row (`<script>/<name>`) | a verb whose argv names `{row}` | run that script with `{row}` = the row's reported name; only on rows the last status report listed |
+//!
+//! Where the Environment draws a script component's verbs (its row, its
+//! group's header, or the stack's own actions) is [`crate::env_view`]'s
+//! business; a verb drawn on a group or with the stack is sent back as
+//! `<script>:<verb>` ([`script_action_id`]).
 //!
 //! A plan that runs scripts says so per script: "Run the `stop` script for
 //! stack" and what its `plan` script printed (else the resolved argv). Its
@@ -102,9 +108,30 @@ pub fn script_lines(
     plan.steps
         .iter()
         .filter_map(|s| match s {
-            Step::Script { component, verb } => {
-                Some(runner.script_confirm_of(inst, obs, component, *verb))
-            }
+            Step::Script {
+                component,
+                verb,
+                row: None,
+                rows,
+            } if !rows.is_empty() => Some(ScriptConfirm {
+                text: runner.script_rows_confirm(inst, obs, component, *verb, rows),
+                pending: false,
+            }),
+            Step::Script {
+                component,
+                verb,
+                row: None,
+                ..
+            } => Some(runner.script_confirm_of(inst, obs, component, *verb)),
+            Step::Script {
+                component,
+                verb,
+                row: Some(row),
+                ..
+            } => Some(ScriptConfirm {
+                text: runner.script_row_confirm(inst, obs, component, *verb, row),
+                pending: false,
+            }),
             _ => None,
         })
         .collect()
@@ -447,9 +474,18 @@ fn script_actions(
         if !script::has(def, verb) {
             continue;
         }
+        if script::takes_row(def, verb) {
+            out.extend(row_actions(runner, inst, obs, component, verb));
+            continue;
+        }
+        if verb == ScriptVerb::Up && script::takes_rows(def, verb) {
+            out.extend(row_ups(runner, inst, obs, component));
+        }
         let change = Change::Script {
             component: component.to_string(),
             verb,
+            row: None,
+            rows: Vec::new(),
         };
         let Ok(plan) = runner.plan(obs, &change) else {
             continue;
@@ -480,6 +516,375 @@ fn script_actions(
         });
     }
     out
+}
+
+/// A per-row verb on every row the last status report listed (a row the
+/// script did not report, or one only assumed from the intent, gets
+/// none): `{row}` is the row's reported name.
+fn row_actions(
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    obs: &Observation,
+    component: &str,
+    verb: ScriptVerb,
+) -> Vec<Offered> {
+    let Some(view) = obs
+        .scripts
+        .get(component)
+        .filter(|v| v.from == script::ViewFrom::Status)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in &view.rows {
+        if script::row_name_problem(&row.name).is_some() {
+            continue;
+        }
+        let change = Change::Script {
+            component: component.to_string(),
+            verb,
+            row: Some(row.name.clone()),
+            rows: Vec::new(),
+        };
+        let Ok(plan) = runner.plan(obs, &change) else {
+            continue;
+        };
+        out.push(Offered {
+            id: verb.as_str().to_string(),
+            key: Some(row.id.clone()),
+            label: script_label(verb).to_string(),
+            confirm: runner.script_row_confirm(inst, obs, component, verb, &row.name),
+            work: JobWork::Plan {
+                change,
+                plan: Box::new(plan),
+                save: None,
+                remove_volumes: false,
+            },
+            disabled: None,
+        });
+    }
+    out
+}
+
+/// "Up this" on every reported row that is not running, for a script whose
+/// `up` takes `{rows}`: its `up` with just that row's name.
+fn row_ups(
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    obs: &Observation,
+    component: &str,
+) -> Vec<Offered> {
+    let Some(view) = obs
+        .scripts
+        .get(component)
+        .filter(|v| v.from == script::ViewFrom::Status && v.multi)
+    else {
+        return Vec::new();
+    };
+    view.rows
+        .iter()
+        .filter(|r| !r.state.is_running() && script::row_name_problem(&r.name).is_none())
+        .filter_map(|r| {
+            planned(
+                runner,
+                inst,
+                obs,
+                "up",
+                Some(&r.id),
+                "Up this",
+                Change::Script {
+                    component: component.to_string(),
+                    verb: ScriptVerb::Up,
+                    row: None,
+                    rows: vec![r.name.clone()],
+                },
+            )
+        })
+        .collect()
+}
+
+/// The name of the picker input that chooses how the stack comes up, and
+/// of the one that holds what was ticked.
+pub const SELECTION_INPUT: &str = "selection";
+pub const PICK_INPUT: &str = "pick";
+/// What a script's Up sends the ticked rows (and groups) in.
+pub const ROWS_INPUT: &str = "rows";
+/// A ticked group, in a pick list.
+const GROUP_PREFIX: &str = "group:";
+/// A named selection, as a value of the selection input.
+const NAMED_PREFIX: &str = "named:";
+/// Most options one picker list carries (the app refuses more).
+const PICK_OPTIONS_MAX: usize = 200;
+
+fn option(value: impl Into<String>, label: impl Into<String>) -> Value {
+    json!({ "value": value.into(), "label": label.into() })
+}
+
+/// The picker on the stack's Bring up: the default selection (everything
+/// not normally off), each named selection of the definition, or what is
+/// ticked among the definition's groups and components.
+pub fn up_inputs(stack: &stack_core::definition::StackDef) -> Value {
+    let mut choices = vec![option("default", "Default: everything not normally off")];
+    for (name, members) in &stack.selections {
+        choices.push(option(
+            format!("{NAMED_PREFIX}{name}"),
+            format!("{name}: {}", members.join(", ")),
+        ));
+    }
+    choices.push(option("picked", "Only what is ticked below"));
+    let mut picks: Vec<Value> = Vec::new();
+    for (id, g) in &stack.groups {
+        if stack
+            .components
+            .values()
+            .any(|c| c.group.as_deref() == Some(id.as_str()))
+        {
+            let label = g.label.clone().unwrap_or_else(|| id.clone());
+            picks.push(option(
+                format!("{GROUP_PREFIX}{id}"),
+                format!("{label} (group)"),
+            ));
+        }
+    }
+    for (id, c) in &stack.components {
+        let label = c.label.clone().unwrap_or_else(|| id.clone());
+        let off = if c.normally_off {
+            " (normally off)"
+        } else {
+            ""
+        };
+        picks.push(option(id.clone(), format!("{label}{off}")));
+    }
+    picks.truncate(PICK_OPTIONS_MAX);
+    json!([
+        { "name": SELECTION_INPUT, "label": "Bring up", "kind": "choice", "options": choices, "required": true, "default": "default" },
+        { "name": PICK_INPUT, "label": "Ticked", "kind": "multi", "options": picks },
+    ])
+}
+
+/// The picker on a script's Up whose argv takes `{rows}`: the reported
+/// rows and the groups that hold them; nothing ticked = everything.
+pub fn rows_inputs(
+    view: &script::ScriptView,
+    group_of: &dyn Fn(&script::ScriptRow) -> String,
+) -> Value {
+    let mut picks: Vec<Value> = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
+    for r in &view.rows {
+        let g = group_of(r);
+        if !groups.contains(&g) {
+            groups.push(g);
+        }
+    }
+    if groups.len() > 1 {
+        for g in &groups {
+            let label = view
+                .groups
+                .iter()
+                .find(|x| &x.id == g)
+                .map(|x| x.label.clone())
+                .unwrap_or_else(|| g.clone());
+            picks.push(option(
+                format!("{GROUP_PREFIX}{g}"),
+                format!("{label} (group)"),
+            ));
+        }
+    }
+    for r in &view.rows {
+        picks.push(option(r.id.clone(), r.name.clone()));
+    }
+    picks.truncate(PICK_OPTIONS_MAX);
+    json!([
+        { "name": ROWS_INPUT, "label": "Only these (nothing ticked brings up everything)", "kind": "multi", "options": picks },
+    ])
+}
+
+fn strings(v: Option<&Value>) -> Result<Vec<String>, String> {
+    match v {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "the ticked entries must be text".to_string())
+            })
+            .collect(),
+        Some(_) => Err("the ticked entries must be a list".into()),
+    }
+}
+
+/// What the stack's Bring up was asked to bring up: `None` for the default
+/// selection. Checked against the definition: a named selection must
+/// exist, and every ticked component or group must be one of its own.
+pub fn picked_selection(
+    stack: &stack_core::definition::StackDef,
+    params: &Value,
+) -> Result<Option<Selection>, String> {
+    let choice = params
+        .get(SELECTION_INPUT)
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    if choice == "default" {
+        return Ok(None);
+    }
+    if let Some(name) = choice.strip_prefix(NAMED_PREFIX) {
+        return if stack.selections.contains_key(name) {
+            Ok(Some(Selection::Named(name.to_string())))
+        } else {
+            Err(format!("the definition has no selection `{name}`"))
+        };
+    }
+    if choice != "picked" {
+        return Err(format!("`{choice}` is not a way to bring the stack up"));
+    }
+    let ticked = strings(params.get(PICK_INPUT))?;
+    if ticked.is_empty() {
+        return Err("nothing is ticked".into());
+    }
+    let mut wanted: Vec<&str> = Vec::new();
+    for t in &ticked {
+        if let Some(g) = t.strip_prefix(GROUP_PREFIX) {
+            let members: Vec<&str> = stack
+                .components
+                .iter()
+                .filter(|(_, c)| c.group.as_deref() == Some(g))
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if members.is_empty() {
+                return Err(format!("the definition has no group `{g}`"));
+            }
+            wanted.extend(members);
+        } else if stack.components.contains_key(t) {
+            wanted.push(t);
+        } else {
+            return Err(format!("the definition has no component `{t}`"));
+        }
+    }
+    // In the definition's order, each once.
+    let list: Vec<String> = stack
+        .components
+        .keys()
+        .filter(|n| wanted.contains(&n.as_str()))
+        .cloned()
+        .collect();
+    Ok(Some(Selection::Components(list)))
+}
+
+/// The rows a script's Up was asked to bring up, as the names its `{rows}`
+/// gets, in the order the status reported them: empty for everything.
+/// Each ticked row must be one the last status report listed, and each
+/// ticked group one that holds such rows.
+pub fn picked_rows(
+    view: &script::ScriptView,
+    group_of: &dyn Fn(&script::ScriptRow) -> String,
+    params: &Value,
+) -> Result<Vec<String>, String> {
+    let ticked = strings(params.get(ROWS_INPUT))?;
+    if ticked.is_empty() {
+        return Ok(Vec::new());
+    }
+    if view.from != script::ViewFrom::Status {
+        return Err("its status has not reported any rows yet".into());
+    }
+    let mut wanted: Vec<&str> = Vec::new();
+    for t in &ticked {
+        if let Some(g) = t.strip_prefix(GROUP_PREFIX) {
+            let members: Vec<&str> = view
+                .rows
+                .iter()
+                .filter(|r| group_of(r) == g)
+                .map(|r| r.id.as_str())
+                .collect();
+            if members.is_empty() {
+                return Err(format!("no reported row is in group `{g}`"));
+            }
+            wanted.extend(members);
+        } else if view.rows.iter().any(|r| &r.id == t) {
+            wanted.push(t);
+        } else {
+            return Err(format!("`{t}` is not a row its status reported"));
+        }
+    }
+    Ok(view
+        .rows
+        .iter()
+        .filter(|r| wanted.contains(&r.id.as_str()))
+        .map(|r| r.name.clone())
+        .collect())
+}
+
+/// `chosen` as asked for by its params: the stack's Bring up with a picked
+/// selection, or a script's Up with picked rows. `Ok(None)` when the
+/// params ask for nothing but what was offered.
+pub fn with_picks(
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    obs: &Observation,
+    chosen: &Offered,
+    params: &Value,
+    group_of: &dyn Fn(&str, &script::ScriptRow) -> String,
+    channel: &str,
+) -> Result<Option<Offered>, String> {
+    let change = match chosen.key.as_deref() {
+        None if chosen.id == "up" => match picked_selection(runner.stack, params)? {
+            None => return Ok(None),
+            Some(selection) => Change::Up {
+                selection,
+                modes: IndexMap::new(),
+                channel: Some(channel.to_string()),
+            },
+        },
+        Some(c)
+            if chosen.id == "up"
+                && runner.stack.components.get(c).is_some_and(|d| {
+                    script::has(d, ScriptVerb::Up) && script::takes_rows(d, ScriptVerb::Up)
+                }) =>
+        {
+            if params.get(ROWS_INPUT).is_none() {
+                return Ok(None);
+            }
+            let Some(view) = obs.scripts.get(c) else {
+                return Err("its status has not reported any rows yet".into());
+            };
+            let rows = picked_rows(view, &|r| group_of(c, r), params)?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            Change::Script {
+                component: c.to_string(),
+                verb: ScriptVerb::Up,
+                row: None,
+                rows,
+            }
+        }
+        _ => return Ok(None),
+    };
+    planned(
+        runner,
+        inst,
+        obs,
+        &chosen.id,
+        chosen.key.as_deref(),
+        &chosen.label,
+        change,
+    )
+    .map(Some)
+    .ok_or_else(|| "there is nothing to bring up in what was picked".to_string())
+}
+
+/// The id a script component's verb is sent back with when it is drawn
+/// once for the whole component (on its group's header or with the
+/// stack's actions) rather than on its row: `<component>:<verb>`.
+/// Component names never contain `:`.
+pub fn script_action_id(component: &str, verb: &str) -> String {
+    format!("{component}:{verb}")
+}
+
+/// The component and verb of a [`script_action_id`], if `id` is one.
+pub fn parse_script_action_id(id: &str) -> Option<(&str, &str)> {
+    let (component, verb) = id.split_once(':')?;
+    (!component.is_empty() && ScriptVerb::parse(verb).is_some()).then_some((component, verb))
 }
 
 fn script_label(verb: ScriptVerb) -> &'static str {

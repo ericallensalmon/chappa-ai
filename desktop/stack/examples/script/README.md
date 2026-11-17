@@ -4,7 +4,8 @@ A small project whose `chappa.yml` defines one stack, `scripted`, with two
 slots and a single component, `app`, of the `script` driver. `app` stands
 for a whole existing stack: its scripts bring up two pretend services,
 `api` and `web`, and its status script reports both, so the Environment
-shows them as two rows (`app/api`, `app/web`) in `app`'s group.
+shows them as two rows (`app/api`, `app/web`), in the groups the status
+script names ("Back end", "Front end").
 
 The scripts are small `node` programs that keep the services' state in a
 file under `.work/fake/<instance>.json` instead of starting anything, so
@@ -17,6 +18,7 @@ scripts/up.js        deploy and start both services (safe to run again)
 scripts/stop.js      stop both, web first
 scripts/start.js     start what is deployed (fails when nothing is)
 scripts/down.js      remove both
+scripts/restart.js   restart one service, named by the row
 scripts/status.js    print the status JSON
 scripts/plan.js      `plan <verb>`: say what <verb> would do
 .gitignore           .work/ and .chappa/stack-state/ stay local
@@ -28,9 +30,19 @@ scripts/plan.js      `plan <verb>`: say what <verb> would do
 | Start | `node scripts/start.js` | `plan start` |
 | Stop | `node scripts/stop.js` | `plan stop` |
 | Down | `node scripts/down.js` | `plan down` |
+| Restart (per row) | `node scripts/restart.js <row>` | the resolved argv |
 
-`restart` and `rebuild` have no script here, so they are not offered, and a
-stack-wide Rebuild all says it leaves `app` as it is.
+The status script fills every column of a row: `group`, `detail` (the
+second line), `since` or `uptime`, `restarts`, `source` (`{mode, ref,
+commit}`) and `probe` (`{url, rule, status}`; the runner judges it by the
+rule, and no `status` is "no answer"). This example pretends its services
+answer while they run.
+
+`app` stands for the whole stack, so its Up, Start, Stop and Down are drawn
+once, at the top of the Environment, not on every row. Restart's argv names
+`{row}`, so it is a verb of each row instead: the app fills in the row's
+reported name (`api`, `web`) as one argument, and only for a name the last
+status report listed. `rebuild` has no script here, so it is not offered.
 
 ## Ports
 
@@ -50,15 +62,18 @@ them as `APP_API_URL` / `APP_WEB_URL`.
 3. Environment: `app/api` and `app/web` show as not deployed (behind the
    "not deployed" toggle) with a "status not read yet" badge for the first
    few seconds, while the status script runs in the background.
-4. Up on either row (or Bring up for the stack): the confirm is "Run the
-   `up` script for App." and the lines `plan up` printed. Accept, and a
-   pane runs `node scripts/up.js` with its output; the next poll shows both
-   rows `up` with uptime and an "Open api" / "Open web" link.
-5. Stop: both rows go `stopped-idle` (gray). Delete `.work/fake/` by hand
+4. Up, at the top of the view: the confirm is "Run the `up` script for
+   App." and the lines `plan up` printed. Accept, and a pane runs
+   `node scripts/up.js` with its output; the next poll shows both rows `up`
+   with uptime and an "Open api" / "Open web" link. The view says once,
+   under its header, that App reports these rows and runs their actions.
+5. Restart on the `api` row (hover it, or its "⋯" menu): the confirm shows
+   `node scripts/restart.js api`, and api's uptime starts again.
+6. Stop: both rows go `stopped-idle` (gray). Delete `.work/fake/` by hand
    instead, and the rows turn `not-deployed`; edit the state file to say
    `"running": false` while the stack still wants them running, and they
    show red, `stopped-problem`, because the stack's intent says running.
-6. Down: both rows go back to not deployed.
+7. Down: both rows go back to not deployed.
 
 ## Wrapping an existing PowerShell stack script
 

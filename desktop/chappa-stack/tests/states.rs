@@ -227,14 +227,7 @@ fn run(f: &Fakes, dir: &Path, reply: &Value) -> (i32, String) {
 
 fn stack_action(src: &chappa_stack::server::Source, id: &str) -> Option<Value> {
     let env = get(src, "/api/environment").1;
-    let stack = env["facts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == "stack")
-        .unwrap()
-        .clone();
-    find(&stack["actions"], id).cloned()
+    find(&env["actions"], id).cloned()
 }
 
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {

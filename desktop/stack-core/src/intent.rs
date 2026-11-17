@@ -50,6 +50,12 @@ pub enum Desired {
 pub struct ComponentIntent {
     #[serde(default)]
     pub desired: Desired,
+    /// Per reported row of a script component, what a verb run on that row
+    /// asked for (`stop` on one row, `up` of picked rows). It overrides
+    /// `desired` for that row only, until a verb on the whole component
+    /// clears it.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub rows: IndexMap<String, Desired>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -139,7 +145,19 @@ impl IntentRecord {
     /// then kept it that way.
     pub fn record_plan(&mut self, plan: &Plan, now_utc: &str) {
         for (name, desired) in &plan.desired {
-            self.components.entry(name.clone()).or_default().desired = *desired;
+            let c = self.components.entry(name.clone()).or_default();
+            c.desired = *desired;
+            // A verb on the whole component replaces what was asked of its
+            // rows one by one.
+            if !plan.row_desired.contains_key(name) {
+                c.rows.clear();
+            }
+        }
+        for (name, rows) in &plan.row_desired {
+            let c = self.components.entry(name.clone()).or_default();
+            for (row, desired) in rows {
+                c.rows.insert(row.clone(), *desired);
+            }
         }
         for (name, mode) in &plan.modes {
             self.components.entry(name.clone()).or_default().mode = Some(*mode);
@@ -314,6 +332,7 @@ mod tests {
             "api".into(),
             ComponentIntent {
                 desired: Desired::Running,
+                rows: IndexMap::new(),
                 mode: Some(Mode::Source),
                 git_ref: Some("feature/x".into()),
                 channel: None,

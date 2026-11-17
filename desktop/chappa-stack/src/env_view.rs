@@ -3,7 +3,8 @@
 //!
 //! | field | from |
 //! |---|---|
-//! | `groups` | the definition's groups, in order, labelled |
+//! | `groups` | the definition's groups, in order, labelled, then the groups script components report (their `groups` order); a group of one script's rows carries that script's verbs |
+//! | `actions` | the stack-wide verbs (bring up, start, stop, down, rebuild, clean up), and the verbs of a script component whose rows span several groups |
 //! | `components[].state` | the nine states (desired state from the intent record vs what the engine or the process table reports) |
 //! | `uptime` / `restarts` / `exitCode` | `inspect` for containers, the process table for processes |
 //! | `source` | provenance: mode, ref (the image tag for prebuilt), commit, plus `dirty`, `buildId`, `image`, `stale` |
@@ -13,18 +14,23 @@
 //! | `badges` | staleness (`newer prebuilt`, `behind 2` …), "no data-safety check" on an unscanned persistent component, the data-safety state of a checked one, the mode |
 //! | `actions` | the component's verbs, its data-safety check, its `logs` terminal, its links |
 //! | `alerts` | red components with their cause, engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check, data that is not clean (`bad`) or not checked (`warn` under `unscanned: warn`) |
-//! | `facts` | the stack (instance, slot, port block, bound item, channel, with the stack-wide actions), engines and versions, the memory budget, relay listeners, data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
+//! | `facts` | the stack (instance, slot, port block, bound item, channel), engines and versions, the memory budget, relay listeners, data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
+//! | `freshness.notices` | who reports a script's rows and runs their actions, and how many reported links were left out, once for the whole view |
 //! | `banners` | definition warnings or errors; the hosts-file fix; agents blocked by data safety (with the acknowledge action) |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //! | `secretScan` | the instance's secret-scan block, added by the server with its alerts, banner and facts section (see [`crate::secret_scan`]) |
 //!
 //! A script component shows as one row, or, when its status script reports
 //! several components (a wrapped whole stack), as one row per reported
-//! component (`<component>/<name>`) in its group with the script
-//! component's verbs on each. The script's facts become a section of their
-//! own, its `warn` / `bad` alerts Environment alerts, its `info` alerts rows
-//! of that section. Reported links pass the same rule as every other link:
-//! only the stack's own hostname (loopback names when it has none).
+//! component (`<component>/<name>`) in the group it names (else the script
+//! component's group, else one named after it). Its verbs are drawn once:
+//! on the header of the one group its rows fill, else with the stack's
+//! actions (see [`crate::actions::script_action_id`]); only a verb whose
+//! argv names `{row}` is on each row. The script's facts become a section
+//! of their own, its `warn` / `bad` alerts Environment alerts, its `info`
+//! alerts rows of that section. Reported links pass the same rule as every
+//! other link: only the stack's own hostname (loopback names when it has
+//! none).
 //!
 //! `summary` is left out: the view counts the components itself, and a
 //! summary is only worth sending when it knows more than the rows do.
@@ -43,9 +49,9 @@ use stack_core::hosts::HostsCheck;
 use stack_core::placeholders;
 use stack_core::probe::ProbeOutcome;
 use stack_core::runner::{ComponentReport, Observation};
-use stack_core::script::{AlertTone, ScriptView, ViewFrom};
+use stack_core::script::{self as script, AlertTone, ScriptVerb, ScriptView, ViewFrom};
 
-use crate::actions::{logs_action, Offered};
+use crate::actions::{logs_action, script_action_id, Offered};
 use crate::data_safety::{self, InstanceSafety, SafetyState};
 use crate::procs::ProcessTable;
 use crate::project::Loaded;
@@ -277,12 +283,39 @@ fn process_uptime(processes: &ProcessTable, component: &str, now_utc: &str) -> O
     uptime_text(&e.started_utc, parse_utc(now_utc)?)
 }
 
-/// The rows of one report: one, or a script component's reported ones.
-fn component_rows(inp: &EnvInputs<'_>, r: &ComponentReport) -> Vec<Value> {
+/// The rows of one report: one, or a script component's reported ones,
+/// and how many reported links were left out.
+fn component_rows(inp: &EnvInputs<'_>, r: &ComponentReport) -> (Vec<Value>, usize) {
     match &r.script {
         Some(view) => script_rows(inp, r, view),
-        None => vec![component(inp, r)],
+        None => (vec![component(inp, r)], 0),
     }
+}
+
+/// The label a component is shown with: the definition's, else its id.
+fn label_of(inp: &EnvInputs<'_>, id: &str) -> String {
+    inp.loaded
+        .stack
+        .components
+        .get(id)
+        .and_then(|d| d.label.clone())
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// The group a reported row of a several-row script shows in: the one the
+/// status names, else the script component's own, else one named after
+/// the script component.
+fn script_row_group(r: &ComponentReport, row: &stack_core::script::ScriptRow) -> String {
+    row_group(&r.group, &r.status.id, row)
+}
+
+/// [`script_row_group`] from the script component's definition group and
+/// id.
+pub fn row_group(def_group: &str, component: &str, row: &stack_core::script::ScriptRow) -> String {
+    row.group
+        .clone()
+        .or_else(|| (!def_group.is_empty()).then(|| def_group.to_string()))
+        .unwrap_or_else(|| component.to_string())
 }
 
 fn kind_name(kind: ComponentKind) -> &'static str {
@@ -292,22 +325,22 @@ fn kind_name(kind: ComponentKind) -> &'static str {
     }
 }
 
-fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> Vec<Value> {
+fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> (Vec<Value>, usize) {
     let id = &r.status.id;
-    let label = inp
-        .loaded
-        .stack
-        .components
-        .get(id)
-        .and_then(|d| d.label.clone())
-        .unwrap_or_else(|| id.clone());
+    let label = label_of(inp, id);
     let fingerprint = inp.obs.state.fingerprint();
-    let verbs: Vec<Value> = inp
-        .offered
-        .iter()
-        .filter(|o| o.key.as_deref() == Some(id.as_str()))
-        .map(|o| o.to_json(&fingerprint))
-        .collect();
+    // A one-row script's verbs are its row's; a several-row script's are
+    // drawn once elsewhere (see `environment`), only `{row}` verbs here.
+    let verbs_of = |row_id: &str| -> Vec<Value> {
+        inp.offered
+            .iter()
+            .filter(|o| {
+                o.key.as_deref() == Some(row_id)
+                    || (!view.multi && o.key.as_deref() == Some(id.as_str()))
+            })
+            .map(|o| o.to_json(&fingerprint))
+            .collect()
+    };
     let now = parse_utc(inp.now_utc);
     let badge_for = match view.from {
         ViewFrom::Status => None,
@@ -328,6 +361,7 @@ fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> V
         )),
     };
     let mut out = Vec::new();
+    let mut dropped_total = 0;
     for row in &view.rows {
         let running = matches!(
             row.state,
@@ -336,21 +370,41 @@ fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> V
                 | ComponentState::Unhealthy
                 | ComponentState::Crashloop
         );
+        // `since` gives a live uptime; a script that only knows the text
+        // reports `uptime`. Neither shows while it is not running.
         let uptime = match (running, &row.since, now) {
             (true, Some(s), Some(n)) => uptime_text(s, n),
             _ => None,
+        }
+        .or_else(|| row.uptime.clone().filter(|_| running));
+        let source = row.source.as_ref().map_or(
+            Value::Null,
+            |s| json!({ "mode": s.mode.as_str(), "ref": s.git_ref, "commit": s.commit }),
+        );
+        let group = if view.multi {
+            script_row_group(r, row)
+        } else {
+            r.group.clone()
         };
         let mut c = json!({
             "id": row.id,
-            "group": r.group,
+            "group": group,
             "label": if view.multi { row.name.clone() } else { label.clone() },
             "kind": kind_name(r.kind),
             "state": row.state.as_str(),
             "uptime": uptime,
-            "restarts": Value::Null,
+            "restarts": row.restarts,
             "exitCode": row.exit_code,
-            "source": Value::Null,
+            "source": source,
         });
+        if let Some(p) = &row.probe {
+            c["probe"] = json!({
+                "url": p.url,
+                "rule": serde_json::to_value(p.rule).unwrap_or(Value::Null),
+                "up": p.up(),
+                "status": p.status,
+            });
+        }
         let mut links: Vec<Value> = if view.multi { Vec::new() } else { links_of(r) };
         let mut link_actions: Vec<Value> = Vec::new();
         if !view.multi {
@@ -382,19 +436,9 @@ fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> V
         if !links.is_empty() {
             c["links"] = links.into();
         }
-        let mut hint: Vec<String> = row.detail.iter().cloned().collect();
-        if view.multi {
-            hint.push(format!(
-                "reported by {label}; its actions run {label}'s scripts"
-            ));
-        }
-        if dropped > 0 {
-            hint.push(format!(
-                "{dropped} reported link(s) to a host other than the stack's own left out"
-            ));
-        }
-        if !hint.is_empty() {
-            c["hint"] = hint.join("; ").into();
+        dropped_total += dropped;
+        if let Some(detail) = &row.detail {
+            c["hint"] = detail.clone().into();
         }
         let mut badges: Vec<Value> = badge_for.iter().cloned().collect();
         if let Some(secs) = view.slow_secs {
@@ -407,14 +451,14 @@ fn script_rows(inp: &EnvInputs<'_>, r: &ComponentReport, view: &ScriptView) -> V
         if !badges.is_empty() {
             c["badges"] = badges.into();
         }
-        let mut actions = verbs.clone();
+        let mut actions = verbs_of(&row.id);
         actions.extend(link_actions);
         if !actions.is_empty() {
             c["actions"] = actions.into();
         }
         out.push(c);
     }
-    out
+    (out, dropped_total)
 }
 
 /// A section per script component whose status reports facts or `info`
@@ -623,18 +667,10 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
         .display()
         .to_string();
     rows.push(row("Definition", file));
-    let fingerprint = inp.obs.state.fingerprint();
-    let stack_actions: Vec<Value> = inp
-        .offered
-        .iter()
-        .filter(|o| o.key.is_none())
-        .map(|o| o.to_json(&fingerprint))
-        .collect();
     sections.push(json!({
         "id": "stack",
         "title": format!("Stack {} · slot {}", loaded.stack_name, inp.inst.slot),
         "rows": rows,
-        "actions": stack_actions,
     }));
 
     let memory = inp.inst.memory_by_engine();
@@ -1048,41 +1084,152 @@ fn banners(inp: &EnvInputs<'_>) -> Vec<Value> {
     out
 }
 
+/// The stack's own verbs that a script component standing for the whole
+/// stack makes redundant: with it as the only component, "bring up" is its
+/// `up` script, "stop" its `stop`, and so on.
+const STACK_VERBS: [&str; 5] = ["up", "start", "stop", "down", "rebuild"];
+
 /// The whole `GET` answer.
 pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
     let stack = &inp.loaded.stack;
-    let mut groups: Vec<Value> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let used: Vec<String> = inp
-        .inst
-        .components
-        .values()
-        .map(|c| c.group.clone())
-        .collect();
+    let fingerprint = inp.obs.state.fingerprint();
+    // Groups in display order: the definition's, then each report's as it
+    // comes (a script's in the order its status lists them).
+    let mut groups: IndexMap<String, Value> = IndexMap::new();
+    fn add_group(groups: &mut IndexMap<String, Value>, id: &str, label: String) {
+        groups
+            .entry(id.to_string())
+            .or_insert_with(|| json!({ "id": id, "label": label }));
+    }
     for (id, g) in &stack.groups {
-        if seen.insert(id.clone()) {
-            groups
-                .push(json!({ "id": id, "label": g.label.clone().unwrap_or_else(|| capital(id)) }));
-        }
+        add_group(
+            &mut groups,
+            id,
+            g.label.clone().unwrap_or_else(|| capital(id)),
+        );
     }
-    for id in used {
-        if seen.insert(id.clone()) {
-            groups.push(json!({ "id": id, "label": capital(&id) }));
+    let mut components: Vec<Value> = Vec::new();
+    let mut dropped = 0;
+    let mut notices: Vec<String> = Vec::new();
+    let mut root_actions: Vec<Value> = Vec::new();
+    let mut group_actions: IndexMap<String, Vec<Value>> = IndexMap::new();
+    let sole = inp.inst.components.len() == 1;
+    let mut sole_script_at_root = false;
+    for r in inp.reports {
+        let (rows, left_out) = component_rows(inp, r);
+        dropped += left_out;
+        match &r.script {
+            Some(view) if view.multi => {
+                let id = &r.status.id;
+                let label = label_of(inp, id);
+                for g in &view.groups {
+                    add_group(&mut groups, &g.id, g.label.clone());
+                }
+                let mut used: Vec<String> = Vec::new();
+                for row in &view.rows {
+                    let g = script_row_group(r, row);
+                    if !used.contains(&g) {
+                        used.push(g);
+                    }
+                }
+                for g in &used {
+                    let shown = if g == id { label.clone() } else { capital(g) };
+                    add_group(&mut groups, g, shown);
+                }
+                notices.push(format!(
+                    "{label} reports {} component(s); their actions run {label}'s scripts",
+                    view.rows.len()
+                ));
+                let picks_rows = stack
+                    .components
+                    .get(id)
+                    .is_some_and(|d| script::takes_rows(d, ScriptVerb::Up));
+                let verbs: Vec<Value> = inp
+                    .offered
+                    .iter()
+                    .filter(|o| o.key.as_deref() == Some(id.as_str()))
+                    .map(|o| {
+                        let mut v = o.to_json(&fingerprint);
+                        v["id"] = script_action_id(id, &o.id).into();
+                        if o.id == "up" && picks_rows && view.from == ViewFrom::Status {
+                            v["inputs"] =
+                                crate::actions::rows_inputs(view, &|row| script_row_group(r, row));
+                        }
+                        v
+                    })
+                    .collect();
+                // The script's verbs go on its group when its rows fill
+                // exactly one group that holds nothing else.
+                let own_group = match used.as_slice() {
+                    [g] if !sole => {
+                        let others = inp.reports.iter().any(|o| {
+                            o.status.id != *id
+                                && match &o.script {
+                                    Some(v) if v.multi => {
+                                        v.rows.iter().any(|row| script_row_group(o, row) == *g)
+                                    }
+                                    _ => o.group == *g,
+                                }
+                        });
+                        (!others).then(|| g.clone())
+                    }
+                    _ => None,
+                };
+                match own_group {
+                    Some(g) => group_actions.entry(g).or_default().extend(verbs),
+                    None => {
+                        sole_script_at_root |= sole;
+                        root_actions.extend(verbs);
+                    }
+                }
+            }
+            _ => add_group(&mut groups, &r.group, capital(&r.group)),
         }
+        components.extend(rows);
     }
-    let components: Vec<Value> = inp
-        .reports
+    let stack_actions: Vec<Value> = inp
+        .offered
         .iter()
-        .flat_map(|r| component_rows(inp, r))
+        .filter(|o| o.key.is_none())
+        .filter(|o| !(sole_script_at_root && STACK_VERBS.contains(&o.id.as_str())))
+        .map(|o| {
+            let mut v = o.to_json(&fingerprint);
+            // Bring up picks what comes up when there is anything to pick.
+            if o.id == "up" && (stack.components.len() > 1 || !stack.selections.is_empty()) {
+                v["inputs"] = crate::actions::up_inputs(stack);
+            }
+            v
+        })
+        .collect();
+    let mut actions = stack_actions;
+    actions.extend(root_actions);
+    if dropped > 0 {
+        notices.push(format!(
+            "{dropped} reported link(s) to a host other than the stack's own were left out"
+        ));
+    }
+    let groups: Vec<Value> = groups
+        .into_iter()
+        .map(|(id, mut g)| {
+            if let Some(a) = group_actions.shift_remove(&id) {
+                g["actions"] = a.into();
+            }
+            g
+        })
         .collect();
     let alerts = alerts(inp, &components);
+    let mut freshness = json!({
+        "asOf": inp.now_utc,
+        "errors": errors.iter().map(|(s, m)| json!({"source": s, "message": m})).collect::<Vec<_>>(),
+    });
+    if !notices.is_empty() {
+        freshness["notices"] = notices.into();
+    }
     json!({
-        "freshness": {
-            "asOf": inp.now_utc,
-            "errors": errors.iter().map(|(s, m)| json!({"source": s, "message": m})).collect::<Vec<_>>(),
-        },
+        "freshness": freshness,
         "groups": groups,
         "components": components,
+        "actions": actions,
         "facts": facts(inp),
         "alerts": alerts,
         "banners": banners(inp),

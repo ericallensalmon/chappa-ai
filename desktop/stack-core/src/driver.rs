@@ -105,6 +105,10 @@ pub struct ResolvedComponent {
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
     pub desired: Desired,
+    /// What was asked of single reported rows of a script component (see
+    /// [`crate::intent::ComponentIntent::rows`]).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub rows: IndexMap<String, Desired>,
     pub normally_off: bool,
     pub ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +178,7 @@ pub fn resolve(
                 mode: ci.and_then(|c| c.mode).or_else(|| def.default_mode()),
                 git_ref: ci.and_then(|c| c.git_ref.clone()),
                 desired: ci.map(|c| c.desired).unwrap_or_default(),
+                rows: ci.map(|c| c.rows.clone()).unwrap_or_default(),
                 normally_off: def.normally_off,
                 ports: port_map.get(name).cloned().unwrap_or_default(),
                 memory_mb: def.memory_mb,
@@ -325,6 +330,17 @@ impl ComponentState {
     /// Red states: they count toward the Environment alert dot.
     pub fn is_problem(self) -> bool {
         self.tone() == Tone::Bad
+    }
+
+    /// A running state: up, starting, unhealthy or crash-looping.
+    pub fn is_running(self) -> bool {
+        matches!(
+            self,
+            ComponentState::Up
+                | ComponentState::Starting
+                | ComponentState::Unhealthy
+                | ComponentState::Crashloop
+        )
     }
 
     /// Hidden by default behind a "show not deployed" toggle.

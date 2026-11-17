@@ -8,7 +8,30 @@
   "groups": [
     { "id": "app", "label": "Application" },
     { "id": "data", "label": "Data" },
-    { "id": "jobs", "label": "Jobs" }
+    {
+      "id": "jobs", "label": "Jobs",
+      "actions": [{ "kind": "endpoint", "id": "run-jobs", "label": "Run jobs", "mutates": true, "confirm": "Run every job of the stack again?" }]
+    }
+  ],
+  "actions": [
+    {
+      "kind": "endpoint", "id": "bring-up", "label": "Bring up", "mutates": true,
+      "confirm": "Bring the stack up",
+      "inputs": [
+        {
+          "name": "selection", "label": "Bring up", "kind": "choice", "required": true, "default": "default",
+          "options": [
+            { "value": "default", "label": "Default: everything not normally off" },
+            { "value": "named:backend", "label": "backend: api, db" },
+            { "value": "picked", "label": "Only what is ticked below" }
+          ]
+        },
+        {
+          "name": "pick", "label": "Ticked", "kind": "multi",
+          "options": [{ "value": "group:data", "label": "Data (group)" }, { "value": "api", "label": "API" }, { "value": "web", "label": "Web" }]
+        }
+      ]
+    }
   ],
   "components": [
     {

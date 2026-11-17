@@ -260,8 +260,13 @@ export interface EnvironmentResponse {
   freshness: Freshness;
   /** Count per state; the header shows the non-zero ones. */
   summary?: Partial<Record<ComponentState, number>>;
-  groups: { id: string; label: string }[];
+  /** Display order. A group's `actions` are drawn on its header; they are
+   *  judged and called with `target.key` = the group's id. */
+  groups: { id: string; label: string; actions?: Action[] }[];
   components: Component[];
+  /** Stack-wide actions, drawn once in the view's header; judged and
+   *  called with `target.key` = null, like the view's banners'. */
+  actions?: Action[];
   /** Runtimes, memory, dirty clones and the like. */
   facts?: Section[];
   /** Drives the view's alert dot. */

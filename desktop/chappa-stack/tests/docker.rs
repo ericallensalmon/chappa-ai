@@ -204,7 +204,7 @@ fn the_example_database_comes_up_and_goes_down_through_the_protocol() {
         "the db container: {logs}"
     );
 
-    let down = env["facts"][0]["actions"]
+    let down = env["actions"]
         .as_array()
         .unwrap()
         .iter()
@@ -328,7 +328,7 @@ fn the_example_saves_its_database_goes_down_and_resumes_it() {
 
     // Down saves first, keeps the volume, and the snapshot in it.
     let (_, env) = get(&src, "/api/environment");
-    let down = env["facts"][0]["actions"]
+    let down = env["actions"]
         .as_array()
         .unwrap()
         .iter()

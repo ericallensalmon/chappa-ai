@@ -896,7 +896,7 @@ fn switching(after: FakeCli) -> (Fakes, Arc<Switching>) {
 
 fn stack_up(src: &Source) -> String {
     let e = env(src);
-    let up = e["facts"][0]["actions"]
+    let up = e["actions"]
         .as_array()
         .unwrap()
         .iter()

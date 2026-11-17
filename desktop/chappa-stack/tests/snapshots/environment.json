@@ -1,4 +1,154 @@
 {
+  "actions": [
+    {
+      "confirm": "Pull search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); start worker, cache, mailer, seed. Migrate already ran to completion.",
+      "id": "up",
+      "inputs": [
+        {
+          "default": "default",
+          "kind": "choice",
+          "label": "Bring up",
+          "name": "selection",
+          "options": [
+            {
+              "label": "Default: everything not normally off",
+              "value": "default"
+            },
+            {
+              "label": "Only what is ticked below",
+              "value": "picked"
+            }
+          ],
+          "required": true
+        },
+        {
+          "kind": "multi",
+          "label": "Ticked",
+          "name": "pick",
+          "options": [
+            {
+              "label": "Application (group)",
+              "value": "group:app"
+            },
+            {
+              "label": "Data (group)",
+              "value": "group:data"
+            },
+            {
+              "label": "Jobs (group)",
+              "value": "group:jobs"
+            },
+            {
+              "label": "api",
+              "value": "api"
+            },
+            {
+              "label": "web",
+              "value": "web"
+            },
+            {
+              "label": "search",
+              "value": "search"
+            },
+            {
+              "label": "worker",
+              "value": "worker"
+            },
+            {
+              "label": "cache",
+              "value": "cache"
+            },
+            {
+              "label": "db",
+              "value": "db"
+            },
+            {
+              "label": "mailer",
+              "value": "mailer"
+            },
+            {
+              "label": "migrate",
+              "value": "migrate"
+            },
+            {
+              "label": "seed",
+              "value": "seed"
+            },
+            {
+              "label": "docs (normally off)",
+              "value": "docs"
+            }
+          ]
+        }
+      ],
+      "kind": "endpoint",
+      "label": "Bring up",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    },
+    {
+      "confirm": "Start worker, mailer, seed. Migrate already ran to completion.",
+      "id": "start",
+      "kind": "endpoint",
+      "label": "Start (after a reboot)",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    },
+    {
+      "confirm": "Stop db, search, web, api. Seed was already stopped; recorded as stopped. Mailer was already stopped; recorded as stopped. Worker was already stopped; recorded as stopped.",
+      "id": "stop",
+      "kind": "endpoint",
+      "label": "Stop",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    },
+    {
+      "confirm": "Stop db, search, web, api; remove seed, migrate, mailer, db, cache, worker, search, web, api. Containers are removed; volumes are kept.",
+      "id": "down",
+      "kind": "endpoint",
+      "label": "Down",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    },
+    {
+      "confirm": "Down and DELETE the data volumes env-0-data_db-data. No saved state keeps a snapshot there. Stop db, search, web, api; remove seed, migrate, mailer, db, cache, worker, search, web, api. Containers and these volumes are removed.",
+      "id": "down-volumes",
+      "kind": "endpoint",
+      "label": "Down and delete data",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    },
+    {
+      "confirm": "Pull api (registry.example/api:main), search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), db (postgres:16), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); recreate api (rebuilt), search (rebuilt), worker (rebuilt), cache (rebuilt), db (rebuilt), mailer (rebuilt), migrate (rebuilt), seed (rebuilt).",
+      "id": "rebuild",
+      "kind": "endpoint",
+      "label": "Rebuild all",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    },
+    {
+      "confirm": "Remove images that no running instance, kept state or pinned channel uses, and prune the build cache on docker. The job lists every image before it removes anything.",
+      "id": "gc",
+      "kind": "endpoint",
+      "label": "Clean up images",
+      "mutates": true,
+      "params": {
+        "fingerprint": "60c1aa7c428afbfd"
+      }
+    }
+  ],
   "alerts": [
     {
       "componentId": "search",
@@ -642,78 +792,6 @@
   },
   "facts": [
     {
-      "actions": [
-        {
-          "confirm": "Pull search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); start worker, cache, mailer, seed. Migrate already ran to completion.",
-          "id": "up",
-          "kind": "endpoint",
-          "label": "Bring up",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        },
-        {
-          "confirm": "Start worker, mailer, seed. Migrate already ran to completion.",
-          "id": "start",
-          "kind": "endpoint",
-          "label": "Start (after a reboot)",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        },
-        {
-          "confirm": "Stop db, search, web, api. Seed was already stopped; recorded as stopped. Mailer was already stopped; recorded as stopped. Worker was already stopped; recorded as stopped.",
-          "id": "stop",
-          "kind": "endpoint",
-          "label": "Stop",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        },
-        {
-          "confirm": "Stop db, search, web, api; remove seed, migrate, mailer, db, cache, worker, search, web, api. Containers are removed; volumes are kept.",
-          "id": "down",
-          "kind": "endpoint",
-          "label": "Down",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        },
-        {
-          "confirm": "Down and DELETE the data volumes env-0-data_db-data. No saved state keeps a snapshot there. Stop db, search, web, api; remove seed, migrate, mailer, db, cache, worker, search, web, api. Containers and these volumes are removed.",
-          "id": "down-volumes",
-          "kind": "endpoint",
-          "label": "Down and delete data",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        },
-        {
-          "confirm": "Pull api (registry.example/api:main), search (registry.example/search:1), worker (registry.example/worker:1), cache (registry.example/cache:7), db (postgres:16), mailer (registry.example/mailer:1), migrate (postgres:16), seed (postgres:16); recreate api (rebuilt), search (rebuilt), worker (rebuilt), cache (rebuilt), db (rebuilt), mailer (rebuilt), migrate (rebuilt), seed (rebuilt).",
-          "id": "rebuild",
-          "kind": "endpoint",
-          "label": "Rebuild all",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        },
-        {
-          "confirm": "Remove images that no running instance, kept state or pinned channel uses, and prune the build cache on docker. The job lists every image before it removes anything.",
-          "id": "gc",
-          "kind": "endpoint",
-          "label": "Clean up images",
-          "mutates": true,
-          "params": {
-            "fingerprint": "60c1aa7c428afbfd"
-          }
-        }
-      ],
       "id": "stack",
       "rows": [
         {

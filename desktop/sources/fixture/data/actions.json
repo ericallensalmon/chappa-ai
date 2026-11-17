@@ -23,5 +23,7 @@
     "body": { "kind": "uncertain", "message": "The deploy service did not answer in time", "detail": "The request may or may not have been applied" }
   },
   "deploy-web": { "mutates": true, "status": 200, "body": { "message": "Deployed" } },
+  "bring-up": { "mutates": true, "status": 200, "body": { "message": "Bringing the stack up" } },
+  "run-jobs": { "mutates": true, "status": 200, "body": { "message": "Jobs started" } },
   "unsafe": { "mutates": true, "status": 200, "body": { "message": "Done" } }
 }

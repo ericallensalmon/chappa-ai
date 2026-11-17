@@ -39,7 +39,7 @@ fn fresh() -> FakeCli {
 }
 
 fn stack_action<'a>(env: &'a Value, id: &str) -> &'a Value {
-    env["facts"][0]["actions"]
+    env["actions"]
         .as_array()
         .unwrap()
         .iter()
@@ -82,7 +82,7 @@ fn up_is_offered_with_its_plan_and_answers_a_pane_to_run_it_in() {
         "Pull db (postgres:16), migrate (postgres:16), api (registry.example/api:main); start db, migrate, api, web."
     );
     // Nothing runs yet, so nothing to stop or take down.
-    let ids: Vec<&str> = env["facts"][0]["actions"]
+    let ids: Vec<&str> = env["actions"]
         .as_array()
         .unwrap()
         .iter()

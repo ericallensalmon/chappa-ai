@@ -415,7 +415,7 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
     assert_eq!(env["dataSafety"]["policy"], "warn");
     assert_eq!(env["dataSafety"]["blocksAgents"], false);
     assert_eq!(env["dataSafety"]["unscanned"], serde_json::json!(["db"]));
-    // facts: the stack (with its actions), engines, memory
+    // facts: the stack, engines, memory; the stack's actions at the top
     let stack = &env["facts"][0];
     assert_eq!(stack["id"], "stack");
     let rows: Vec<String> = stack["rows"]
@@ -437,7 +437,7 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
             .any(|r| r.starts_with("Slot=0 of 2 · ports 15000–15005 (block 15000–15049)")),
         "{rows:?}"
     );
-    let stack_ids: Vec<&str> = stack["actions"]
+    let stack_ids: Vec<&str> = env["actions"]
         .as_array()
         .unwrap()
         .iter()

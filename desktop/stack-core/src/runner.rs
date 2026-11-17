@@ -306,6 +306,8 @@ impl<'a> StackRunner<'a> {
             item: self.item.clone().or_else(|| inst.item.clone()),
             branches: self.branches.clone(),
             worktrees: self.worktrees.clone(),
+            row: None,
+            rows: Vec::new(),
         }
     }
 
@@ -318,13 +320,33 @@ impl<'a> StackRunner<'a> {
         verb: ScriptVerb,
         extra: &[String],
     ) -> Result<ScriptRun, ScriptError> {
+        self.script_run_on(inst, cache, component, verb, None, &[], extra)
+    }
+
+    /// [`StackRunner::script_run`] for a verb run on one reported row
+    /// (`{row}` = `row`; `None` = the whole component) or, for `up`, on the
+    /// picked rows (`{rows}`; empty = everything).
+    #[allow(clippy::too_many_arguments)]
+    pub fn script_run_on(
+        &self,
+        inst: &ResolvedInstance,
+        cache: &ProvenanceCache,
+        component: &str,
+        verb: ScriptVerb,
+        row: Option<&str>,
+        rows: &[String],
+        extra: &[String],
+    ) -> Result<ScriptRun, ScriptError> {
+        let mut binding = self.script_binding(inst);
+        binding.row = row.map(str::to_string);
+        binding.rows = rows.to_vec();
         script::prepare(
             inst,
             self.stack,
             self.project_dir,
             component,
             verb,
-            &self.script_binding(inst),
+            &binding,
             &self.known_images(cache),
             extra,
         )
@@ -358,10 +380,11 @@ impl<'a> StackRunner<'a> {
         } else {
             None
         };
-        let mut view = script::view(
+        let mut view = script::view_with_rows(
             component,
             c.kind,
             c.desired,
+            &c.rows,
             has_status,
             report.as_ref(),
             runs.components.get(component),
@@ -428,6 +451,59 @@ impl<'a> StackRunner<'a> {
         }
     }
 
+    /// The confirm of running `verb` of a script component for the picked
+    /// rows (`{rows}`): the resolved argv, like a per-row verb's.
+    pub fn script_rows_confirm(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        component: &str,
+        verb: ScriptVerb,
+        rows: &[String],
+    ) -> String {
+        let label = self
+            .stack
+            .components
+            .get(component)
+            .and_then(|d| d.label.clone())
+            .unwrap_or_else(|| component.to_string());
+        let run = self.script_run_on(inst, &obs.cache, component, verb, None, rows, &[]);
+        script::confirm(
+            &format!("{label} ({})", rows.join(", ")),
+            verb,
+            run.as_ref(),
+            false,
+            None,
+        )
+    }
+
+    /// The confirm of running `verb` of a script component on one reported
+    /// row: the resolved argv (a `plan` script is not asked per row, so
+    /// this is never pending).
+    pub fn script_row_confirm(
+        &self,
+        inst: &ResolvedInstance,
+        obs: &Observation,
+        component: &str,
+        verb: ScriptVerb,
+        row: &str,
+    ) -> String {
+        let label = self
+            .stack
+            .components
+            .get(component)
+            .and_then(|d| d.label.clone())
+            .unwrap_or_else(|| component.to_string());
+        let run = self.script_run_on(inst, &obs.cache, component, verb, Some(row), &[], &[]);
+        script::confirm(
+            &format!("{row} (reported by {label})"),
+            verb,
+            run.as_ref(),
+            false,
+            None,
+        )
+    }
+
     /// Refuse a plan whose scripts cannot be resolved now (a placeholder
     /// that needs a bound item, a PowerShell file named without its
     /// interpreter), before anything is stored or run.
@@ -438,8 +514,22 @@ impl<'a> StackRunner<'a> {
         plan: &Plan,
     ) -> Result<(), RunnerError> {
         for step in &plan.steps {
-            if let Step::Script { component, verb } = step {
-                self.script_run(inst, &obs.cache, component, *verb, &[])?;
+            if let Step::Script {
+                component,
+                verb,
+                row,
+                rows,
+            } = step
+            {
+                self.script_run_on(
+                    inst,
+                    &obs.cache,
+                    component,
+                    *verb,
+                    row.as_deref(),
+                    rows,
+                    &[],
+                )?;
             }
         }
         Ok(())
@@ -1108,8 +1198,18 @@ impl<'a> StackRunner<'a> {
                         ));
                     }
                 }
-                Step::Script { verb, .. } => {
-                    let run = self.script_run(inst, &obs.cache, &component, *verb, &[])?;
+                Step::Script {
+                    verb, row, rows, ..
+                } => {
+                    let run = self.script_run_on(
+                        inst,
+                        &obs.cache,
+                        &component,
+                        *verb,
+                        row.as_deref(),
+                        rows,
+                        &[],
+                    )?;
                     steps.push(JobStep::Script {
                         run: run.run_block(),
                         component: component.clone(),

@@ -206,11 +206,17 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         scripts: Vec<String>,
     },
-    /// Run one script of one script component.
+    /// Run one script of one script component; with `row`, on that one
+    /// reported row (its argv names `{row}`); with `rows`, an `up` of the
+    /// picked reported rows (its argv names `{rows}`).
     Script {
         component: String,
         #[serde(rename = "script")]
         verb: ScriptVerb,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rows: Vec<String>,
     },
 }
 
@@ -385,11 +391,16 @@ pub enum Step {
     Remove {
         component: String,
     },
-    /// Run a script component's script for `verb`.
+    /// Run a script component's script for `verb`; with `row`, on that
+    /// one reported row; with `rows`, for those picked rows.
     Script {
         component: String,
         #[serde(rename = "script")]
         verb: ScriptVerb,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rows: Vec<String>,
     },
 }
 
@@ -456,6 +467,10 @@ pub struct Plan {
     /// Desired state after apply, for every component the plan touches.
     #[serde(default)]
     pub desired: IndexMap<String, Desired>,
+    /// Desired state after apply of single reported rows of script
+    /// components (a verb run on one row, an `up` of picked rows).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub row_desired: IndexMap<String, IndexMap<String, Desired>>,
     /// Mode after apply, for components whose mode the plan decides.
     #[serde(default)]
     pub modes: IndexMap<String, Mode>,
@@ -500,6 +515,7 @@ impl Plan {
             notes: Vec::new(),
             fingerprint: fingerprint.to_string(),
             desired: IndexMap::new(),
+            row_desired: IndexMap::new(),
             modes: IndexMap::new(),
             refs: IndexMap::new(),
             channel: None,
@@ -580,9 +596,25 @@ impl Plan {
             } => {
                 self.refs.insert(component.clone(), git_ref.clone());
             }
-            Step::Script { component, verb } => {
+            // A verb on one row, or an `up` of picked rows, records what
+            // was asked of those rows only; the whole component keeps
+            // what the stack wants of it.
+            Step::Script {
+                component,
+                verb,
+                row,
+                rows,
+            } => {
                 if let Some(d) = verb.desired_after() {
-                    self.desired.insert(component.clone(), d);
+                    let picked: Vec<&String> = row.iter().chain(rows.iter()).collect();
+                    if picked.is_empty() {
+                        self.desired.insert(component.clone(), d);
+                    } else {
+                        let per_row = self.row_desired.entry(component.clone()).or_default();
+                        for r in picked {
+                            per_row.insert(r.clone(), d);
+                        }
+                    }
                 }
             }
             Step::Build { .. } | Step::Pull { .. } => {}
@@ -597,6 +629,8 @@ impl Plan {
             self.push(Step::Script {
                 component: component.to_string(),
                 verb,
+                row: None,
+                rows: Vec::new(),
             });
         } else {
             self.notes.push(format!(
@@ -693,7 +727,12 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
                 &mut plan,
             );
         }
-        Change::Script { component, verb } => {
+        Change::Script {
+            component,
+            verb,
+            row,
+            rows,
+        } => {
             require(stack, component)?;
             if !ScriptVerb::MUTATING.contains(verb)
                 || !script::has(&stack.components[component], *verb)
@@ -706,6 +745,8 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
             plan.push(Step::Script {
                 component: component.clone(),
                 verb: *verb,
+                row: row.clone(),
+                rows: rows.clone(),
             });
         }
         Change::Rebuild { component } if is_script(stack, component) => {
@@ -718,6 +759,8 @@ pub fn plan(stack: &StackDef, state: &InstanceState, change: &Change) -> Result<
             plan.push(Step::Script {
                 component: component.clone(),
                 verb: ScriptVerb::Rebuild,
+                row: None,
+                rows: Vec::new(),
             });
         }
         Change::Rebuild { component } => {
@@ -1121,6 +1164,8 @@ fn plan_resume(
             plan.push(Step::Script {
                 component: name.clone(),
                 verb: ScriptVerb::Up,
+                row: None,
+                rows: Vec::new(),
             });
             continue;
         }
@@ -1303,6 +1348,8 @@ fn plan_up(
             plan.push(Step::Script {
                 component: name.clone(),
                 verb: ScriptVerb::Up,
+                row: None,
+                rows: Vec::new(),
             });
             continue;
         }

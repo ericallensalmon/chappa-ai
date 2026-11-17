@@ -862,20 +862,29 @@ impl Source {
         if id == secret_scan::ACK_ACTION_ID {
             return self.secret_ack(body, caller, &loaded);
         }
-        // A row a script component reports (`stack/api`) acts through the
-        // script component's own verbs.
-        if let Some(k) = key.as_deref() {
-            let owner = stack_core::script::component_of_row(k);
-            if owner != k
-                && loaded
-                    .stack
-                    .components
-                    .get(owner)
-                    .is_some_and(|c| c.driver == stack_core::definition::DriverKind::Script)
-            {
-                key = Some(owner.to_string());
+        let is_script = |c: &str| {
+            loaded
+                .stack
+                .components
+                .get(c)
+                .is_some_and(|c| c.driver == stack_core::definition::DriverKind::Script)
+        };
+        // A script's verb drawn once for the whole component (on its
+        // group's header or with the stack's actions) names the component
+        // in its id, whatever key it was sent with.
+        let mut id = id;
+        if let Some((component, verb)) = crate::actions::parse_script_action_id(id) {
+            if is_script(component) {
+                key = Some(component.to_string());
+                id = verb;
             }
         }
+        // A row a script component reports (`stack/api`) acts through its
+        // own per-row verbs, else through the script component's verbs.
+        let row_owner = key.as_deref().and_then(|k| {
+            let owner = stack_core::script::component_of_row(k);
+            (owner != k && is_script(owner)).then(|| owner.to_string())
+        });
         let runner = loaded
             .runner(&self.world, &now)
             .with_scripts(&*self.background);
@@ -901,7 +910,14 @@ impl Source {
         }
         let channel = channel_for(&obs, &self.config.channel);
         let offered = states::offered(&loaded, &runner, &inst, &obs, &channel);
-        let Some(chosen) = offered.into_iter().find(|o| o.id == id && o.key == key) else {
+        let exact = offered.iter().position(|o| o.id == id && o.key == key);
+        let found = exact.or_else(|| {
+            let owner = row_owner.clone()?;
+            offered
+                .iter()
+                .position(|o| o.id == id && o.key.as_deref() == Some(owner.as_str()))
+        });
+        let Some(chosen) = found.map(|i| offered[i].clone()) else {
             return error(
                 409,
                 "not-offered",
@@ -935,6 +951,29 @@ impl Source {
                 ),
             );
         }
+        // What was picked in the Bring up picker (a selection, or a
+        // script's rows), checked against the definition and the last
+        // status report, replaces the default the confirm described.
+        let params = body.get("params").cloned().unwrap_or(Value::Null);
+        let group_of = |c: &str, row: &stack_core::script::ScriptRow| {
+            env_view::row_group(
+                loaded
+                    .stack
+                    .components
+                    .get(c)
+                    .and_then(|d| d.group.as_deref())
+                    .unwrap_or(""),
+                c,
+                row,
+            )
+        };
+        let chosen = match crate::actions::with_picks(
+            &runner, &inst, &obs, &chosen, &params, &group_of, &channel,
+        ) {
+            Ok(Some(picked)) => picked,
+            Ok(None) => chosen,
+            Err(e) => return error(409, "bad-selection", e),
+        };
         if let JobWork::Plan { plan, .. } = &chosen.work {
             if let Err(e) = runner.guard_plan(&inst, &obs, plan) {
                 return error(409, "shared-checkout", e.to_string());

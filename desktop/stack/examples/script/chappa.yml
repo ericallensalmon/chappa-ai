@@ -29,6 +29,9 @@ stacks:
         stop:   [node, scripts/stop.js]
         start:  [node, scripts/start.js]
         down:   [node, scripts/down.js]
+        # `{row}` makes Restart a verb of each reported row: the app
+        # passes that row's name as one argument.
+        restart: [node, scripts/restart.js, "{row}"]
         status: [node, scripts/status.js]
         plan:   [node, scripts/plan.js]
         # Two host ports in this slot: the pretend api and web.

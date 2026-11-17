@@ -123,6 +123,21 @@ export interface ProbeCell {
   title: string;
 }
 
+/** The ENDPOINT column: whether the component's probe answers. */
+export interface EndpointCell {
+  text: "answers" | "no answer" | "–";
+  tone: Tone;
+  title: string;
+}
+
+/** One label/value pair of the compact facts line. */
+export interface FactPair {
+  label: string;
+  value: string;
+  /** The section it comes from, for the tooltip. */
+  section: string;
+}
+
 export interface EnvLink {
   label: string;
   url: string;
@@ -155,8 +170,13 @@ export interface EnvRow {
   notDeployed: boolean;
   /** Uptime, restarts, exit code: shown, never deciding the colour. */
   details: string[];
+  /** The UPTIME column ("3h 12m"), empty when not reported. */
+  uptime: string;
   source: SourceCell | null;
+  /** The MODE / SOURCE column's second line: short commit and ref. */
+  sourceLine: string;
   probe: ProbeCell | null;
+  endpoint: EndpointCell;
   links: EnvLink[];
   hint: string;
   badges: Chip[];
@@ -174,6 +194,8 @@ export interface EnvGroup {
   id: string;
   label: string;
   rows: EnvRow[];
+  /** The ids of the group's own actions (drawn on its header). */
+  actionIds: string[];
 }
 
 /** One source's stack. */
@@ -184,6 +206,13 @@ export interface EnvBlock {
   hasData: boolean;
   /** The non-zero counts, table order ("1 up", "2 stopped"). */
   header: string[];
+  /** The same counts as toned chips, plus "endpoints a/b" when any
+   *  component has a probe. */
+  chips: Chip[];
+  /** The ids of the stack-wide actions (`actions` of the answer). */
+  actionIds: string[];
+  /** The facts as one compact line of label/value pairs. */
+  factsLine: FactPair[];
   groups: EnvGroup[];
   /** How many components are `not-deployed` (hidden behind the toggle). */
   notDeployed: number;
@@ -283,6 +312,21 @@ function details(c: Record<string, unknown>): string[] {
   return out;
 }
 
+/** The ENDPOINT cell from the probe: "answers", "no answer", or "–" when
+ *  the component has none. */
+export function endpointCell(probe: ProbeCell | null): EndpointCell {
+  if (!probe) return { text: "–", tone: "muted", title: "No endpoint is checked for this component" };
+  return probe.up ? { text: "answers", tone: "ok", title: probe.title } : { text: "no answer", tone: "bad", title: probe.title };
+}
+
+/** "1a2b3c4 abc-1-health": the short commit, then the ref. */
+function sourceLine(v: unknown): string {
+  const s = obj(v);
+  if (!s) return "";
+  const commit = text(s.commit);
+  return [commit ? shortCommit(commit) : "", text(s.ref)].filter(Boolean).join(" ");
+}
+
 /** One component as a row, or null when it has no id. */
 export function readComponent(raw: unknown, sourceId: string, sourceLabel: string, alerts: EnvAlert[] = []): EnvRow | null {
   const c = obj(raw);
@@ -308,8 +352,11 @@ export function readComponent(raw: unknown, sourceId: string, sourceLabel: strin
     red: info.red,
     notDeployed: state === "not-deployed",
     details: details(c),
+    uptime: text(c.uptime),
     source: readSourceCell(c.source),
+    sourceLine: sourceLine(c.source),
     probe: readProbe(c.probe),
+    endpoint: endpointCell(readProbe(c.probe)),
     links: readLinks(c.links),
     hint: text(c.hint),
     badges: chips(c.badges),
@@ -323,6 +370,12 @@ export function readComponent(raw: unknown, sourceId: string, sourceLabel: strin
 /** The header counts: the source's `summary` when it sent one, else counted
  *  from the components. Non-zero only, table order. */
 export function headerCounts(summary: unknown, rows: EnvRow[]): string[] {
+  return headerChips(summary, rows).filter((c) => !c.text.startsWith("endpoints ")).map((c) => c.text);
+}
+
+/** {@link headerCounts} as chips in each state's tone, then "endpoints
+ *  answered/checked" (green when all answer) when any row has a probe. */
+export function headerChips(summary: unknown, rows: EnvRow[]): Chip[] {
   const s = obj(summary);
   const counts = new Map<ComponentState, number>();
   if (s) {
@@ -333,14 +386,64 @@ export function headerCounts(summary: unknown, rows: EnvRow[]): string[] {
   } else {
     for (const r of rows) if (isState(r.state)) counts.set(r.state, (counts.get(r.state) ?? 0) + 1);
   }
-  return STATE_ORDER.filter((st) => (counts.get(st) ?? 0) > 0).map((st) => STATES[st].count(counts.get(st)!));
+  const chips: Chip[] = STATE_ORDER.filter((st) => (counts.get(st) ?? 0) > 0).map((st) => ({
+    text: STATES[st].count(counts.get(st)!),
+    tone: STATES[st].tone,
+    title: STATES[st].title,
+  }));
+  const probed = rows.filter((r) => r.probe);
+  if (probed.length) {
+    const up = probed.filter((r) => r.probe!.up).length;
+    chips.push({
+      text: `endpoints ${up}/${probed.length}`,
+      tone: up === probed.length ? "ok" : up === 0 ? "bad" : "warn",
+      title: `${up} of ${probed.length} checked endpoints answer`,
+    });
+  }
+  return chips;
+}
+
+/** The ids of an `actions` list as sent. */
+function actionIdsOf(v: unknown): string[] {
+  return list(v)
+    .map((a) => str(obj(a)?.id))
+    .filter((a): a is string => !!a);
+}
+
+/** The facts as one line of label/value pairs, section by section (a
+ *  section the source sent folded, and `more` rows, stay in the details). */
+export function factsLine(facts: Section[]): FactPair[] {
+  return facts
+    .filter((s) => !s.collapsed)
+    .flatMap((s) => s.rows.map((r) => ({ label: oneLine(r.label), value: oneLine(r.value ?? ""), section: s.title })));
+}
+
+/** A group's "(2/4 up)": components up out of those deployed. With none
+ *  deployed, how many are not. */
+export function groupCountText(rows: EnvRow[]): string {
+  const deployed = rows.filter((r) => !r.notDeployed);
+  if (deployed.length === 0) return `(${rows.length} not deployed)`;
+  return `(${deployed.filter((r) => r.state === "up").length}/${deployed.length} up)`;
 }
 
 function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
   const body = obj(p.payload);
   if (!body) {
     return {
-      block: { sourceId: p.sourceId, sourceLabel: p.sourceLabel, hasData: false, header: [], groups: [], notDeployed: 0, alerts: [], facts: [], banners: [] },
+      block: {
+        sourceId: p.sourceId,
+        sourceLabel: p.sourceLabel,
+        hasData: false,
+        header: [],
+        chips: [],
+        actionIds: [],
+        factsLine: [],
+        groups: [],
+        notDeployed: 0,
+        alerts: [],
+        facts: [],
+        banners: [],
+      },
       skipped: 0,
     };
   }
@@ -365,11 +468,11 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
     const g = obj(raw);
     const id = text(g?.id);
     if (!id || byId.has(id)) continue;
-    const group = { id, label: text(g?.label) || id, rows: [] };
+    const group: EnvGroup = { id, label: text(g?.label) || id, rows: [], actionIds: actionIdsOf(g?.actions) };
     byId.set(id, group);
     groups.push(group);
   }
-  const other: EnvGroup = { id: "\u0000other", label: "Other", rows: [] };
+  const other: EnvGroup = { id: "\u0000other", label: "Other", rows: [], actionIds: [] };
   for (const r of rows) (byId.get(r.group) ?? other).rows.push(r);
   if (other.rows.length) groups.push(other);
   return {
@@ -378,6 +481,9 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
       sourceLabel: p.sourceLabel,
       hasData: true,
       header: headerCounts(body.summary, rows),
+      chips: headerChips(body.summary, rows),
+      actionIds: actionIdsOf(body.actions),
+      factsLine: factsLine(readSections(body.facts)),
       groups: groups.filter((g) => g.rows.length > 0),
       notDeployed: rows.filter((r) => r.notDeployed).length,
       alerts,

@@ -621,9 +621,19 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
         .sources
         .actions(sid, "environment", None, &deps.tools.list(), &roots)
         .unwrap();
+    // The stack-wide actions are the view's own too; a group's are under
+    // the group's id.
     assert_eq!(
         env_own.iter().map(|a| a.action.id()).collect::<Vec<_>>(),
-        ["check-images"]
+        ["bring-up", "check-images"]
+    );
+    let jobs = deps
+        .sources
+        .actions(sid, "environment", Some("jobs"), &deps.tools.list(), &roots)
+        .unwrap();
+    assert_eq!(
+        jobs.iter().map(|a| a.action.id()).collect::<Vec<_>>(),
+        ["run-jobs"]
     );
     assert!(
         deps.sources

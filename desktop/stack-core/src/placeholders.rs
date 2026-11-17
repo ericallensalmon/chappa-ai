@@ -19,6 +19,8 @@
 //! | `{instance}` | the instance id, `<stack>-<slot>` |
 //! | `{branch:<repo>}` | the branch the bound work item has in its worktree of that clone |
 //! | `{worktree:<repo>}` | the folder of the bound work item's worktree of that clone |
+//! | `{row}` | the name of one row a script component's status reported, for a verb run on that row (see [`crate::script`]) |
+//! | `{rows}` | a whole argv word of a script's `up`: the picked rows' names, one word each (none when nothing was picked) |
 //! | `{secret:<name>}` | a random value the runner generated for this instance and keeps under `.work/` (see [`crate::instance_secrets`]) |
 //!
 //! `{host}` differs per engine because containers reach the host under a
@@ -62,6 +64,11 @@ pub enum Placeholder {
     Worktree(String),
     /// A value generated for the instance, by name.
     Secret(String),
+    /// The reported row a script verb runs on.
+    Row,
+    /// The picked rows of a script's `up`; expands to several argv words,
+    /// so it only stands as a whole word (see [`crate::script::prepare`]).
+    Rows,
 }
 
 impl Placeholder {
@@ -99,6 +106,8 @@ impl fmt::Display for Placeholder {
             Placeholder::Branch(r) => write!(f, "{{branch:{r}}}"),
             Placeholder::Worktree(r) => write!(f, "{{worktree:{r}}}"),
             Placeholder::Secret(n) => write!(f, "{{secret:{n}}}"),
+            Placeholder::Row => write!(f, "{{row}}"),
+            Placeholder::Rows => write!(f, "{{rows}}"),
         }
     }
 }
@@ -128,6 +137,10 @@ pub enum PlaceholderError {
     BadSecretName { name: String },
     #[error("no value for `{what}` in this context")]
     NoValue { what: String },
+    #[error("`{what}` names one reported row; run this verb from that row")]
+    NoRow { what: String },
+    #[error("`{{rows}}` stands for several argv words, so it must be a whole word of its own")]
+    RowsInsideWord,
     #[error("`{what}` needs a bound work item; activate one in this slot first")]
     NoItem { what: String },
     #[error("`{what}`: the bound work item has no worktree of `{repo}`")]
@@ -201,6 +214,8 @@ pub struct Context {
     pub worktrees: IndexMap<String, String>,
     /// The instance's generated secrets.
     pub secrets: crate::instance_secrets::Secrets,
+    /// The reported row a script verb runs on (`{row}`).
+    pub row: Option<String>,
 }
 
 /// Parse `template` into segments. Pure syntax: no values are consulted.
@@ -275,6 +290,8 @@ fn parse_one(body: &str) -> Result<Placeholder, PlaceholderError> {
         "container" => no_arg(Placeholder::Container),
         "snapshot" => no_arg(Placeholder::Snapshot),
         "instance" => no_arg(Placeholder::Instance),
+        "row" => no_arg(Placeholder::Row),
+        "rows" => no_arg(Placeholder::Rows),
         "branch" => needs_arg(Placeholder::Branch),
         "worktree" => needs_arg(Placeholder::Worktree),
         "image" => needs_arg(Placeholder::Image),
@@ -364,6 +381,13 @@ fn resolve_one(p: &Placeholder, ctx: &Context) -> Result<String, PlaceholderErro
             .clone()
             .ok_or_else(|| PlaceholderError::NoItem { what: what.clone() }),
         Placeholder::Instance => ctx.instance.clone().ok_or_else(no_value),
+        Placeholder::Row => ctx
+            .row
+            .clone()
+            .ok_or_else(|| PlaceholderError::NoRow { what: what.clone() }),
+        // A whole `{rows}` word is expanded before resolution; one that
+        // gets here sits inside another word.
+        Placeholder::Rows => Err(PlaceholderError::RowsInsideWord),
         Placeholder::Branch(repo) | Placeholder::Worktree(repo) => {
             if ctx.item.is_none() {
                 return Err(PlaceholderError::NoItem { what: what.clone() });

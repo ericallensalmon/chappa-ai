@@ -96,7 +96,8 @@
 //! `status` prints, on stdout (at most 1 MiB):
 //!
 //! ```json
-//! { "components": [ { "name": "api", "state": "up", "since": "2026-11-15T09:00:00Z",
+//! { "groups": [{"id": "core", "label": "Core"}, {"id": "apis", "label": "APIs"}],
+//!   "components": [ { "name": "api", "group": "apis", "state": "up", "since": "2026-11-15T09:00:00Z",
 //!                     "exitCode": 0, "detail": "…", "links": [{"label": "API", "url": "http://…"}] } ],
 //!   "facts":  [{"label": "Built from", "value": "main @ 1a2b3c4d"}],
 //!   "alerts": [{"tone": "warn", "text": "…"}] }
@@ -104,12 +105,78 @@
 //!
 //! `state` is one of the nine Environment states (`up`, `starting`,
 //! `unhealthy`, `crashloop`, `stopped-problem`, `stopped-idle`,
-//! `oneshot-ok`, `oneshot-failed`, `not-deployed`); `since`, `exitCode`,
-//! `detail` and `links` are optional; `tone` is `warn`, `bad` or `info`.
+//! `oneshot-ok`, `oneshot-failed`, `not-deployed`); `tone` is `warn`, `bad`
+//! or `info`. Everything else of a component is optional and fills one
+//! column of its row:
+//!
+//! | field | shape | shown as |
+//! |---|---|---|
+//! | `group` | a group id | the group it sits in |
+//! | `detail` | text | the row's second line (container and engine, say) |
+//! | `since` | UTC time it started | UPTIME, counted live |
+//! | `uptime` | text (`2d 7h`) | UPTIME, when there is no `since` |
+//! | `restarts`, `exitCode` | whole numbers | the row's page |
+//! | `source` | `{mode: prebuilt\|source\|dev, ref?, commit?}` (`commit` a hex hash) | MODE / SOURCE |
+//! | `probe` | `{url, rule?: health\|web\|any, status?}` | ENDPOINT |
+//! | `links` | `[{label, url}]` | LINKS (only the stack's own hosts) |
+//!
+//! A `probe` is the check the script made itself; the runner does not call
+//! the URL. Whether it passes is judged here from `status` by the same
+//! rules as every probe (`health` 2xx, `web` 2xx/3xx, `any` any status;
+//! `health` when no rule is given), and no `status` means no answer, which
+//! is down. An `up` the script might add is not read.
+//!
 //! One script may report many components (a wrapped whole stack): each
-//! shows as its own row in the script component's group, and its actions
-//! are the script component's verbs. A script for a single component may
-//! report one entry named after the component, or leave `name` out.
+//! shows as its own row. A script for a single component may report one
+//! entry named after the component, or leave `name` out.
+//!
+//! **Groups.** `groups` lists the script's groups in display order (`id`
+//! `[A-Za-z0-9._-]`, at most 40 characters; `label` optional, the id when
+//! missing). A component's `group` names one of them, or any other id (it
+//! then shows under that id). A component with no `group` goes to the
+//! script component's own group from the definition, else to a group
+//! named after the script component. A group id the definition also uses
+//! is the same group.
+//!
+//! **Where the verbs go.** A script's verbs act on everything it runs, so
+//! each is drawn once, not on every row: on the group header when every
+//! row of the script lands in one group that holds nothing else, else
+//! with the stack's own actions at the top of the Environment. A script
+//! that reports only itself keeps its verbs on its one row.
+//!
+//! **What was asked of one row.** A verb run on one row (`stop` with
+//! `{row}`, an `up` of picked rows) records that row's desired state in the
+//! instance's intent record, so a row stopped on request shows as stopped
+//! (gray), not as deployed but not running, while the stack still wants
+//! the script's other rows running. A verb on the whole component (Up,
+//! Stop, Down, a stack-wide one) clears those per-row records.
+//!
+//! **Per-row verbs.** A mutating verb whose argv has a `{row}` word (or a
+//! word containing `{row}`) runs on one row: it is offered on every row
+//! the last status report named, and `{row}` becomes that row's `name`,
+//! as one argv element, never through a shell. A name the last report
+//! did not list is refused, and so is a name starting with `-` (it would
+//! read as an option). `{row}` is not allowed in `status`, `plan` or
+//! `env:`. A per-row verb's confirm shows its resolved argv; the `plan`
+//! script is not asked per row.
+//!
+//! ```yaml
+//! restart: [node, scripts/restart.js, "{row}"]      # one Restart per row
+//! ```
+//!
+//! **Picking what comes up.** An `up` argv with a whole `{rows}` word
+//! lets the user pick reported rows (or the groups that hold them) when
+//! bringing the script's stack up, and lets each row that is not running
+//! be brought up on its own. `{rows}` becomes the picked rows' names, one
+//! argv element each, in the order the status reported them; with nothing
+//! picked (a plain Up, or the stack's own Bring up) it becomes no words at
+//! all, which the script should read as "everything". Every name is
+//! checked against the last status report first. Without `{rows}` the
+//! script's Up is whole-stack only.
+//!
+//! ```yaml
+//! up: [node, scripts/up.js, "{rows}"]               # up.js api web, or up.js
+//! ```
 //!
 //! The reported state goes through the same desired-state rule as every
 //! other driver: a reported `stopped-idle` while the stack wants the
@@ -152,12 +219,12 @@ use std::time::Duration;
 use crate::cli::{CliError, EngineCli, Invocation};
 use crate::definition::{
     is_valid_key, parse_interval, ComponentDef, ComponentKind, ComponentStop, Diagnostic,
-    DriverKind, Rule, Severity, StackDef,
+    DriverKind, Mode, ProbeRule, Rule, Severity, StackDef,
 };
 use crate::driver::{ComponentState, ResolvedInstance};
 use crate::intent::{Desired, INSTANCES_DIR};
 use crate::jobs::{write_atomic, RunBlock};
-use crate::placeholders::{self, PlaceholderError};
+use crate::placeholders::{self, Placeholder, PlaceholderError};
 use crate::process::{env_name, instance_env};
 
 /// Most status output read, in bytes.
@@ -290,6 +357,46 @@ pub fn has(def: &ComponentDef, verb: ScriptVerb) -> bool {
     def.driver == DriverKind::Script && argv(def, verb).is_some()
 }
 
+/// The argv word that stands for the picked rows.
+pub const ROWS_WORD: &str = "{rows}";
+
+/// Whether `text` uses placeholder `p`.
+fn mentions(text: &str, p: Placeholder) -> bool {
+    placeholders::references(text).is_ok_and(|r| r.contains(&p))
+}
+
+/// Whether `text` uses the `{row}` placeholder.
+fn mentions_row(text: &str) -> bool {
+    mentions(text, Placeholder::Row)
+}
+
+/// Whether the definition's argv for `verb` has a whole `{rows}` word: its
+/// `up` can then be given the rows to bring up.
+pub fn takes_rows(def: &ComponentDef, verb: ScriptVerb) -> bool {
+    argv(def, verb).is_some_and(|words| words.iter().any(|w| w == ROWS_WORD))
+}
+
+/// Whether the definition's argv for `verb` uses `{row}`: the verb then
+/// runs on one reported row, not on the whole component.
+pub fn takes_row(def: &ComponentDef, verb: ScriptVerb) -> bool {
+    argv(def, verb).is_some_and(|words| words.iter().any(|w| mentions_row(w)))
+}
+
+/// Why `name` cannot stand in for `{row}`, if it cannot: it must be a
+/// reported name (`[A-Za-z0-9._-]`, at most 40 characters) and must not
+/// start with `-`, which a program would read as an option.
+pub fn row_name_problem(name: &str) -> Option<String> {
+    if !is_valid_key(name) {
+        return Some(format!("`{name}` is not a reported row name"));
+    }
+    if name.starts_with('-') {
+        return Some(format!(
+            "`{name}` starts with `-`, which the script would read as an option"
+        ));
+    }
+    None
+}
+
 /// The limit for `verb`: the definition's `timeouts.<verb>`, else the
 /// default. An unreadable or zero entry (a validation error) falls back
 /// to the default rather than to no limit.
@@ -395,6 +502,46 @@ pub fn validate_component(c: &ComponentDef, cpath: &str) -> Vec<Diagnostic> {
             );
         }
     }
+    for verb in ScriptVerb::ALL {
+        let Some(words) = argv(c, verb) else { continue };
+        let whole = words.iter().any(|w| w == ROWS_WORD);
+        let inside = words
+            .iter()
+            .any(|w| w != ROWS_WORD && mentions(w, Placeholder::Rows));
+        if inside || (whole && verb != ScriptVerb::Up) {
+            push(
+                Severity::Error,
+                Rule::ScriptArgv,
+                format!("{cpath}.{verb}"),
+                if inside {
+                    "`{rows}` stands for several argv words, so it must be a whole word of its own"
+                        .into()
+                } else {
+                    format!("`{{rows}}` is the rows picked for `up`; the `{verb}` script cannot take it")
+                },
+            );
+        }
+    }
+    for verb in [ScriptVerb::Status, ScriptVerb::Plan] {
+        if takes_row(c, verb) {
+            push(
+                Severity::Error,
+                Rule::ScriptArgv,
+                format!("{cpath}.{verb}"),
+                format!("`{{row}}` names the row a verb runs on; the `{verb}` script runs for the whole component, so it has none"),
+            );
+        }
+    }
+    for (key, value) in &c.env {
+        if mentions_row(value) || mentions(value, Placeholder::Rows) {
+            push(
+                Severity::Error,
+                Rule::ScriptArgv,
+                format!("{cpath}.env.{key}"),
+                "`{row}` and `{rows}` only work in the argv of a verb; the environment is the same for every row".into(),
+            );
+        }
+    }
     if let Some(cwd) = &c.cwd {
         if !stays_inside(cwd) {
             push(
@@ -476,6 +623,10 @@ pub struct ScriptBinding {
     pub branches: IndexMap<String, String>,
     /// The item's worktree per clone name.
     pub worktrees: IndexMap<String, PathBuf>,
+    /// The reported row a per-row verb runs on (`{row}`).
+    pub row: Option<String>,
+    /// The reported rows picked for `up` (`{rows}`); empty = everything.
+    pub rows: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -614,7 +765,16 @@ pub fn prepare(
             words[0]
         )));
     }
+    if let Some(problem) = binding
+        .row
+        .iter()
+        .chain(&binding.rows)
+        .find_map(|r| row_name_problem(r))
+    {
+        return Err(argv_error(problem));
+    }
     let mut ctx = inst.context_for(component);
+    ctx.row = binding.row.clone();
     // A script runs on the host, whatever engine its group names.
     ctx.host = Some(placeholders::HostSide::Host);
     ctx.images = images.clone();
@@ -632,7 +792,16 @@ pub fn prepare(
         verb,
         source,
     };
-    let mut resolved = placeholders::resolve_argv(words, &ctx).map_err(placeholder)?;
+    // `{rows}` is several words (or none), so it is expanded here, each
+    // name one element, before the rest is resolved word by word.
+    let mut resolved: Vec<String> = Vec::new();
+    for word in words {
+        if word == ROWS_WORD {
+            resolved.extend(binding.rows.iter().cloned());
+        } else {
+            resolved.push(placeholders::resolve(word, &ctx).map_err(placeholder)?);
+        }
+    }
     resolved.extend(extra.iter().cloned());
     let cwd = match &def.cwd {
         None => project_dir.to_path_buf(),
@@ -676,6 +845,13 @@ pub struct ReportedLink {
     pub url: String,
 }
 
+/// A group a status script names, in its display order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedGroup {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedFact {
     pub label: String,
@@ -702,6 +878,9 @@ pub struct ReportedAlert {
 pub struct ReportedComponent {
     pub name: String,
     pub state: ComponentState,
+    /// The group it shows in; `None` = the script component's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -710,11 +889,52 @@ pub struct ReportedComponent {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<ReportedLink>,
+    /// How long it has been up, as text ("2d 7h"), when `since` is not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ReportedSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ReportedProbe>,
+}
+
+/// Where a reported component's code comes from, in the Environment's
+/// own terms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedSource {
+    pub mode: Mode,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+/// An HTTP check the status script made. Whether it passes is decided here,
+/// by the contract's rule from the status it got, never taken from the
+/// script: no status means no answer, which is down whatever the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedProbe {
+    pub url: String,
+    pub rule: ProbeRule,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+impl ReportedProbe {
+    pub fn up(&self) -> bool {
+        self.status
+            .is_some_and(|s| crate::probe::passes(self.rule, s))
+    }
 }
 
 /// A status script's whole report, checked.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScriptStatus {
+    /// The groups in display order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ReportedGroup>,
     pub components: Vec<ReportedComponent>,
     #[serde(default)]
     pub facts: Vec<ReportedFact>,
@@ -792,6 +1012,27 @@ pub fn parse_status(stdout: &str, component: &str) -> Result<ScriptStatus, Strin
     let Value::Object(doc) = doc else {
         return Err("the output is not a JSON object".into());
     };
+    let mut groups: Vec<ReportedGroup> = Vec::new();
+    for (i, g) in list(&doc, "groups")?.iter().enumerate() {
+        let at = format!("groups[{i}]");
+        let Value::Object(g) = g else {
+            return Err(format!("{at} is not an object"));
+        };
+        let id = string_field(g, "id", &at)?.ok_or_else(|| format!("{at} has no `id`"))?;
+        if !is_valid_key(&id) {
+            return Err(format!(
+                "{at}: `id` must match [A-Za-z0-9._-] and be at most 40 characters"
+            ));
+        }
+        if groups.iter().any(|x| x.id == id) {
+            return Err(format!("{at}: `{id}` is listed twice"));
+        }
+        let label = string_field(g, "label", &at)?
+            .map(|l| clean_text(&l, 60))
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| id.clone());
+        groups.push(ReportedGroup { id, label });
+    }
     let entries = list(&doc, "components")?;
     let mut components: Vec<ReportedComponent> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
@@ -827,6 +1068,12 @@ pub fn parse_status(stdout: &str, component: &str) -> Result<ScriptStatus, Strin
         if components.iter().any(|c| c.name == name) {
             return Err(format!("{at}: `{name}` is reported twice"));
         }
+        let group = string_field(e, "group", &at)?;
+        if group.as_deref().is_some_and(|g| !is_valid_key(g)) {
+            return Err(format!(
+                "{at} (`{name}`): `group` must match [A-Za-z0-9._-] and be at most 40 characters"
+            ));
+        }
         let exit_code = match e.get("exitCode") {
             None | Some(Value::Null) => None,
             Some(v) => Some(
@@ -848,9 +1095,78 @@ pub fn parse_status(stdout: &str, component: &str) -> Result<ScriptStatus, Strin
                 url: clean_text(&url, 2000),
             });
         }
+        let uptime = string_field(e, "uptime", &at)?.map(|s| clean_text(&s, 40));
+        let restarts =
+            match e.get("restarts") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(
+                    || format!("{at} (`{name}`): `restarts` is not a whole number of 0 or more"),
+                )?),
+            };
+        let source = match e.get("source") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(s)) => {
+                let sat = format!("{at}.source");
+                let mode =
+                    string_field(s, "mode", &sat)?.ok_or_else(|| format!("{sat} has no `mode`"))?;
+                let mode = Mode::parse(&mode)
+                    .ok_or_else(|| format!("{sat}: `mode` is not prebuilt, source or dev"))?;
+                let commit = string_field(s, "commit", &sat)?;
+                if commit.as_deref().is_some_and(|c| {
+                    c.is_empty() || c.len() > 64 || !c.bytes().all(|b| b.is_ascii_hexdigit())
+                }) {
+                    return Err(format!("{sat}: `commit` is not a commit hash"));
+                }
+                Some(ReportedSource {
+                    mode,
+                    git_ref: string_field(s, "ref", &sat)?
+                        .map(|r| clean_text(&r, 200))
+                        .filter(|r| !r.is_empty()),
+                    commit: commit.map(|c| c.to_ascii_lowercase()),
+                })
+            }
+            Some(_) => return Err(format!("{at} (`{name}`): `source` is not an object")),
+        };
+        let probe = match e.get("probe") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(p)) => {
+                let pat = format!("{at}.probe");
+                let url =
+                    string_field(p, "url", &pat)?.ok_or_else(|| format!("{pat} has no `url`"))?;
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(format!("{pat}: `url` is not an http(s) URL"));
+                }
+                let rule = match string_field(p, "rule", &pat)?.as_deref() {
+                    None | Some("health") => ProbeRule::Health,
+                    Some("web") => ProbeRule::Web,
+                    Some("any") => ProbeRule::Any,
+                    Some(_) => return Err(format!("{pat}: `rule` is not health, web or any")),
+                };
+                let status = match p.get("status") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(
+                        v.as_u64()
+                            .and_then(|n| u16::try_from(n).ok())
+                            .filter(|n| (100..600).contains(n))
+                            .ok_or_else(|| format!("{pat}: `status` is not an HTTP status"))?,
+                    ),
+                };
+                Some(ReportedProbe {
+                    url: clean_text(&url, 2000),
+                    rule,
+                    status,
+                })
+            }
+            Some(_) => return Err(format!("{at} (`{name}`): `probe` is not an object")),
+        };
         components.push(ReportedComponent {
             name,
             state,
+            group,
+            uptime,
+            restarts,
+            source,
+            probe,
             since: string_field(e, "since", &at)?.map(|s| clean_text(&s, 40)),
             exit_code,
             detail: string_field(e, "detail", &at)?.map(|s| clean_text(&s, TEXT_CAP)),
@@ -894,6 +1210,7 @@ pub fn parse_status(stdout: &str, component: &str) -> Result<ScriptStatus, Strin
         });
     }
     Ok(ScriptStatus {
+        groups,
         components,
         facts,
         alerts,
@@ -997,6 +1314,9 @@ pub struct ScriptRow {
     pub id: String,
     pub name: String,
     pub state: ComponentState,
+    /// The group the status script put it in, if it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1005,6 +1325,14 @@ pub struct ScriptRow {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<ReportedLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ReportedSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ReportedProbe>,
 }
 
 /// Everything the Environment shows for one script component.
@@ -1017,6 +1345,9 @@ pub struct ScriptView {
     /// of them, and the component has no row of its own.
     pub multi: bool,
     pub rows: Vec<ScriptRow>,
+    /// The groups the status script listed, in its order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ReportedGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<ReportedFact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1161,6 +1492,29 @@ pub fn view(
     report: Option<&ScriptReport>,
     last: Option<&LastRun>,
 ) -> ScriptView {
+    view_with_rows(
+        component,
+        kind,
+        desired,
+        &IndexMap::new(),
+        has_status,
+        report,
+        last,
+    )
+}
+
+/// [`view`] with what was asked of single rows (`stop` on one row, `up` of
+/// picked rows): a reported row's state is judged by its own desired
+/// state when it has one, else by the component's.
+pub fn view_with_rows(
+    component: &str,
+    kind: ComponentKind,
+    desired: Desired,
+    row_desired: &IndexMap<String, Desired>,
+    has_status: bool,
+    report: Option<&ScriptReport>,
+    last: Option<&LastRun>,
+) -> ScriptView {
     let single = |from: ViewFrom, state: ComponentState, detail: String| ScriptView {
         component: component.to_string(),
         from,
@@ -1169,11 +1523,17 @@ pub fn view(
             id: component.to_string(),
             name: component.to_string(),
             state,
+            group: None,
             exit_code: last.and_then(|l| l.exit_code).filter(|c| *c != 0),
             since: None,
             detail: Some(detail),
             links: Vec::new(),
+            uptime: None,
+            restarts: None,
+            source: None,
+            probe: None,
         }],
+        groups: Vec::new(),
         facts: Vec::new(),
         alerts: Vec::new(),
         slow_secs: None,
@@ -1232,13 +1592,22 @@ pub fn view(
                     .map(|c| ScriptRow {
                         id: row_id(component, &c.name),
                         name: c.name.clone(),
-                        state: with_intent(c.state, desired),
+                        state: with_intent(
+                            c.state,
+                            row_desired.get(&c.name).copied().unwrap_or(desired),
+                        ),
+                        group: c.group.clone(),
                         exit_code: c.exit_code,
                         since: c.since.clone(),
                         detail: c.detail.clone(),
                         links: c.links.clone(),
+                        uptime: c.uptime.clone(),
+                        restarts: c.restarts,
+                        source: c.source.clone(),
+                        probe: c.probe.clone(),
                     })
                     .collect(),
+                groups: status.groups.clone(),
                 facts: status.facts.clone(),
                 alerts: status.alerts.clone(),
                 slow_secs: None,

@@ -114,7 +114,7 @@ plain `http` to this machine.
 
 Every list response is `{ "freshness": {...}, "items": [...] }` plus
 view-specific fields (`banners`, or for the environment `groups`,
-`components`, `summary`, `facts`, `alerts`, `dataSafety`). Unknown fields are ignored.
+`components`, `actions`, `summary`, `facts`, `alerts`, `dataSafety`). Unknown fields are ignored.
 A non-2xx reply carries `{kind, message, detail?}`.
 
 ## Actions
@@ -310,6 +310,40 @@ Run the fixture twice to see it: once as above, once with
 adds to the first one's ABC-1 and ABC-2, keeps ABC-9 the tracker no
 longer lists, and offers Start work on the rest). Its actions answer with
 the call they received, so the target can be read back.
+
+## The Environment answer
+
+`{ freshness, summary?, groups, components, actions?, facts?, alerts?, banners? }`.
+The view draws it as a header over a dense table:
+
+- **Header**: the stack's counts as toned chips (from `summary`, else
+  counted from `components`), "endpoints a/b" when any component has a
+  `probe`, `facts` as one compact line of label/value pairs (every
+  section, with its actions, is on the "Details" page), alerts and
+  banners, `freshness.notices` (say there, once, who reports the rows and
+  what was left out; never on each row), and the stack-wide `actions`.
+- **Groups**: `groups: [{id, label, actions?}]` in display order, each a
+  folding header "<label> (up/deployed up)"; a group's `actions` sit on
+  its header. A component whose `group` is not listed shows under "Other".
+- **Rows**: one line per component: state, label with its badges and
+  `hint` as a muted second line, the `source` mode with its short commit
+  and ref, `uptime`, the probe as "answers" / "no answer" / "–", and its
+  links. A row's `actions` show on hover and in its "⋯" menu; clicking
+  the row opens a page with everything about it (restarts, exit code,
+  sections, every link and action). `not-deployed` components are behind
+  a toggle and shown dimmed in their own groups.
+
+Actions are judged and called by where they sit: a component's with
+`target.key` = its `id`, a group's with the group's `id`, and the
+stack-wide `actions` (like the view's banners' and facts' actions) with
+`key: null`. Keep a group's action ids apart from those of a component
+with the same id, and the stack-wide ids apart from the banners' and the
+facts'.
+
+A stack-wide Up can be a picker: an endpoint action whose `inputs` are a
+`choice` (the default selection, each named selection, or "picked") and a
+`multi` of groups and components. The picked values arrive in `params`;
+the source checks them against its own definition before it acts.
 
 ## Data safety on the Environment view
 
