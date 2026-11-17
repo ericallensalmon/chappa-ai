@@ -140,7 +140,7 @@ jobs:
   # for main and manual runs: a release build is slow, and a pull request
   # gets its macOS coverage from the rust job.
   bundle-macos:
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ true }} # ROUND-ONLY: revert to github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,7 +194,7 @@ jobs:
   # The Windows and Linux bundles must carry chappa-ai-mcp too. Like
   # bundle-macos, only for main and manual runs; nothing is uploaded.
   bundle-check:
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ true }} # ROUND-ONLY: revert to github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
