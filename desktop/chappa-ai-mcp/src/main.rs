@@ -3,8 +3,9 @@
 //! Environment: CHAPPA_AI_CONTROL_URL (default: the address in the app's
 //! `control_endpoint` file, or CHAPPA_AI_CONTROL_ENDPOINT_FILE),
 //! CHAPPA_AI_CONTROL_TOKEN or CHAPPA_AI_CONTROL_TOKEN_FILE (default: the
-//! app-config `control_token`). All logic lives in the library; this is the
-//! loop.
+//! app-config `control_token`). CHAPPA_PROFILE_DIR moves the app-config
+//! folder into a separate profile, the same way it does for the app. All
+//! logic lives in the library; this is the loop.
 //!
 //! `chappa-ai-mcp session-hook` is the other entry point: a Claude Code
 //! `SessionStart` hook that reports the session id of the app-spawned agent
@@ -22,7 +23,7 @@ fn main() {
              Usage: claude mcp add chappa-ai -- chappa-ai-mcp\n\
              \x20      chappa-ai-mcp session-hook  (Claude Code SessionStart hook; JSON on stdin)\n\
              Env: CHAPPA_AI_CONTROL_URL, CHAPPA_AI_CONTROL_ENDPOINT_FILE,\n\
-             CHAPPA_AI_CONTROL_TOKEN, CHAPPA_AI_CONTROL_TOKEN_FILE\n\
+             CHAPPA_AI_CONTROL_TOKEN, CHAPPA_AI_CONTROL_TOKEN_FILE, CHAPPA_PROFILE_DIR\n\
              Default token file: {}\n\
              Default endpoint file: {}",
             chappa_ai_mcp::SERVER_VERSION,

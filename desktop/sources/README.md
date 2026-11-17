@@ -14,7 +14,7 @@ working example is in `fixture/`.
 A source is a command in `chappa.yml` with a `source:` key:
 
 ```yaml
-commands:
+processes:
   my-source:
     command: [node, sources/my-source/index.mjs]
     source: {}
@@ -95,7 +95,8 @@ time.
 }
 ```
 
-Every view is optional, and `pollSeconds` is clamped to 15..3600. The
+Every view is optional, and `pollSeconds` (default 60) is clamped to
+15..3600. The
 list of endpoints is closed: the app calls only the paths named here.
 `linkHosts` and `roots` are what the source asks to be allowed to open
 and launch in; the user approves them (shown with the view list) and
@@ -114,7 +115,8 @@ plain `http` to this machine.
 
 Every list response is `{ "freshness": {...}, "items": [...] }` plus
 view-specific fields (`banners`, or for the environment `groups`,
-`components`, `actions`, `summary`, `facts`, `alerts`, `dataSafety`). Unknown fields are ignored.
+`components`, `actions`, `summary`, `facts`, `alerts`, `dataSafety`,
+`secretScan`). Unknown fields are ignored.
 A non-2xx reply carries `{kind, message, detail?}`.
 
 ## Actions
@@ -530,7 +532,7 @@ Requirements: `gh` on `PATH` (or named by `GH_BIN`) and logged in
 clear error instead of failing.
 
 ```yaml
-commands:
+processes:
   github-source:
     command: [node, sources/github/index.mjs]
     source: {}

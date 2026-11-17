@@ -26,7 +26,7 @@ describe("the switch mapping", () => {
   it("says what Automatic resolves to", () => {
     expect(switchHint(null, { found: true, program: "C:\\tools\\gitleaks.exe", effectiveEnabled: true })).toContain("on, gitleaks was found (C:\\tools\\gitleaks.exe)");
     expect(switchHint(null, { found: false, program: null, effectiveEnabled: false })).toContain("off, gitleaks is not installed");
-    expect(switchHint(true, { found: false, program: null, effectiveEnabled: true })).toContain("nothing was scanned");
+    expect(switchHint(true, { found: false, program: null, effectiveEnabled: true })).toContain("Launch anyway");
     expect(switchHint(false, null)).toContain("Off");
     expect(switchHint(null, null)).toBe("Automatic.");
   });

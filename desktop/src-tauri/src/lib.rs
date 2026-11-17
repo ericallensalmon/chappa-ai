@@ -17,6 +17,7 @@ pub mod delivery_hold;
 pub mod event_ring;
 pub mod login_path;
 pub mod open_path;
+pub mod profile;
 pub mod projects;
 pub mod records;
 pub mod registry;
@@ -64,6 +65,27 @@ pub fn run() {
     // Also before any thread: a Finder or Dock launch on macOS inherits a
     // PATH without Homebrew or the login shell's additions.
     login_path::adopt_login_shell_path();
+    // Also before any thread: a separate profile is made absolute and put
+    // back into the environment, so every child resolves the same folder.
+    let profile = profile::adopt_from_env();
+    let mut context = tauri::generate_context!();
+    // Under a profile the windows are built in `setup` instead, where their
+    // webview storage can be pointed into the profile; the config can only
+    // name a folder relative to the platform data folder.
+    let profile_windows: Vec<tauri::utils::config::WindowConfig> = match profile {
+        Some(_) => context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .filter(|w| w.create)
+            .map(|w| {
+                w.create = false;
+                w.clone()
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -79,8 +101,26 @@ pub fn run() {
         .manage(Workspace::default())
         .manage(Records::default())
         .manage(Sources::default())
-        .setup(|app| {
-            let config_dir = app.path().app_config_dir().unwrap_or_default();
+        .setup(move |app| {
+            let dirs = profile::AppDirs::resolve(profile.as_ref(), app.handle());
+            if let Some(profile) = &profile {
+                eprintln!(
+                    "[profile] keeping all state under {}",
+                    profile.root().display()
+                );
+            }
+            if let Some(webview_dir) = &dirs.webview {
+                for window in &profile_windows {
+                    let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), window)?
+                        .data_directory(webview_dir.clone());
+                    // WKWebView cannot be given a folder: keep its storage in
+                    // memory rather than in the everyday profile's store.
+                    #[cfg(target_os = "macos")]
+                    let builder = builder.incognito(true);
+                    builder.build()?;
+                }
+            }
+            let config_dir = dirs.config.clone();
             // The config dir holds secrets (agent tool env, the control
             // token, the coordination db): owner-only before anything is
             // written into it. Non-fatal; the stores report their own errors.
@@ -90,11 +130,8 @@ pub fn run() {
             // Crash evidence first, before anything that could fail:
             // module inventory now, minidump + report on a native crash,
             // a report on a panic. All in the log directory.
-            let log_dir = app
-                .path()
-                .app_log_dir()
-                .unwrap_or_else(|_| config_dir.join("logs"));
-            crash::install(log_dir);
+            let log_dir = dirs.logs.clone();
+            crash::install(log_dir.clone());
             // Load `<app-config>/settings.json` BEFORE the projects
             // store: project spawns read the execution profile out of it.
             let settings = app.state::<SettingsState>();
@@ -229,6 +266,16 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        // The plugin's default file target is the platform
+                        // log folder; name the resolved one instead.
+                        .clear_targets()
+                        .targets([
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                                path: log_dir,
+                                file_name: None,
+                            }),
+                        ])
                         .build(),
                 )?;
                 // Test-harness surface over HTTP; opt-in, see debug_http.
@@ -421,7 +468,7 @@ pub fn run() {
     ]);
 
     let app = builder
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {

@@ -7,7 +7,8 @@ Bound to `http://127.0.0.1:8324` in every build. Every request must carry
 `Authorization: Bearer <token>` where the token is the contents of
 `<app-config>/control_token` (created at first launch, owner-only permissions;
 `<app-config>` is Tauri's app config dir for `com.chappa-ai.desktop`, e.g.
-`%APPDATA%\com.chappa-ai.desktop` on Windows). Responses are JSON; errors are
+`%APPDATA%\com.chappa-ai.desktop` on Windows, or `<profile>/config` when the app runs
+with `CHAPPA_PROFILE_DIR=<profile>`). Responses are JSON; errors are
 `{"error": "…"}` with a 4xx/5xx status. `GET /` returns this same table.
 
 The one exception to the token rule is `GET /identity`: anything can bind this

@@ -1759,7 +1759,8 @@ pub fn render_api_doc() -> String {
          `Authorization: Bearer <token>` where the token is the contents of\n\
          `<app-config>/control_token` (created at first launch, owner-only permissions;\n\
          `<app-config>` is Tauri's app config dir for `com.chappa-ai.desktop`, e.g.\n\
-         `%APPDATA%\\com.chappa-ai.desktop` on Windows). Responses are JSON; errors are\n\
+         `%APPDATA%\\com.chappa-ai.desktop` on Windows, or `<profile>/config` when the app runs\n\
+         with `CHAPPA_PROFILE_DIR=<profile>`). Responses are JSON; errors are\n\
          `{{\"error\": \"…\"}}` with a 4xx/5xx status. `GET /` returns this same table.\n\n\
          The one exception to the token rule is `GET /identity`: anything can bind this\n\
          port before the app does, so a client should verify the server before it sends\n\

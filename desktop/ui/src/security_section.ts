@@ -42,7 +42,7 @@ export function switchHint(setting: boolean | null, info: ipc.ScannerInfoDto | n
   const where = info?.program ? ` (${info.program})` : "";
   if (setting === true) {
     return info && !info.found
-      ? "Always on, but gitleaks was not found: launches go ahead with a warning that nothing was scanned."
+      ? "Always on, but gitleaks was not found: each launch stops and asks, and goes ahead only with Launch anyway and a note."
       : `Always on${where}.`;
   }
   if (setting === false) return "Off: agent launches are not scanned.";

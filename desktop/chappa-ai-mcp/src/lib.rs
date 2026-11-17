@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 
 pub mod http;
 pub mod identity;
+pub mod profile;
 pub mod session_hook;
 pub use identity::{identity_proof, Endpoint, ENDPOINT_FILE, IDENTITY_PATH};
 
@@ -384,26 +385,17 @@ fn cap_text(text: &str) -> String {
     format!("{}… [truncated {} bytes]", &text[..cut], text.len() - cut)
 }
 
-/// `%APPDATA%\com.chappa-ai.desktop\control_token` on Windows,
-/// `~/Library/Application Support/<id>/control_token` on macOS,
-/// `$XDG_CONFIG_HOME/<id>/control_token` (or `~/.config/…`) elsewhere —
-/// Tauri v2's `app_config_dir` for this identifier.
+/// `<app-config>/control_token`, where the app-config folder is
+/// [`profile::config_dir`]: the `CHAPPA_PROFILE_DIR` profile's when that is
+/// set, else the platform folder Tauri v2's `app_config_dir` names for this
+/// identifier.
 pub fn default_token_path() -> PathBuf {
     default_config_dir().join(TOKEN_FILE)
 }
 
 /// The app-config dir (see [`default_token_path`]).
 pub fn default_config_dir() -> PathBuf {
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    };
-    base.unwrap_or_default().join(APP_IDENTIFIER)
+    profile::config_dir()
 }
 
 /// `http://host:port[/…]` → (host, port, path-prefix). Only plain http: the

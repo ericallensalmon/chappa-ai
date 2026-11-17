@@ -264,12 +264,15 @@ Then open this folder as a project in the app:
 2. Settings ▸ Sources shows **Stack local** asking for review: its link
    hosts are the stack's own `dev.example.test:<port>` addresses and its
    one view is Environment. Trust it.
-3. The rail gains **Environment**. Every component is listed (`not
-   deployed` ones behind the toggle) with its mode, probe and links; the
-   **Stack local · slot 0** section at the bottom holds the stack-wide
-   actions (Bring up, Start, Stop, Down, Rebuild all, Clean up images),
-   each row its own (Start, Stop, Restart, Rebuild, Switch to …, Watch,
-   Logs).
+3. The rail gains **Environment**: the stack's header (counts, facts,
+   alerts) over a table of its components in their groups (`not deployed`
+   ones behind the toggle), each with its mode, probe and links. The
+   stack-wide actions (Bring up, Start, Stop, Down, Rebuild all, Clean up
+   images) sit in the header; Bring up asks which components (the
+   default, or the groups and components you tick). Each row has its own
+   (Start, Stop, Restart, Rebuild, Switch to …, Watch, Logs) on hover and
+   in its menu, and opens a page with everything about it; the stack's
+   facts, under **Stack local · slot 0**, are on the Details page.
 4. An action asks first, with the plan as the question ("Pull db
    (postgres:16); start db."). Accepting opens one pane that runs
    `chappa-stack run-job <id>`: the checks before up, then every step with
@@ -277,7 +280,8 @@ Then open this folder as a project in the app:
    `.work/jobs/<id>.{json,log,result.json}`.
 
 Without podman, `api` cannot start; bring `db` up on its own from its row.
-`web` starts only once `../web` exists with an `npm run dev`. The source
+`web` needs `../web` with an `npm run dev`, and it depends on `api`, so
+starting it brings `db` and `api` up first. The source
 serves slot 0; another slot is a second command with `serve --slot 1`.
 
 To run the source outside the app (attached mode), start it with a token
