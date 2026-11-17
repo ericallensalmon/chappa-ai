@@ -14,6 +14,7 @@ pub mod data_safety;
 pub mod debug_http;
 pub mod delivery_hold;
 pub mod event_ring;
+pub mod login_path;
 pub mod open_path;
 pub mod projects;
 pub mod records;
@@ -58,6 +59,9 @@ pub fn run() {
     // config overrides) never sit in the app's own environment, which every
     // pane, job and agent it starts would inherit.
     stack_core::child_env::scrub_process_env();
+    // Also before any thread: a Finder or Dock launch on macOS inherits a
+    // PATH without Homebrew or the login shell's additions.
+    login_path::adopt_login_shell_path();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())

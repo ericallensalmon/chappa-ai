@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MOD_ALT,
   MOD_CTRL,
@@ -13,14 +13,18 @@ import {
   InputController,
   DEFAULT_CLIPBOARD_SHORTCUTS,
   dtoFromKeyboardEvent,
+  isAppChord,
   isAppShortcut,
   isCopyShortcut,
   isCtrlCCopyOnlyShortcut,
   isCtrlVPasteShortcut,
+  isHudShortcut,
   isMarkNavShortcut,
+  isNewAgentShortcut,
   isPanelShortcut,
   isProjectShortcut,
   isSearchShortcut,
+  macKeyAction,
   modsFromEvent,
   quotePath,
   quotePaths,
@@ -29,6 +33,7 @@ import {
   type InputControllerOptions,
   type WheelState,
 } from "./input";
+import { setPlatform } from "../platform";
 
 // --- pure mapping tables ---------------------------------------------------
 
@@ -800,5 +805,182 @@ describe("InputController drag-drop", () => {
     Object.defineProperty(drop, "dataTransfer", { value: { files: [{ path: "" }] } });
     h.element.dispatchEvent(drop);
     expect(h.onPaste.length).toBe(0);
+  });
+});
+
+// --- macOS: Cmd is the app modifier, Ctrl belongs to the terminal ----------
+
+describe("keyboard on macOS", () => {
+  beforeEach(() => setPlatform("mac"));
+  afterEach(() => setPlatform(null));
+
+  const key = (init: KeyboardEventInit): KeyboardEvent =>
+    new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+
+  it("moves every app chord from Ctrl to Cmd", () => {
+    const chords: KeyboardEventInit[] = [
+      { key: "ArrowLeft" },
+      { key: "ArrowUp" },
+      { key: "ArrowDown" },
+      { key: "f" },
+      { key: "ArrowUp", altKey: true },
+      { key: "d", shiftKey: true },
+      { key: "PageUp" },
+      { key: "PageDown" },
+      { key: "T", shiftKey: true },
+      { key: "W", shiftKey: true },
+      { key: "S", shiftKey: true },
+      { key: "A", shiftKey: true },
+      { key: "P", shiftKey: true },
+    ];
+    for (const init of chords) {
+      const label = JSON.stringify(init);
+      expect(isAppChord(key({ ...init, metaKey: true })), label).toBe(true);
+      // The same chord with Ctrl is a terminal key on macOS…
+      expect(isAppChord(key({ ...init, ctrlKey: true })), label).toBe(false);
+      expect(isAppShortcut(key({ ...init, ctrlKey: true }), false), label).toBe(false);
+      // …and Cmd+Ctrl together is not an app chord.
+      expect(isAppChord(key({ ...init, ctrlKey: true, metaKey: true })), label).toBe(false);
+    }
+    expect(isNewAgentShortcut(key({ key: "t", metaKey: true }))).toBe(true);
+    expect(isNewAgentShortcut(key({ key: "t", ctrlKey: true }))).toBe(false);
+    expect(isHudShortcut(key({ key: "d", metaKey: true, shiftKey: true }))).toBe(true);
+  });
+
+  it("sends Ctrl+C to the terminal as an interrupt, with or without a selection", () => {
+    for (const hasSelection of [false, true]) {
+      const h = makeHarness({ hasSelection: () => hasSelection });
+      const ev = key({ key: "c", ctrlKey: true });
+      h.textarea.dispatchEvent(ev);
+      expect(h.onCopy).toBe(0);
+      expect(h.onKey).toEqual([{ key: { kind: "char", ch: "c" }, mods: MOD_CTRL }]);
+      expect(ev.defaultPrevented).toBe(true);
+    }
+    // The copy-only setting is about the Ctrl reflex elsewhere; it does not
+    // apply here.
+    expect(isAppShortcut(key({ key: "c", ctrlKey: true }), false, DEFAULT_CLIPBOARD_SHORTCUTS)).toBe(false);
+  });
+
+  it("sends Ctrl+V to the terminal (0x16) whatever the paste setting says", () => {
+    const h = makeHarness({ clipboardSettings: () => ({ ctrlVPastes: true, ctrlCCopyOnly: true }) });
+    h.textarea.dispatchEvent(key({ key: "v", ctrlKey: true }));
+    expect(h.onClipboardPaste).toBe(0);
+    expect(h.onKey).toEqual([{ key: { kind: "char", ch: "v" }, mods: MOD_CTRL }]);
+  });
+
+  it("copies with Cmd+C when there is a selection and does nothing without one", () => {
+    expect(isCopyShortcut(key({ key: "c", metaKey: true }), true)).toBe(true);
+    expect(isCopyShortcut(key({ key: "c", ctrlKey: true }), true)).toBe(false);
+    const withSel = makeHarness({ hasSelection: () => true });
+    const copy = key({ key: "c", metaKey: true });
+    withSel.textarea.dispatchEvent(copy);
+    expect(withSel.onCopy).toBe(1);
+    expect(copy.defaultPrevented).toBe(true);
+
+    const noSel = makeHarness();
+    const nothing = key({ key: "c", metaKey: true });
+    noSel.textarea.dispatchEvent(nothing);
+    expect(noSel.onCopy).toBe(0);
+    expect(noSel.onKey.length).toBe(0);
+    expect(nothing.defaultPrevented).toBe(true);
+  });
+
+  it("leaves Cmd+V to the Edit menu, whose paste event reaches the terminal", () => {
+    const h = makeHarness();
+    const ev = key({ key: "v", metaKey: true });
+    h.textarea.dispatchEvent(ev);
+    expect(macKeyAction(ev)).toBe("paste-native");
+    expect(ev.defaultPrevented).toBe(false);
+    expect(h.onKey.length).toBe(0);
+    expect(h.onClipboardPaste).toBe(0);
+    // What the menu's Paste then does: a paste event on the textarea.
+    const paste = new Event("paste", { cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(paste, "clipboardData", { value: { getData: () => "ls -la" } });
+    h.textarea.dispatchEvent(paste);
+    expect(h.onPaste).toEqual(["ls -la"]);
+  });
+
+  it("selects everything with Cmd+A", () => {
+    let selectAll = 0;
+    const h = makeHarness({ onSelectAll: () => selectAll++ });
+    const ev = key({ key: "a", metaKey: true });
+    h.textarea.dispatchEvent(ev);
+    expect(selectAll).toBe(1);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(h.onKey.length).toBe(0);
+    // Ctrl+A is the terminal's (start of line in a shell).
+    h.textarea.dispatchEvent(key({ key: "a", ctrlKey: true }));
+    expect(selectAll).toBe(1);
+    expect(h.onKey).toEqual([{ key: { kind: "char", ch: "a" }, mods: MOD_CTRL }]);
+  });
+
+  it("leaves Cmd chords the app has no use for to the menu and the system", () => {
+    for (const init of [
+      { key: "q" },
+      { key: "w" },
+      { key: "h" },
+      { key: "m" },
+      { key: "," },
+      { key: "z", shiftKey: true },
+    ]) {
+      const label = JSON.stringify(init);
+      const h = makeHarness();
+      const ev = key({ ...init, metaKey: true });
+      h.textarea.dispatchEvent(ev);
+      expect(macKeyAction(ev), label).toBe("system");
+      expect(ev.defaultPrevented, label).toBe(false);
+      expect(h.onKey.length, label).toBe(0);
+    }
+    // An app chord that is also a Cmd chord is still the app's.
+    const h = makeHarness();
+    const newShell = key({ key: "T", metaKey: true, shiftKey: true });
+    h.textarea.dispatchEvent(newShell);
+    expect(newShell.defaultPrevented).toBe(true);
+    expect(h.onKey.length).toBe(0);
+  });
+
+  it("sends the character Option typed, not an Alt chord", () => {
+    // Option+L on a German layout types "@".
+    expect(dtoFromKeyboardEvent(key({ key: "@", code: "KeyL", altKey: true }))).toEqual({
+      key: { kind: "char", ch: "@" },
+      mods: 0,
+    });
+    // Option+Shift keeps the shift bit and drops only Alt.
+    expect(dtoFromKeyboardEvent(key({ key: "Ò", code: "KeyL", altKey: true, shiftKey: true }))).toEqual({
+      key: { kind: "char", ch: "Ò" },
+      mods: MOD_SHIFT,
+    });
+    // A layout whose Option leaves the letter as it is: still an Alt chord.
+    expect(dtoFromKeyboardEvent(key({ key: "b", code: "KeyB", altKey: true }))).toEqual({
+      key: { kind: "char", ch: "b" },
+      mods: MOD_ALT,
+    });
+    // Named keys keep Alt (Option+← is word-left in a shell).
+    expect(dtoFromKeyboardEvent(key({ key: "ArrowLeft", altKey: true }))).toEqual({
+      key: { kind: "left" },
+      mods: MOD_ALT,
+    });
+    // Ctrl+Option chords keep both bits.
+    expect(dtoFromKeyboardEvent(key({ key: "x", code: "KeyX", altKey: true, ctrlKey: true }))).toEqual({
+      key: { kind: "char", ch: "x" },
+      mods: MOD_ALT | MOD_CTRL,
+    });
+  });
+});
+
+describe("keyboard elsewhere keeps Ctrl as the app modifier", () => {
+  beforeEach(() => setPlatform("other"));
+  afterEach(() => setPlatform(null));
+
+  it("does not take Cmd/Win chords, Option-style characters or Ctrl+A from the terminal", () => {
+    const ev = new KeyboardEvent("keydown", { key: "a", metaKey: true });
+    expect(macKeyAction(ev)).toBeNull();
+    expect(isAppShortcut(ev, false)).toBe(false);
+    expect(isAppShortcut(new KeyboardEvent("keydown", { key: "a", ctrlKey: true }), false)).toBe(false);
+    expect(isAppChord(new KeyboardEvent("keydown", { key: "f", metaKey: true }))).toBe(false);
+    expect(isAppChord(new KeyboardEvent("keydown", { key: "f", ctrlKey: true }))).toBe(true);
+    expect(
+      dtoFromKeyboardEvent(new KeyboardEvent("keydown", { key: "@", code: "KeyL", altKey: true })),
+    ).toEqual({ key: { kind: "char", ch: "@" }, mods: MOD_ALT });
   });
 });

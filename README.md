@@ -5,8 +5,9 @@ dev processes around them: one window, many terminals, scoped by project,
 with notifications that tell you **which** agent in **which** project wants
 attention.
 
-**Status:** 0.1, under active development. Windows-first (ConPTY); macOS and
-Linux are untested.
+**Status:** 0.1, under active development. Windows-first (ConPTY). The test
+suite runs on Windows, Linux and macOS in CI; see [Platforms](#platforms) for
+what has and has not been tried by hand.
 
 ## What it does
 
@@ -71,6 +72,46 @@ cd .. && npm install && npm run dev                         # the app
 `src-tauri` needs the platform webview libraries to compile; the other three
 crates do not. `term-core`'s pty tests need a POSIX shell and are compiled out
 on Windows, where the rest of the suite runs.
+
+## Platforms
+
+- **Windows** is where the app is used day to day.
+- **Linux** builds and passes the test suite in CI; the app itself has not
+  been tried by hand.
+- **macOS** 13 or later builds and passes the test suite in CI on Apple
+  Silicon, see below. Intel Macs are not built or tested.
+
+### macOS
+
+Supported, with these notes:
+
+- **Unsigned for now.** Every push to `main` builds an unsigned Apple
+  Silicon `.dmg`,
+  attached to the CI run as the `chappa-ai-macos-unsigned` artifact. macOS
+  blocks an unsigned app the first time: Control-click (or right-click) the
+  app in Finder and choose **Open**, then **Open** again. On macOS 15 and
+  later that menu no longer offers it; open the app once, then go to
+  **System Settings → Privacy & Security** and click **Open Anyway**.
+- **Keys.** Cmd is the app's modifier: Cmd+C copies a selection, Cmd+V
+  pastes, Cmd+A selects the whole buffer, and the app shortcuts that are
+  Ctrl chords elsewhere are Cmd chords (Cmd+Shift+T for a new terminal,
+  Cmd+F to search). Every Ctrl chord goes to the terminal, so Ctrl+C
+  interrupts. Option types the character it makes on your keyboard layout.
+- **PATH.** Started from Finder or the Dock, the app reads the PATH from
+  your login shell (`$SHELL -l`) once at startup and adds
+  `/opt/homebrew/bin` and `/usr/local/bin`, so tools installed with
+  Homebrew or a version manager are found by panes, agents and git. A tool
+  that only your `~/.zshrc` puts on PATH (not `~/.zprofile`) is not seen;
+  move that line to `~/.zprofile`.
+- **Stacks** need Docker Desktop (or another engine with the `docker` CLI
+  and Compose) running.
+- Settings, the control token and logs live in
+  `~/Library/Application Support/com.chappa-ai.desktop/` and
+  `~/Library/Logs/com.chappa-ai.desktop/`.
+- **Not tried by hand yet:** the app window itself (rendering, fonts and
+  Retina scaling), the keys above, notifications, the folder picker,
+  opening files in an editor, Docker stacks, and agent CLIs started from a
+  Finder launch. Reports welcome.
 
 ## License
 

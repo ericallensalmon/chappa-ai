@@ -94,6 +94,8 @@ export interface PointDto {
 export type SelectionOpDto =
   | { op: "start"; point: PointDto; kind: SelectionKindDto }
   | { op: "update"; point: PointDto; kind: SelectionKindDto }
+  /** The whole buffer, scrollback included. */
+  | { op: "all" }
   | { op: "clear" };
 
 // --- command wrappers -------------------------------------------------------
@@ -1019,16 +1021,17 @@ export interface SettingsDto {
   /** Selection-finished → clipboard. Default false. */
   copyOnSelect: boolean;
   /** Ctrl+V (no alt/shift/meta) pastes the clipboard through the
-   *  existing paste path instead of sending 0x16 to the terminal. Default
+   *  existing paste path instead of sending 0x16 to the terminal (not
+   *  applied on macOS, where Cmd+V pastes). Default
    *  TRUE — deliberately, so existing settings.json files gain the behavior
    *  on upgrade. Frontend-only consumer (term/input.ts reads it live). */
   ctrlVPastes: boolean;
   /** Ctrl+C is ALWAYS an app shortcut — with a selection it copies,
    *  without one it is a no-op — so 0x03 never reaches the pty (stop a
    *  process from its rail row, not with a reflexive ^C). Default TRUE for
-   *  the same deliberate-upgrade reason. Cmd+C (mac) keeps today's behavior
-   *  in both modes; this setting is about the Windows/Linux Ctrl reflex.
-   *  Frontend-only consumer. */
+   *  the same deliberate-upgrade reason. Not applied on macOS, where Cmd
+   *  copies and Ctrl+C always reaches the terminal; this setting is about
+   *  the Windows/Linux Ctrl reflex. Frontend-only consumer. */
   ctrlCCopyOnly: boolean;
   /** TUI wheel multiplier, 1..=6 (default 3). Applied Rust-side (term-core
    *  `keys.rs::alt_screen_wheel`); normal scrollback stays at system speed. */

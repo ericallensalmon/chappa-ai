@@ -21,6 +21,8 @@
 import type * as ipc from "./ipc";
 import { firstLine, MARKDOWN_CSS, renderMarkdown } from "./markdown";
 import { renderEvents } from "./transcript";
+import { isNewAgentShortcut } from "./term/input";
+import { shortcutLabel } from "./platform";
 
 /** The kinds a record pane renders: the record kinds. */
 export type RecordPaneKind = ipc.RecordKind;
@@ -354,7 +356,8 @@ function keycap(text: string): HTMLElement {
 export interface RecordPaneOptions {
   /** A card action was chosen (button, or S / Enter for the first one). */
   onAction: (id: RecordAction["id"]) => void;
-  /** Ctrl+T on the focused pane: a new agent in this row's scope. */
+  /** Mod+T (Cmd on macOS, Ctrl elsewhere) on the focused pane: a new agent
+   *  in this row's scope. */
   onNewAgent: () => void;
 }
 
@@ -400,7 +403,7 @@ export class RecordPane {
     const startKeys = document.createElement("span");
     startKeys.append(keycap("S"), " or ", keycap("Enter"));
     const newKeys = document.createElement("span");
-    newKeys.append(keycap("Ctrl+T"));
+    newKeys.append(keycap(shortcutLabel("Mod+T")));
     const startLabelEl = label("Start");
     this.startKeys = [startLabelEl, startKeys];
     keys.append(startLabelEl, startKeys, label("New agent"), newKeys);
@@ -520,7 +523,7 @@ export class RecordPane {
       if (!primary) return;
       e.preventDefault();
       this.opts.onAction(primary.id);
-    } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+    } else if (isNewAgentShortcut(e)) {
       e.preventDefault();
       this.opts.onNewAgent();
     }

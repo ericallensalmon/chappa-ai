@@ -575,6 +575,9 @@ export class TerminalPanel {
       onCopy: () => {
         if (this.termId >= 0 && this.active) void this.api.copySelection(this.termId);
       },
+      onSelectAll: () => {
+        if (this.termId >= 0 && this.active) void this.api.selection(this.termId, { op: "all" });
+      },
       onSelectionEnd: () => this.copyOnSelect(),
       hasSelection: () => this.hasSelection,
       hasMouseCapture: () => this.frameMouseCapture,

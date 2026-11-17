@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,6 +24,7 @@ env:
   GITLEAKS_VERSION: 8.30.1
   GITLEAKS_SHA256_LINUX_X64: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
   GITLEAKS_SHA256_WINDOWS_X64: d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e
+  GITLEAKS_SHA256_DARWIN_ARM64: b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
 
 jobs:
   rust:
@@ -30,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -67,16 +69,28 @@ jobs:
           dir="$RUNNER_TEMP/gitleaks-bin"
           mkdir -p "$dir"
           cd "$RUNNER_TEMP"
-          if [ "$RUNNER_OS" = Windows ]; then
-            archive="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip"
-            sum="$GITLEAKS_SHA256_WINDOWS_X64"
-          else
-            archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-            sum="$GITLEAKS_SHA256_LINUX_X64"
-          fi
+          case "$RUNNER_OS" in
+            Windows)
+              archive="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip"
+              sum="$GITLEAKS_SHA256_WINDOWS_X64"
+              ;;
+            macOS)
+              archive="gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz"
+              sum="$GITLEAKS_SHA256_DARWIN_ARM64"
+              ;;
+            *)
+              archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+              sum="$GITLEAKS_SHA256_LINUX_X64"
+              ;;
+          esac
           curl -fsSL --retry 3 -o "$archive" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
-          echo "$sum  $archive" | sha256sum -c -
+          # macOS has shasum; sha256sum may be missing there.
+          if command -v sha256sum >/dev/null; then
+            echo "$sum  $archive" | sha256sum -c -
+          else
+            echo "$sum  $archive" | shasum -a 256 -c -
+          fi
           if [ "$RUNNER_OS" = Windows ]; then
             unzip -q -o "$archive" gitleaks.exe -d "$dir"
           else
@@ -86,7 +100,9 @@ jobs:
 
       # Tests that need git, node, gitleaks or a Linux docker daemon skip
       # when the tool is missing. Fail here instead, so a changed runner image
-      # can't turn those tests into silent passes.
+      # can't turn those tests into silent passes. Only the Linux runner has
+      # a daemon for Linux containers (the macOS runners have no docker), so
+      # only Linux runs the real-docker tests and checks for it.
       - name: Check the tools the tests rely on
         run: |
           git --version
@@ -105,18 +121,66 @@ jobs:
         id: test
         working-directory: desktop
         # The real-docker round trips need a daemon running Linux containers;
-        # the Windows runner's daemon runs Windows containers.
+        # the Windows runner's daemon runs Windows containers and the macOS
+        # runners have none.
         env:
           CHAPPA_TEST_DOCKER: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: cargo test --workspace --no-fail-fast
 
-      # Each OS compiles code the other doesn't (ConPTY and Win32 process
-      # handling, Unix ptys and sockets), so clippy runs on both. It also
-      # runs when tests failed, so one push reports both.
+      # Each OS compiles code the others don't (ConPTY and Win32 process
+      # handling, Unix ptys and sockets, macOS-only startup), so clippy runs
+      # on all three. It also runs when tests failed, so one push reports
+      # both.
       - name: cargo clippy
         if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
         working-directory: desktop
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # An unsigned macOS app and disk image, for trying a build on a Mac. Only
+  # for main and manual runs: a release build is slow, and a pull request
+  # gets its macOS coverage from the rust job.
+  bundle-macos:
+    # TEMPORARY-PR-RUN: becomes `github.event_name != 'pull_request'` before merging.
+    if: ${{ true }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            desktop/ui/package-lock.json
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: desktop
+
+      - name: Install the build tools and the webview's dependencies
+        run: |
+          npm ci --prefix desktop
+          npm ci --prefix desktop/ui
+
+      # No signing identity is configured, so the bundle is unsigned. The
+      # disk image's Finder window styling is skipped on CI by the bundler.
+      - name: Build the app and the disk image
+        working-directory: desktop
+        run: npx tauri build --bundles app,dmg
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chappa-ai-macos-unsigned
+          path: desktop/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
 
   fmt:
     runs-on: ubuntu-latest

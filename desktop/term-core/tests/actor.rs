@@ -628,6 +628,19 @@ fn selection_and_copy_selection() {
     assert_eq!(frame.selection, None);
 }
 
+#[test]
+fn select_all_takes_the_scrollback_and_the_screen() {
+    let (handle, rx, _sink) = test_actor(10, 3);
+    // Five lines on a three-row screen: the first two scroll into history.
+    handle.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    let frame = next_frame(&rx);
+    handle.ack(frame.seq);
+
+    handle.selection(SelectionOp::All);
+    let copied = handle.copy_selection().expect("a selection to copy");
+    assert_eq!(copied.trim_end(), "one\ntwo\nthree\nfour\nfive");
+}
+
 // ---- text dump -------------------------------------------------------------
 
 #[test]

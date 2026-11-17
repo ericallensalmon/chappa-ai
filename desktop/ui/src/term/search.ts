@@ -3,8 +3,10 @@
 // the default input, and the raw-regex toggle (invalid regex → red border,
 // the search clears and the count flips to 0 — a search that can't run
 // behaves like no search, per the host-run rule). Esc → onClose (the
-// panel clears the search and returns typing to the terminal); Ctrl+F while
+// panel clears the search and returns typing to the terminal); Mod+F while
 // open → refocus, never close.
+
+import { isSearchShortcut } from "./input";
 
 /** Debounce window for search-as-you-type. */
 export const SEARCH_DEBOUNCE_MS = 150;
@@ -107,8 +109,8 @@ export class SearchBar {
       } else if (e.key === "Escape") {
         e.preventDefault();
         this.opts.onClose();
-      } else if (e.key.toLowerCase() === "f" && e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
-        // Ctrl+F while the bar is open refocuses it — it never closes.
+      } else if (isSearchShortcut(e)) {
+        // Mod+F while the bar is open refocuses it — it never closes.
         e.preventDefault();
         this.input.focus();
         this.input.select();
