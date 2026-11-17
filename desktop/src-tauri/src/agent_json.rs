@@ -1850,6 +1850,12 @@ mod tests {
         assert!(!r.delivered);
         assert_eq!(r.reason.as_deref(), Some("exited: boom"), "{r:?}");
         assert_eq!(r.wait_ms, 20_000);
+        // The receipt returns on the CLI's own error; the exit error and the
+        // return to waiting come from the exit handler a moment later.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while kinds_of(&h).len() < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let ks = kinds_of(&h);
         assert_eq!(
             ks,
