@@ -98,6 +98,20 @@ pub fn parse_listen_addr(text: &str) -> Result<SocketAddr, String> {
 /// One response: status and JSON body.
 pub type Reply = (u16, Value);
 
+/// Every string in `v` with the generated values in it hidden.
+pub fn hide_generated(v: &mut Value, secrets: &stack_core::instance_secrets::Secrets) {
+    match v {
+        Value::String(s) => {
+            if secrets.found_in(s) {
+                *s = secrets.hide(s);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|i| hide_generated(i, secrets)),
+        Value::Object(map) => map.values_mut().for_each(|i| hide_generated(i, secrets)),
+        _ => {}
+    }
+}
+
 /// What the request headers say about the caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Caller {
@@ -188,6 +202,9 @@ pub struct Source {
     secret_busy: Arc<std::sync::atomic::AtomicBool>,
     /// What the definition must hash to before anything runs.
     pin: Mutex<DefinitionPin>,
+    /// The work folder of the definition last read, where the instances'
+    /// generated secrets are kept (see [`Source::handle_as`]).
+    last_work_dir: Mutex<Option<PathBuf>>,
 }
 
 /// The least time between two looks at the workspaces on the refresher
@@ -227,6 +244,7 @@ impl Source {
             last_secret_tick: Mutex::new(None),
             secret_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pin: Mutex::new(DefinitionPin::Unchecked),
+            last_work_dir: Mutex::new(None),
         });
         let _ = source.me.set(Arc::downgrade(&source));
         let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
@@ -271,11 +289,30 @@ impl Source {
     }
 
     fn load(&self) -> Result<Loaded, String> {
-        Loaded::load(
+        let loaded = Loaded::load(
             &self.config.dir,
             self.config.stack.as_deref(),
             self.config.slot,
-        )
+        )?;
+        *self.last_work_dir.lock().unwrap_or_else(|p| p.into_inner()) = Some(loaded.work_dir());
+        Ok(loaded)
+    }
+
+    /// Every value generated for an instance of this stack, for hiding in
+    /// what goes out. The work folder is the one the request just read
+    /// (else the default one beside the definition).
+    pub fn generated_secrets(&self) -> stack_core::instance_secrets::Secrets {
+        let work = self
+            .last_work_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| {
+                self.config
+                    .dir
+                    .join(stack_core::definition::DEFAULT_WORK_DIR)
+            });
+        stack_core::instance_secrets::existing(&work)
     }
 
     /// Answer one request. `auth` is the `Authorization` header value.
@@ -295,7 +332,29 @@ impl Source {
     }
 
     /// [`Source::handle`] with everything the headers say about the caller.
+    ///
+    /// Every reply leaves with each value the runner generated for an
+    /// instance (`{secret:<name>}`) shown as `••••`: status script output,
+    /// links, job titles and logs can all carry the instance env, and a
+    /// generated password is hidden like any other credential. Nothing
+    /// reveals it; the file under `.work/` is where a person reads it.
     pub fn handle_as(
+        &self,
+        method: &str,
+        url: &str,
+        auth: Option<&str>,
+        caller: &Caller,
+        body: &str,
+    ) -> Reply {
+        let (status, mut reply) = self.route(method, url, auth, caller, body);
+        let secrets = self.generated_secrets();
+        if !secrets.is_empty() {
+            hide_generated(&mut reply, &secrets);
+        }
+        (status, reply)
+    }
+
+    fn route(
         &self,
         method: &str,
         url: &str,
@@ -519,6 +578,20 @@ impl Source {
             secrets.banner(),
         ) {
             banners.push(b);
+        }
+        // The project's own gitleaks config is not what the scans use (not
+        // trusted, changed since, or failing the config rules): say so, and
+        // that the scans fell back to rules that can only find more.
+        if let (Some(banners), Some(why)) = (
+            v.get_mut("banners").and_then(Value::as_array_mut),
+            self.world.secrets.config_review(),
+        ) {
+            banners.push(json!({
+                "id": secret_scan::CONFIG_REVIEW_BANNER,
+                "tone": "warn",
+                "title": "Review the project's secret-scan config",
+                "lines": [why],
+            }));
         }
         if secrets.active() {
             if let Some(facts) = v.get_mut("facts").and_then(Value::as_array_mut) {

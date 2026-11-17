@@ -28,8 +28,10 @@
 //! **Nothing in the scanned tree configures the scan.** A cloned repository
 //! or an agent could otherwise ship an allow-everything `.gitleaks.toml` or
 //! a `.gitleaksignore` and blind it. So every run passes an explicit
-//! `--config`: the caller's ([`GitleaksScanner::config`], from the user's
-//! settings) or [`DEFAULT_CONFIG`] written into the run's scratch directory,
+//! `--config`: a trusted project config's checked text
+//! ([`GitleaksScanner::config_text`], see [`super::config`]) or
+//! [`DEFAULT_CONFIG`], either written into the run's scratch directory, or
+//! the caller's file ([`GitleaksScanner::config`], from the user's settings),
 //! which extends gitleaks' defaults with rules for credentials written
 //! inline in commands and settings files. `--gitleaks-ignore-path` names an
 //! empty scratch directory, and gitleaks' config variables are removed from
@@ -80,6 +82,12 @@ pub struct GitleaksScanner {
     /// A gitleaks config file the user chose (never one from a scanned
     /// tree). `None` uses [`DEFAULT_CONFIG`].
     pub config: Option<PathBuf>,
+    /// A project config's exact text, checked by the caller (its hash
+    /// matched its trust, see [`super::config::choose`]). Written into the
+    /// run's scratch folder layered on [`Self::config`] (or on the app's own
+    /// config when that is `None`), so gitleaks reads the bytes that were
+    /// checked, never the file again, and never loses the rules below.
+    pub config_text: Option<String>,
     /// A baseline in gitleaks' own report format that the user keeps for
     /// gitleaks itself, named in their settings (never taken from a
     /// scanned tree), passed as `--baseline-path` when the file exists.
@@ -96,6 +104,7 @@ impl GitleaksScanner {
             work_dir: work_dir.into(),
             timeout: DEFAULT_TIMEOUT,
             config: None,
+            config_text: None,
             baseline_path: None,
             stage_with_links: true,
         }
@@ -161,13 +170,27 @@ impl GitleaksScanner {
         };
         let ignore_dir = dir.path.join("ignore");
         fs::create_dir_all(&ignore_dir).map_err(|e| io(&ignore_dir, e))?;
-        let config = match &self.config {
-            Some(c) => c.clone(),
-            None => {
-                let c = dir.path.join("gitleaks.toml");
-                fs::write(&c, DEFAULT_CONFIG).map_err(|e| io(&c, e))?;
-                c
+        let written = |name: &str, text: &str| -> Result<PathBuf, SafetyError> {
+            let c = dir.path.join(name);
+            fs::write(&c, text).map_err(|e| io(&c, e))?;
+            Ok(c)
+        };
+        let config = match (&self.config_text, &self.config) {
+            // A project config is layered on its base, never in place of it:
+            // the Settings config when there is one, else the app's own
+            // (see `super::config::layered`).
+            (Some(text), base) => {
+                let base = match base {
+                    Some(b) => std::path::absolute(b).unwrap_or_else(|_| b.clone()),
+                    None => written("app-gitleaks.toml", DEFAULT_CONFIG)?,
+                };
+                let layered = super::config::layered(text, &base).map_err(|e| {
+                    SafetyError::Scanner(format!("the project's gitleaks config: {e}"))
+                })?;
+                written("gitleaks.toml", &layered)?
             }
+            (None, Some(c)) => c.clone(),
+            (None, None) => written("gitleaks.toml", DEFAULT_CONFIG)?,
         };
         Ok(Scratch {
             dir,

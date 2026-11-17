@@ -138,6 +138,9 @@ fn the_example_database_comes_up_and_goes_down_through_the_protocol() {
     let mut world = World::real();
     world.spawner = Arc::new(ThreadSpawner);
     world.hosts_text = Some("127.0.0.1 localhost dev.example.test\n".into());
+    // The runner program as built for this test run, not the test binary.
+    world.exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chappa-stack"));
+    let exe = world.exe.clone();
     let src = source(world, &p.dir);
 
     let (_, env) = get(&src, "/api/environment");
@@ -172,7 +175,34 @@ fn the_example_database_comes_up_and_goes_down_through_the_protocol() {
         .iter()
         .find(|a| a["id"] == "logs")
         .unwrap();
-    assert_eq!(logs["command"][0], "docker");
+    // The instance has a generated password, so the engine's `logs -f`
+    // runs under the runner's `follow-command`, which hides it.
+    let command: Vec<&str> = logs["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert_eq!(command[0], exe.display().to_string(), "{logs}");
+    assert_eq!(
+        command[1..4],
+        [
+            "follow-command",
+            chappa_stack::actions::HIDE_GENERATED_ARG,
+            &p.work().display().to_string()
+        ],
+        "{logs}"
+    );
+    let wrapped = &command[command.iter().position(|w| *w == "--").unwrap() + 1..];
+    assert_eq!(wrapped[0], "docker", "{logs}");
+    assert_eq!(
+        &wrapped[wrapped.len() - 3..wrapped.len() - 1],
+        ["logs", "-f"]
+    );
+    assert!(
+        wrapped[wrapped.len() - 1].contains("db"),
+        "the db container: {logs}"
+    );
 
     let down = env["facts"][0]["actions"]
         .as_array()

@@ -96,16 +96,23 @@ pub const EXIT_REFUSED: i32 = 2;
 const INSTANCE_ENV: &str = "CHAPPA_STACK_INSTANCE";
 
 /// Where a job's lines go: the pane (stdout) and the job's log file.
+///
+/// Every line, a step's output included, goes out with the values the
+/// runner generated for an instance shown as `••••`: commands and their
+/// output can carry the instance env. The values are read again for each
+/// line, because the job itself may be what generates them.
 struct Out<'a> {
     pane: &'a mut dyn Write,
     log: Option<File>,
+    work_dir: PathBuf,
 }
 
 impl Out<'_> {
     fn say(&mut self, text: &str) {
-        crate::world::line(self.pane, text);
+        let shown = stack_core::instance_secrets::existing(&self.work_dir).hide(text);
+        crate::world::line(self.pane, &shown);
         if let Some(f) = &mut self.log {
-            let _ = writeln!(f, "{text}");
+            let _ = writeln!(f, "{shown}");
         }
     }
 }
@@ -145,7 +152,11 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
         return EXIT_REFUSED;
     }
     let log = open_log(&rec.log, true).ok();
-    let mut out = Out { pane, log };
+    let mut out = Out {
+        pane,
+        log,
+        work_dir: work_dir.clone(),
+    };
     let started = utc_now();
     let _ = JobRecord::update(&work_dir, id, |r| {
         r.status = JobStatus::Running;
@@ -1515,4 +1526,39 @@ fn start_process(
         log.display()
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_line_shows_a_generated_value_as_the_mask_in_the_pane_and_the_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join(".work");
+        let log_path = tmp.path().join("job.log");
+        let mut pane: Vec<u8> = Vec::new();
+        let mut out = Out {
+            pane: &mut pane,
+            log: Some(File::create(&log_path).unwrap()),
+            work_dir: work.clone(),
+        };
+        out.say("before any value exists");
+        // Generated while the job runs (as an instance resolution does).
+        let names = ["db".to_string()].into();
+        let v = stack_core::instance_secrets::load_or_create(&work, "app-0", &names)
+            .unwrap()
+            .get("db")
+            .unwrap()
+            .to_owned();
+        out.say(&format!("  $ psql postgres://app:{v}@db/app"));
+        drop(out);
+        let pane = String::from_utf8(pane).unwrap();
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        for shown in [&pane, &log] {
+            assert!(shown.contains("before any value exists"), "{shown}");
+            assert!(shown.contains("postgres://app:••••@db/app"), "{shown}");
+            assert!(!shown.contains(&v), "{shown}");
+        }
+    }
 }

@@ -74,3 +74,40 @@ describe("SecuritySection", () => {
     section.dispose();
   });
 });
+
+describe("a gitleaks config inside an open project", () => {
+  it("is said to be refused when the app does not save it, and not used when saved before", async () => {
+    const api: SettingsApi = {
+      getSettings: async () => defaultSettings(),
+      setSettings: async () => {
+        throw new Error("Settings ▸ Security: the gitleaks config is inside the project folder");
+      },
+    };
+    const s = new SettingsStore(api);
+    await s.load();
+    let refused: string | undefined;
+    const info = vi.fn(async () => ({ found: true, program: "gitleaks", effectiveEnabled: true, configRefused: refused }));
+    const section = new SecuritySection({ settings: s, scannerInfo: info });
+    document.body.appendChild(section.element);
+    section.activate();
+    await new Promise((r) => setTimeout(r, 0));
+    const hint = section.element.querySelector('[data-role="configHint"]')!;
+    expect(hint.textContent).toBe("");
+    const config = section.element.querySelector<HTMLInputElement>('[data-setting="secretScanConfig"]')!;
+    config.value = "C:\code\app\gitleaks.toml";
+    config.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(hint.textContent).toContain("Not saved");
+    expect(hint.textContent).toContain("secretScan: { config: <path> }");
+    section.dispose();
+
+    // Saved before the folder was opened: kept, shown as not used.
+    refused = "the gitleaks config C:\code\app\gitleaks.toml is inside the project folder C:\code\app";
+    const again = new SecuritySection({ settings: s, scannerInfo: info });
+    document.body.appendChild(again.element);
+    again.activate();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(again.element.querySelector('[data-role="configHint"]')!.textContent).toContain(`Not used: ${refused}`);
+    again.dispose();
+  });
+});

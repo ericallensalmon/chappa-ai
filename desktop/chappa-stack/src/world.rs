@@ -24,6 +24,7 @@ use stack_core::intent::format_utc;
 use stack_core::jobs::RunBlock;
 use stack_core::probe::{ProbeHttp, ProbeResponse, StdHttp};
 use stack_core::provenance::{GitCli, GitError, GitFacts};
+use stack_core::safety::secrets::config::ProjectScanConfig;
 
 pub type Shared<T> = Arc<T>;
 
@@ -49,7 +50,8 @@ pub struct World {
     pub procs: Shared<dyn ProcessHost + Send + Sync>,
     /// How a job is started when the caller cannot host a pane.
     pub spawner: Shared<dyn JobSpawner + Send + Sync>,
-    /// The program a pane runs for `run-job` (this executable).
+    /// The program a pane runs for `run-job`, `follow` and `follow-command`
+    /// (`chappa-stack`; see [`runner_exe`]).
     pub exe: PathBuf,
     /// How long a freshly started process component must stay alive to
     /// count as started.
@@ -70,16 +72,55 @@ pub struct World {
     /// real scanner uses it, and every job is started with it
     /// ([`World::job_argv`]) so a job's scans use the same rules.
     pub gitleaks_config: Option<PathBuf>,
+    /// The project's own gitleaks config (`chappa.yml` `secretScan.config`)
+    /// with the hash the person trusted, as the app hands it over. Every
+    /// scan re-reads and re-hashes the file and uses it only while it
+    /// matches; otherwise the Settings config or the default, with a banner
+    /// (see [`stack_core::safety::secrets::config`]). Jobs get it too.
+    pub project_scan_config: ProjectScanConfig,
 }
 
 /// The argument that carries [`World::gitleaks_config`] on `serve` and
 /// `run-job`.
 pub const GITLEAKS_CONFIG_ARG: &str = "--gitleaks-config";
+/// The arguments that carry [`World::project_scan_config`]: its path, and
+/// its trusted hash (`none` while it is not trusted).
+pub const PROJECT_GITLEAKS_CONFIG_ARG: &str = "--project-gitleaks-config";
+pub const PROJECT_GITLEAKS_CONFIG_HASH_ARG: &str = "--project-gitleaks-config-hash";
 
 /// The default for [`World::settle`].
 pub const PROCESS_SETTLE: Duration = Duration::from_millis(1500);
 /// The default for [`World::hook_retry`].
 pub const HOOK_RETRY: Duration = Duration::from_secs(3);
+
+/// The program's own file name.
+const RUNNER_NAME: &str = "chappa-stack";
+/// The `chappa-stack` program that panes and detached jobs run (`run-job`,
+/// `follow`, `follow-command`): this process when it is `chappa-stack` (the
+/// app launches the runner as its own process, the usual case), else a
+/// `chappa-stack` program in the same folder as the running one (the runner
+/// embedded in another host shipped beside it), else the bare name, found on
+/// `PATH` by whatever starts it. Never another program: a command built for
+/// a pane must not start a test harness or an embedding host in its place.
+/// No folder above is searched, so a `chappa-stack` planted higher up the
+/// tree is never what runs. (Tests set [`World::exe`] themselves.)
+pub fn runner_exe(current: Option<&Path>) -> PathBuf {
+    let file = format!("{RUNNER_NAME}{}", std::env::consts::EXE_SUFFIX);
+    let Some(current) = current else {
+        return PathBuf::from(RUNNER_NAME);
+    };
+    let is_runner = current
+        .file_stem()
+        .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(RUNNER_NAME));
+    if is_runner {
+        return current.to_path_buf();
+    }
+    current
+        .parent()
+        .map(|dir| dir.join(&file))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(RUNNER_NAME))
+}
 
 impl World {
     /// The real machine: engines, git and HTTP for real.
@@ -102,27 +143,40 @@ impl World {
             steps: Arc::new(ChildSteps),
             procs: Arc::new(OsProcesses),
             spawner: Arc::new(DetachedSpawner),
-            exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("chappa-stack")),
+            exe: runner_exe(std::env::current_exe().ok().as_deref()),
             settle: PROCESS_SETTLE,
             clock: Arc::new(SystemClock),
             hook_retry: HOOK_RETRY,
             secrets: Arc::new(crate::secret_scan::GitleaksOnPath::default()),
             gitleaks_config: None,
+            project_scan_config: ProjectScanConfig::None,
         }
     }
 
     /// The real world scanning with `config` (the app's Settings value) in
     /// place of the built-in default.
     pub fn with_gitleaks_config(mut self, config: Option<PathBuf>) -> World {
-        self.secrets = Arc::new(crate::secret_scan::GitleaksOnPath::with_config(
-            config.clone(),
-        ));
         self.gitleaks_config = config;
+        self.secrets = Arc::new(crate::secret_scan::GitleaksOnPath {
+            config: self.gitleaks_config.clone(),
+            project: self.project_scan_config.clone(),
+        });
+        self
+    }
+
+    /// The real world scanning with the project's own config first, while
+    /// it is the trusted one (see [`World::project_scan_config`]).
+    pub fn with_project_scan_config(mut self, project: ProjectScanConfig) -> World {
+        self.project_scan_config = project;
+        self.secrets = Arc::new(crate::secret_scan::GitleaksOnPath {
+            config: self.gitleaks_config.clone(),
+            project: self.project_scan_config.clone(),
+        });
         self
     }
 
     /// `run-job <id>` as this executable runs it, carrying the gitleaks
-    /// config on, so a job scans with the rules the source was started with.
+    /// configs on, so a job scans with the rules the source was started with.
     pub fn job_argv(&self, job_id: &str) -> Vec<String> {
         let mut argv = vec![
             self.exe.display().to_string(),
@@ -132,6 +186,12 @@ impl World {
         if let Some(c) = &self.gitleaks_config {
             argv.push(GITLEAKS_CONFIG_ARG.to_string());
             argv.push(c.display().to_string());
+        }
+        if let Some((path, hash)) = self.project_scan_config.args() {
+            argv.push(PROJECT_GITLEAKS_CONFIG_ARG.to_string());
+            argv.push(path.display().to_string());
+            argv.push(PROJECT_GITLEAKS_CONFIG_HASH_ARG.to_string());
+            argv.push(hash.to_string());
         }
         argv
     }
@@ -956,6 +1016,36 @@ pub fn line(out: &mut dyn Write, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_runner_program_is_chappa_stack_never_the_host_running_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = format!("chappa-stack{}", std::env::consts::EXE_SUFFIX);
+        let bin = tmp.path().join("bin");
+        let deps = bin.join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let host = |dir: &Path| dir.join(format!("host-1a2b{}", std::env::consts::EXE_SUFFIX));
+        // Itself, when it is the runner (whether or not the file is there).
+        let own = bin.join(&file);
+        assert_eq!(runner_exe(Some(&own)), own);
+        // Another program with nothing beside it: the bare name, never itself.
+        assert_eq!(runner_exe(Some(&host(&bin))), PathBuf::from("chappa-stack"));
+        // A runner in the same folder is the one.
+        std::fs::write(&own, "").unwrap();
+        assert_eq!(runner_exe(Some(&host(&bin))), own);
+        // One a folder above is never searched for: it could be planted.
+        assert_eq!(
+            runner_exe(Some(&host(&deps))),
+            PathBuf::from("chappa-stack")
+        );
+        // A folder named like the program is not the program.
+        std::fs::create_dir_all(deps.join(&file)).unwrap();
+        assert_eq!(
+            runner_exe(Some(&host(&deps))),
+            PathBuf::from("chappa-stack")
+        );
+        assert_eq!(runner_exe(None), PathBuf::from("chappa-stack"));
+    }
     use stack_core::driver::EngineKind;
     use std::sync::atomic::{AtomicU32, Ordering};
 

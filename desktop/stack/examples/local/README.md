@@ -108,9 +108,11 @@ api:
 
 The first time an instance is resolved, the stack runner generates a
 random value for each `{secret:<name>}` the definition uses and keeps it
-in `.work/instances/<instance>/secrets/<name>` (owner-only on Linux and
-macOS). Every `{secret:db}` of that instance is the same value; `local-0`
-and `local-1` get different ones. The value reaches the containers through
+in `.work/instances/<instance>/secrets/<name>` (owner-only: mode 0700 / 0600
+on Linux and macOS, the current user as the only access entry on Windows;
+when that cannot be set, the value is not created and the job fails).
+Every `{secret:db}` of that instance is the same value; `local-0` and
+`local-1` get different ones. The value reaches the containers through
 the generated override file, also under `.work/`, so the compose files
 leave `POSTGRES_PASSWORD` and `PGPASSWORD` out.
 
@@ -122,7 +124,14 @@ again with the current value.
 
 The secret scan of the instance environment skips values the runner
 generated this way. A password written into `chappa.yml` or a file it
-names is still reported.
+names is still reported. So is a generated value that turns up in a
+commit or a tracked file of a bound worktree (rule `generated-secret`, by
+file and line, never the value): it has left the work folder.
+
+Everywhere the app shows what the stack does (the Environment view, job
+panes and their logs, the `logs` terminals) a generated value is shown as
+`••••`, like any other credential. Nothing reveals it there; the file is
+where you read it.
 
 ## Validation
 

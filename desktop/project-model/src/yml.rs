@@ -228,7 +228,36 @@ pub struct ProjectYml {
     pub icon_initials: Option<String>,
     #[serde(default)]
     pub processes: IndexMap<String, ProcessDef>,
+    /// `secretScan:`, the project's own secret-scan options.
+    #[serde(
+        default,
+        rename = "secretScan",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_scan: Option<SecretScanOptions>,
     /// Top-level keys chappa-ai does not model, preserved through write-back.
+    #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
+    pub unknown: IndexMap<String, YamlValue>,
+}
+
+/// The project's own secret-scan options:
+///
+/// ```yaml
+/// secretScan:
+///   config: tools/gitleaks.toml
+/// ```
+///
+/// `config` names a gitleaks config file, relative to the project folder
+/// (it must stay inside it). The file is part of what the project is
+/// trusted for, like a command: its content hash joins the trust hash, the
+/// trust prompt shows it, and every secret scan of the project uses it only
+/// while it is the trusted content (see the app's `scan_config` module and
+/// stack-core's `safety::secrets::config`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SecretScanOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// Keys chappa-ai does not model, preserved through write-back.
     #[serde(default, flatten, skip_serializing_if = "IndexMap::is_empty")]
     pub unknown: IndexMap<String, YamlValue>,
 }
@@ -240,6 +269,7 @@ impl Default for ProjectYml {
             icon: None,
             icon_initials: None,
             processes: IndexMap::new(),
+            secret_scan: None,
             unknown: IndexMap::new(),
         }
     }
@@ -252,6 +282,8 @@ struct ProjectYmlRaw {
     icon: Option<String>,
     icon_initials: Option<String>,
     processes: Option<IndexMap<String, ProcessDefRaw>>,
+    #[serde(default, rename = "secretScan")]
+    secret_scan: Option<SecretScanOptions>,
     #[serde(flatten)]
     unknown: IndexMap<String, YamlValue>,
 }
@@ -263,6 +295,7 @@ impl Default for ProjectYmlRaw {
             icon: None,
             icon_initials: None,
             processes: None,
+            secret_scan: None,
             unknown: IndexMap::new(),
         }
     }
@@ -372,6 +405,7 @@ impl ProjectYml {
             icon: raw.icon,
             icon_initials: raw.icon_initials,
             processes,
+            secret_scan: raw.secret_scan,
             unknown: raw.unknown,
         })
     }
@@ -729,8 +763,25 @@ processes:
             ]
             .into_iter()
             .collect(),
+            secret_scan: None,
             unknown: IndexMap::new(),
         }
+    }
+
+    #[test]
+    fn secret_scan_config_is_read_and_kept_through_write_back() {
+        let text = "processes:\n  web:\n    command: npm run dev\nsecretScan:\n  config: tools/gitleaks.toml\n  later: 1\n";
+        let yml = ProjectYml::parse(text).unwrap();
+        let scan = yml.secret_scan.clone().unwrap();
+        assert_eq!(scan.config.as_deref(), Some("tools/gitleaks.toml"));
+        assert!(scan.unknown.contains_key("later"));
+        assert!(yml.unknown.is_empty(), "modelled, not passed through");
+        let again = ProjectYml::parse(&yml.to_yaml_string().unwrap()).unwrap();
+        assert_eq!(again, yml);
+        assert_eq!(
+            ProjectYml::parse("processes: {}\n").unwrap().secret_scan,
+            None
+        );
     }
 
     #[test]

@@ -104,3 +104,20 @@ describe("offerLaunchAnyway", () => {
     await expect(cancelled).resolves.toBeNull();
   });
 });
+
+describe("the project's own config under review", () => {
+  it("leads the refusal and the notices, and a clean launch gets a notice of its own", () => {
+    const review = "The project's secret-scan config (tools/gitleaks.toml) changed since it was trusted, so scans use the built-in rules instead (which can only find more).";
+    const parsed = parseSecretScanBlock(`${BLOCK_PREFIX}${JSON.stringify({ ...block, configReview: review })}`);
+    expect(parsed?.configReview).toBe(review);
+    const text = blockMessage(parsed!);
+    expect(text.startsWith(`Review the project's secret-scan config: ${review}`)).toBe(true);
+    expect(text).toContain(".env:1  (github-pat)");
+    expect(blockMessage(block)).not.toContain("Review the project's");
+    const clean = noticeText({ kind: "config-review", cwd: "C:\code\app", reason: review });
+    expect(clean.title).toBe("Review the project's secret-scan config");
+    expect(clean.body).toContain(review);
+    const warned = noticeText({ kind: "warn", cwd: "C:\code\app", findings: block.findings, skipped: 0, configReview: review });
+    expect(warned.body).toContain(review);
+  });
+});

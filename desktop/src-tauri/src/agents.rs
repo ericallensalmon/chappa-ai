@@ -1989,12 +1989,19 @@ pub fn spawn_agent_with(
             let pref = req
                 .project_id
                 .and_then(|id| ctx.projects.secret_scan_pref(id));
-            crate::secret_scan::gate_launch(
+            // The project's own gitleaks config while it is the trusted one,
+            // and the open folders a Settings config must lie outside of.
+            let configs = crate::secret_scan::ScanConfigs {
+                project: ctx.projects.scan_config_for(req.project_id),
+                open_roots: ctx.projects.open_roots(),
+            };
+            crate::secret_scan::gate_launch_with(
                 &settings,
                 pref,
                 project_root,
                 dir,
                 req.launch_anyway.as_deref(),
+                &configs,
             )?
         }
         _ => None,

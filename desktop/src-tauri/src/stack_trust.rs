@@ -18,7 +18,10 @@
 use std::path::{Path, PathBuf};
 
 use project_model::yml::{CommandLine, ProcessDef, ProjectYml};
+use stack_core::safety::secrets::config::ProjectScanConfig;
 use stack_core::trust::{definition_trust, DefinitionTrust, UNTRUSTED};
+
+use crate::scan_config::ScanConfigSource;
 
 /// The argument the runner takes the trusted hash in.
 pub const TRUSTED_DEFINITION_ARG: &str = "--trusted-definition";
@@ -26,6 +29,11 @@ pub const TRUSTED_DEFINITION_ARG: &str = "--trusted-definition";
 /// Security in, so its scans and the app's pre-agent scan use one set of
 /// rules. A path the person chose; never one from a scanned tree.
 pub const GITLEAKS_CONFIG_ARG: &str = "--gitleaks-config";
+/// The arguments the runner takes the project's own gitleaks config in: the
+/// file, and the hash it was trusted at (`none` while it is not). The runner
+/// re-hashes the file before every scan and uses it only while it matches.
+pub const PROJECT_GITLEAKS_CONFIG_ARG: &str = "--project-gitleaks-config";
+pub const PROJECT_GITLEAKS_CONFIG_HASH_ARG: &str = "--project-gitleaks-config-hash";
 
 /// The words of a command as it is written (a shell line split on spaces).
 fn words(def: &ProcessDef) -> Vec<String> {
@@ -125,13 +133,22 @@ pub fn stack_sources<'a>(
 /// command runs a stack (so every existing trust record stays valid), else
 /// a hash over it and each stack runner's definition hash. Only this hash
 /// is ever stored.
-pub fn project_trust_hash(file_hash: &str, stacks: &[StackSource]) -> String {
-    if stacks.is_empty() {
+pub fn project_trust_hash(
+    file_hash: &str,
+    stacks: &[StackSource],
+    scan_config: Option<&ScanConfigSource>,
+) -> String {
+    if stacks.is_empty() && scan_config.is_none() {
         return file_hash.to_owned();
     }
     let mut text = format!("chappa project trust v1\0{file_hash}");
     for s in stacks {
         text.push_str(&format!("\0{}\0{}", s.name, s.hash()));
+    }
+    // The project's own gitleaks config is trusted like a command: its
+    // path and content hash, so an edit of the file alone asks again.
+    if let Some(c) = scan_config {
+        text.push_str(&format!("\0secretScan.config\0{}", c.hash_part()));
     }
     project_model::hash::content_hash(text.as_bytes())
 }
@@ -143,6 +160,7 @@ pub fn trust_hash_on_disk(root: &Path) -> Option<String> {
     Some(project_trust_hash(
         &file_hash,
         &stack_sources(root, &yml.processes),
+        ScanConfigSource::of(root, &yml).as_ref(),
     ))
 }
 
@@ -218,52 +236,100 @@ pub fn refusal(root: &Path, def: &ProcessDef, trusted: Option<&str>) -> Option<S
     }
 }
 
+/// `def` with `flag <path>` added to its command line. A list command takes
+/// the path as one word. A shell line gets it quoted, which is only done for
+/// paths made of characters every shell leaves alone inside quotes;
+/// anything else is refused (`what` names the path in the error) rather
+/// than passed in a form some shell would expand.
+fn with_path_arg(
+    def: &ProcessDef,
+    flag: &str,
+    path: &str,
+    what: &str,
+) -> Result<ProcessDef, String> {
+    let mut out = def.clone();
+    out.command = match &def.command {
+        CommandLine::Argv(w) => {
+            let mut w = w.clone();
+            w.push(flag.into());
+            w.push(path.into());
+            CommandLine::Argv(w)
+        }
+        CommandLine::Shell(line) => {
+            let plain = path
+                .chars()
+                .all(|c| c.is_alphanumeric() || " /\\:._-+~,@()[]{}=#".contains(c));
+            if !plain {
+                return Err(format!(
+                    "{what} ({path}) holds characters a shell would read; write this command as a list (`command: [...]`) or move the file"
+                ));
+            }
+            let quote = if cfg!(windows) { '"' } else { '\'' };
+            CommandLine::Shell(format!("{line} {flag} {quote}{path}{quote}"))
+        }
+    };
+    Ok(out)
+}
+
 /// `def` with the gitleaks config from Settings ▸ Security on its command
 /// line (`config` trimmed; empty = nothing added, and the runner uses the
-/// built-in default the app uses too). A list command takes the path as one
-/// word. A shell line gets it quoted, which is only done for paths made of
-/// characters every shell leaves alone inside quotes; anything else is
-/// refused rather than passed in a form some shell would expand.
+/// built-in default the app uses too).
 pub fn with_gitleaks_config(def: &ProcessDef, config: &str) -> Result<ProcessDef, String> {
     let config = config.trim();
     if config.is_empty() {
         return Ok(def.clone());
     }
-    let mut out = def.clone();
-    out.command = match &def.command {
+    with_path_arg(
+        def,
+        GITLEAKS_CONFIG_ARG,
+        config,
+        "the gitleaks config path in Settings ▸ Security",
+    )
+}
+
+/// `def` with the project's own gitleaks config on its command line: the
+/// file and the hash it was trusted at (`none` while it is not trusted or
+/// not valid). Nothing is added when the project names none.
+pub fn with_project_scan_config(
+    def: &ProcessDef,
+    config: &ProjectScanConfig,
+) -> Result<ProcessDef, String> {
+    let Some((path, hash)) = config.args() else {
+        return Ok(def.clone());
+    };
+    let with_path = with_path_arg(
+        def,
+        PROJECT_GITLEAKS_CONFIG_ARG,
+        &path.display().to_string(),
+        "the project's secret-scan config path",
+    )?;
+    // The hash is hex or `none`: no quoting needed.
+    let mut out = with_path.clone();
+    out.command = match &with_path.command {
         CommandLine::Argv(w) => {
             let mut w = w.clone();
-            w.push(GITLEAKS_CONFIG_ARG.into());
-            w.push(config.into());
+            w.push(PROJECT_GITLEAKS_CONFIG_HASH_ARG.into());
+            w.push(hash.into());
             CommandLine::Argv(w)
         }
         CommandLine::Shell(line) => {
-            let plain = config
-                .chars()
-                .all(|c| c.is_alphanumeric() || " /\\:._-+~,@()[]{}=#".contains(c));
-            if !plain {
-                return Err(format!(
-                    "the gitleaks config path in Settings ▸ Security ({config}) holds characters a shell would read; write this command as a list (`command: [...]`) or move the file"
-                ));
-            }
-            let quote = if cfg!(windows) { '"' } else { '\'' };
-            CommandLine::Shell(format!(
-                "{line} {GITLEAKS_CONFIG_ARG} {quote}{config}{quote}"
-            ))
+            CommandLine::Shell(format!("{line} {PROJECT_GITLEAKS_CONFIG_HASH_ARG} {hash}"))
         }
     };
     Ok(out)
 }
 
 /// The stack runner `def` as it is launched: the gitleaks config from
-/// Settings, then the trusted definition hash (always the last two words).
+/// Settings, the project's own config with its trusted hash, then the
+/// trusted definition hash (always the last two words).
 pub fn launch_def(
     def: &ProcessDef,
     trusted: Option<&str>,
     gitleaks_config: &str,
+    project_scan: &ProjectScanConfig,
 ) -> Result<ProcessDef, String> {
     Ok(with_trusted_definition(
-        &with_gitleaks_config(def, gitleaks_config)?,
+        &with_project_scan_config(&with_gitleaks_config(def, gitleaks_config)?, project_scan)?,
         trusted,
     ))
 }
@@ -406,7 +472,13 @@ mod launch_tests {
         };
         let hash = "ab".repeat(32);
         let path = r"C:\cfg dir\house rules.toml";
-        let launched = launch_def(&argv, Some(&hash), &format!("  {path} ")).unwrap();
+        let launched = launch_def(
+            &argv,
+            Some(&hash),
+            &format!("  {path} "),
+            &ProjectScanConfig::None,
+        )
+        .unwrap();
         assert_eq!(
             launched.command,
             CommandLine::Argv(vec![
@@ -420,13 +492,15 @@ mod launch_tests {
         );
         // Nothing set: nothing added (the runner uses the shared default).
         assert_eq!(
-            launch_def(&argv, None, "  ").unwrap().command,
+            launch_def(&argv, None, "  ", &ProjectScanConfig::None)
+                .unwrap()
+                .command,
             with_trusted_definition(&argv, None).command
         );
         // A shell line gets it quoted for the platform's shell.
         let q = if cfg!(windows) { '"' } else { '\'' };
         assert_eq!(
-            launch_def(&shell("chappa-stack serve"), None, path)
+            launch_def(&shell("chappa-stack serve"), None, path, &ProjectScanConfig::None)
                 .unwrap()
                 .command,
             CommandLine::Shell(format!(
@@ -439,9 +513,60 @@ mod launch_tests {
             "/tmp/$HOME/x.toml",
             "/a/'b'.toml",
         ] {
-            let err = launch_def(&shell("chappa-stack serve"), None, bad).unwrap_err();
+            let err = launch_def(
+                &shell("chappa-stack serve"),
+                None,
+                bad,
+                &ProjectScanConfig::None,
+            )
+            .unwrap_err();
             assert!(err.contains("as a list"), "{err}");
         }
+    }
+
+    #[test]
+    fn the_project_config_and_its_trusted_hash_go_before_the_definition_hash() {
+        let argv = ProcessDef {
+            command: CommandLine::Argv(vec!["chappa-stack".into(), "serve".into()]),
+            ..ProcessDef::default()
+        };
+        let path = std::path::PathBuf::from("proj dir")
+            .join("tools")
+            .join("gitleaks.toml");
+        let hash = "cd".repeat(32);
+        let trusted = ProjectScanConfig::Trusted {
+            path: path.clone(),
+            hash: hash.clone(),
+        };
+        let launched = launch_def(&argv, None, "", &trusted).unwrap();
+        assert_eq!(
+            launched.command,
+            CommandLine::Argv(vec![
+                "chappa-stack".into(),
+                "serve".into(),
+                PROJECT_GITLEAKS_CONFIG_ARG.into(),
+                path.display().to_string(),
+                PROJECT_GITLEAKS_CONFIG_HASH_ARG.into(),
+                hash.clone(),
+                TRUSTED_DEFINITION_ARG.into(),
+                UNTRUSTED.into(),
+            ])
+        );
+        // Not trusted: named with `none`, so the runner falls back and says so.
+        let not_used = ProjectScanConfig::NotUsed {
+            path: path.clone(),
+            reason: "is not trusted".into(),
+        };
+        let q = if cfg!(windows) { '"' } else { '\'' };
+        assert_eq!(
+            launch_def(&shell("chappa-stack serve"), None, "", &not_used)
+                .unwrap()
+                .command,
+            CommandLine::Shell(format!(
+                "chappa-stack serve {PROJECT_GITLEAKS_CONFIG_ARG} {q}{}{q} {PROJECT_GITLEAKS_CONFIG_HASH_ARG} none {TRUSTED_DEFINITION_ARG} none",
+                path.display()
+            ))
+        );
     }
 
     #[test]

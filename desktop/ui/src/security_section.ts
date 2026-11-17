@@ -52,6 +52,11 @@ export function switchHint(setting: boolean | null, info: ipc.ScannerInfoDto | n
     : "Automatic: off, gitleaks is not installed. Install it or name its path below to turn the scan on.";
 }
 
+/** Why a gitleaks config typed into Settings was not saved: the one reason
+ *  the app refuses it. */
+export const CONFIG_REFUSED =
+  "Not saved: this file is inside an open project folder. Use the project's own config through chappa.yml (secretScan: { config: <path> }), which is trusted like a command.";
+
 export const POLICY_LABELS: Record<ipc.SecretScanPolicy, string> = {
   "block-agents": "Block the launch until fixed or acknowledged",
   warn: "Launch and warn",
@@ -73,6 +78,9 @@ export class SecuritySection {
   private readonly policySelect: HTMLSelectElement;
   private readonly programInput: HTMLInputElement;
   private readonly configInput: HTMLInputElement;
+  private readonly configHint: HTMLDivElement;
+  /** Why the last config typed here was not saved, until the next change. */
+  private configRefusedNow: string | null = null;
   private info: ipc.ScannerInfoDto | null = null;
   private unsubscribe: (() => void) | null = null;
 
@@ -152,16 +160,26 @@ export class SecuritySection {
     this.configInput.style.cssText = `${INPUT_CSS}width:260px;`;
     this.configInput.dataset.setting = "secretScanConfig";
     this.configInput.addEventListener("change", () => {
-      void this.settings.update({ secretScanConfig: this.configInput.value.trim() });
+      const typed = this.configInput.value.trim();
+      void this.settings.update({ secretScanConfig: typed }).then((stored) => {
+        // The one refusal for this field: a file inside an open project.
+        this.configRefusedNow = typed !== "" && stored.secretScanConfig !== typed ? CONFIG_REFUSED : null;
+        return this.refreshInfo();
+      });
     });
-    section.card.appendChild(
-      settingsRow(
-        "gitleaks config",
-        this.configInput,
-        "Empty uses gitleaks' default rules plus rules for passwords, tokens and keys written inline in commands. " +
-          "A .gitleaks.toml or .gitleaksignore inside a scanned folder is never used.",
-      ),
+    const configRow = settingsRow(
+      "gitleaks config",
+      this.configInput,
+      "Empty uses gitleaks' default rules plus rules for passwords, tokens and keys written inline in commands. " +
+        "A .gitleaks.toml or .gitleaksignore inside a scanned folder is never used. " +
+        "A project keeps its own config through chappa.yml (secretScan: { config: <path> }), trusted like a command; it is used ahead of this one.",
     );
+    this.configHint = document.createElement("div");
+    this.configHint.className = "chappa-security-config-hint";
+    this.configHint.style.cssText = "font:12px system-ui,sans-serif;color:#f0883e;line-height:1.45;flex:1 1 100%;";
+    this.configHint.dataset.role = "configHint";
+    configRow.appendChild(this.configHint);
+    section.card.appendChild(configRow);
 
     this.element.appendChild(section.element);
     this.sync(this.settings.get());
@@ -206,5 +224,7 @@ export class SecuritySection {
     if (document.activeElement !== this.programInput) this.programInput.value = s.secretScanProgram;
     if (document.activeElement !== this.configInput) this.configInput.value = s.secretScanConfig;
     this.switchHint.textContent = switchHint(s.secretScanBeforeAgents, this.info);
+    this.configHint.textContent =
+      this.configRefusedNow ?? (this.info?.configRefused ? `Not used: ${this.info.configRefused}.` : "");
   }
 }

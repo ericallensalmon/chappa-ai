@@ -81,6 +81,12 @@ pub fn set_settings(
     state: State<'_, SettingsState>,
     settings: Settings,
 ) -> Result<Settings, String> {
+    // A gitleaks config inside an open project folder is a file of a
+    // scanned tree configuring its own scan: a new one is refused here,
+    // with the way to keep one in the tree. (The folders are read before
+    // the settings lock is taken.) One saved before is kept but not used
+    // (see `scan_config::settings_config`), so other settings still save.
+    let open_roots = projects.open_roots();
     let (old, stored) = {
         let mut guard = state
             .inner
@@ -90,6 +96,9 @@ pub fn set_settings(
             .as_mut()
             .ok_or_else(|| "settings store not initialized".to_owned())?;
         let old = store.get().clone();
+        if gitleaks_config_changed(&old, &settings) {
+            refuse_config_inside(&settings, &open_roots)?;
+        }
         let stored = store.set(settings)?;
         (old, stored)
     };
@@ -116,6 +125,22 @@ pub fn set_settings(
         projects.relaunch_stack_runners(&registry, &app);
     }
     Ok(stored)
+}
+
+/// `Err` with the reason when the gitleaks config `settings` name lies
+/// inside one of the open project folders `roots`.
+pub fn refuse_config_inside(settings: &Settings, roots: &[PathBuf]) -> Result<(), String> {
+    let set = settings.secret_scan_config.trim();
+    if set.is_empty() {
+        return Ok(());
+    }
+    match stack_core::safety::secrets::config::settings_path_refusal(
+        std::path::Path::new(set),
+        roots.iter().map(PathBuf::as_path),
+    ) {
+        Some(why) => Err(format!("Settings ▸ Security: {why}")),
+        None => Ok(()),
+    }
 }
 
 /// Whether the change from `old` to `new` moves the gitleaks config the

@@ -21,6 +21,7 @@ pub mod projects;
 pub mod records;
 pub mod registry;
 pub mod roots;
+pub mod scan_config;
 pub mod secret_scan;
 pub mod settings;
 pub mod source_actions;

@@ -1108,3 +1108,82 @@ fn nothing_a_scan_leaves_in_the_work_folder_shows_up_in_git_status() {
     assert!(!status.contains(".work"), "{status}");
     assert!(Baseline::path(&dot_work).is_file());
 }
+
+/// A project config is layered on the app's own config, never in place of
+/// it: an app-only rule (a credential assigned inline) still fires under it,
+/// its exact-match allowlist still lets its one known value through, and
+/// its `disabledRules` switch an app rule off. Layered on a Settings config
+/// instead, that config's own rule fires. Real gitleaks.
+#[test]
+fn real_gitleaks_layers_a_project_config_on_the_app_config_or_the_settings_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let Some(mut scanner) = real_gitleaks(&work) else {
+        return;
+    };
+    let root = dir.path().join("tree");
+    // Assembled at run time: no source line holds a credential.
+    let known = planted_token();
+    let other = format!("ghp_{}", "Zq9Xw8Vu7Ts6".repeat(3));
+    let pw = ["Zq", "84", "hk", "Lw"].concat();
+    let marker = format!("HOUSEMARK-{}", "7Q4W9X2K8M3N");
+    write(
+        &root,
+        "f.txt",
+        &format!("sample = {known}\nother = {other}\nDB_PASSWORD={pw}\nmark {marker}\n"),
+    );
+    let rules = |s: &GitleaksScanner| -> Vec<(String, u32)> {
+        let mut v: Vec<(String, u32)> = s
+            .scan_files(&root, &[PathBuf::from("f.txt")])
+            .unwrap()
+            .into_iter()
+            .map(|f| match f.location {
+                Location::Source { line, .. } => (f.rule, line.unwrap_or(0)),
+                _ => unreachable!(),
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let project =
+        format!("[extend]\nuseDefault = true\n\n[allowlist]\nregexes = ['''^{known}$''']\n");
+    scanner.config_text = Some(project.clone());
+    let found = rules(&scanner);
+    assert!(found.contains(&("github-pat".into(), 2)), "{found:?}");
+    assert!(
+        !found.iter().any(|(_, l)| *l == 1),
+        "the project's allowlist lets the known value through: {found:?}"
+    );
+    assert!(
+        found.contains(&("inline-credential-assignment".into(), 3)),
+        "the app's own rule still fires under a project config: {found:?}"
+    );
+
+    scanner.config_text = Some(project.replace(
+        "useDefault = true\n",
+        "useDefault = true\ndisabledRules = [\"inline-credential-assignment\"]\n",
+    ));
+    let found = rules(&scanner);
+    assert!(
+        !found
+            .iter()
+            .any(|(r, _)| r == "inline-credential-assignment"),
+        "{found:?}"
+    );
+    assert!(found.contains(&("github-pat".into(), 2)), "{found:?}");
+
+    // On a Settings config: its own rule fires, gitleaks' defaults stay.
+    let settings = dir.path().join("house.toml");
+    std::fs::write(
+        &settings,
+        "[extend]\nuseDefault = true\n\n[[rules]]\nid = \"house-marker\"\nregex = '''HOUSEMARK-[0-9A-Z]{12}'''\n",
+    )
+    .unwrap();
+    scanner.config = Some(settings);
+    scanner.config_text = Some(project);
+    let found = rules(&scanner);
+    assert!(found.contains(&("house-marker".into(), 4)), "{found:?}");
+    assert!(found.contains(&("github-pat".into(), 2)), "{found:?}");
+    assert!(!found.iter().any(|(_, l)| *l == 1), "{found:?}");
+}

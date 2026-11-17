@@ -91,6 +91,13 @@ pub struct Project {
     /// `Some(false)` never does, absent follows the app setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_scan: Option<bool>,
+    /// The text of the project's own gitleaks config (`chappa.yml`
+    /// `secretScan.config`) when the project was last trusted. The trust
+    /// hash alone decides trust; this is kept only so a later prompt can
+    /// show what changed. It is a committed file of the project, not a
+    /// secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_scan_config: Option<String>,
     /// The native process definitions THE STORE owns, by process
     /// name. `None` (absent) until a project is migrated or mutated; after
     /// that `Some(map)` carries the defs (an EMPTY `Some({})` is a valid
@@ -311,6 +318,7 @@ impl ProjectStore {
             process_overrides: None,
             yml_backed_up: None,
             secret_scan: None,
+            trusted_scan_config: None,
             processes: None,
             agents: Vec::new(),
             terminals: Vec::new(),
@@ -339,6 +347,23 @@ impl ProjectStore {
             .find(|p| p.id == id)
             .ok_or_else(|| format!("no such project: {id}"))?;
         project.trusted_hash = Some(hash);
+        self.save()
+    }
+
+    /// Record the text of the project's own gitleaks config as it was when
+    /// the person trusted the project (`None`: it names none), so the next
+    /// trust prompt can show what changed since. Written only when it
+    /// differs.
+    pub fn set_trusted_scan_config(&mut self, id: u32, text: Option<String>) -> Result<(), String> {
+        let project = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("no such project: {id}"))?;
+        if project.trusted_scan_config == text {
+            return Ok(());
+        }
+        project.trusted_scan_config = text;
         self.save()
     }
 

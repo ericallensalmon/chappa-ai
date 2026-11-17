@@ -561,6 +561,7 @@ fn component(inp: &EnvInputs<'_>, r: &ComponentReport) -> Value {
         &inp.loaded.dir,
         process_log.as_ref(),
         inp.exe,
+        &inp.loaded.work_dir(),
     ) {
         actions.push(l);
     }

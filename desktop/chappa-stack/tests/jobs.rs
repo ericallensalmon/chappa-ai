@@ -729,3 +729,42 @@ fn run_job_takes_the_gitleaks_config_on_its_command_line() {
     let out = run(&["--no-such-flag", "x"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected argument"));
 }
+
+/// What a container's `logs` terminal runs when the instance has generated
+/// secrets: the real `chappa-stack follow-command` passes the wrapped
+/// command's output and exit code through, each generated value shown as
+/// `••••`. (The engine is stood in for by the platform's shell `echo`.)
+#[test]
+fn follow_command_passes_the_wrapped_output_through_with_generated_values_hidden() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join(".work");
+    let names = ["db".to_string()].into();
+    let value = stack_core::instance_secrets::load_or_create(&work, "local-0", &names)
+        .unwrap()
+        .get("db")
+        .unwrap()
+        .to_owned();
+    let line = format!("url=postgres://app:{value}@db/app");
+    let wrapped: Vec<String> = if cfg!(windows) {
+        vec!["cmd".into(), "/C".into(), format!("echo {line}")]
+    } else {
+        vec!["sh".into(), "-c".into(), format!("echo '{line}'")]
+    };
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_chappa-stack"))
+        .args(["follow-command", chappa_stack::actions::HIDE_GENERATED_ARG])
+        .arg(&work)
+        .arg("--")
+        .args(&wrapped)
+        .output()
+        .unwrap();
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert!(shown.contains("url=postgres://app:••••@db/app"), "{shown}");
+    assert!(!shown.contains(&value), "{shown}");
+    // Without the folder or the command, it refuses.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_chappa-stack"))
+        .args(["follow-command", "--", "x"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

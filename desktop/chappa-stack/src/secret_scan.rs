@@ -106,9 +106,12 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use stack_core::definition::Mode;
 use stack_core::driver::ResolvedInstance;
+use stack_core::instance_secrets::Secrets;
 use stack_core::jobs::write_atomic;
 use stack_core::planner::{Plan, Step};
 use stack_core::runner::StackRunner;
+use stack_core::safety::secrets::config::{choose, ProjectScanConfig};
+use stack_core::safety::secrets::generated::{find_in_commits, find_in_tracked};
 use stack_core::safety::secrets::{
     list_target, policy_for, scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason,
     SkippedFile,
@@ -121,6 +124,9 @@ use crate::project::{Binding, Loaded};
 use crate::world::World;
 
 pub const STORE_FILE: &str = "secret-scan.json";
+/// The Environment banner's id while the project's own gitleaks config is
+/// not the one in use.
+pub const CONFIG_REVIEW_BANNER: &str = "secret-scan-config";
 /// The acknowledge action's id (the wire block names it too).
 pub const ACK_ACTION_ID: &str = "secret-scan-ack";
 /// Where the baseline (and the scanner's scratch space) lives, under the
@@ -143,22 +149,36 @@ pub type SharedScanner = Arc<dyn SecretScanner + Send + Sync>;
 /// scratch space (the project's `.work`, which no listing reads).
 pub trait ScannerSource {
     fn scanner(&self, work_dir: &Path) -> Option<SharedScanner>;
+
+    /// Why the project's own gitleaks config is not what the scans use
+    /// now (not trusted, changed since, or failing the config rules): the
+    /// Environment view shows it as a banner asking to review it.
+    fn config_review(&self) -> Option<String> {
+        None
+    }
 }
 
-/// gitleaks on `PATH`, the default, with the gitleaks config the app's
-/// Settings name (`serve --gitleaks-config`, passed on to every job), so the
-/// app's pre-agent scan and every scan here use the same rules. `None` is
+/// gitleaks on `PATH`, the default, with the config chosen in this order
+/// ([`stack_core::safety::secrets::config::choose`]): the project's own
+/// (`serve --project-gitleaks-config` with the hash the person trusted,
+/// re-read and re-hashed for every scan and used only while it matches),
+/// else the one the app's Settings name (`serve --gitleaks-config`), else
 /// stack-core's [`DEFAULT_CONFIG`](stack_core::safety::secrets::gitleaks::DEFAULT_CONFIG),
-/// which the app uses too when nothing is set. A config file inside a
-/// scanned tree is never read either way.
+/// which the app uses too when nothing is set. Both are passed on to every
+/// job, so the app's pre-agent scan and every scan here use the same rules.
+/// No other config file in a scanned tree is ever read.
 #[derive(Debug, Clone, Default)]
 pub struct GitleaksOnPath {
     pub config: Option<PathBuf>,
+    pub project: ProjectScanConfig,
 }
 
 impl GitleaksOnPath {
     pub fn with_config(config: Option<PathBuf>) -> Self {
-        Self { config }
+        Self {
+            config,
+            project: ProjectScanConfig::None,
+        }
     }
 }
 
@@ -166,9 +186,13 @@ impl ScannerSource for GitleaksOnPath {
     fn scanner(&self, work_dir: &Path) -> Option<SharedScanner> {
         GitleaksScanner::detect(None, work_dir).map(|mut g| {
             g.timeout = SCAN_TIMEOUT;
-            g.config = self.config.clone();
+            choose(&self.project, self.config.as_deref()).apply(&mut g);
             Arc::new(g) as SharedScanner
         })
+    }
+
+    fn config_review(&self) -> Option<String> {
+        choose(&self.project, self.config.as_deref()).review
     }
 }
 
@@ -476,6 +500,7 @@ pub fn scan_tree(
     project: &Path,
     root: &Path,
     excludes: &[String],
+    generated: &Secrets,
     label: &str,
     now: &str,
 ) -> TargetEntry {
@@ -510,6 +535,12 @@ pub fn scan_tree(
         Ok(r) => e.findings = rebased(project, root, r.findings),
         Err(err) => e.error = Some(failure(&err)),
     }
+    match find_in_tracked(&limits().git, root, None, generated) {
+        Ok(found) => e.findings.extend(rebased(project, root, found)),
+        Err(err) => {
+            e.error.get_or_insert(failure(&err));
+        }
+    }
     judge_skips(&mut e, &list.skipped);
     e
 }
@@ -522,6 +553,7 @@ pub fn rescan_tree(
     project: &Path,
     root: &Path,
     excludes: &[String],
+    generated: &Secrets,
     prev: &TargetEntry,
     now: &str,
 ) -> Option<TargetEntry> {
@@ -531,6 +563,7 @@ pub fn rescan_tree(
             project,
             root,
             excludes,
+            generated,
             &prev.label,
             now,
         ));
@@ -592,6 +625,13 @@ pub fn rescan_tree(
             Ok(r) => e.findings.extend(rebased(project, root, r.findings)),
             Err(err) => e.error = Some(failure(&err)),
         }
+        let only: BTreeSet<String> = changed.iter().cloned().collect();
+        match find_in_tracked(&limits().git, root, Some(&only), generated) {
+            Ok(found) => e.findings.extend(rebased(project, root, found)),
+            Err(err) => {
+                e.error.get_or_insert(failure(&err));
+            }
+        }
     }
     judge_skips(&mut e, &list.skipped);
     Some(e)
@@ -600,11 +640,13 @@ pub fn rescan_tree(
 /// The commits `root` carries ahead of `base`, compared with the remote's
 /// copy of the base first (what a push would be measured against), else the
 /// local branch.
+#[allow(clippy::too_many_arguments)]
 pub fn scan_commits(
     scanner: &dyn SecretScanner,
     project: &Path,
     root: &Path,
     base: &str,
+    generated: &Secrets,
     label: &str,
     head: Option<String>,
     now: &str,
@@ -620,6 +662,11 @@ pub fn scan_commits(
         match scan(scanner, &target, &limits(), &Baseline::default()) {
             Ok(r) => {
                 e.findings = rebased(project, root, r.findings);
+                let range = format!("{cand}..HEAD");
+                match find_in_commits(&limits().git, root, &range, generated) {
+                    Ok(found) => e.findings.extend(rebased(project, root, found)),
+                    Err(err) => e.error = Some(failure(&err)),
+                }
                 return e;
             }
             Err(SafetyError::InvalidTarget(_)) => continue,
@@ -812,6 +859,12 @@ fn scratch_of(loaded: &Loaded) -> PathBuf {
     loaded.dir.join(BASELINE_DIR)
 }
 
+/// The values generated for the stack's instances, which a worktree's
+/// tracked files and commits must not hold.
+fn generated_of(loaded: &Loaded) -> Secrets {
+    stack_core::instance_secrets::existing(&loaded.work_dir())
+}
+
 /// Scan every tree in full, and the commits each carries.
 fn scan_trees(
     world: &World,
@@ -823,12 +876,14 @@ fn scan_trees(
 ) {
     let now = world.clock.now_utc();
     let ex = excludes(loaded);
+    let generated = generated_of(loaded);
     for t in trees {
         let entry = scan_tree(
             scanner,
             &loaded.dir,
             &t.root,
             &ex,
+            &generated,
             &format!("{} worktree", t.repo),
             &now,
         );
@@ -840,6 +895,7 @@ fn scan_trees(
             &loaded.dir,
             &t.root,
             &t.base,
+            &generated,
             &format!("{} commits ahead of {}", t.repo, t.base),
             head,
             &now,
@@ -1105,6 +1161,7 @@ pub fn rescan(
         .last_full_secs
         .is_none_or(|t| now_secs >= t.saturating_add(FULL_RESCAN_SECS));
     let ex = excludes(loaded);
+    let generated = generated_of(loaded);
     let mut scanned = false;
     for t in trees_of(loaded, &loaded.binding) {
         let tk = tree_key(&loaded.dir, &t.root);
@@ -1115,10 +1172,11 @@ pub fn rescan(
                 &loaded.dir,
                 &t.root,
                 &ex,
+                &generated,
                 &label,
                 &now,
             )),
-            Some(prev) => rescan_tree(&*scanner, &loaded.dir, &t.root, &ex, prev, &now),
+            Some(prev) => rescan_tree(&*scanner, &loaded.dir, &t.root, &ex, &generated, prev, &now),
         };
         if let Some(e) = entry {
             store.put(&tk, e);
@@ -1136,6 +1194,7 @@ pub fn rescan(
                 &loaded.dir,
                 &t.root,
                 &t.base,
+                &generated,
                 &format!("{} commits ahead of {}", t.repo, t.base),
                 head,
                 &now,

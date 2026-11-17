@@ -41,6 +41,60 @@ what has and has not been tried by hand.
   read output without scraping the screen, and share scratchpads, todos and
   timers with other agents working on the same project.
 
+## A project's own secret-scan config
+
+Before an agent starts in a folder, and in the worktrees a stack builds
+from, Chappa'Ai scans for credentials with gitleaks (Settings ▸ Security).
+A project can bring its own gitleaks config, named in `chappa.yml` relative
+to the project folder:
+
+```yaml
+secretScan:
+  config: tools/gitleaks.toml
+```
+
+The config must keep gitleaks' default rules. It is stacked on top of the
+rules a scan uses without it, never in place of them: on Chappa'Ai's own
+rules (gitleaks' defaults plus rules for credentials written inline), or,
+when Settings ▸ Security names a config, on that one.
+
+```toml
+# tools/gitleaks.toml
+[extend]
+useDefault = true
+
+# A token-shaped value the test fixtures use on purpose, let through by
+# exact match. ([_] matches "_"; written that way so this file does not
+# itself look like a token.)
+[allowlist]
+description = "the fixtures' public test token"
+regexes = ['''^ghp[_]0123456789abcdefABCDEF0123456789abcd$''']
+```
+
+The file sits in the tree it configures the scan of, so it is trusted like
+a command:
+
+- Its content is part of the project's trust. The trust prompt shows it,
+  lists every allowlisted `paths` pattern as "skips these files entirely"
+  and every rule in `[extend] disabledRules` as "turns off these rules"
+  (those rules then no longer fire anywhere in the project), and, when it
+  changed, shows what changed since it was last trusted. An edit of the
+  file asks again, exactly as an edited command does.
+- It must contain `[extend] useDefault = true`, and `[extend] path` is
+  refused (it would pull in a file the trust does not cover). A file that
+  breaks a rule is shown as an error and never used. A Settings config
+  that itself extends another file cannot have a project config stacked on
+  it (gitleaks follows only two levels); the Settings config is then used
+  alone and the scan says so.
+- Scans use, in order: the project's config while it is trusted and
+  unchanged, else the Settings ▸ Security config, else the built-in rules.
+  Falling back can only find more. While the project's config is not used,
+  the Environment view and the agent launch say so and ask you to review
+  it.
+- A Settings ▸ Security config inside an open project folder is refused:
+  use the project's own config instead. `.gitleaksignore` files and any
+  other gitleaks config in the tree are never read.
+
 ## Layout
 
 ```

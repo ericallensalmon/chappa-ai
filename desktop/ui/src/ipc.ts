@@ -1120,6 +1120,9 @@ export interface ScannerInfoDto {
   found: boolean;
   program: string | null;
   effectiveEnabled: boolean;
+  /** Why the gitleaks config set here is not used (it lies inside an open
+   *  project folder), when it is not. */
+  configRefused?: string;
 }
 
 export function secretScanInfo(): Promise<ScannerInfoDto> {
@@ -1142,6 +1145,10 @@ export interface SecretScanBlockDto {
   /** Set when the scan did not finish: why. The dialog then offers
    *  "Launch anyway" (there are no findings to acknowledge). */
   incomplete?: string | null;
+  /** Set while the project's own gitleaks config (chappa.yml
+   *  `secretScan.config`) is not what the scan used: why, and that it needs
+   *  review. */
+  configReview?: string | null;
 }
 
 /** An `agent://secret-scan` payload: a launch that went ahead with
@@ -1150,8 +1157,9 @@ export interface SecretScanBlockDto {
 export interface SecretScanNoticeEvent {
   term_id: number;
   notice:
-    | { kind: "warn"; cwd: string; findings: SecretFindingDto[]; skipped: number }
-    | { kind: "launched-anyway"; cwd: string; reason: string; note: string };
+    | { kind: "warn"; cwd: string; findings: SecretFindingDto[]; skipped: number; configReview?: string }
+    | { kind: "launched-anyway"; cwd: string; reason: string; note: string; configReview?: string }
+    | { kind: "config-review"; cwd: string; reason: string };
 }
 
 /** Acknowledge findings into the project's local baseline; answers how

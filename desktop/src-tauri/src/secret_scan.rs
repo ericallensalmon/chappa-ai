@@ -43,6 +43,7 @@ use std::time::Duration;
 
 use project_model::settings::{SecretScanPolicy, Settings};
 use serde::{Deserialize, Serialize};
+use stack_core::safety::secrets::config::{choose, Chosen, ProjectScanConfig};
 use stack_core::safety::secrets::{
     scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason,
 };
@@ -112,10 +113,16 @@ pub struct ScanBlock {
     /// "Launch anyway" instead of acknowledging (there are no findings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete: Option<String>,
+    /// Set while the project's own gitleaks config is not what the scan
+    /// used (not trusted, changed since, failing the config rules): the
+    /// dialog asks to review it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_review: Option<String>,
 }
 
-/// A notice for a launch that went ahead: `warn` findings, or a scan that
-/// did not finish and was overridden with "Launch anyway".
+/// A notice for a launch that went ahead: `warn` findings, a scan that did
+/// not finish and was overridden with "Launch anyway", or a clean scan that
+/// used a fallback because the project's own gitleaks config needs review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ScanNotice {
@@ -123,12 +130,41 @@ pub enum ScanNotice {
         cwd: String,
         findings: Vec<FindingDto>,
         skipped: usize,
+        #[serde(rename = "configReview", skip_serializing_if = "Option::is_none")]
+        config_review: Option<String>,
     },
     LaunchedAnyway {
         cwd: String,
         reason: String,
         note: String,
+        #[serde(rename = "configReview", skip_serializing_if = "Option::is_none")]
+        config_review: Option<String>,
     },
+    ConfigReview {
+        cwd: String,
+        reason: String,
+    },
+}
+
+/// The configs the pre-agent scan chooses from besides Settings: the
+/// project's own (pinned at its trusted hash, see [`crate::scan_config`])
+/// and the open project folders (a Settings config inside one is refused).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanConfigs {
+    pub project: ProjectScanConfig,
+    pub open_roots: Vec<PathBuf>,
+}
+
+impl ScanConfigs {
+    /// The config this scan uses, in order: the trusted project config,
+    /// the Settings config, the built-in default.
+    pub fn chosen(&self, settings: &Settings) -> Chosen {
+        let settings_config = crate::scan_config::settings_config(
+            settings,
+            self.open_roots.iter().map(PathBuf::as_path),
+        );
+        choose(&self.project, settings_config.as_deref())
+    }
 }
 
 /// What the gate decided, before it is turned into an error or a notice.
@@ -237,6 +273,7 @@ pub fn evaluate(
             findings,
             skipped,
             incomplete: None,
+            config_review: None,
         });
     }
     if over_total > 0 {
@@ -295,10 +332,30 @@ pub fn decide(
     project_root: &Path,
     cwd: &Path,
 ) -> GateOutcome {
+    decide_with(
+        settings,
+        project_pref,
+        project_root,
+        cwd,
+        &ScanConfigs::default(),
+    )
+    .0
+}
+
+/// [`decide`] with the project's own config and the open project folders:
+/// the outcome, and why the project's config was not used when it was not
+/// (for the review banner). A scan that is off says nothing about configs.
+pub fn decide_with(
+    settings: &Settings,
+    project_pref: Option<bool>,
+    project_root: &Path,
+    cwd: &Path,
+    configs: &ScanConfigs,
+) -> (GateOutcome, Option<String>) {
     // A folder that does not exist holds nothing an agent could read (the
     // spawn fails, or starts elsewhere, on its own terms).
     if !cwd.is_dir() {
-        return GateOutcome::Skipped;
+        return (GateOutcome::Skipped, None);
     }
     let scanner = detect_scanner(settings, project_root);
     if !effective_enabled(
@@ -306,12 +363,27 @@ pub fn decide(
         project_pref,
         scanner.is_some(),
     ) {
-        return GateOutcome::Skipped;
+        return (GateOutcome::Skipped, None);
     }
     match scanner {
-        Some(scanner) => evaluate(&scanner, settings.secret_scan_policy, project_root, cwd, &ListLimits::default()),
-        None => GateOutcome::Incomplete(
-            "the secret scan is on but gitleaks was not found (install it, or name its path under Settings ▸ Security)".into(),
+        Some(mut scanner) => {
+            // Chosen (and the project's file re-hashed) right before the scan.
+            let chosen = configs.chosen(settings);
+            chosen.apply(&mut scanner);
+            let outcome = evaluate(
+                &scanner,
+                settings.secret_scan_policy,
+                project_root,
+                cwd,
+                &ListLimits::default(),
+            );
+            (outcome, chosen.review)
+        }
+        None => (
+            GateOutcome::Incomplete(
+                "the secret scan is on but gitleaks was not found (install it, or name its path under Settings ▸ Security)".into(),
+            ),
+            None,
         ),
     }
 }
@@ -329,13 +401,44 @@ pub fn gate_launch(
     cwd: &Path,
     launch_anyway: Option<&str>,
 ) -> Result<Option<ScanNotice>, String> {
-    match decide(settings, project_pref, project_root, cwd) {
-        GateOutcome::Skipped | GateOutcome::Clean { .. } => Ok(None),
-        GateOutcome::Blocked(block) => Err(block_error(&block)),
+    gate_launch_with(
+        settings,
+        project_pref,
+        project_root,
+        cwd,
+        launch_anyway,
+        &ScanConfigs::default(),
+    )
+}
+
+/// [`gate_launch`] with the project's own config and the open project
+/// folders. While the project's config is not the one used, the refusal
+/// and every notice carry why, and a clean launch raises a notice of its
+/// own asking to review it.
+pub fn gate_launch_with(
+    settings: &Settings,
+    project_pref: Option<bool>,
+    project_root: &Path,
+    cwd: &Path,
+    launch_anyway: Option<&str>,
+    configs: &ScanConfigs,
+) -> Result<Option<ScanNotice>, String> {
+    let (outcome, config_review) = decide_with(settings, project_pref, project_root, cwd, configs);
+    match outcome {
+        GateOutcome::Skipped => Ok(None),
+        GateOutcome::Clean { .. } => Ok(config_review.map(|reason| ScanNotice::ConfigReview {
+            cwd: cwd.display().to_string(),
+            reason,
+        })),
+        GateOutcome::Blocked(mut block) => {
+            block.config_review = config_review;
+            Err(block_error(&block))
+        }
         GateOutcome::Warn { findings, skipped } => Ok(Some(ScanNotice::Warn {
             cwd: cwd.display().to_string(),
             findings,
             skipped,
+            config_review,
         })),
         GateOutcome::Incomplete(reason) => {
             match launch_anyway.map(str::trim).filter(|n| !n.is_empty()) {
@@ -343,6 +446,7 @@ pub fn gate_launch(
                     cwd: cwd.display().to_string(),
                     reason,
                     note: note.chars().take(1000).collect(),
+                    config_review,
                 })),
                 None => Err(block_error(&ScanBlock {
                     project_root: project_root.display().to_string(),
@@ -350,6 +454,7 @@ pub fn gate_launch(
                     findings: Vec::new(),
                     skipped: 0,
                     incomplete: Some(reason),
+                    config_review,
                 })),
             }
         }
@@ -359,10 +464,12 @@ pub fn gate_launch(
 /// The journal line a "Launch anyway" leaves on the agent's row.
 pub fn launch_anyway_record(notice: &ScanNotice) -> Option<String> {
     match notice {
-        ScanNotice::LaunchedAnyway { cwd, reason, note } => Some(format!(
+        ScanNotice::LaunchedAnyway {
+            cwd, reason, note, ..
+        } => Some(format!(
             "launched anyway: the secret scan of {cwd} did not finish ({reason}); note: {note}"
         )),
-        ScanNotice::Warn { .. } => None,
+        ScanNotice::Warn { .. } | ScanNotice::ConfigReview { .. } => None,
     }
 }
 
@@ -451,6 +558,9 @@ pub fn emit_notice(app: Option<&AppHandle>, term_id: u32, notice: &ScanNotice) {
         ScanNotice::LaunchedAnyway { cwd, reason, .. } => {
             log::warn!("[secret-scan] launched anyway in {cwd}, unscanned: {reason}")
         }
+        ScanNotice::ConfigReview { cwd, reason } => {
+            log::warn!("[secret-scan] launched in {cwd}: {reason}")
+        }
     }
     if let Some(app) = app {
         let _ = app.emit(
@@ -482,10 +592,21 @@ pub struct ScannerInfo {
     pub program: Option<String>,
     /// The switch as it stands app-wide with the automatic default applied.
     pub effective_enabled: bool,
+    /// Why the gitleaks config the settings name is not used (it lies
+    /// inside an open project folder), when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_refused: Option<String>,
 }
 
 pub fn scanner_info(settings: &Settings) -> ScannerInfo {
+    scanner_info_with(settings, &[])
+}
+
+/// [`scanner_info`], checking the settings' config against the open project
+/// folders `roots`.
+pub fn scanner_info_with(settings: &Settings, roots: &[PathBuf]) -> ScannerInfo {
     let scanner = detect_scanner(settings, Path::new("."));
+    let set = settings.secret_scan_config.trim();
     ScannerInfo {
         found: scanner.is_some(),
         program: scanner.as_ref().map(|s| s.program.display().to_string()),
@@ -494,14 +615,25 @@ pub fn scanner_info(settings: &Settings) -> ScannerInfo {
             None,
             scanner.is_some(),
         ),
+        config_refused: (!set.is_empty())
+            .then(|| {
+                stack_core::safety::secrets::config::settings_path_refusal(
+                    Path::new(set),
+                    roots.iter().map(PathBuf::as_path),
+                )
+            })
+            .flatten(),
     }
 }
 
 // ---- Tauri commands ----------------------------------------------------------------
 
 #[tauri::command]
-pub fn secret_scan_info(settings: tauri::State<'_, crate::settings::SettingsState>) -> ScannerInfo {
-    scanner_info(&settings.snapshot())
+pub fn secret_scan_info(
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+    projects: tauri::State<'_, crate::projects::Projects>,
+) -> ScannerInfo {
+    scanner_info_with(&settings.snapshot(), &projects.open_roots())
 }
 
 /// "Add to .gitignore" for an exposed agent settings file (confirmed in the
@@ -1004,6 +1136,71 @@ mod tests {
                 .unwrap()
                 .contains(&token)
         );
+    }
+
+    /// The launch gate with the project's own gitleaks config, trusted at
+    /// its hash: its exact-match allowlist lets one public test value
+    /// through. Edited since, the gate falls back to the built-in rules
+    /// (the value blocks the launch again) and the refusal asks to review
+    /// the config. Real gitleaks.
+    #[test]
+    fn real_gitleaks_uses_the_trusted_project_config_and_falls_back_with_a_review() {
+        let settings = Settings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        if detect_scanner(&settings, &root).is_none() {
+            eprintln!("skipping: gitleaks is not on PATH");
+            return;
+        }
+        // Assembled at run time so no source line holds a token-shaped string.
+        let token = format!("ghp_{}", "PubL1cTe5tVa1ue".repeat(3))[..40].to_string();
+        std::fs::write(root.join("sample.txt"), format!("sample = {token}\n")).unwrap();
+        let config_path = root.join("tools").join("gitleaks.toml");
+        let config =
+            format!("[extend]\nuseDefault = true\n\n[allowlist]\nregexes = ['''^{token}$''']\n");
+        std::fs::write(&config_path, &config).unwrap();
+        let configs = ScanConfigs {
+            project: ProjectScanConfig::Trusted {
+                path: config_path.clone(),
+                hash: stack_core::safety::secrets::config::content_hash(config.as_bytes()),
+            },
+            open_roots: vec![root.clone()],
+        };
+        let mut on = settings.clone();
+        on.secret_scan_before_agents = Some(true);
+        assert_eq!(
+            gate_launch_with(&on, None, &root, &root, None, &configs),
+            Ok(None),
+            "the trusted config's allowlist lets the known value through"
+        );
+        // Without it, the built-in rules find the value.
+        let err =
+            gate_launch_with(&on, None, &root, &root, None, &ScanConfigs::default()).unwrap_err();
+        assert!(parse_block_error(&err)
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.file == "sample.txt"));
+        // Edited after it was trusted: not used, blocked, asked to review.
+        std::fs::write(&config_path, format!("{config}# edited\n")).unwrap();
+        let err = gate_launch_with(&on, None, &root, &root, None, &configs).unwrap_err();
+        let block = parse_block_error(&err).unwrap();
+        assert!(
+            block.findings.iter().any(|f| f.file == "sample.txt"),
+            "{block:?}"
+        );
+        let review = block.config_review.clone().unwrap();
+        assert!(review.contains("changed since it was trusted"), "{review}");
+        assert!(!err.contains(&token));
+        // A clean launch that fell back still says so.
+        std::fs::remove_file(root.join("sample.txt")).unwrap();
+        match gate_launch_with(&on, None, &root, &root, None, &configs) {
+            Ok(Some(ScanNotice::ConfigReview { reason, .. })) => {
+                assert!(reason.contains("changed since it was trusted"))
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

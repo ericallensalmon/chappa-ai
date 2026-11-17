@@ -10,18 +10,28 @@
 //!
 //! Each value is its own file, `<work>/instances/<instance>/secrets/<name>`,
 //! holding the value and nothing else, so a person can read it (or replace
-//! it with a value of their own) without a tool. On Unix the folder is
-//! `0700` and each file `0600`. A file is written under a temporary name and
-//! linked into place, so two resolutions racing for the same name agree on
-//! one value. Deleting a file makes a new value next time; anything that
-//! kept the old one (a database volume initialised with it) has to be
-//! reset too.
+//! it with a value of their own) without a tool. The folder and each file
+//! are owner-only ([`crate::owner_only`]): `0700` / `0600` on Unix, the
+//! current user as the only access entry on Windows. A file that cannot be
+//! restricted is removed and the resolution fails: a value is never left
+//! where other users can read it. A file is written under a temporary name,
+//! restricted, and linked into place, so two resolutions racing for the
+//! same name agree on one value. Deleting a file makes a new value next
+//! time; anything that kept the old one (a database volume initialised with
+//! it) has to be reset too.
+//!
+//! The values stay in the instance env (components need them), and stay out
+//! of everything shown: every view, job line and log the stack runner hands
+//! out passes through [`Secrets::hide`], which shows each value as `••••`.
 //!
 //! The secret scan of the instance env puts each generated value back as
 //! its placeholder before it scans ([`Secrets::mask`]): the scan looks for
 //! credentials written into files, and a value the runner made and keeps
 //! out of the repository is not one. Anything else in the env, such as a
-//! password written literally into the definition, is scanned as it is.
+//! password written literally into the definition, is scanned as it is. A
+//! generated value that turns up in a commit or a tracked file of a bound
+//! worktree is its own finding (`generated-secret`, see
+//! [`crate::safety::secrets::generated`]): it left the work folder.
 
 use indexmap::IndexMap;
 use std::collections::BTreeSet;
@@ -76,18 +86,66 @@ impl Secrets {
     /// Longer values go first, so one value inside another is never left
     /// half replaced.
     pub fn mask(&self, text: &str) -> String {
-        let mut by_len: Vec<(&String, &String)> =
-            self.0.iter().filter(|(_, v)| !v.is_empty()).collect();
-        by_len.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
         let mut out = text.to_owned();
-        for (name, value) in by_len {
+        for (name, value) in self.by_length() {
             if out.contains(value.as_str()) {
                 out = out.replace(value.as_str(), &format!("{{secret:{name}}}"));
             }
         }
         out
     }
+
+    /// `text` with every value long enough to match ([`MIN_MATCH_LEN`])
+    /// shown as [`crate::credentials::MASK`], the way every other
+    /// credential is shown: views, job output and logs carry the instance
+    /// env's values, and a generated password in them is as secret as one
+    /// written by hand. There is no way to reveal it from a view; the file
+    /// under `.work/` is where a person reads it.
+    pub fn hide(&self, text: &str) -> String {
+        let mut out: Option<String> = None;
+        for (_, value) in self.by_length() {
+            if value.len() < MIN_MATCH_LEN {
+                continue;
+            }
+            let cur = out.as_deref().unwrap_or(text);
+            if cur.contains(value.as_str()) {
+                out = Some(cur.replace(value.as_str(), crate::credentials::MASK));
+            }
+        }
+        out.unwrap_or_else(|| text.to_owned())
+    }
+
+    /// Whether `text` holds any value long enough to match.
+    pub fn found_in(&self, text: &str) -> bool {
+        self.matchable().any(|v| text.contains(v))
+    }
+
+    /// The values long enough to match exactly, longest first.
+    pub fn matchable(&self) -> impl Iterator<Item = &str> {
+        self.by_length()
+            .into_iter()
+            .map(|(_, v)| v.as_str())
+            .filter(|v| v.len() >= MIN_MATCH_LEN)
+    }
+
+    /// The longest matchable value's length (0 without one).
+    pub fn longest(&self) -> usize {
+        self.matchable().map(str::len).max().unwrap_or(0)
+    }
+
+    fn by_length(&self) -> Vec<(&String, &String)> {
+        let mut by_len: Vec<(&String, &String)> =
+            self.0.iter().filter(|(_, v)| !v.is_empty()).collect();
+        by_len.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+        by_len
+    }
 }
+
+/// The shortest value matched against text ([`Secrets::hide`], the scan
+/// for a generated value in a commit). A generated value is 48 characters;
+/// a value a person wrote into the file may be shorter, and one this short
+/// would match ordinary words and numbers everywhere.
+pub const MIN_MATCH_LEN: usize = 8;
 
 /// Letters, digits, `-` and `_`: a name that is also a safe file name.
 pub fn is_valid_name(name: &str) -> bool {
@@ -208,45 +266,47 @@ fn generate() -> io::Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-#[cfg(unix)]
+/// The secrets folder, owner-only ([`crate::owner_only`]): `0700` on Unix,
+/// the current user as its only access entry on Windows.
 fn make_private_dir(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    if let Some(parent) = dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    match fs::DirBuilder::new().mode(0o700).create(dir) {
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        other => other,
-    }
+    crate::owner_only::create_dir(dir)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))
 }
 
-#[cfg(not(unix))]
-fn make_private_dir(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)
-}
-
-#[cfg(unix)]
+/// A value's file, owner-only before it is linked into place: a value
+/// whose file cannot be restricted is not created at all.
 fn write_private(path: &Path, value: &str) -> io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(value.as_bytes())?;
-    f.sync_all()
+    crate::owner_only::write_new(path, value.as_bytes())
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
-#[cfg(not(unix))]
-fn write_private(path: &Path, value: &str) -> io::Result<()> {
-    use std::io::Write;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    f.write_all(value.as_bytes())?;
-    f.sync_all()
+/// Every value generated for any instance under `work_dir`, without making
+/// any. Unreadable or empty files are left out (a resolution reports them).
+/// Named `<instance>/<name>`, so two instances' values stay apart.
+pub fn existing(work_dir: &Path) -> Secrets {
+    let mut out = IndexMap::new();
+    let Ok(instances) = fs::read_dir(work_dir.join(INSTANCES_DIR)) else {
+        return Secrets(out);
+    };
+    let mut instances: Vec<_> = instances.flatten().collect();
+    instances.sort_by_key(|e| e.file_name());
+    for inst in instances {
+        let Ok(files) = fs::read_dir(inst.path().join(SECRETS_DIR)) else {
+            continue;
+        };
+        let mut files: Vec<_> = files.flatten().collect();
+        files.sort_by_key(|e| e.file_name());
+        for f in files {
+            let name = f.file_name().to_string_lossy().into_owned();
+            if !is_valid_name(&name) {
+                continue;
+            }
+            if let Ok(Some(v)) = read(&f.path()) {
+                out.insert(format!("{}/{name}", inst.file_name().to_string_lossy()), v);
+            }
+        }
+    }
+    Secrets(out)
 }
 
 #[cfg(test)]
@@ -332,6 +392,40 @@ mod tests {
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&d), 0o700);
         assert_eq!(mode(&d.join("db")), 0o600);
+    }
+
+    /// The folder and each value file have exactly one access entry, the
+    /// current user's, not inherited.
+    #[cfg(windows)]
+    #[test]
+    fn the_folder_and_files_have_the_owner_as_their_only_access_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        load_or_create(tmp.path(), "app-0", &set(&["db", "api-key"])).unwrap();
+        let d = dir(tmp.path(), "app-0");
+        crate::owner_only::assert_owner_only(&d);
+        crate::owner_only::assert_owner_only(&d.join("db"));
+        crate::owner_only::assert_owner_only(&d.join("api-key"));
+    }
+
+    #[test]
+    fn hide_shows_each_value_as_the_mask_and_existing_reads_every_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path();
+        let a = load_or_create(work, "app-0", &set(&["db"])).unwrap();
+        let b = load_or_create(work, "app-1", &set(&["db"])).unwrap();
+        fs::write(dir(work, "app-1").join("short"), "abc").unwrap();
+        let all = existing(work);
+        let (va, vb) = (a.get("db").unwrap(), b.get("db").unwrap());
+        assert_eq!(all.get("app-0/db"), Some(va));
+        assert_eq!(all.get("app-1/db"), Some(vb));
+        let line = format!("DATABASE_URL=postgres://app:{va}@db/app other={vb} abc");
+        let shown = all.hide(&line);
+        assert_eq!(
+            shown, "DATABASE_URL=postgres://app:••••@db/app other=•••• abc",
+            "a value too short to match is left alone"
+        );
+        assert!(all.found_in(&line) && !all.found_in("abc"));
+        assert!(existing(&work.join("nothing-here")).is_empty());
     }
 
     #[test]

@@ -1082,3 +1082,196 @@ fn while_the_definition_is_untrusted_acknowledgements_are_refused_like_every_act
     assert_eq!(get(&s.src, "/api/work").0, 200);
     assert_eq!(get(&s.src, "/chappa/v1/manifest").0, 200);
 }
+
+/// A value the runner generated for an instance is a finding of its own
+/// (`generated-secret`) in a tracked file of a bound worktree and in the
+/// commits ahead of the base (one committed and deleted again included),
+/// by file and line and never by value; an untracked file holding it is
+/// not one (the work folder is where it lives). Every reply shows it as
+/// `••••`, here in a finding's file name.
+#[test]
+fn a_generated_value_in_a_commit_or_tracked_file_is_flagged_and_every_reply_hides_it() {
+    let Some(s) = setup("block-agents", true) else {
+        return;
+    };
+    let names = ["db".to_string()].into();
+    let value = stack_core::instance_secrets::load_or_create(&s.p.work(), "app-0", &names)
+        .unwrap()
+        .get("db")
+        .unwrap()
+        .to_owned();
+    commit_file(
+        &s.wt(),
+        "db.txt",
+        &format!("url=postgres://app:{value}@db/app\n"),
+        "add the url",
+    );
+    fs::remove_file(s.wt().join("db.txt")).unwrap();
+    test_git(&s.wt(), &["commit", "-q", "-am", "remove it again"]);
+    commit_file(
+        &s.wt(),
+        "notes.txt",
+        &format!("a\npassword {value}\n"),
+        "notes",
+    );
+    fs::write(s.wt().join("scratch.txt"), format!("{value}\n")).unwrap();
+    // A file whose name holds the value: its finding names it in the view.
+    fs::write(s.wt().join(format!("{value}.txt")), "PLANTED\n").unwrap();
+    let log = s.open_item();
+    let (_, env) = get(&s.src, "/api/environment");
+    let b = env["secretScan"].clone();
+    let generated: Vec<String> = b["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == stack_core::safety::secrets::generated::GENERATED_RULE)
+        .map(|f| {
+            format!(
+                "{}:{}{}",
+                f["file"].as_str().unwrap(),
+                f["line"],
+                if f["commit"].is_string() {
+                    " @commit"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    assert!(
+        generated.contains(&format!("{WT}/notes.txt:2")),
+        "{generated:?} {b}"
+    );
+    assert!(
+        generated.contains(&format!("{WT}/notes.txt:2 @commit")),
+        "{generated:?} {b}"
+    );
+    assert!(
+        generated.contains(&format!("{WT}/db.txt:1 @commit")),
+        "{generated:?} {b}"
+    );
+    assert!(
+        !generated.iter().any(|g| g.contains("scratch.txt")),
+        "an untracked file is where such a value may live: {generated:?}"
+    );
+    assert_eq!(b["blocksAgents"], true, "{b}");
+    let planted = files_of(&b)
+        .into_iter()
+        .find(|f| f.contains("(planted)"))
+        .unwrap_or_else(|| panic!("{b}"));
+    assert_eq!(planted, format!("{WT}/••••.txt:1 (planted)"));
+    let shown = env.to_string();
+    assert!(!shown.contains(&value), "{shown}");
+    assert!(
+        log.iter()
+            .all(|l| !l.contains(&format!("password {value}"))),
+        "{log:?}"
+    );
+    let stored = fs::read_to_string(secret_scan::store_path(&s.p.work(), "app-0")).unwrap();
+    assert!(
+        !stored.contains(&format!("password {value}")),
+        "the store names places, never contents"
+    );
+}
+
+/// The project's own gitleaks config, trusted at its hash: its allowlist
+/// lets one known public test value through. Edited after it was trusted,
+/// the runner's hash check falls back to the built-in rules (the value is
+/// found again) and the Environment view asks to review it.
+#[test]
+fn real_gitleaks_uses_a_trusted_project_config_and_falls_back_when_it_changes() {
+    if GitleaksOnPath::default()
+        .scanner(&std::env::temp_dir())
+        .is_none()
+    {
+        eprintln!("skipped: gitleaks is not on PATH");
+        return;
+    }
+    let Some(mut s) = setup("block-agents", true) else {
+        return;
+    };
+    // A token-shaped public test value, assembled at run time.
+    let public = format!("ghp_{}", "PubL1cTe5tVa1ue".repeat(3));
+    let token = &public[..40];
+    fs::create_dir_all(s.wt().join("samples")).unwrap();
+    fs::write(
+        s.wt().join("samples/public.txt"),
+        format!("sample = {token}\n"),
+    )
+    .unwrap();
+    let config_path = s.p.dir.join("tools").join("gitleaks.toml");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let config = format!(
+        "[extend]\nuseDefault = true\n\n[allowlist]\ndescription = \"a public test value\"\nregexes = ['''^{token}$''']\n"
+    );
+    fs::write(&config_path, &config).unwrap();
+    let hash = stack_core::safety::secrets::config::content_hash(config.as_bytes());
+    let pinned = stack_core::safety::secrets::config::ProjectScanConfig::Trusted {
+        path: config_path.clone(),
+        hash: hash.clone(),
+    };
+    let is_found = |b: &Value| {
+        b["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["file"] == format!("{WT}/samples/public.txt"))
+    };
+    let review = |env: &Value| {
+        env["banners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == secret_scan::CONFIG_REVIEW_BANNER)
+            .cloned()
+    };
+
+    // Without the project config, the built-in rules find it.
+    s.f.world = s.f.world.clone().with_gitleaks_config(None);
+    s.src = source(s.f.world.clone(), &s.p.dir);
+    s.open_item();
+    assert!(is_found(&s.block()), "{}", s.block());
+
+    // Trusted: its allowlist lets the known value through.
+    s.f.world = s.f.world.clone().with_project_scan_config(pinned.clone());
+    s.src = source(s.f.world.clone(), &s.p.dir);
+    s.open_item();
+    let env = s.env();
+    assert!(!is_found(&env["secretScan"]), "{env}");
+    assert_eq!(review(&env), None, "{env}");
+    let argv = s.f.world.job_argv("job-1");
+    assert_eq!(
+        argv[argv.len() - 4..],
+        [
+            chappa_stack::world::PROJECT_GITLEAKS_CONFIG_ARG.to_string(),
+            config_path.display().to_string(),
+            chappa_stack::world::PROJECT_GITLEAKS_CONFIG_HASH_ARG.to_string(),
+            hash.clone(),
+        ]
+    );
+
+    // Edited since: the hash no longer matches, the built-in rules apply
+    // again, and the view asks to review the config.
+    fs::write(&config_path, format!("{config}# edited\n")).unwrap();
+    s.open_item();
+    let env = s.env();
+    assert!(is_found(&env["secretScan"]), "{env}");
+    let banner = review(&env).unwrap_or_else(|| panic!("{env}"));
+    let text = banner.to_string();
+    assert!(text.contains("changed since it was trusted"), "{text}");
+    assert!(text.contains("the built-in rules"), "{text}");
+    assert!(!env.to_string().contains(token));
+
+    // Not trusted at all: never used, the same banner.
+    let unpinned = stack_core::safety::secrets::config::ProjectScanConfig::from_args(
+        Some(config_path.clone()),
+        Some("none"),
+    )
+    .unwrap();
+    s.f.world = s.f.world.clone().with_project_scan_config(unpinned);
+    s.src = source(s.f.world.clone(), &s.p.dir);
+    s.open_item();
+    let env = s.env();
+    assert!(is_found(&env["secretScan"]), "{env}");
+    assert!(review(&env).unwrap().to_string().contains("is not trusted"));
+}

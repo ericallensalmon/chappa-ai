@@ -46,6 +46,7 @@ use project_model::watcher::{ChangeMatcher, RecursiveMode, RestartWatcher};
 use project_model::writeback;
 use project_model::yml::{CommandLine, ProcessDef, ProjectYml};
 use serde::{Deserialize, Serialize};
+use stack_core::safety::secrets::config::ProjectScanConfig;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
 use term_core::actor::epoch_ms;
@@ -59,6 +60,7 @@ use crate::registry::{
     RecordBinding, Registry, TermId,
 };
 use crate::roots::{Root, RootKind};
+use crate::scan_config::ScanConfigSource;
 use crate::settings::SettingsState;
 use crate::sources::Sources;
 
@@ -79,6 +81,15 @@ struct ProjectRuntime {
     /// The project's git worktrees (cwd roots), listed on demand and kept
     /// for [`WORKTREE_CACHE_TTL`]; dropped on every project-file reload.
     worktrees: Option<WorktreeCache>,
+    /// The project's own gitleaks config as the gates get it
+    /// ([`crate::scan_config`]): pinned at the hash last trusted, which it
+    /// keeps while a change waits for trust (the scans then see the hash
+    /// differ and fall back), or named with why it is not used.
+    scan_config: ProjectScanConfig,
+    /// A watcher on that config file (it may live outside the folder the
+    /// project-file watcher sees), so an edit re-prompts like an edit of
+    /// `chappa.yml` does. Rebuilt when the file named changes.
+    scan_config_watcher: Option<(PathBuf, RestartWatcher)>,
 }
 
 /// One `git worktree list` result and when it was taken.
@@ -125,6 +136,10 @@ struct ProcessRuntime {
     /// put while a changed definition waits for trust, so a restart in the
     /// meantime still runs nothing new.
     trusted_definition: Option<String>,
+    /// For a stack runner: the project's own gitleaks config with the hash
+    /// it was trusted at, which every launch passes on (see
+    /// [`ProjectRuntime::scan_config`]).
+    scan_config: ProjectScanConfig,
 }
 
 #[derive(Clone, Default)]
@@ -192,6 +207,18 @@ impl Inner {
     /// the only real bug.
     fn notify_changed(&self) {
         self.changed.notify_all();
+    }
+
+    /// The settings a launch uses: the snapshot, with a Settings ▸ Security
+    /// gitleaks config that lies inside an open project folder dropped (it
+    /// is refused: see [`crate::scan_config::settings_config`]).
+    fn launch_settings(&self) -> Settings {
+        let mut settings = self.settings.snapshot();
+        let roots: Vec<&Path> = self.runtimes.values().map(|r| r.root.as_path()).collect();
+        settings.secret_scan_config = crate::scan_config::settings_config(&settings, roots)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        settings
     }
 }
 
@@ -446,6 +473,51 @@ impl Projects {
         for (id, names) in live_stack_runners(&inner.runtimes) {
             relaunch_locked(&mut inner, registry, app, arc.clone(), id, &names);
         }
+    }
+
+    /// The project's own gitleaks config as the pre-agent scan gets it: the
+    /// open project's pin, else (not open) what is on disk, pinned only when
+    /// the stored trust covers it. [`ProjectScanConfig::None`] for no
+    /// project or no config.
+    pub fn scan_config_for(&self, id: Option<u32>) -> ProjectScanConfig {
+        let Some(id) = id else {
+            return ProjectScanConfig::None;
+        };
+        let root = {
+            let Ok(inner) = self.inner.lock() else {
+                return ProjectScanConfig::None;
+            };
+            if let Some(rt) = inner.runtimes.get(&id) {
+                return rt.scan_config.clone();
+            }
+            match inner.store.as_ref().and_then(|s| s.get(id)) {
+                Some(p) => p.path.clone(),
+                None => return ProjectScanConfig::None,
+            }
+        };
+        let Ok(yml) = ProjectYml::load_result(&root) else {
+            return ProjectScanConfig::None;
+        };
+        let Some(scan) = ScanConfigSource::of(&root, &yml) else {
+            return ProjectScanConfig::None;
+        };
+        let trusted = crate::stack_trust::trust_hash_on_disk(&root).is_some_and(|h| {
+            self.inner
+                .lock()
+                .ok()
+                .and_then(|i| i.store.as_ref().map(|s| s.is_trusted(id, &h)))
+                .unwrap_or(false)
+        });
+        scan.pinned(trusted)
+    }
+
+    /// The folders of the open projects (a Settings gitleaks config inside
+    /// one is refused).
+    pub fn open_roots(&self) -> Vec<PathBuf> {
+        self.inner
+            .lock()
+            .map(|i| i.runtimes.values().map(|r| r.root.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Why a call that changes something through the stack runner `command`
@@ -828,13 +900,15 @@ fn spawn_process(
 ) -> Result<TermId, String> {
     // The stack runner learns which definition the person trusted on its
     // command line (it runs nothing under any other), and the gitleaks
-    // config from Settings, so its scans use the app's rules.
+    // configs (the project's own with its trusted hash, and the one from
+    // Settings), so its scans use the app's rules.
     let mut spec = if crate::stack_trust::is_stack_serve(&proc.def) {
         build_spec(
             &crate::stack_trust::launch_def(
                 &proc.def,
                 proc.trusted_definition.as_deref(),
                 &settings.secret_scan_config,
+                &proc.scan_config,
             )?,
             &root,
             settings,
@@ -1075,7 +1149,7 @@ fn respawn_process(
     };
     // Settings are re-read on every respawn, so an exec-profile change takes
     // effect on the next restart without reopening the project.
-    let settings = inner.settings.snapshot();
+    let settings = inner.launch_settings();
     let Some(proc) = inner
         .runtimes
         .get(&project_id)
@@ -1529,6 +1603,7 @@ pub fn open_project(
     // it, the trust gate guards it, and it is watched for external edits.
     let project_file = root.join(project_model::yml::CHAPPA_YML_NAME);
     let mut stack_lines: Vec<String> = Vec::new();
+    let mut scan_pin = ProjectScanConfig::None;
     let (processes, yml_hash, trust_pending, name, icon) = if !project_file.exists() {
         // A bare project: no file until the first command is added. Empty
         // defs, no trust gate, no load error — the first mutation
@@ -1550,9 +1625,11 @@ pub fn open_project(
                 root.display()
             )
         })?;
-        // A stack runner's definition is part of what is trusted.
+        // A stack runner's definition is part of what is trusted, and so is
+        // the project's own gitleaks config.
         let stacks = crate::stack_trust::stack_sources(&root, &yml.processes);
-        let yml_hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks);
+        let scan = ScanConfigSource::of(&root, &yml);
+        let yml_hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks, scan.as_ref());
         // Trust is read here, while `store`'s borrow of `inner` is still live —
         // below we need `inner` mutably for the runtime swap.
         let trust_pending = !store.is_trusted(id, &yml_hash);
@@ -1564,7 +1641,19 @@ pub fn open_project(
         if !trust_pending {
             trust_stack_definitions(&mut processes, &stacks);
         }
+        scan_pin = next_scan_pin(&ProjectScanConfig::None, scan.as_ref(), !trust_pending);
+        pin_scan_config(&mut processes, &scan_pin);
         stack_lines = crate::stack_trust::prompt_lines(&stacks);
+        if let Some(s) = &scan {
+            stack_lines.push(s.prompt_entry(stored.trusted_scan_config.as_deref()));
+            if let Some(p) = s.problem() {
+                log::warn!(
+                    "{}: secretScan.config {} is not used: {p}",
+                    root.display(),
+                    s.rel
+                );
+            }
+        }
         // chappa.yml is committed: a credential written into it is named
         // (file, command, field; never the value) so it can move to the
         // environment.
@@ -1635,6 +1724,14 @@ pub fn open_project(
         }
         _ => None,
     };
+    let scan_config_watcher = scan_config_watcher_for(
+        inner.app.clone(),
+        projects.arc(),
+        registry.inner().clone(),
+        id,
+        None,
+        &scan_pin,
+    );
 
     let trust_hash = yml_hash.clone();
     // Every command is a durable record from the moment it is opened, so
@@ -1657,6 +1754,8 @@ pub fn open_project(
             load_error: None,
             _yml_watcher: yml_watcher,
             worktrees: None,
+            scan_config: scan_pin,
+            scan_config_watcher,
         },
     );
     // Every process of this project just got a fresh (stopped, no term_id)
@@ -1744,17 +1843,14 @@ pub fn confirm_project_trust(
         })?;
         let loaded = inner.runtimes.get(&id).map(|r| r.yml_hash.as_str());
         trust_answer_matches(shown.as_deref(), loaded, &hash)?;
-        inner
-            .store
-            .as_mut()
-            .unwrap()
-            .mark_trusted(id, hash.clone())?;
+        mark_trusted_with_config(inner.store.as_mut().unwrap(), id, &root, hash.clone())?;
         // The sources this content stopped declaring may let go of their
         // kept records now; read the declared ones from exactly what was
         // trusted.
         if let Ok((yml, read)) = ProjectYml::load_result_with_hash(&root) {
             let stacks = crate::stack_trust::stack_sources(&root, &yml.processes);
-            if crate::stack_trust::project_trust_hash(&read, &stacks) == hash {
+            let scan = ScanConfigSource::of(&root, &yml);
+            if crate::stack_trust::project_trust_hash(&read, &stacks, scan.as_ref()) == hash {
                 let declared: Vec<String> = yml
                     .processes
                     .iter()
@@ -1762,9 +1858,28 @@ pub fn confirm_project_trust(
                     .map(|(n, _)| n.clone())
                     .collect();
                 inner.sources.content_trusted(&root, &declared);
-                // The stack runners start again under what was just trusted.
+                // The stack runners start again under what was just trusted
+                // (their definition, or the project's gitleaks config).
+                let app_handle = inner.app.clone();
                 let relaunch = match inner.runtimes.get_mut(&id) {
-                    Some(r) => trust_stack_definitions(&mut r.processes, &stacks),
+                    Some(r) => {
+                        let mut names = trust_stack_definitions(&mut r.processes, &stacks);
+                        r.scan_config = next_scan_pin(&r.scan_config, scan.as_ref(), true);
+                        for n in pin_scan_config(&mut r.processes, &r.scan_config) {
+                            if !names.contains(&n) {
+                                names.push(n);
+                            }
+                        }
+                        r.scan_config_watcher = scan_config_watcher_for(
+                            app_handle,
+                            projects.arc(),
+                            registry.inner().clone(),
+                            id,
+                            r.scan_config_watcher.take(),
+                            &r.scan_config,
+                        );
+                        names
+                    }
                     None => Vec::new(),
                 };
                 relaunch_locked(&mut inner, &registry, &app, projects.arc(), id, &relaunch);
@@ -2283,9 +2398,11 @@ fn after_own_write(
 /// stays untrusted, so the next reload still asks.
 fn trust_own_write(store: &mut ProjectStore, id: u32, was_trusted: bool) {
     if was_trusted {
-        let root = store.get(id).map(|p| p.path.clone());
-        if let Some(hash) = root.and_then(|r| crate::stack_trust::trust_hash_on_disk(&r)) {
-            let _ = store.mark_trusted(id, hash);
+        let Some(root) = store.get(id).map(|p| p.path.clone()) else {
+            return;
+        };
+        if let Some(hash) = crate::stack_trust::trust_hash_on_disk(&root) {
+            let _ = mark_trusted_with_config(store, id, &root, hash);
         }
     }
 }
@@ -2422,6 +2539,7 @@ fn fresh_runtime(root: &Path, def: ProcessDef) -> ProcessRuntime {
         spawned_at: Instant::now(),
         generation: 0,
         trusted_definition: None,
+        scan_config: ProjectScanConfig::None,
     }
 }
 
@@ -2465,6 +2583,102 @@ fn trust_stack_definitions(
         }
     }
     relaunch
+}
+
+/// The project's own gitleaks config as the gates get it next: from what
+/// is on disk (`now`) when the content is `trusted`; while it is not, a
+/// config pinned before stays pinned at its old hash (the scans see the
+/// file differ and fall back, with the banner), and anything else is named
+/// as not used.
+fn next_scan_pin(
+    prev: &ProjectScanConfig,
+    now: Option<&ScanConfigSource>,
+    trusted: bool,
+) -> ProjectScanConfig {
+    match (trusted, prev) {
+        (true, _) => now.map_or(ProjectScanConfig::None, |s| s.pinned(true)),
+        (false, ProjectScanConfig::Trusted { .. }) => prev.clone(),
+        (false, _) => now.map_or(ProjectScanConfig::None, |s| s.pinned(false)),
+    }
+}
+
+/// Give every stack runner of the project `pin` for its next launch. The
+/// names of live runners whose value changed: the caller starts them again.
+fn pin_scan_config(
+    processes: &mut IndexMap<String, ProcessRuntime>,
+    pin: &ProjectScanConfig,
+) -> Vec<String> {
+    let mut relaunch = Vec::new();
+    for (name, proc) in processes.iter_mut() {
+        if !crate::stack_trust::is_stack_serve(&proc.def) || proc.scan_config == *pin {
+            continue;
+        }
+        if is_live(proc) {
+            relaunch.push(name.clone());
+        }
+        proc.scan_config = pin.clone();
+    }
+    relaunch
+}
+
+/// The text of the project's own config to keep with a trust record (for
+/// the next prompt's diff), from what is on disk.
+fn scan_config_text_on_disk(root: &Path) -> Option<String> {
+    let yml = ProjectYml::load_result(root).ok()?;
+    ScanConfigSource::of(root, &yml).and_then(|s| s.text().map(str::to_owned))
+}
+
+/// Trust `hash` for project `id` and keep the config text that goes with
+/// it.
+fn mark_trusted_with_config(
+    store: &mut ProjectStore,
+    id: u32,
+    root: &Path,
+    hash: String,
+) -> Result<(), String> {
+    store.mark_trusted(id, hash)?;
+    store.set_trusted_scan_config(id, scan_config_text_on_disk(root))
+}
+
+/// A watcher on the project's own gitleaks config, reloading the project
+/// (and so re-prompting) when it changes. `prev` is kept when it already
+/// watches that file. `None` without an app (tests) or without a file to
+/// watch.
+fn scan_config_watcher_for(
+    app: Option<AppHandle>,
+    projects: Arc<Mutex<Inner>>,
+    registry: Registry,
+    id: u32,
+    prev: Option<(PathBuf, RestartWatcher)>,
+    pin: &ProjectScanConfig,
+) -> Option<(PathBuf, RestartWatcher)> {
+    let app = app?;
+    let (path, _) = pin.args()?;
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Some((p, w)) = prev {
+        if p == path {
+            return Some((p, w));
+        }
+    }
+    let dir = path.parent()?.to_path_buf();
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let matcher = ChangeMatcher::new(dir.clone(), &[glob_literal(&name)]);
+    let (watcher, rx) =
+        RestartWatcher::start_with_mode(dir, matcher, RecursiveMode::NonRecursive).ok()?;
+    start_yml_reload_consumer(projects, registry, app, id, rx);
+    Some((path.to_path_buf(), watcher))
+}
+
+/// `name` as a glob matching only itself.
+fn glob_literal(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '*' | '?' | '[' | ']' | '{' | '}' => format!("[{c}]"),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// Whether `proc` is running (or starting) in a terminal.
@@ -2530,7 +2744,11 @@ fn stack_refusal_of(
             if !stacks.iter().any(|s| command.is_none_or(|c| c == s.name)) {
                 return None;
             }
-            let hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks);
+            let hash = crate::stack_trust::project_trust_hash(
+                &file_hash,
+                &stacks,
+                ScanConfigSource::of(root, &yml).as_ref(),
+            );
             (!is_trusted(&hash)).then(|| crate::stack_trust::UNTRUSTED_REFUSAL.to_owned())
         }
     }
@@ -2549,7 +2767,7 @@ fn relaunch_locked(
     let Some(root) = inner.runtimes.get(&id).map(|r| r.root.clone()) else {
         return;
     };
-    let settings = inner.settings.snapshot();
+    let settings = inner.launch_settings();
     for name in names {
         let record = begin_command_run(inner, id, name);
         let sources = inner.sources.clone();
@@ -2640,7 +2858,7 @@ fn reload_locked(
     }) else {
         return;
     };
-    let settings = inner.settings.snapshot();
+    let settings = inner.launch_settings();
     // The process source is chappa.yml, always — load it, hash it,
     // and gate on trust.
     let (yml, file_hash) = match ProjectYml::load_result_with_hash(&root) {
@@ -2654,7 +2872,8 @@ fn reload_locked(
         }
     };
     let stacks = crate::stack_trust::stack_sources(&root, &yml.processes);
-    let new_hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks);
+    let scan = ScanConfigSource::of(&root, &yml);
+    let new_hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks, scan.as_ref());
     let trust_hash = new_hash.clone();
     // Trust is per CONTENT HASH, not a one-time
     // gate at open. Content we have not confirmed — an external edit, an
@@ -2788,20 +3007,59 @@ fn reload_locked(
     }
     settle_undeclared(&inner.sources, &root, undeclared, trusted, &declared);
     let mut processes = processes;
-    let relaunch = if trusted {
+    let mut relaunch = if trusted {
         trust_stack_definitions(&mut processes, &stacks)
     } else {
         Vec::new()
     };
+    // The project's own gitleaks config: re-pinned when trusted; while not,
+    // the old pin stays (the scans see the file differ and fall back).
+    let prev_pin = inner.runtimes[&id].scan_config.clone();
+    let scan_pin = next_scan_pin(&prev_pin, scan.as_ref(), trusted);
+    for n in pin_scan_config(&mut processes, &scan_pin) {
+        if !relaunch.contains(&n) {
+            relaunch.push(n);
+        }
+    }
+    if let Some(s) = scan.as_ref().and_then(|s| s.problem().map(|p| (s, p))) {
+        log::warn!(
+            "{}: secretScan.config {} is not used: {}",
+            root.display(),
+            s.0.rel,
+            s.1
+        );
+    }
     let trust_commands = if trusted {
         Vec::new()
     } else {
         // A changed stack definition always asks, even when no command of
-        // the file itself would start.
+        // the file itself would start; so does a changed gitleaks config,
+        // shown with what changed since it was last trusted.
         let mut lines = reload_trust_commands(&processes, &held_back);
         lines.extend(crate::stack_trust::prompt_lines(&stacks));
+        if let Some(s) = &scan {
+            let last = inner
+                .store
+                .as_ref()
+                .and_then(|st| st.get(id))
+                .and_then(|p| p.trusted_scan_config.clone());
+            lines.push(s.prompt_entry(last.as_deref()));
+        }
         lines
     };
+    {
+        let app_handle = inner.app.clone();
+        let rt = inner.runtimes.get_mut(&id).unwrap();
+        rt.scan_config = scan_pin;
+        rt.scan_config_watcher = scan_config_watcher_for(
+            app_handle,
+            projects.clone(),
+            registry.clone(),
+            id,
+            rt.scan_config_watcher.take(),
+            &rt.scan_config,
+        );
+    }
     // Commands the file added are records too (no write when nothing is new).
     let names: Vec<String> = processes.keys().cloned().collect();
     if let Err(e) = inner
@@ -3256,7 +3514,7 @@ fn start_process(
         .ok_or_else(|| ControlError::no_process(&name, id))?;
     // Read the execution profile + per-actor controls fresh at every
     // start (same borrow discipline — owned clone before `&mut proc`).
-    let settings = inner.settings.snapshot();
+    let settings = inner.launch_settings();
     let sources = inner.sources.clone();
     // The run begins only for a spec that can spawn; a failed attempt leaves
     // the record's previous run as it was.
@@ -3887,6 +4145,8 @@ mod tests {
             load_error: None,
             _yml_watcher: None,
             worktrees: None,
+            scan_config: ProjectScanConfig::None,
+            scan_config_watcher: None,
         }
     }
 
@@ -3966,6 +4226,187 @@ mod tests {
         assert!(
             live_stack_runners(&runtimes).is_empty(),
             "a stopped runner stays stopped"
+        );
+    }
+
+    const SCAN_CONFIG: &str =
+        "[extend]\nuseDefault = true\n\n[allowlist]\npaths = ['''^samples/''']\n";
+
+    /// A stack project whose chappa.yml names its own gitleaks config.
+    fn scan_config_project(dir: &Path) -> (ProjectStore, u32, PathBuf) {
+        let root = dir.join("project");
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::write(root.join("tools").join("gitleaks.toml"), SCAN_CONFIG).unwrap();
+        std::fs::write(
+            root.join(project_model::yml::CHAPPA_YML_NAME),
+            "processes:\n  stack:\n    command: [chappa-stack, serve]\n    source: {}\nsecretScan:\n  config: tools/gitleaks.toml\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("chappa.stack.yml"), STACK_UP).unwrap();
+        let mut store = ProjectStore::new(dir.join("projects.json"));
+        let pid = store.add(root.clone(), "app".into(), None).unwrap().id;
+        (store, pid, root)
+    }
+
+    /// The project's own gitleaks config is part of its trust: trusting it
+    /// pins it at its hash (the runner gets both on its command line) and
+    /// keeps its text for the next prompt; editing the file alone lapses
+    /// trust, the pin stays at the old hash (the scans see the change and
+    /// fall back), and the prompt shows what changed. Trusting again pins
+    /// the new hash and names the live runner for a relaunch.
+    #[test]
+    fn an_edited_scan_config_lapses_trust_keeps_the_old_pin_and_asks_with_a_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, pid, root) = scan_config_project(dir.path());
+        let before_config = crate::stack_trust::trust_hash_on_disk(&root).unwrap();
+        mark_trusted_with_config(&mut store, pid, &root, before_config.clone()).unwrap();
+        assert_eq!(
+            store.get(pid).unwrap().trusted_scan_config.as_deref(),
+            Some(SCAN_CONFIG)
+        );
+        let yml = ProjectYml::load_result(&root).unwrap();
+        let scan = ScanConfigSource::of(&root, &yml).unwrap();
+        let first = next_scan_pin(&ProjectScanConfig::None, Some(&scan), true);
+        let first_hash = match &first {
+            ProjectScanConfig::Trusted { hash, .. } => hash.clone(),
+            other => panic!("{other:?}"),
+        };
+        let mut rt = runtime_of(&root);
+        assert!(
+            pin_scan_config(&mut rt.processes, &first).is_empty(),
+            "nothing live"
+        );
+        let launched = crate::stack_trust::launch_def(
+            &rt.processes["stack"].def,
+            None,
+            "",
+            &rt.processes["stack"].scan_config,
+        )
+        .unwrap();
+        match &launched.command {
+            CommandLine::Argv(w) => {
+                assert!(w.contains(&first_hash), "{w:?}");
+                assert!(w.contains(&crate::stack_trust::PROJECT_GITLEAKS_CONFIG_ARG.to_owned()));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Only the config file changes: trust lapses, like an edited command.
+        let edited = SCAN_CONFIG.replace("^samples/", "^.*");
+        std::fs::write(root.join("tools").join("gitleaks.toml"), &edited).unwrap();
+        let now = crate::stack_trust::trust_hash_on_disk(&root).unwrap();
+        assert_ne!(now, before_config);
+        assert!(!store.is_trusted(pid, &now), "the gate asks again");
+        let scan = ScanConfigSource::of(&root, &yml).unwrap();
+        // While it waits, the old pin stays: the scan's hash check falls back.
+        assert_eq!(next_scan_pin(&first, Some(&scan), false), first);
+        let chosen = stack_core::safety::secrets::config::choose(&first, None);
+        assert_eq!(
+            chosen.source,
+            stack_core::safety::secrets::config::ConfigSource::Default
+        );
+        assert!(chosen
+            .review
+            .unwrap()
+            .contains("changed since it was trusted"));
+        let prompt = scan.prompt_entry(store.get(pid).unwrap().trusted_scan_config.as_deref());
+        assert!(
+            prompt.contains("changed since it was last trusted"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("+ paths = ['''^.*''']"), "{prompt}");
+        assert!(
+            prompt.contains("skips these files entirely: ^.*"),
+            "{prompt}"
+        );
+
+        // Trusted again: a new pin, and the live runner starts again.
+        let p = rt.processes.get_mut("stack").unwrap();
+        p.term_id = Some(4);
+        p.lifecycle.on(ProcessEvent::Spawned, 1);
+        mark_trusted_with_config(&mut store, pid, &root, now.clone()).unwrap();
+        assert_eq!(
+            store.get(pid).unwrap().trusted_scan_config.as_deref(),
+            Some(edited.as_str())
+        );
+        let second = next_scan_pin(&first, Some(&scan), true);
+        assert_ne!(second, first);
+        assert_eq!(pin_scan_config(&mut rt.processes, &second), ["stack"]);
+    }
+
+    /// A project nobody trusted, or a config that breaks a rule, never
+    /// pins it; the runner is told `none` and says why.
+    #[test]
+    fn an_untrusted_or_invalid_scan_config_is_never_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _pid, root) = scan_config_project(dir.path());
+        let yml = ProjectYml::load_result(&root).unwrap();
+        let scan = ScanConfigSource::of(&root, &yml).unwrap();
+        let pin = next_scan_pin(&ProjectScanConfig::None, Some(&scan), false);
+        assert!(matches!(&pin, ProjectScanConfig::NotUsed { .. }), "{pin:?}");
+        assert_eq!(pin.args().map(|(_, h)| h), Some("none"));
+        std::fs::write(
+            root.join("tools").join("gitleaks.toml"),
+            "[extend]\nuseDefault = true\npath = \"more.toml\"\n",
+        )
+        .unwrap();
+        let scan = ScanConfigSource::of(&root, &yml).unwrap();
+        match next_scan_pin(&ProjectScanConfig::None, Some(&scan), true) {
+            ProjectScanConfig::NotUsed { reason, .. } => {
+                assert!(reason.contains("`[extend] path` is refused"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // A project naming none is unchanged: the plain file hash.
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(
+            plain.join(project_model::yml::CHAPPA_YML_NAME),
+            "processes:\n  web:\n    command: npm run dev\n",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::stack_trust::trust_hash_on_disk(&plain).unwrap(),
+            project_model::hash::file_content_hash(
+                &plain.join(project_model::yml::CHAPPA_YML_NAME)
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_settings_gitleaks_config_inside_an_open_project_is_refused_and_dropped_at_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _pid, root) = scan_config_project(dir.path());
+        let mut settings = Settings {
+            secret_scan_config: root
+                .join("tools")
+                .join("gitleaks.toml")
+                .display()
+                .to_string(),
+            ..Settings::default()
+        };
+        let err = crate::settings::refuse_config_inside(&settings, std::slice::from_ref(&root))
+            .unwrap_err();
+        assert!(
+            err.contains("use the project's own config through chappa.yml"),
+            "{err}"
+        );
+        assert!(crate::settings::refuse_config_inside(&settings, &[]).is_ok());
+        let outside = dir.path().join("house.toml");
+        settings.secret_scan_config = outside.display().to_string();
+        assert!(
+            crate::settings::refuse_config_inside(&settings, std::slice::from_ref(&root)).is_ok()
+        );
+        // Saved before the project was opened: kept, not used.
+        settings.secret_scan_config = root
+            .join("tools")
+            .join("gitleaks.toml")
+            .display()
+            .to_string();
+        assert_eq!(
+            crate::scan_config::settings_config(&settings, [root.as_path()]),
+            None
         );
     }
 
@@ -4123,6 +4564,7 @@ mod tests {
             spawned_at: Instant::now(),
             generation: 0,
             trusted_definition: None,
+            scan_config: ProjectScanConfig::None,
         }
     }
 

@@ -1,4 +1,4 @@
-//! `chappa-stack serve | run-job <id> | follow <file>`; see the library
+//! `chappa-stack serve | run-job <id> | follow <file> | follow-command`; see the library
 //! docs for what each does.
 
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -6,17 +6,24 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use chappa_stack::hidden_output::LineHider;
 use chappa_stack::identity::{Token, ADDR_ENV, TOKEN_ENV};
 use chappa_stack::project::ProjectConfig;
 use chappa_stack::server::{self, DefinitionPin, Source};
-use chappa_stack::world::{World, GITLEAKS_CONFIG_ARG};
+use chappa_stack::world::{
+    World, GITLEAKS_CONFIG_ARG, PROJECT_GITLEAKS_CONFIG_ARG, PROJECT_GITLEAKS_CONFIG_HASH_ARG,
+};
+use stack_core::safety::secrets::config::ProjectScanConfig;
 
 const USAGE: &str = "usage:
   chappa-stack serve [--project <dir>] [--stack <name>] [--slot <n>] [--channel <name>]
                      [--trusted-definition <hash>|none] [--gitleaks-config <file>]
+                     [--project-gitleaks-config <file> --project-gitleaks-config-hash <hash>|none]
                      [--addr <loopback:port> --token-file <file>]
   chappa-stack run-job <job id> [--project <dir>] [--gitleaks-config <file>]
-  chappa-stack follow <file>
+                     [--project-gitleaks-config <file> --project-gitleaks-config-hash <hash>|none]
+  chappa-stack follow <file> [--hide-generated <work dir>]
+  chappa-stack follow-command --hide-generated <work dir> -- <command…>
 
 serve: launched by the app as a `source:` command, it reads CHAPPA_SOURCE_ADDR
 and CHAPPA_SOURCE_TOKEN. With --addr it runs on its own (attached mode): the
@@ -31,7 +38,18 @@ attached without it, the definition as read at startup is the trusted one.
 --gitleaks-config is the gitleaks config the app's Settings name: every
 secret scan (worktrees, commits, build contexts, env files) uses it, and
 every job is started with it. Without it the built-in default is used, the
-same one the app uses. A config file inside a scanned folder is never read.";
+same one the app uses. A config file inside a scanned folder is never read,
+except the project's own:
+
+--project-gitleaks-config is the config the project names in chappa.yml
+(`secretScan.config`), with the content hash the person trusted in the app
+(`none` while it is not trusted). Before every scan the file is read and
+hashed again; it is used, ahead of the Settings config, only while the hash
+matches and it keeps gitleaks' defaults. Otherwise the scans fall back to the
+Settings config or the default, and the Environment view asks to review it.
+
+follow and follow-command show a component's output for its `logs` terminal,
+with every value generated for an instance (`{secret:<name>}`) as ••••.";
 
 /// What the app put in this process's environment, taken out of it before
 /// anything else runs, so no child of this process can inherit the token.
@@ -85,6 +103,7 @@ fn main() -> ExitCode {
         "serve" => serve(&mut args, launch),
         "run-job" => run_job(&mut args),
         "follow" => follow(&mut args),
+        "follow-command" => follow_command(&mut args),
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
     match result {
@@ -112,6 +131,18 @@ fn gitleaks_config(args: &mut Args) -> Result<Option<PathBuf>, String> {
         .map(PathBuf::from))
 }
 
+/// `--project-gitleaks-config <file> --project-gitleaks-config-hash
+/// <hash|none>`: the project's own config and the hash it was trusted at.
+fn project_scan_config(args: &mut Args) -> Result<ProjectScanConfig, String> {
+    let path = args
+        .take(PROJECT_GITLEAKS_CONFIG_ARG)?
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from);
+    let hash = args.take(PROJECT_GITLEAKS_CONFIG_HASH_ARG)?;
+    ProjectScanConfig::from_args(path, hash.as_deref())
+}
+
 fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     let mut config = ProjectConfig::new(project_dir(args)?);
     config.stack = args.take("--stack")?;
@@ -130,6 +161,7 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
         .map(|t| DefinitionPin::parse(&t))
         .transpose()?;
     let gitleaks_config = gitleaks_config(args)?;
+    let project_scan = project_scan_config(args)?;
     args.done()?;
     let (addr, token, attached) = match addr_flag {
         Some(addr) => {
@@ -161,7 +193,9 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     // Launched: the proof covers the address string the app chose. Attached:
     // the address actually bound (a `:0` request becomes a real port).
     let proof_addr = if attached { bound.to_string() } else { addr };
-    let world = World::real().with_gitleaks_config(gitleaks_config);
+    let world = World::real()
+        .with_gitleaks_config(gitleaks_config)
+        .with_project_scan_config(project_scan);
     let source = Source::new(world.clone(), config, token, proof_addr.clone());
     if pin == DefinitionPin::Nothing {
         eprintln!("chappa-stack: no trusted stack definition; read-only until it is trusted");
@@ -230,8 +264,11 @@ fn run_job(args: &mut Args) -> Result<u8, String> {
     let id = args.rest.remove(0);
     let dir = project_dir(args)?;
     let gitleaks_config = gitleaks_config(args)?;
+    let project_scan = project_scan_config(args)?;
     args.done()?;
-    let world = World::real().with_gitleaks_config(gitleaks_config);
+    let world = World::real()
+        .with_gitleaks_config(gitleaks_config)
+        .with_project_scan_config(project_scan);
     let mut stdout = std::io::stdout();
     let code = chappa_stack::runjob::run_job(&world, &dir, &id, &mut stdout);
     Ok(code.clamp(0, 255) as u8)
@@ -239,15 +276,22 @@ fn run_job(args: &mut Args) -> Result<u8, String> {
 
 /// Print a file and keep printing what is appended, like `tail -f`, for a
 /// process component's `logs` action. Starts over when the file shrinks.
+/// With `--hide-generated <work dir>`, the values generated for that work
+/// folder's instances are shown as `••••`.
 fn follow(args: &mut Args) -> Result<u8, String> {
     if args.rest.is_empty() {
         return Err("follow needs a file".into());
     }
     let path = PathBuf::from(args.rest.remove(0));
+    let hide = args
+        .take(chappa_stack::actions::HIDE_GENERATED_ARG)?
+        .map(PathBuf::from);
     args.done()?;
+    let mut hider = hide.as_deref().map(LineHider::new);
     let mut pos: u64 = 0;
     let mut out = std::io::stdout();
     loop {
+        let mut read = Vec::new();
         if let Ok(mut f) = std::fs::File::open(&path) {
             let len = f.metadata().map(|m| m.len()).unwrap_or(0);
             if len < pos {
@@ -257,11 +301,43 @@ fn follow(args: &mut Args) -> Result<u8, String> {
                 let mut buf = Vec::new();
                 if f.take(len - pos).read_to_end(&mut buf).is_ok() {
                     pos += buf.len() as u64;
-                    let _ = out.write_all(&buf);
-                    let _ = out.flush();
+                    read = buf;
                 }
             }
         }
+        let shown = match (&mut hider, read.is_empty()) {
+            (None, _) => read,
+            (Some(h), false) => h.push(&read),
+            (Some(h), true) => h.idle(),
+        };
+        if !shown.is_empty() {
+            let _ = out.write_all(&shown);
+            let _ = out.flush();
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// `follow-command --hide-generated <work dir> -- <argv…>`: run an engine's
+/// `logs -f` with its output shown a line at a time, the values generated
+/// for that work folder's instances shown as `••••`.
+fn follow_command(args: &mut Args) -> Result<u8, String> {
+    let work_dir = args
+        .take(chappa_stack::actions::HIDE_GENERATED_ARG)?
+        .map(PathBuf::from)
+        .ok_or("follow-command needs --hide-generated <work dir>")?;
+    match args.rest.first().map(String::as_str) {
+        Some("--") => {
+            args.rest.remove(0);
+        }
+        _ => return Err("follow-command needs `--` before the command".into()),
+    }
+    if args.rest.is_empty() {
+        return Err("follow-command needs a command after `--`".into());
+    }
+    let argv = std::mem::take(&mut args.rest);
+    let out: std::sync::Arc<std::sync::Mutex<dyn Write + Send>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
+    let code = chappa_stack::hidden_output::follow_command(&argv, &work_dir, out);
+    Ok(code.clamp(0, 255) as u8)
 }

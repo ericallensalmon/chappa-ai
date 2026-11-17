@@ -24,6 +24,8 @@
 //! | any other scanner | [`hook::HookScanner`] (gitleaks JSON or SARIF on stdout) |
 //! | report parsing, value stripping | `report` (internal) |
 //! | acknowledgements | [`baseline::Baseline`] |
+//! | a project's own gitleaks config, and which config a scan uses | [`config`] |
+//! | a generated instance secret in a commit or a tracked file | [`generated`] |
 //!
 //! The invariant from the parent module holds throughout: a [`Finding`]
 //! has a rule, a file, a line and a commit, and no value. Scanners are run
@@ -32,6 +34,8 @@
 //! cannot hold one.
 
 pub mod baseline;
+pub mod config;
+pub mod generated;
 pub mod gitleaks;
 pub mod hook;
 pub mod listing;

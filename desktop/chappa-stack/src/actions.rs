@@ -509,8 +509,19 @@ pub fn all_actions(
     out
 }
 
+/// The flag `follow` and `follow-command` take the work folder in: the
+/// values generated for its instances are shown as `••••` in what they
+/// print.
+pub const HIDE_GENERATED_ARG: &str = "--hide-generated";
+
 /// The `logs` terminal action: `<engine> logs -f <container>` for a
 /// container, or this program following a process component's log file.
+///
+/// When the instance has generated secrets (`work_dir` names where they
+/// live), a component's output may print them (a connection string at
+/// startup), so the engine's command runs under this program's
+/// `follow-command`, and `follow` is told the same folder: both show each
+/// generated value as `••••`, like every other view.
 pub fn logs_action(
     inst: &ResolvedInstance,
     obs: &Observation,
@@ -518,18 +529,40 @@ pub fn logs_action(
     project_dir: &Path,
     process_log: Option<&PathBuf>,
     exe: &Path,
+    work_dir: &Path,
 ) -> Option<Value> {
     let c = inst.components.get(component)?;
+    let hide = !inst.secrets.is_empty();
+    let hide_args = || {
+        vec![
+            HIDE_GENERATED_ARG.to_string(),
+            work_dir.display().to_string(),
+        ]
+    };
     let command: Vec<String> = match (process_log, obs.ps.get(component)) {
-        (Some(log), _) => vec![
-            exe.display().to_string(),
-            "follow".into(),
-            log.display().to_string(),
-        ],
-        (None, Some(ps)) if !ps.name.is_empty() => {
-            let mut argv = engine_argv(&c.engine);
-            argv.extend(["logs".to_string(), "-f".to_string(), ps.name.clone()]);
+        (Some(log), _) => {
+            let mut argv = vec![
+                exe.display().to_string(),
+                "follow".into(),
+                log.display().to_string(),
+            ];
+            if hide {
+                argv.extend(hide_args());
+            }
             argv
+        }
+        (None, Some(ps)) if !ps.name.is_empty() => {
+            let mut engine = engine_argv(&c.engine);
+            engine.extend(["logs".to_string(), "-f".to_string(), ps.name.clone()]);
+            if hide {
+                let mut argv = vec![exe.display().to_string(), "follow-command".into()];
+                argv.extend(hide_args());
+                argv.push("--".into());
+                argv.extend(engine);
+                argv
+            } else {
+                engine
+            }
         }
         _ => return None,
     };

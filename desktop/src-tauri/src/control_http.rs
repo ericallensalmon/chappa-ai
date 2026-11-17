@@ -730,72 +730,15 @@ fn write_owner_only(path: &Path, token: &str) -> std::io::Result<()> {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(token.as_bytes())?;
         drop(file);
-        restrict_acl_windows(&tmp)?;
+        // The current user's grant as the file's only access entry: the
+        // one routine the generated stack secrets use too.
+        stack_core::owner_only::restrict(&tmp)?;
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
-}
-
-/// Leave the current user's grant as the file's only ACE. `icacls` ships
-/// with every Windows; shelling out keeps the crate free of the Win32
-/// security API.
-///
-/// Two steps, because a new file can carry explicit ACEs that
-/// `/inheritance:r` keeps: where the folder passes nothing down, Windows
-/// writes the creating token's default DACL onto the file (SYSTEM and
-/// Administrators for an elevated account). `/reset` drops every explicit
-/// ACE, leaving only what the folder passes down; `/inheritance:r` then
-/// strips that, and the grant is all that is left.
-///
-/// `icacls` is run by its full System32 path, never resolved by name, so a
-/// same-named binary next to the app or earlier on PATH can't stand in for
-/// it. The grant names `DOMAIN\user` when `USERDOMAIN` is set: a bare name
-/// is looked up on the local machine first, so on a domain-joined machine a
-/// local account sharing the user's name would otherwise get the grant.
-#[cfg(windows)]
-fn restrict_acl_windows(path: &Path) -> std::io::Result<()> {
-    let user = std::env::var("USERNAME")
-        .map_err(|_| std::io::Error::other("USERNAME not set; cannot restrict the token ACL"))?;
-    let principal = match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
-        _ => user,
-    };
-    let icacls = icacls_path()?;
-    let run = |args: &[std::ffi::OsString]| -> std::io::Result<()> {
-        let output = std::process::Command::new(&icacls)
-            .arg(path)
-            .args(args)
-            .output()?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!(
-                "icacls failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )))
-        }
-    };
-    run(&["/reset".into()])?;
-    run(&[
-        "/inheritance:r".into(),
-        "/grant:r".into(),
-        format!("{principal}:F").into(),
-    ])
-}
-
-/// `%SystemRoot%\System32\icacls.exe` (`windir` as the fallback). With
-/// neither set there is no trustworthy location, so this fails rather than
-/// falling back to a PATH lookup.
-#[cfg(windows)]
-fn icacls_path() -> std::io::Result<PathBuf> {
-    let root = std::env::var_os("SystemRoot")
-        .or_else(|| std::env::var_os("windir"))
-        .filter(|r| !r.is_empty())
-        .ok_or_else(|| std::io::Error::other("SystemRoot not set; cannot locate icacls"))?;
-    Ok(PathBuf::from(root).join("System32").join("icacls.exe"))
 }
 
 #[cfg(not(any(unix, windows)))]

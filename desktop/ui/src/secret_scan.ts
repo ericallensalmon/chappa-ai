@@ -26,6 +26,7 @@ export function parseSecretScanBlock(err: unknown): ipc.SecretScanBlockDto | nul
       findings: parsed.findings.filter((f) => f && typeof f.file === "string" && typeof f.rule === "string"),
       skipped: typeof parsed.skipped === "number" ? parsed.skipped : 0,
       ...(typeof parsed.incomplete === "string" && parsed.incomplete ? { incomplete: parsed.incomplete } : {}),
+      ...(typeof parsed.configReview === "string" && parsed.configReview ? { configReview: parsed.configReview } : {}),
     };
   } catch {
     return null;
@@ -37,10 +38,17 @@ export function findingLine(f: ipc.SecretFindingDto): string {
   return `${f.file}${f.line ? `:${f.line}` : ""}  (${f.rule})`;
 }
 
+/** The review banner's lines, leading a dialog while the project's own
+ *  gitleaks config is not the one the scan used. */
+function reviewLines(review: string | null | undefined): string[] {
+  return review ? [`Review the project's secret-scan config: ${review}`, ""] : [];
+}
+
 /** The dialog text for a refused launch. */
 export function blockMessage(block: ipc.SecretScanBlockDto): string {
   if (block.incomplete) {
     return [
+      ...reviewLines(block.configReview),
       `The agent was not launched: the secret scan of ${block.cwd} did not finish.`,
       "",
       block.incomplete,
@@ -50,6 +58,7 @@ export function blockMessage(block: ipc.SecretScanBlockDto): string {
   }
   const n = block.findings.length;
   const lines = [
+    ...reviewLines(block.configReview),
     `The agent was not launched: ${n} possible secret${n === 1 ? "" : "s"} in ${block.cwd}.`,
     "",
     ...block.findings.map(findingLine),
@@ -62,13 +71,17 @@ export function blockMessage(block: ipc.SecretScanBlockDto): string {
 
 /** The notification for a launch that went ahead. */
 export function noticeText(notice: ipc.SecretScanNoticeEvent["notice"]): { title: string; body: string } {
+  if (notice.kind === "config-review") {
+    return { title: "Review the project's secret-scan config", body: `Launched in ${notice.cwd}. ${notice.reason}` };
+  }
+  const review = notice.configReview ? ` ${notice.configReview}` : "";
   if (notice.kind === "launched-anyway") {
-    return { title: "Launched without a complete secret scan", body: `Launched in ${notice.cwd} anyway: ${notice.reason}. Note: ${notice.note}` };
+    return { title: "Launched without a complete secret scan", body: `Launched in ${notice.cwd} anyway: ${notice.reason}. Note: ${notice.note}${review}` };
   }
   const n = notice.findings.length;
   return {
     title: `${n} possible secret${n === 1 ? "" : "s"} in the agent's folder`,
-    body: `Launched in ${notice.cwd} anyway (policy: warn). ${notice.findings.map(findingLine).join("; ")}`,
+    body: `Launched in ${notice.cwd} anyway (policy: warn). ${notice.findings.map(findingLine).join("; ")}${review}`,
   };
 }
 
