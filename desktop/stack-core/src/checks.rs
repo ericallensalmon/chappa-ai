@@ -322,6 +322,12 @@ pub trait PortProbe {
 
 /// Binds the port on every address to find out. Both the wildcard and
 /// loopback must bind, because a listener on either blocks the publish.
+/// The IPv6 wildcard and loopback are tried too: on macOS and the BSDs an
+/// IPv4 bind succeeds beside an IPv6 listener on the same port (a dev server
+/// listening on `::`, as Node does by default, accepts IPv4 connections too),
+/// so the IPv4 binds alone would read that port as free. Only "address in
+/// use" counts there, since a host without IPv6 fails those binds for
+/// reasons that say nothing about the port.
 ///
 /// It binds a plain TCP socket and never calls `listen()`: listening on the
 /// wildcard address is what makes Windows Firewall ask whether to allow the
@@ -339,23 +345,37 @@ pub trait PortProbe {
 pub struct StdPortProbe;
 
 impl StdPortProbe {
-    /// Whether `addr` binds, without listening; the socket is dropped (and
-    /// the port released) before this returns.
-    fn binds(addr: std::net::SocketAddr) -> bool {
+    /// Bind `addr` without listening; the socket is dropped (and the port
+    /// released) before this returns.
+    fn bind(addr: std::net::SocketAddr) -> std::io::Result<()> {
         use socket2::{Domain, Protocol, Socket, Type};
-        let Ok(socket) = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
-        else {
-            return false;
-        };
-        socket.bind(&addr.into()).is_ok()
+        let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+        if addr.is_ipv6() {
+            // The IPv4 binds cover IPv4; this one asks about IPv6 alone.
+            socket.set_only_v6(true)?;
+        }
+        socket.bind(&addr.into())
+    }
+
+    /// Whether `addr` binds (any error reads as taken).
+    fn binds(addr: std::net::SocketAddr) -> bool {
+        Self::bind(addr).is_ok()
+    }
+
+    /// Whether `addr` is not held by someone else: only "address in use"
+    /// reads as taken (for the IPv6 addresses, see the type's docs).
+    fn not_in_use(addr: std::net::SocketAddr) -> bool {
+        !matches!(Self::bind(addr), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse)
     }
 }
 
 impl PortProbe for StdPortProbe {
     fn is_free(&self, port: u16) -> bool {
-        use std::net::{Ipv4Addr, SocketAddr};
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
         Self::binds(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
             && Self::binds(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+            && Self::not_in_use(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))
+            && Self::not_in_use(SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
     }
 }
 
@@ -1007,25 +1027,64 @@ stacks:
         // twice over. A released ephemeral port can be picked up by another
         // process's outgoing connection at any moment, so that half retries
         // on a fresh port instead of failing on someone else's socket.
-        fn binds(host: &str, port: u16) -> bool {
-            TcpListener::bind((host, port)).is_ok() // dropped on return
+        //
+        // macOS frees a closed socket's port a moment after the close, so
+        // the probe may read a just-released port as taken for a while
+        // (the safe side); the wait below allows for that.
+        fn binds(host: &str, port: u16) -> Result<(), String> {
+            TcpListener::bind((host, port)) // dropped on return
+                .map(drop)
+                .map_err(|e| format!("a listener on {host}:{port} after the probe: {e}"))
         }
-        let released_and_kept_free = |port: u16| {
-            (0..2).all(|_| {
-                StdPortProbe.is_free(port) && binds("0.0.0.0", port) && binds("127.0.0.1", port)
-            })
+        fn probe_reads_free(port: u16) -> Result<(), String> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !StdPortProbe.is_free(port) {
+                if std::time::Instant::now() > deadline {
+                    return Err(format!("{port} still read as taken 5 s after the release"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(())
+        }
+        let released_and_kept_free = |port: u16| -> Result<(), String> {
+            for _ in 0..2 {
+                probe_reads_free(port)?;
+                binds("0.0.0.0", port)?;
+                binds("127.0.0.1", port)?;
+            }
+            Ok(())
         };
         for host in ["127.0.0.1", "0.0.0.0"] {
+            let mut tries = Vec::new();
             let freed = (0..5).any(|_| {
                 let listener = TcpListener::bind((host, 0)).unwrap();
                 let port = listener.local_addr().unwrap().port();
                 assert!(!StdPortProbe.is_free(port), "{host}:{port} is listened on");
                 drop(listener);
-                released_and_kept_free(port)
+                let outcome = released_and_kept_free(port);
+                let ok = outcome.is_ok();
+                tries.extend(outcome.err());
+                ok
             });
             assert!(
                 freed,
-                "{host}: a released port never read free and bindable"
+                "{host}: a released port never read free and bindable: {tries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn std_port_probe_sees_an_ipv6_listener() {
+        // A dev server on `::` or `::1` holds the port for IPv4 clients too
+        // on some systems, while an IPv4 bind beside it still succeeds.
+        for host in ["::1", "::"] {
+            let Ok(listener) = TcpListener::bind((host, 0)) else {
+                continue; // no IPv6 on this host
+            };
+            let port = listener.local_addr().unwrap().port();
+            assert!(
+                !StdPortProbe.is_free(port),
+                "[{host}]:{port} is listened on"
             );
         }
     }

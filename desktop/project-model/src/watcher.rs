@@ -29,6 +29,11 @@ pub const WATCHER_DEBOUNCE: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone)]
 pub struct ChangeMatcher {
     root: PathBuf,
+    /// `root` with its symlinks resolved, when that differs. The OS can
+    /// report events under the resolved path (macOS FSEvents always does,
+    /// and on macOS `/var` and `/tmp` are themselves symlinks), so a root
+    /// reached through a link must match there too.
+    resolved_root: Option<PathBuf>,
     set: GlobSet,
     patterns: Vec<String>,
     /// Restart semantics ([`new`](Self::new)): chappa-ai's own yml artifacts —
@@ -54,8 +59,12 @@ impl ChangeMatcher {
             }
         }
         let set = builder.build().unwrap_or_default();
+        let resolved_root = std::fs::canonicalize(&root)
+            .ok()
+            .filter(|resolved| *resolved != root);
         Self {
             root,
+            resolved_root,
             set,
             patterns: kept,
             skip_own_yml: true,
@@ -105,10 +114,12 @@ impl ChangeMatcher {
         {
             return false;
         }
-        match path.strip_prefix(&self.root) {
-            Ok(rel) => self.set.is_match(rel),
-            Err(_) => false,
-        }
+        let rel = path.strip_prefix(&self.root).ok().or_else(|| {
+            self.resolved_root
+                .as_deref()
+                .and_then(|resolved| path.strip_prefix(resolved).ok())
+        });
+        rel.is_some_and(|rel| self.set.is_match(rel))
     }
 }
 
@@ -275,6 +286,23 @@ mod tests {
         assert!(!m.matches(&root.path().join("docs/intro.md")));
         // Paths outside the root never match.
         assert!(!m.matches(&tempfile::tempdir().unwrap().path().join("app/docs/a.md")));
+    }
+
+    /// Events can arrive under the root's resolved path (macOS reports them
+    /// there, and its temp folders sit behind a `/var` symlink).
+    #[cfg(unix)]
+    #[test]
+    fn a_root_reached_through_a_symlink_matches_under_its_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let m = ChangeMatcher::new(link.clone(), &["src/*.rs".into()]);
+        let resolved = fs::canonicalize(&real).unwrap();
+        assert!(m.matches(&link.join("src/main.rs")));
+        assert!(m.matches(&resolved.join("src/main.rs")));
+        assert!(!m.matches(&resolved.join("docs/main.rs")));
     }
 
     #[test]
