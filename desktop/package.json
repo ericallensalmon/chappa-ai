@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "node scripts/bundle.mjs",
     "tauri": "tauri",
     "test:sources": "node --test \"sources/**/*.test.mjs\""
   },

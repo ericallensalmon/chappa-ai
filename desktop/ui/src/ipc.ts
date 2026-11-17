@@ -1033,6 +1033,10 @@ export interface SettingsDto {
    *  copies and Ctrl+C always reaches the terminal; this setting is about
    *  the Windows/Linux Ctrl reflex. Frontend-only consumer. */
   ctrlCCopyOnly: boolean;
+  /** macOS only: Option+<key> sends Meta (ESC + the key), as Alt does on
+   *  other systems, instead of the character Option types on the layout.
+   *  Default false. Frontend-only consumer (term/input.ts reads it live). */
+  optionAsMeta: boolean;
   /** TUI wheel multiplier, 1..=6 (default 3). Applied Rust-side (term-core
    *  `keys.rs::alt_screen_wheel`); normal scrollback stays at system speed. */
   scrollWheelSpeed: number;
@@ -1893,6 +1897,10 @@ export interface DataSafetyStateDto {
   /** Deliveries held per pane (panes with none left out). */
   held: { termId: number; count: number }[];
 }
+
+/** The macOS menu bar's File ▸ Close Pane (Cmd+W), emitted by the app's
+ *  menu (app_menu.rs) instead of closing the window. */
+export const MENU_CLOSE_PANE_EVENT = "menu://close-pane";
 
 export const DATA_SAFETY_EVENT = "term://data-safety";
 

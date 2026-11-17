@@ -178,6 +178,7 @@ export class SettingsPane {
   /** The clipboard-key toggles (both default ON). */
   private readonly ctrlVToggle: HTMLInputElement;
   private readonly ctrlCToggle: HTMLInputElement;
+  private readonly optionMetaToggle: HTMLInputElement;
   private readonly marksToggle: HTMLInputElement;
   private readonly wheelPicker: Segmented<number>;
   /** OSC 52 clipboard writes from terminal output: Off | Ask | Allow. */
@@ -318,6 +319,17 @@ export class SettingsPane {
           "cancel paths. Deliberate.",
       )),
     );
+    // macOS only, the counterpart of the rows above: there Option types
+    // characters unless this is on.
+    this.optionMetaToggle = this.toggle("optionAsMeta");
+    const optionRow = settingsRow(
+      "Option is Meta",
+      this.optionMetaToggle,
+      "Option+<key> sends Esc and the key, as Alt does on other systems (Option+B and Option+F move by " +
+        "word in a shell). Off by default: Option types the characters of your keyboard layout.",
+    );
+    optionRow.hidden = !isMac();
+    behavior.card.appendChild(optionRow);
     this.clipboardWritesPicker = new Segmented<ClipboardWritesMode>({
       label: "Programs can set the clipboard",
       options: CLIPBOARD_WRITES_MODES.map((m) => ({
@@ -639,6 +651,7 @@ export class SettingsPane {
     this.copyToggle.checked = s.copyOnSelect;
     this.ctrlVToggle.checked = s.ctrlVPastes;
     this.ctrlCToggle.checked = s.ctrlCCopyOnly;
+    this.optionMetaToggle.checked = s.optionAsMeta;
     this.marksToggle.checked = s.syntheticPromptMarks;
     this.wheelPicker.setValue(s.scrollWheelSpeed);
     this.clipboardWritesPicker.setValue(s.clipboardWrites);
@@ -668,7 +681,9 @@ export class SettingsPane {
 
   // --- builders ------------------------------------------------------------
 
-  private toggle(setting: "copyOnSelect" | "ctrlVPastes" | "ctrlCCopyOnly" | "syntheticPromptMarks"): HTMLInputElement {
+  private toggle(
+    setting: "copyOnSelect" | "ctrlVPastes" | "ctrlCCopyOnly" | "optionAsMeta" | "syntheticPromptMarks",
+  ): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.setting = setting;

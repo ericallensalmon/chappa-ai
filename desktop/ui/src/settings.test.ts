@@ -57,6 +57,15 @@ describe("defaults", () => {
     expect(clampSettings({ ctrlVPastes: "yes" as unknown as boolean }).ctrlVPastes).toBe(true);
     expect(clampSettings({ ctrlCCopyOnly: 0 as unknown as boolean }).ctrlCCopyOnly).toBe(true);
   });
+
+  it("keeps Option as Meta off unless it is explicitly on", () => {
+    expect(defaultSettings().optionAsMeta).toBe(false);
+    expect(clampSettings({}).optionAsMeta).toBe(false);
+    expect(clampSettings({ optionAsMeta: true }).optionAsMeta).toBe(true);
+    expect(clampSettings({ optionAsMeta: false }).optionAsMeta).toBe(false);
+    expect(clampSettings({ optionAsMeta: "yes" as unknown as boolean }).optionAsMeta).toBe(false);
+    expect(clampSettings({ optionAsMeta: 1 as unknown as boolean }).optionAsMeta).toBe(false);
+  });
 });
 
 describe("clampSettings", () => {

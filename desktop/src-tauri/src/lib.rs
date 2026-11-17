@@ -4,6 +4,7 @@ pub mod agent_json;
 pub mod agent_settings;
 pub mod agent_tools;
 pub mod agents;
+pub mod app_menu;
 mod commands;
 pub mod control_http;
 pub mod coordination;
@@ -234,6 +235,12 @@ pub fn run() {
             }
             Ok(())
         });
+
+    // macOS: Cmd+W closes the pane, not the only window (see app_menu).
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(app_menu::build)
+        .on_menu_event(app_menu::on_event);
 
     #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(tauri::generate_handler![

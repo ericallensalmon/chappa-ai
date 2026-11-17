@@ -26,6 +26,7 @@ import {
   isSearchShortcut,
   macKeyAction,
   modsFromEvent,
+  optionMetaChar,
   quotePath,
   quotePaths,
   rawWheelLines,
@@ -829,6 +830,7 @@ describe("keyboard on macOS", () => {
       { key: "PageDown" },
       { key: "T", shiftKey: true },
       { key: "W", shiftKey: true },
+      { key: "w" },
       { key: "S", shiftKey: true },
       { key: "A", shiftKey: true },
       { key: "P", shiftKey: true },
@@ -917,7 +919,6 @@ describe("keyboard on macOS", () => {
   it("leaves Cmd chords the app has no use for to the menu and the system", () => {
     for (const init of [
       { key: "q" },
-      { key: "w" },
       { key: "h" },
       { key: "m" },
       { key: "," },
@@ -937,6 +938,101 @@ describe("keyboard on macOS", () => {
     h.textarea.dispatchEvent(newShell);
     expect(newShell.defaultPrevented).toBe(true);
     expect(h.onKey.length).toBe(0);
+  });
+
+  it("closes the pane with Cmd+W and leaves Ctrl+W to the terminal", () => {
+    const h = makeHarness();
+    const close = key({ key: "w", metaKey: true });
+    expect(isPanelShortcut(close)).toBe(true);
+    h.textarea.dispatchEvent(close);
+    // The app performs it (its window listener closes the pane); the page
+    // keeps the key, so it is not also the window's Close.
+    expect(close.defaultPrevented).toBe(true);
+    expect(h.onKey.length).toBe(0);
+    // Cmd+Shift+W still closes it too; Cmd+Option+W is not the shortcut.
+    expect(isPanelShortcut(key({ key: "W", metaKey: true, shiftKey: true }))).toBe(true);
+    expect(isPanelShortcut(key({ key: "w", metaKey: true, altKey: true }))).toBe(false);
+    // Ctrl+W deletes a word in a shell.
+    const word = key({ key: "w", ctrlKey: true });
+    expect(isPanelShortcut(word)).toBe(false);
+    h.textarea.dispatchEvent(word);
+    expect(h.onKey).toEqual([{ key: { kind: "char", ch: "w" }, mods: MOD_CTRL }]);
+  });
+
+  it("sends Meta for Option chords when Option is Meta", () => {
+    const meta = { optionAsMeta: true };
+    // Option+B makes "∫" on a US layout; as Meta it is ESC b.
+    expect(dtoFromKeyboardEvent(key({ key: "∫", code: "KeyB", altKey: true }), meta)).toEqual({
+      key: { kind: "char", ch: "b" },
+      mods: MOD_ALT,
+    });
+    // The character Option would have made on a German layout is ignored.
+    expect(dtoFromKeyboardEvent(key({ key: "@", code: "KeyL", altKey: true }), meta)).toEqual({
+      key: { kind: "char", ch: "l" },
+      mods: MOD_ALT,
+    });
+    // A dead key (Option+E on US) is Meta too, not the start of a composition.
+    expect(dtoFromKeyboardEvent(key({ key: "Dead", code: "KeyE", altKey: true }), meta)).toEqual({
+      key: { kind: "char", ch: "e" },
+      mods: MOD_ALT,
+    });
+    // Shift gives the upper case and the shifted symbols.
+    expect(
+      dtoFromKeyboardEvent(key({ key: "Ï", code: "KeyF", altKey: true, shiftKey: true }), meta),
+    ).toEqual({ key: { kind: "char", ch: "F" }, mods: MOD_ALT | MOD_SHIFT });
+    expect(
+      dtoFromKeyboardEvent(key({ key: "˘", code: "Period", altKey: true, shiftKey: true }), meta),
+    ).toEqual({ key: { kind: "char", ch: ">" }, mods: MOD_ALT | MOD_SHIFT });
+    expect(dtoFromKeyboardEvent(key({ key: "™", code: "Digit2", altKey: true }), meta)).toEqual({
+      key: { kind: "char", ch: "2" },
+      mods: MOD_ALT,
+    });
+    // Named keys and Ctrl+Option chords are as they were.
+    expect(dtoFromKeyboardEvent(key({ key: "ArrowLeft", altKey: true }), meta)).toEqual({
+      key: { kind: "left" },
+      mods: MOD_ALT,
+    });
+    expect(
+      dtoFromKeyboardEvent(key({ key: "x", code: "KeyX", altKey: true, ctrlKey: true }), meta),
+    ).toEqual({ key: { kind: "char", ch: "x" }, mods: MOD_ALT | MOD_CTRL });
+    // Off (the default), Option types the character.
+    expect(dtoFromKeyboardEvent(key({ key: "∫", code: "KeyB", altKey: true }))).toEqual({
+      key: { kind: "char", ch: "∫" },
+      mods: 0,
+    });
+    expect(
+      dtoFromKeyboardEvent(key({ key: "∫", code: "KeyB", altKey: true }), { optionAsMeta: false }),
+    ).toEqual({ key: { kind: "char", ch: "∫" }, mods: 0 });
+  });
+
+  it("maps a key's position to the character Meta sends", () => {
+    expect(optionMetaChar("KeyA", false)).toBe("a");
+    expect(optionMetaChar("KeyZ", true)).toBe("Z");
+    expect(optionMetaChar("Digit0", false)).toBe("0");
+    expect(optionMetaChar("Digit0", true)).toBe(")");
+    expect(optionMetaChar("Digit1", true)).toBe("!");
+    expect(optionMetaChar("Digit9", true)).toBe("(");
+    expect(optionMetaChar("Backslash", false)).toBe("\\");
+    expect(optionMetaChar("Backquote", true)).toBe("~");
+    expect(optionMetaChar("Space", false)).toBe(" ");
+    // Keys without a character of their own.
+    expect(optionMetaChar("F5", false)).toBe("");
+    expect(optionMetaChar("IntlBackslash", false)).toBe("");
+    expect(optionMetaChar(undefined, false)).toBe("");
+  });
+
+  it("reads the Option setting live on every key", () => {
+    let meta = false;
+    const h = makeHarness({ optionAsMeta: () => meta });
+    h.textarea.dispatchEvent(key({ key: "ƒ", code: "KeyF", altKey: true }));
+    meta = true;
+    const ev = key({ key: "ƒ", code: "KeyF", altKey: true });
+    h.textarea.dispatchEvent(ev);
+    expect(h.onKey).toEqual([
+      { key: { kind: "char", ch: "ƒ" }, mods: 0 },
+      { key: { kind: "char", ch: "f" }, mods: MOD_ALT },
+    ]);
+    expect(ev.defaultPrevented).toBe(true);
   });
 
   it("sends the character Option typed, not an Alt chord", () => {
@@ -982,5 +1078,18 @@ describe("keyboard elsewhere keeps Ctrl as the app modifier", () => {
     expect(
       dtoFromKeyboardEvent(new KeyboardEvent("keydown", { key: "@", code: "KeyL", altKey: true })),
     ).toEqual({ key: { kind: "char", ch: "@" }, mods: MOD_ALT });
+  });
+
+  it("leaves Ctrl+W to the terminal and ignores the Option setting", () => {
+    expect(isPanelShortcut(new KeyboardEvent("keydown", { key: "w", ctrlKey: true }))).toBe(false);
+    expect(isPanelShortcut(new KeyboardEvent("keydown", { key: "w", metaKey: true }))).toBe(false);
+    expect(isAppShortcut(new KeyboardEvent("keydown", { key: "w", ctrlKey: true }), false)).toBe(false);
+    expect(isPanelShortcut(new KeyboardEvent("keydown", { key: "W", ctrlKey: true, shiftKey: true }))).toBe(true);
+    // Alt is Meta here already; the macOS setting changes nothing.
+    const altAt = new KeyboardEvent("keydown", { key: "@", code: "KeyL", altKey: true });
+    expect(dtoFromKeyboardEvent(altAt, { optionAsMeta: true })).toEqual({
+      key: { kind: "char", ch: "@" },
+      mods: MOD_ALT,
+    });
   });
 });

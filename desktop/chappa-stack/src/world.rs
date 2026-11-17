@@ -235,6 +235,12 @@ impl<T: PortProbe> PortProbe for Locked<T> {
     fn is_free(&self, port: u16) -> bool {
         self.with(|p| p.is_free(port))
     }
+    fn release_grace(&self) -> Duration {
+        self.with(|p| p.release_grace())
+    }
+    fn wait(&self, step: Duration) {
+        self.with(|p| p.wait(step))
+    }
 }
 
 impl<T: GitFacts> GitFacts for Locked<T> {
