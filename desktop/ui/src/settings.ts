@@ -82,6 +82,7 @@ export function defaultSettings(): Settings {
     // paste-on-^V / copy-only-^C, not keep the legacy passthrough).
     ctrlVPastes: true,
     ctrlCCopyOnly: true,
+    optionAsMeta: false,
     scrollWheelSpeed: 3,
     fontSize: 14,
     fontFamily: BUNDLED_FONTS[0],
@@ -228,6 +229,8 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     // passthrough.
     ctrlVPastes: s.ctrlVPastes !== false,
     ctrlCCopyOnly: s.ctrlCCopyOnly !== false,
+    // Off unless explicitly on: Option keeps typing characters.
+    optionAsMeta: s.optionAsMeta === true,
     scrollWheelSpeed: clampInt(s.scrollWheelSpeed, WHEEL_SPEED_MIN, WHEEL_SPEED_MAX, d.scrollWheelSpeed),
     fontSize: clampInt(s.fontSize, FONT_SIZE_MIN, FONT_SIZE_MAX, d.fontSize),
     fontFamily: family,

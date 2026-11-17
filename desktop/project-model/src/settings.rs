@@ -21,7 +21,8 @@
 //!                      "enabled": true}],
 //!   "defaultExecProfile": "cmd",
 //!   "ctrlVPastes": true,
-//!   "ctrlCCopyOnly": true
+//!   "ctrlCCopyOnly": true,
+//!   "optionAsMeta": false
 //! }
 //! ```
 //!
@@ -362,6 +363,12 @@ pub struct Settings {
     /// selection → no-op); 0x03 never reaches the pty while TRUE. Same
     /// frontend-only shape and deliberate TRUE default as `ctrl_v_pastes`.
     pub ctrl_c_copy_only: bool,
+    /// macOS: Option+<key> sends Meta (ESC + the key) instead of the
+    /// character Option types on the keyboard layout. Default FALSE, so
+    /// Option keeps typing `@`, `€` and accented letters until someone opts
+    /// in. FRONTEND-ONLY consumer, like the clipboard keys; ignored on other
+    /// systems, where Alt is always Meta.
+    pub option_as_meta: bool,
     /// Sweep docker containers for marker-bearing container
     /// processes no live row owns (orphans) at app start and on each bridge
     /// probe tick. Default TRUE — orphans from a hard restart / mid-close
@@ -426,6 +433,7 @@ impl Default for Settings {
             // legacy passthrough.
             ctrl_v_pastes: default_ctrl_v_pastes(),
             ctrl_c_copy_only: default_ctrl_c_copy_only(),
+            option_as_meta: false,
             agent_reap_orphans: default_agent_reap_orphans(),
             clipboard_writes: ClipboardWrites::default(),
             editor_command: String::new(),
@@ -930,6 +938,31 @@ mod tests {
     }
 
     #[test]
+    fn option_as_meta_is_off_unless_turned_on_and_round_trips() {
+        assert!(!Settings::default().option_as_meta);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A file that never mentions it, and one holding a non-boolean.
+        for text in [
+            r#"{"fontSize": 16}"#,
+            r#"{"optionAsMeta": "yes", "fontSize": 16}"#,
+        ] {
+            fs::write(&path, text).unwrap();
+            let s = SettingsStore::new(path.clone());
+            assert!(!s.get().option_as_meta, "{text}");
+        }
+        fs::write(&path, r#"{"optionAsMeta": true}"#).unwrap();
+        let mut store = SettingsStore::new(path.clone());
+        assert!(store.get().option_as_meta);
+        store.set(store.get().clone()).unwrap();
+        assert!(SettingsStore::new(path.clone()).get().option_as_meta);
+        let mut off = store.get().clone();
+        off.option_as_meta = false;
+        store.set(off).unwrap();
+        assert!(!SettingsStore::new(path).get().option_as_meta);
+    }
+
+    #[test]
     fn set_clamps_persists_and_returns_the_clamped_result() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("appconfig").join("settings.json");
@@ -1079,6 +1112,7 @@ mod tests {
             "agentStaleAfterS",
             "ctrlVPastes",
             "ctrlCCopyOnly",
+            "optionAsMeta",
             "agentReapOrphans",
             "clipboardWrites",
             "editorCommand",

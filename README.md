@@ -69,6 +69,12 @@ cd ui && npm install && npm test                            # vitest, jsdom
 cd .. && npm install && npm run dev                         # the app
 ```
 
+`npm run build` (in `desktop`) builds the installable bundles for the
+platform, with the `chappa-ai-mcp` server inside them beside the app's
+executable. A `tauri dev` run finds the server beside the debug build once
+`cargo build -p chappa-ai-mcp` (or any workspace build or test run) has made
+it, and otherwise on `PATH`.
+
 `src-tauri` needs the platform webview libraries to compile; the other three
 crates do not. `term-core`'s pty tests need a POSIX shell and are compiled out
 on Windows, where the rest of the suite runs.
@@ -80,6 +86,11 @@ on Windows, where the rest of the suite runs.
   been tried by hand.
 - **macOS** 13 or later builds and passes the test suite in CI on Apple
   Silicon, see below. Intel Macs are not built or tested.
+
+Every bundle ships the `chappa-ai-mcp` server beside the app's executable:
+in the install folder on Windows, in `/usr/bin` from the Linux packages, and
+in `Contents/MacOS` inside the macOS app. The app finds it there for its own
+hooks; register it with an agent CLI by that path.
 
 ### macOS
 
@@ -95,14 +106,22 @@ Supported, with these notes:
 - **Keys.** Cmd is the app's modifier: Cmd+C copies a selection, Cmd+V
   pastes, Cmd+A selects the whole buffer, and the app shortcuts that are
   Ctrl chords elsewhere are Cmd chords (Cmd+Shift+T for a new terminal,
-  Cmd+F to search). Every Ctrl chord goes to the terminal, so Ctrl+C
-  interrupts. Option types the character it makes on your keyboard layout.
+  Cmd+F to search). Cmd+W closes the pane, not the window; Cmd+Q quits.
+  Every Ctrl chord goes to the terminal, so Ctrl+C interrupts. Option types
+  the character it makes on your keyboard layout, unless **Settings ▸
+  Terminal ▸ Option is Meta** is on: then Option+key sends Esc and the key,
+  as Alt does elsewhere (Option+B and Option+F move by word in a shell).
 - **PATH.** Started from Finder or the Dock, the app reads the PATH from
   your login shell (`$SHELL -l`) once at startup and adds
   `/opt/homebrew/bin` and `/usr/local/bin`, so tools installed with
-  Homebrew or a version manager are found by panes, agents and git. A tool
-  that only your `~/.zshrc` puts on PATH (not `~/.zprofile`) is not seen;
-  move that line to `~/.zprofile`.
+  Homebrew or a version manager are found by panes, agents and git. When
+  `git`, `node`, `docker` or `npm` is still missing after that, it asks
+  once more as an interactive login shell (`$SHELL -i -l`), which also
+  reads `~/.zshrc`. Each read gives up after 3 seconds.
+- **Agents' MCP server.** `chappa-ai-mcp` ships inside the app, at
+  `chappa-ai.app/Contents/MacOS/chappa-ai-mcp`. Register it with an agent
+  CLI by that full path, for example `claude mcp add chappa-ai --
+  /Applications/chappa-ai.app/Contents/MacOS/chappa-ai-mcp`.
 - **Stacks** need Docker Desktop (or another engine with the `docker` CLI
   and Compose) running.
 - Settings, the control token and logs live in

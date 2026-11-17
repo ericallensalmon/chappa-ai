@@ -92,6 +92,10 @@ export interface InputControllerOptions {
    *  the EXISTING paste path (the same `paste(text)` route a textarea
    *  paste event uses — bracketed-paste handling stays Rust-side). */
   onClipboardPaste?: () => void;
+  /** `option_as_meta` (macOS only), read LIVE on every keydown: Option+key
+   *  sends Meta (ESC + the key) instead of the character Option types.
+   *  Omitted = off, the default. */
+  optionAsMeta?: () => boolean;
   /** Override the app-shortcut predicate (default: {@link isAppShortcut}). */
   shortcuts?: (e: KeyboardEvent, hasSelection: boolean) => boolean;
 }
@@ -110,12 +114,19 @@ export function modsFromEvent(
 
 const FUNCTION_KEY_RE = /^F(\d{1,2})$/;
 
+/** How a key event is read. */
+export interface KeyReadOptions {
+  /** macOS: Option acts as Meta (see {@link optionMetaChar}). Ignored
+   *  elsewhere, where Alt always is. */
+  optionAsMeta?: boolean;
+}
+
 /**
  * Map a DOM KeyboardEvent to a semantic KeyEventDto. Returns null for events
  * the terminal must not see: bare modifier presses, unencodable keys
  * (F13+, PrintScreen…), IME-in-progress, and dead keys (left to composition).
  */
-export function dtoFromKeyboardEvent(e: KeyboardEvent): KeyEventDto | null {
+export function dtoFromKeyboardEvent(e: KeyboardEvent, opts: KeyReadOptions = {}): KeyEventDto | null {
   if (e.isComposing) return null;
   const mods = modsFromEvent(e);
   const { key } = e;
@@ -137,6 +148,13 @@ export function dtoFromKeyboardEvent(e: KeyboardEvent): KeyEventDto | null {
     Delete: { kind: "delete" },
   };
   if (key in named) return { key: named[key], mods };
+
+  if (opts.optionAsMeta && isMac() && e.altKey && !e.metaKey) {
+    // Option as Meta: the key itself with the Alt bit (ESC prefix), not the
+    // character or dead key Option makes on the layout.
+    const ch = optionMetaChar(e.code, e.shiftKey);
+    if (ch) return { key: { kind: "char", ch }, mods };
+  }
 
   const fn = FUNCTION_KEY_RE.exec(key);
   if (fn) {
@@ -164,7 +182,7 @@ export function dtoFromKeyboardEvent(e: KeyboardEvent): KeyEventDto | null {
 
   if (key.length === 1) {
     if (isMac() && e.altKey && !e.ctrlKey && !e.metaKey && key.toLowerCase() !== baseChar(e.code)) {
-      // macOS Option types characters (Option+L is `@` on a German layout,
+      // macOS Option types characters (unless it is Meta, above) (Option+L is `@` on a German layout,
       // Option+2 is `€` on a British one): send what it typed, not an
       // Alt chord with an ESC in front of it.
       return { key: { kind: "char", ch: key }, mods: mods & ~MOD_ALT };
@@ -172,6 +190,37 @@ export function dtoFromKeyboardEvent(e: KeyboardEvent): KeyEventDto | null {
     return { key: { kind: "char", ch: key }, mods };
   }
   return null;
+}
+
+/** Shifted and unshifted characters of the punctuation keys, by `code`. */
+const PUNCTUATION_CODES: Record<string, [string, string]> = {
+  Minus: ["-", "_"],
+  Equal: ["=", "+"],
+  BracketLeft: ["[", "{"],
+  BracketRight: ["]", "}"],
+  Backslash: ["\\", "|"],
+  Semicolon: [";", ":"],
+  Quote: ["'", '"'],
+  Comma: [",", "<"],
+  Period: [".", ">"],
+  Slash: ["/", "?"],
+  Backquote: ["`", "~"],
+  Space: [" ", " "],
+};
+const SHIFTED_DIGITS = ")!@#$%^&*(";
+
+/**
+ * The character an Option chord sends when Option is Meta: the key's own
+ * character by its position (`code`), as on a US keyboard, since the event
+ * carries only what Option made of it. Shift gives the upper case or the
+ * shifted symbol. "" for keys without one.
+ */
+export function optionMetaChar(code: string | undefined, shift: boolean): string {
+  const base = baseChar(code);
+  if (/^[a-z]$/.test(base)) return shift ? base.toUpperCase() : base;
+  if (/^[0-9]$/.test(base)) return shift ? SHIFTED_DIGITS[Number(base)] : base;
+  const punct = PUNCTUATION_CODES[code ?? ""];
+  return punct ? punct[shift ? 1 : 0] : "";
 }
 
 /** The unshifted character a letter or digit key's `code` names ("KeyL" →
@@ -193,8 +242,8 @@ function baseChar(code: string | undefined): string {
  * - Copy while a selection exists → copy_selection: Ctrl/Cmd+C elsewhere,
  *   Cmd+C on macOS (where Ctrl+C is always the interrupt).
  * - Mod+Shift+D → debug HUD toggle (hud.ts).
- * - Mod+PgUp/PgDn → panel cycle, Mod+Shift+T → new shell, Mod+Shift+W →
- *   close panel — the terminal never sees them.
+ * - Mod+PgUp/PgDn → panel cycle, Mod+Shift+T → new shell, Mod+Shift+W
+ *   (and Cmd+W on macOS) → close panel — the terminal never sees them.
  * - Mod+F → per-terminal search overlay, Mod+Alt+↑/↓ → prompt-mark nav
  * — the panel performs them.
  * Ctrl+Shift+arrows deliberately fall through to the terminal (word-select
@@ -202,7 +251,7 @@ function baseChar(code: string | undefined): string {
  *
  * macOS only ({@link macKeyAction}): Cmd+A selects everything, Cmd+V
  * pastes through the Edit menu, Cmd+C without a selection does nothing, and
- * every other Cmd chord (Cmd+Q, Cmd+W, Cmd+H, …) is left to the app menu and
+ * every other Cmd chord (Cmd+Q, Cmd+H, Cmd+M, …) is left to the app menu and
  * the system. No Cmd chord reaches the terminal there, and no Ctrl chord is
  * taken from it.
  *
@@ -290,8 +339,9 @@ export function isFocusNavShortcut(
  *   sends it. Reading the clipboard from script instead would make the
  *   webview ask for permission on every paste.
  * - `swallow`: Cmd+C without a selection — nothing to copy, nothing sent.
- * - `system`: any other Cmd chord the app has no shortcut for (Cmd+Q, Cmd+W,
- *   Cmd+H, Cmd+M, …), left to the app menu and the system untouched.
+ * - `system`: any other Cmd chord (Cmd+Q, Cmd+H, Cmd+M, …), left to the app
+ *   menu and the system untouched unless it is one of the app's own chords
+ *   ({@link isAppChord}, Cmd+W among them), which the app performs.
  * Cmd+C with a selection is {@link isCopyShortcut}, checked first.
  */
 export type MacKeyAction = "select-all" | "paste-native" | "swallow" | "system";
@@ -336,16 +386,18 @@ export function isMarkNavShortcut(
 
 /**
  * The panel chords: Mod+PgUp/PgDn (cycle), Mod+Shift+T (new shell),
- * Mod+Shift+W (close active panel). Recognized here so the terminal never
- * sees them; the App listens on window for the same combos to perform the
- * action (same pattern as the HUD and its Mod+Shift+D).
+ * Mod+Shift+W (close active panel), and on macOS Cmd+W too, which there
+ * closes the pane rather than the window (the menu bar's Close Pane carries
+ * the same key). Ctrl+W elsewhere stays the terminal's (delete a word).
+ * Recognized here so the terminal never sees them; the App listens on
+ * window for the same combos to perform the action (same pattern as the HUD
+ * and its Mod+Shift+D).
  */
 export function isPanelShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">): boolean {
   if (!hasAppMod(e) || e.altKey) return false;
-  if (e.shiftKey) {
-    const k = e.key.toLowerCase();
-    return k === "t" || k === "w";
-  }
+  const k = e.key.toLowerCase();
+  if (e.shiftKey) return k === "t" || k === "w";
+  if (isMac() && k === "w") return true;
   return e.key === "PageUp" || e.key === "PageDown";
 }
 
@@ -575,7 +627,7 @@ export class InputController {
       } else if (mac === "swallow") {
         e.preventDefault();
       } else if (mac === "system" && !isAppChord(e)) {
-        // Cmd+Q, Cmd+W, Cmd+H…: the app menu and the system act on these.
+        // Cmd+Q, Cmd+H, Cmd+M…: the app menu and the system act on these.
       } else if (!isMac() && clipboard.ctrlVPastes && isCtrlVPasteShortcut(e)) {
         // `ctrl_v_pastes`: pull the clipboard and push it through the
         // EXISTING paste path (the panel reads navigator.clipboard and calls
@@ -594,7 +646,7 @@ export class InputController {
       }
       return;
     }
-    const dto = dtoFromKeyboardEvent(e);
+    const dto = dtoFromKeyboardEvent(e, { optionAsMeta: this.opts.optionAsMeta?.() ?? false });
     if (!dto) return; // dead key / modifier / unknown: leave to the browser
     e.preventDefault();
     this.opts.onKey(dto);

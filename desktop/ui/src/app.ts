@@ -1217,6 +1217,11 @@ function trashIcon(): SVGSVGElement {
  */
 const LAST_PROJECT_DIR_KEY = "chappa-ai.lastProjectDir";
 
+/** Close-pane requests closer together than this are one key press (see
+ *  `closeActiveByShortcut`). Shorter than the OS key-repeat delay, so two
+ *  deliberate presses still close two panes. */
+export const CLOSE_SHORTCUT_REPEAT_MS = 200;
+
 /** The header-line add glyph (fullwidth plus: it centres in a 20px square
  *  where the ASCII plus sits low). */
 const PLUS_GLYPH = "＋";
@@ -3058,6 +3063,22 @@ export class App {
     e.preventDefault();
   };
 
+  /**
+   * The close-pane shortcut (Mod+Shift+W, and Cmd+W on macOS) and the macOS
+   * menu's Close Pane: close the active pane, with the usual confirmation
+   * for a running one. One Cmd+W can reach both the page's keydown and the
+   * native menu's key equivalent, so a second request right after the first
+   * is the same press and is ignored: it must not close the next pane too.
+   */
+  closeActiveByShortcut(): void {
+    const now = performance.now();
+    if (now - this.lastCloseShortcutAt < CLOSE_SHORTCUT_REPEAT_MS) return;
+    this.lastCloseShortcutAt = now;
+    if (this.activeId !== null) void this.closePanel(this.activeId);
+  }
+
+  private lastCloseShortcutAt = -Infinity;
+
   /** OS file drop → quoted paths pasted into the active terminal. This is
    *  the ONE code path for drops (quotePaths → normal paste, bracketed-paste
    *  guard applies): Tauri's default drag-drop interception means the webview
@@ -3075,7 +3096,7 @@ export class App {
       if (e.key === "PageUp") this.cycle(-1);
       else if (e.key === "PageDown") this.cycle(1);
       else if (e.key.toLowerCase() === "t") void this.newShell();
-      else if (e.key.toLowerCase() === "w" && this.activeId !== null) void this.closePanel(this.activeId);
+      else if (e.key.toLowerCase() === "w") this.closeActiveByShortcut();
       return;
     }
     if (isProjectShortcut(e)) {
@@ -3160,6 +3181,9 @@ export class App {
     on<{ paths?: string[] }>("tauri://drag-drop", (p) => {
       this.handleFileDrop(p.paths ?? []);
     });
+    // The macOS menu bar's File ▸ Close Pane (Cmd+W): the pane, never the
+    // window.
+    on<unknown>(ipc.MENU_CLOSE_PANE_EVENT, () => this.closeActiveByShortcut());
     // OSC 9/777/99 notifications: the Rust pump no longer toasts on its own
     // — everything routes through the decision function.
     on<ipc.TerminalEventDto>("term://notify", (p) => this.applyNotify(p));

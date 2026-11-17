@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, GlLru, agentForest, agentMenuEntries, railReducer, type ActiveRow, type AppOptions, type RailEntry, type RailStatus, PRE_ADOPT_EVENTS_PER_ID, PRE_ADOPT_EVENT_IDS_MAX } from "./app";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setPlatform } from "./platform";
+import { App, CLOSE_SHORTCUT_REPEAT_MS, GlLru, agentForest, agentMenuEntries, railReducer, type ActiveRow, type AppOptions, type RailEntry, type RailStatus, PRE_ADOPT_EVENTS_PER_ID, PRE_ADOPT_EVENT_IDS_MAX } from "./app";
 import type { NotifyCenter } from "./notify_center";
 import type { TerminalApi } from "./term/panel";
 import { emptyAgentTool, frame, stubSettings } from "./term/test-utils";
@@ -442,6 +443,97 @@ describe("App", () => {
     // The modal cleans itself up on resolve.
     expect(document.querySelector(".chappa-dialog-backdrop")).toBeNull();
     nativeConfirm.mockRestore();
+    panelDispose(app);
+  });
+});
+
+describe("closing the pane by key", () => {
+  afterEach(() => {
+    setPlatform(null);
+    vi.useRealTimers();
+  });
+
+  const press = (init: KeyboardEventInit): KeyboardEvent => {
+    const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    window.dispatchEvent(ev);
+    return ev;
+  };
+
+  it("closes the active pane with Cmd+W on macOS, asking first for a running one", async () => {
+    setPlatform("mac");
+    const { api } = stubApi();
+    const root = document.createElement("div");
+    let asked = 0;
+    let answer = false;
+    const app = new App({
+      root,
+      api,
+      confirm: async () => {
+        asked += 1;
+        return answer;
+      },
+    });
+    await app.mount();
+    await app.newShell();
+
+    const refused = press({ key: "w", metaKey: true });
+    expect(refused.defaultPrevented).toBe(true);
+    await FLUSH();
+    expect(asked).toBe(1);
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    expect(root.querySelectorAll(".chappa-rail-item").length).toBe(1);
+
+    answer = true;
+    await new Promise((resolve) => setTimeout(resolve, CLOSE_SHORTCUT_REPEAT_MS + 20));
+    press({ key: "w", metaKey: true });
+    await FLUSH();
+    expect(asked).toBe(2);
+    expect(api.closeTerminal).toHaveBeenCalledWith(1);
+    panelDispose(app);
+  });
+
+  it("closes one pane when the key and the menu both report the same press", async () => {
+    setPlatform("mac");
+    const { api } = stubApi();
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => true });
+    await app.mount();
+    await app.newShell();
+    await app.newShell();
+    expect(root.querySelectorAll(".chappa-rail-item").length).toBe(2);
+
+    press({ key: "w", metaKey: true });
+    // The menu's Close Pane for the same Cmd+W.
+    app.closeActiveByShortcut();
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledTimes(1);
+    expect(root.querySelectorAll(".chappa-rail-item").length).toBe(1);
+
+    // A later press (or the menu item on its own) closes the next one.
+    await new Promise((resolve) => setTimeout(resolve, CLOSE_SHORTCUT_REPEAT_MS + 20));
+    app.closeActiveByShortcut();
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledTimes(2);
+    expect(root.querySelectorAll(".chappa-rail-item").length).toBe(0);
+    panelDispose(app);
+  });
+
+  it("leaves Ctrl+W to the terminal elsewhere and closes with Ctrl+Shift+W", async () => {
+    setPlatform("other");
+    const { api } = stubApi();
+    const root = document.createElement("div");
+    const app = new App({ root, api, confirm: async () => true });
+    await app.mount();
+    await app.newShell();
+
+    const word = press({ key: "w", ctrlKey: true });
+    expect(word.defaultPrevented).toBe(false);
+    await FLUSH();
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+
+    press({ key: "W", ctrlKey: true, shiftKey: true });
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledWith(1);
     panelDispose(app);
   });
 });

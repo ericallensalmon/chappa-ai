@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { setPlatform } from "./platform";
 import { SettingsPane } from "./settings_pane";
 import { stubSettings } from "./term/test-utils";
 import type { Settings } from "./settings";
@@ -97,6 +98,50 @@ describe("SettingsPane — terminal section", () => {
     lh.querySelectorAll<HTMLButtonElement>("button")[5].click(); // 1.5
     await Promise.resolve();
     expect(harness.saved()!.lineHeight).toBe(1.5);
+    pane.dispose();
+  });
+});
+
+/** Whether `el` or a row around it is hidden. */
+function hiddenRow(el: HTMLElement): boolean {
+  for (let n: HTMLElement | null = el; n; n = n.parentElement) if (n.hidden) return true;
+  return false;
+}
+
+describe("SettingsPane — Option as Meta", () => {
+  afterEach(() => setPlatform(null));
+
+  it("shows the toggle on macOS, OFF by default, and writes it through", async () => {
+    setPlatform("mac");
+    const { pane, harness } = await makePane();
+    const toggle = control<HTMLInputElement>(pane, "optionAsMeta");
+    expect(hiddenRow(toggle)).toBe(false);
+    expect(toggle.checked).toBe(false);
+    // The Ctrl rows it stands in for are hidden there.
+    expect(hiddenRow(control<HTMLInputElement>(pane, "ctrlVPastes"))).toBe(true);
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change"));
+    await Promise.resolve();
+    expect(harness.saved()!.optionAsMeta).toBe(true);
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change"));
+    await Promise.resolve();
+    expect(harness.saved()!.optionAsMeta).toBe(false);
+    pane.dispose();
+  });
+
+  it("reflects a stored ON value", async () => {
+    setPlatform("mac");
+    const { pane } = await makePane({ optionAsMeta: true });
+    expect(control<HTMLInputElement>(pane, "optionAsMeta").checked).toBe(true);
+    pane.dispose();
+  });
+
+  it("hides the toggle elsewhere, where Alt is always Meta", async () => {
+    setPlatform("other");
+    const { pane } = await makePane();
+    expect(hiddenRow(control<HTMLInputElement>(pane, "optionAsMeta"))).toBe(true);
+    expect(hiddenRow(control<HTMLInputElement>(pane, "ctrlVPastes"))).toBe(false);
     pane.dispose();
   });
 });

@@ -140,7 +140,7 @@ jobs:
   # for main and manual runs: a release build is slow, and a pull request
   # gets its macOS coverage from the rust job.
   bundle-macos:
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ true }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -170,9 +170,19 @@ jobs:
 
       # No signing identity is configured, so the bundle is unsigned. The
       # disk image's Finder window styling is skipped on CI by the bundler.
+      # `npm run build` builds the chappa-ai-mcp server first and bundles it.
       - name: Build the app and the disk image
         working-directory: desktop
-        run: npx tauri build --bundles app,dmg
+        run: npm run build -- --bundles app,dmg
+
+      # Agents reach the app through chappa-ai-mcp, found beside the app's
+      # executable: a bundle without it has no MCP server for them.
+      - name: Check the MCP server is in the app
+        working-directory: desktop/target/release/bundle/macos
+        run: |
+          mcp=chappa-ai.app/Contents/MacOS/chappa-ai-mcp
+          test -x "$mcp"
+          "$mcp" --help
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -180,6 +190,60 @@ jobs:
           path: desktop/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14
+
+  # The Windows and Linux bundles carry chappa-ai-mcp too.
+  bundle-check:
+    if: ${{ true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - name: Install the webview build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config file \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: desktop
+      - run: |
+          npm ci --prefix desktop
+          npm ci --prefix desktop/ui
+      - name: Build the bundle
+        working-directory: desktop
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            npm run build -- --bundles nsis
+          else
+            npm run build -- --bundles deb
+          fi
+      - name: List the bundle contents
+        working-directory: desktop/target/release/bundle
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z l nsis/*.exe | tee contents.txt
+            grep -F chappa-ai-mcp.exe contents.txt
+          else
+            dpkg-deb -c deb/*.deb | tee contents.txt
+            grep -E 'usr/bin/chappa-ai-mcp$' contents.txt
+          fi
 
   fmt:
     runs-on: ubuntu-latest

@@ -589,6 +589,8 @@ export class TerminalPanel {
         return { ctrlVPastes: s.ctrlVPastes, ctrlCCopyOnly: s.ctrlCCopyOnly };
       },
       onClipboardPaste: () => this.pasteClipboard(),
+      // Read live like the clipboard keys: the toggle applies at once.
+      optionAsMeta: () => this.settings.get().optionAsMeta,
     });
 
     this.hud = new Hud(host, {

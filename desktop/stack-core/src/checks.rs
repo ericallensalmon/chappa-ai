@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::cli::{engine_invocation, CliError, EngineCli, Invocation};
 use crate::definition::{ContainerOs, EngineRef, StackDef};
@@ -318,7 +319,28 @@ pub fn memory_elsewhere(stack: &StackDef, others: &[IntentRecord]) -> IndexMap<S
 pub trait PortProbe {
     /// True when nothing on this host listens on `port`.
     fn is_free(&self, port: u16) -> bool;
+
+    /// How long a port read as taken may still turn out free: a listener
+    /// closed a moment ago whose port the OS has not released yet. The ports
+    /// check reads a taken port again for this long before it reports it.
+    /// None by default.
+    fn release_grace(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    /// Wait `step` between two readings of a taken port.
+    fn wait(&self, step: Duration) {
+        std::thread::sleep(step);
+    }
 }
+
+/// How long [`StdPortProbe`] waits for a just-closed port. macOS frees a
+/// closed listener's port shortly after the close rather than at it, so a
+/// start right after a stop would otherwise read its own old port as taken.
+pub const PORT_RELEASE_GRACE: Duration = Duration::from_secs(2);
+
+/// The pause between two readings of a taken port.
+pub const PORT_RETRY_STEP: Duration = Duration::from_millis(100);
 
 /// Binds the port on every address to find out. Both the wildcard and
 /// loopback must bind, because a listener on either blocks the publish.
@@ -377,6 +399,10 @@ impl PortProbe for StdPortProbe {
             && Self::not_in_use(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))
             && Self::not_in_use(SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
     }
+
+    fn release_grace(&self) -> Duration {
+        PORT_RELEASE_GRACE
+    }
 }
 
 /// A scripted set of busy ports.
@@ -404,12 +430,28 @@ pub fn ports_outcome(
     probe: &dyn PortProbe,
     owned_elsewhere: &BTreeMap<u16, String>,
 ) -> Outcome {
+    let mut busy: BTreeSet<u16> = ports_to_check
+        .iter()
+        .copied()
+        .filter(|p| !owned_elsewhere.contains_key(p) && !probe.is_free(*p))
+        .collect();
+    // A taken port is read again for a short while: one closed a moment ago
+    // (a stop right before this start) may not be released yet. A port that
+    // is really held stays taken through every reading.
+    let grace = probe.release_grace();
+    let mut waited = Duration::ZERO;
+    while !busy.is_empty() && waited < grace {
+        let step = PORT_RETRY_STEP.min(grace - waited);
+        probe.wait(step);
+        waited += step;
+        busy.retain(|p| !probe.is_free(*p));
+    }
     let mut problems = Vec::new();
     for &port in ports_to_check {
         let who = component_for_port(inst, port).unwrap_or("?");
         if let Some(instance) = owned_elsewhere.get(&port) {
             problems.push(format!("{port} ({who}) is owned by {instance}"));
-        } else if !probe.is_free(port) {
+        } else if busy.contains(&port) {
             problems.push(format!("{port} ({who}) is in use on this host"));
         }
     }
@@ -1017,6 +1059,115 @@ stacks:
             }
         );
         assert_eq!(ports_outcome(&i, &[14101], &busy, &owned), Outcome::Pass);
+    }
+
+    /// Ports taken until a number of waits have passed (`None` = held for
+    /// good), counting the time it was asked to wait.
+    struct ReleasingPorts {
+        frees_after: BTreeMap<u16, Option<u32>>,
+        grace: Duration,
+        waits: std::cell::Cell<u32>,
+        waited: std::cell::Cell<Duration>,
+    }
+
+    impl ReleasingPorts {
+        fn new(grace: Duration, frees_after: &[(u16, Option<u32>)]) -> Self {
+            Self {
+                frees_after: frees_after.iter().copied().collect(),
+                grace,
+                waits: Default::default(),
+                waited: Default::default(),
+            }
+        }
+    }
+
+    impl PortProbe for ReleasingPorts {
+        fn is_free(&self, port: u16) -> bool {
+            match self.frees_after.get(&port) {
+                None => true,
+                Some(None) => false,
+                Some(Some(n)) => self.waits.get() >= *n,
+            }
+        }
+        fn release_grace(&self) -> Duration {
+            self.grace
+        }
+        fn wait(&self, step: Duration) {
+            self.waits.set(self.waits.get() + 1);
+            self.waited.set(self.waited.get() + step);
+        }
+    }
+
+    #[test]
+    fn a_port_released_within_the_grace_passes_the_ports_check() {
+        let i = inst(1, false);
+        let probe = ReleasingPorts::new(PORT_RELEASE_GRACE, &[(14102, Some(3))]);
+        let out = ports_outcome(&i, &[14100, 14101, 14102], &probe, &BTreeMap::new());
+        assert_eq!(out, Outcome::Pass);
+        assert_eq!(probe.waits.get(), 3, "stops reading once the port is free");
+    }
+
+    #[test]
+    fn a_held_port_stays_busy_after_the_whole_grace() {
+        let i = inst(1, false);
+        let probe = ReleasingPorts::new(
+            Duration::from_millis(250),
+            &[(14101, None), (14102, Some(1))],
+        );
+        let out = ports_outcome(&i, &[14100, 14101, 14102], &probe, &BTreeMap::new());
+        assert_eq!(
+            out,
+            Outcome::Fail {
+                reason: "14101 (api) is in use on this host".into(),
+                fix: None
+            }
+        );
+        // 100 + 100 + the 50 left: never past the grace.
+        assert_eq!(probe.waited.get(), Duration::from_millis(250));
+        assert_eq!(probe.waits.get(), 3);
+    }
+
+    #[test]
+    fn without_a_grace_or_a_taken_port_the_check_never_waits() {
+        let i = inst(1, false);
+        let probe = ReleasingPorts::new(Duration::ZERO, &[(14102, Some(1))]);
+        let out = ports_outcome(&i, &[14102], &probe, &BTreeMap::new());
+        assert!(matches!(out, Outcome::Fail { .. }), "{out:?}");
+        assert_eq!(probe.waits.get(), 0);
+
+        let probe = ReleasingPorts::new(PORT_RELEASE_GRACE, &[]);
+        assert_eq!(
+            ports_outcome(&i, &[14100, 14102], &probe, &BTreeMap::new()),
+            Outcome::Pass
+        );
+        assert_eq!(probe.waits.get(), 0);
+
+        // A port another instance owns is reported as owned, not waited on.
+        let probe = ReleasingPorts::new(PORT_RELEASE_GRACE, &[(14100, None)]);
+        let owned = BTreeMap::from([(14100u16, "app-0".to_string())]);
+        let out = ports_outcome(&i, &[14100], &probe, &owned);
+        assert!(matches!(out, Outcome::Fail { .. }), "{out:?}");
+        assert_eq!(probe.waits.get(), 0);
+    }
+
+    #[test]
+    fn the_real_probe_gives_a_just_closed_port_time_to_be_released() {
+        assert_eq!(StdPortProbe.release_grace(), PORT_RELEASE_GRACE);
+        assert!(PORT_RELEASE_GRACE <= Duration::from_secs(2));
+        // Closed right before the check, as after a stop: reads free.
+        let i = inst(1, false);
+        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let out = ports_outcome(&i, &[port], &StdPortProbe, &BTreeMap::new());
+        // A released ephemeral port can be taken by another process's
+        // outgoing connection at any moment; only that may still read busy.
+        if out != Outcome::Pass {
+            assert!(
+                TcpListener::bind(("127.0.0.1", port)).is_err(),
+                "{port} binds now but the check said {out:?}"
+            );
+        }
     }
 
     #[test]
