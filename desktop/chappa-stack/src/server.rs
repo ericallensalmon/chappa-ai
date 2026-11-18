@@ -55,6 +55,7 @@ use crate::project::{Loaded, ProjectConfig};
 use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
 use crate::relay_firewall::{self, FirewallCheck};
+use crate::relay_probe::{self, ContainerTest};
 use crate::reviews;
 use crate::secret_scan;
 use crate::states;
@@ -122,7 +123,57 @@ pub struct Caller {
     pub actor: Option<String>,
 }
 
-fn error(status: u16, kind: &str, message: impl Into<String>) -> Reply {
+/// `GET {IDENTITY_PATH}?challenge=…`: the proof that this process holds the
+/// token, over the address string the app connected to.
+pub fn identity_reply(token: &Token, addr: &str, query: &str) -> Reply {
+    let challenge = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("challenge="))
+        .unwrap_or("");
+    if !is_valid_challenge(challenge) {
+        return error(
+            400,
+            "bad-challenge",
+            "challenge must be 64 lowercase hex characters",
+        );
+    }
+    (200, json!({ "proof": token.proof(challenge, addr) }))
+}
+
+/// What the request pool serves: a source's routes behind its token.
+pub trait Handler: Send + Sync {
+    /// Whether the `Authorization` header carries the source's token.
+    fn authorizes(&self, auth: Option<&str>) -> bool;
+    /// Answer one request.
+    fn handle_as(
+        &self,
+        method: &str,
+        url: &str,
+        auth: Option<&str>,
+        caller: &Caller,
+        body: &str,
+    ) -> Reply;
+}
+
+impl Handler for Source {
+    fn authorizes(&self, auth: Option<&str>) -> bool {
+        self.token.authorizes(auth)
+    }
+
+    fn handle_as(
+        &self,
+        method: &str,
+        url: &str,
+        auth: Option<&str>,
+        caller: &Caller,
+        body: &str,
+    ) -> Reply {
+        Source::handle_as(self, method, url, auth, caller, body)
+    }
+}
+
+/// A JSON error reply.
+pub fn error(status: u16, kind: &str, message: impl Into<String>) -> Reply {
     (status, json!({ "kind": kind, "message": message.into() }))
 }
 
@@ -184,6 +235,8 @@ pub struct Source {
     relay: Mutex<Relay>,
     /// The relay's Windows Firewall check and its elevated commands.
     firewall: FirewallCheck,
+    /// The relay's "Test from a container".
+    relay_test: ContainerTest,
     /// Serialises action acceptance, so two clicks cannot both plan
     /// against the same state.
     accepting: Mutex<()>,
@@ -230,7 +283,9 @@ impl Source {
         if let Ok(abs) = std::path::absolute(&config.dir) {
             config.dir = abs;
         }
+        let relay_test = ContainerTest::new(world.cli.clone());
         let source = Arc::new(Source {
+            relay_test,
             world,
             config,
             token,
@@ -368,21 +423,7 @@ impl Source {
     ) -> Reply {
         let (path, query) = url.split_once('?').unwrap_or((url, ""));
         if method == "GET" && path == IDENTITY_PATH {
-            let challenge = query
-                .split('&')
-                .find_map(|kv| kv.strip_prefix("challenge="))
-                .unwrap_or("");
-            if !is_valid_challenge(challenge) {
-                return error(
-                    400,
-                    "bad-challenge",
-                    "challenge must be 64 lowercase hex characters",
-                );
-            }
-            return (
-                200,
-                json!({ "proof": self.token.proof(challenge, &self.addr) }),
-            );
+            return identity_reply(&self.token, &self.addr, query);
         }
         if !self.token.authorizes(auth) {
             return error(401, "unauthorized", "a bearer token is required");
@@ -577,21 +618,11 @@ impl Source {
         };
         let mut v = env_view::environment(&inputs, &errors);
         if let Some(fw) = &firewall {
-            if let Some(banners) = v.get_mut("banners").and_then(Value::as_array_mut) {
-                banners.extend(fw.banners());
-            }
-            let section = v
-                .get_mut("facts")
-                .and_then(Value::as_array_mut)
-                .and_then(|f| f.iter_mut().find(|s| s["id"] == "relay"));
-            if let Some(section) = section {
-                if let Some(rows) = section.get_mut("rows").and_then(Value::as_array_mut) {
-                    rows.push(fw.row());
-                }
-                let actions = fw.section_actions();
-                if !actions.is_empty() {
-                    section["actions"] = actions.into();
-                }
+            relay_firewall::decorate(&mut v, fw);
+        }
+        if loaded.stack.relay.is_some() {
+            if let Some((engine, target)) = self.relay_test_target(&inst) {
+                relay_probe::decorate(&mut v, &self.relay_test, &engine, target);
             }
         }
         if let Some(alerts) = v.get_mut("alerts").and_then(Value::as_array_mut) {
@@ -896,7 +927,7 @@ impl Source {
         if id == secret_scan::ACK_ACTION_ID {
             return self.secret_ack(body, caller, &loaded);
         }
-        if id == relay_firewall::ALLOW_ACTION_ID || id == relay_firewall::REMOVE_ACTION_ID {
+        if FirewallCheck::is_action(id) || id == relay_probe::TEST_ACTION_ID {
             return self.firewall_action(id, body, &loaded);
         }
         let is_script = |c: &str| {
@@ -1111,7 +1142,27 @@ impl Source {
         }
     }
 
-    /// The relay's firewall commands: refused unconfirmed, when the stack
+    /// The engine and address "Test from a container" connects to: the
+    /// lowest port listening for the first relayed docker engine.
+    fn relay_test_target(
+        &self,
+        inst: &ResolvedInstance,
+    ) -> Option<(stack_core::definition::EngineRef, std::net::SocketAddr)> {
+        let listening = self
+            .relay
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .listening();
+        let engines = inst.engines();
+        listening.iter().find_map(|w| {
+            engines
+                .iter()
+                .find(|e| e.name == w.engine && e.kind == stack_core::driver::EngineKind::Docker)
+                .map(|e| (e.clone(), w.bind))
+        })
+    }
+
+    /// The relay's firewall commands and its container test: refused unconfirmed, when the stack
     /// has no relay, or when the command is not the one the confirm showed;
     /// otherwise the elevated PowerShell starts (Windows asks the user) and
     /// the call answers at once.
@@ -1127,6 +1178,24 @@ impl Source {
             );
         }
         let fingerprint = body.pointer("/params/fingerprint").and_then(Value::as_str);
+        if id == relay_probe::TEST_ACTION_ID {
+            let target = loaded
+                .runner(&self.world, &utc_now())
+                .instance(loaded.slot)
+                .ok()
+                .and_then(|(inst, _)| self.relay_test_target(&inst));
+            let Some((engine, target)) = target else {
+                return error(
+                    409,
+                    "not-offered",
+                    "the relay is not listening for a docker engine",
+                );
+            };
+            return match self.relay_test.run(&engine, target, fingerprint) {
+                Ok(message) => (200, json!({ "message": message })),
+                Err((status, message)) => error(status, "relay-test", message),
+            };
+        }
         match self.firewall.run(id, fingerprint) {
             Ok(message) => (200, json!({ "message": message })),
             Err((status, message)) => error(status, "firewall", message),
@@ -1574,21 +1643,21 @@ pub fn bind(addr: &str) -> Result<(tiny_http::Server, SocketAddr), String> {
 }
 
 /// Serve until the server is dropped or fails.
-pub fn serve(server: tiny_http::Server, source: Arc<Source>) {
+pub fn serve<H: Handler + 'static>(server: tiny_http::Server, source: Arc<H>) {
     let server = Arc::new(server);
     let pool: Vec<_> = (1..WORKERS)
         .map(|_| {
             let (server, source) = (server.clone(), source.clone());
-            thread::spawn(move || accept_loop(&server, &source))
+            thread::spawn(move || accept_loop(&server, &*source))
         })
         .collect();
-    accept_loop(&server, &source);
+    accept_loop(&server, &*source);
     for t in pool {
         let _ = t.join();
     }
 }
 
-fn accept_loop(server: &tiny_http::Server, source: &Source) {
+fn accept_loop<H: Handler>(server: &tiny_http::Server, source: &H) {
     while let Ok(request) = server.recv() {
         respond(source, request);
     }
@@ -1602,7 +1671,7 @@ fn header<'a>(request: &'a tiny_http::Request, name: &'static str) -> Option<&'a
         .map(|h| h.value.as_str())
 }
 
-fn respond(source: &Source, mut request: tiny_http::Request) {
+fn respond<H: Handler>(source: &H, mut request: tiny_http::Request) {
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
     let auth = header(&request, "Authorization").map(str::to_string);
@@ -1611,7 +1680,7 @@ fn respond(source: &Source, mut request: tiny_http::Request) {
         actor: header(&request, ACTOR_HEADER).map(str::to_string),
     };
     let mut body = String::new();
-    if method == "POST" && source.token.authorizes(auth.as_deref()) {
+    if method == "POST" && source.authorizes(auth.as_deref()) {
         let _ = request.as_reader().take(MAX_BODY).read_to_string(&mut body);
     }
     let (status, value) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

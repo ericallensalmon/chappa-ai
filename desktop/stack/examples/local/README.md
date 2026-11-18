@@ -87,32 +87,68 @@ many connections it refused from outside the container network.
 than loopback, so it needs an inbound firewall rule. Without one, the first
 listener raises the system's allow-access prompt, and a Cancel there leaves
 a Block rule that silently drops the containers' connections from then on.
-So whenever the relay's gateway or ports change, and whenever it binds, the
-stack runner checks (read-only, never elevated) and says what it found as
-a warning on the Environment view:
+So whenever the relay's gateway or ports change, whenever it binds, and at
+most once a minute while the Environment view is read, the stack runner
+checks (read-only, never elevated, off the request path) and says what it
+found on the Environment view:
 
+- **bad:** an enabled inbound Block rule that drops the relay's traffic:
+  one for the `chappa-stack` program (as a cancelled prompt leaves), or
+  one for any program on one of the relay's TCP ports from addresses that
+  include containers. It is said as "Windows Firewall is dropping container
+  traffic to the relay", in a banner and as an alert. A rule of the second
+  kind is not the relay's to change: the banner names it and gives the
+  exact `Remove-NetFirewallRule -Name '<rule name>'` line, for you to run
+  from an elevated PowerShell or to narrow the rule instead;
 - no rule named `Chappa'Ai relay` for the running `chappa-stack` program,
-  or one whose program, ports, remote range or profiles do not match;
-- a Block rule for the program (from a cancelled prompt);
+  or one whose program, ports, remote range, interface types or profiles do
+  not match;
 - a gateway outside `172.16.0.0/12`, which the rule does not cover;
 - an interface with forwarding or weak-host receive on: then binding the
   gateway address alone no longer keeps other networks away (the peer check
   still closes their connections).
 
-The first two come with **Allow the relay through Windows Firewall**. Its
-confirm shows the exact command, which runs elevated after one Windows
-permission prompt: it removes an older `Chappa'Ai relay` rule and the
-program's inbound Block rules, then adds an inbound TCP allow rule for the
-program, on every profile, from `172.16.0.0/12`, on the stack's whole port
-range (every slot, so bringing up another slot asks nothing new) plus any
-explicit ports the replaced rule had. The check runs again when it ends.
-The Relay section offers **Remove the relay's firewall rule** for cleanup.
-If PowerShell cannot run the check, the view says so once; the relay keeps
-running. Nothing is changed without that confirm.
+A missing or mismatched rule, or a Block rule for the `chappa-stack`
+program, comes with **Allow the relay through Windows Firewall** (the
+default). Its confirm shows the exact command, which runs elevated after
+one Windows permission prompt: it removes our older allow rule and the
+`chappa-stack` program's own inbound Block rules (never a rule of another
+program, or of any program), then adds an inbound TCP allow rule for the
+program, on every profile, from `172.16.0.0/12`, on the
+stack's whole port range (every slot, so bringing up another slot asks
+nothing new) plus any explicit ports the replaced rule had. The check runs
+again when it ends.
 
-Optional hardening by hand: inbound Block rules for the program on the
-physical adapters (`-InterfaceAlias`). The stack runner does not add them,
-because adapters come and go and such rules need upkeep.
+Beside it, **Allow the relay and block it on other networks** does the same
+and, in the same single elevation, adds inbound Block rules for the program
+on the `Wireless` and `RemoteAccess` interface types (`Chappa'Ai relay
+(block on Wireless)`, `… (block on RemoteAccess)`). They name interface
+types, not adapters, so nothing needs upkeep as adapters come and go.
+`Wired` is left out on purpose: the container network's virtual adapter
+(`vEthernet …`) is an Ethernet adapter to the firewall, and a Block rule
+wins over the allow rule, so blocking `Wired` would drop the relay's own
+traffic. `RemoteAccess` covers the system's own VPN and dial-up
+connections; a third-party VPN adapter the firewall counts as another type
+is not covered. The Relay section offers it too when the rules are not all
+in place, and **Remove the relay's firewall rules** removes them.
+
+Every rule the stack runner adds is in the Windows Firewall group
+`Chappa'Ai relay`, and that group is how its rules are told apart: Remove
+and the allow-and-block variant delete only rules of that group (and an
+allow rule named `Chappa'Ai relay` for the `chappa-stack` program from
+before rules had a group). A rule of yours that merely has a similar name
+is never touched.
+
+On a docker engine the Relay section also offers **Test from a container**:
+confirmed, never automatic, it runs one throwaway container
+(`docker run --rm --pull never <image> curl.exe … http://<gateway>:<port>/`)
+against the lowest relayed port and shows whether it got through. The image
+is a Windows base image the engine already has (`nanoserver` or
+`servercore`); nothing is pulled, and without one the row says which to
+pull.
+
+If PowerShell cannot run the check, the view says so once; the relay keeps
+running. Nothing is changed without a confirm.
 
 The stack runner's other checks (whether a port is free) only bind a
 socket without listening, so they never raise the system prompt. This

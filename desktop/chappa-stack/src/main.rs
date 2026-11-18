@@ -1,4 +1,4 @@
-//! `chappa-stack serve | run-job <id> | follow <file> | follow-command`; see the library
+//! `chappa-stack serve | relay | run-job <id> | follow <file> | follow-command`; see the library
 //! docs for what each does.
 
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,6 +19,8 @@ const USAGE: &str = "usage:
   chappa-stack serve [--project <dir>] [--stack <name>] [--slot <n>] [--channel <name>]
                      [--trusted-definition <hash>|none] [--gitleaks-config <file>]
                      [--project-gitleaks-config <file> --project-gitleaks-config-hash <hash>|none]
+                     [--addr <loopback:port> --token-file <file>]
+  chappa-stack relay --engine <docker|podman>[@<context>]… --ports <ports>…
                      [--addr <loopback:port> --token-file <file>]
   chappa-stack run-job <job id> [--project <dir>] [--gitleaks-config <file>]
                      [--project-gitleaks-config <file> --project-gitleaks-config-hash <hash>|none]
@@ -47,6 +49,13 @@ except the project's own:
 hashed again; it is used, ahead of the Settings config, only while the hash
 matches and it keeps gitleaks' defaults. Otherwise the scans fall back to the
 Settings config or the default, and the Environment view asks to review it.
+
+relay: the relay alone, as a source (launched or attached like serve), for a
+stack that no project defines. It listens on each engine's gateway address
+on every port of --ports (single ports and ranges, comma separated, e.g.
+14000,14010-14020; both flags repeat) and forwards to the same port on
+loopback. Its Environment view is the Relay section, with the Windows
+Firewall check and its actions.
 
 follow and follow-command show a component's output for its `logs` terminal,
 with every value generated for an instance (`{secret:<name>}`) as ••••.";
@@ -101,6 +110,7 @@ fn main() -> ExitCode {
     let mut args = Args { rest: argv };
     let result = match verb.as_str() {
         "serve" => serve(&mut args, launch),
+        "relay" => relay(&mut args, launch),
         "run-job" => run_job(&mut args),
         "follow" => follow(&mut args),
         "follow-command" => follow_command(&mut args),
@@ -163,20 +173,7 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     let gitleaks_config = gitleaks_config(args)?;
     let project_scan = project_scan_config(args)?;
     args.done()?;
-    let (addr, token, attached) = match addr_flag {
-        Some(addr) => {
-            let file = token_file.ok_or("--addr needs --token-file")?;
-            (addr, token_from_file(&PathBuf::from(file))?, true)
-        }
-        None => {
-            let addr = launch
-                .addr
-                .ok_or_else(|| format!("{ADDR_ENV} is not set (or pass --addr)"))?;
-            let token = Token::parse(&launch.token.unwrap_or_default())
-                .map_err(|e| format!("{TOKEN_ENV}: {e}"))?;
-            (addr, token, false)
-        }
-    };
+    let (addr, token, attached) = address_and_token(addr_flag, token_file, launch)?;
     let pin = match pin_flag {
         Some(p) => p,
         // Launched by the app, which always says what was trusted: without
@@ -207,6 +204,73 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     }
     let refresher = source.background.start(world);
     eprintln!("chappa-stack: listening on {proof_addr}");
+    server::serve(http, source.clone());
+    source.shutdown();
+    let _ = refresher.join();
+    Ok(0)
+}
+
+/// Where to listen and the token: from `--addr` and `--token-file`
+/// (attached), else from what the app put in the environment (launched).
+fn address_and_token(
+    addr_flag: Option<String>,
+    token_file: Option<String>,
+    launch: LaunchEnv,
+) -> Result<(String, Token, bool), String> {
+    match addr_flag {
+        Some(addr) => {
+            let file = token_file.ok_or("--addr needs --token-file")?;
+            Ok((addr, token_from_file(&PathBuf::from(file))?, true))
+        }
+        None => {
+            let addr = launch
+                .addr
+                .ok_or_else(|| format!("{ADDR_ENV} is not set (or pass --addr)"))?;
+            let token = Token::parse(&launch.token.unwrap_or_default())
+                .map_err(|e| format!("{TOKEN_ENV}: {e}"))?;
+            Ok((addr, token, false))
+        }
+    }
+}
+
+/// `relay`: the relay alone, as a source.
+fn relay(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
+    use chappa_stack::relay_source::{parse_engine, parse_ports, RelayConfig, RelaySource};
+    let mut engines = Vec::new();
+    while let Some(e) = args.take("--engine")? {
+        engines.push(parse_engine(&e)?);
+    }
+    let mut specs = Vec::new();
+    while let Some(p) = args.take("--ports")? {
+        specs.push(p);
+    }
+    let addr_flag = args.take("--addr")?;
+    let token_file = args.take("--token-file")?;
+    args.done()?;
+    if engines.is_empty() {
+        return Err("relay needs --engine (docker or podman)".into());
+    }
+    if specs.is_empty() {
+        return Err("relay needs --ports".into());
+    }
+    let ports = parse_ports(&specs.join(","))?;
+    let (addr, token, attached) = address_and_token(addr_flag, token_file, launch)?;
+    let (http, bound) = server::bind(&addr)?;
+    let proof_addr = if attached { bound.to_string() } else { addr };
+    let cli: std::sync::Arc<dyn stack_core::cli::EngineCli + Send + Sync> =
+        std::sync::Arc::new(stack_core::cli::CliRunner);
+    let source = RelaySource::new(
+        RelayConfig::new(engines, ports),
+        token,
+        proof_addr.clone(),
+        std::sync::Arc::new(chappa_stack::world::CachedGateways::new(
+            chappa_stack::world::CliGateways(cli.clone()),
+        )),
+        chappa_stack::relay_firewall::FirewallCheck::real(),
+        chappa_stack::relay_probe::ContainerTest::new(cli),
+    );
+    let refresher = source.start();
+    eprintln!("chappa-stack: relay source listening on {proof_addr}");
     server::serve(http, source.clone());
     source.shutdown();
     let _ = refresher.join();

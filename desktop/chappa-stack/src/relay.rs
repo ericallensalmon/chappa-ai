@@ -523,6 +523,13 @@ impl Relay {
         planned
     }
 
+    /// Every listener up now, lowest port first.
+    pub fn listening(&self) -> Vec<Wanted> {
+        let mut out: Vec<Wanted> = self.listeners.iter().map(|l| l.wanted.clone()).collect();
+        out.sort_by_key(|w| (w.engine.clone(), w.bind.port()));
+        out
+    }
+
     pub fn is_listening(&self, bind: SocketAddr) -> bool {
         self.listeners.iter().any(|l| l.wanted.bind == bind)
     }

@@ -128,6 +128,38 @@ Saved states record a script component only as "not restorable beyond
 re-running `up`": resuming one runs its `up` script again, with the
 resumed item's worktrees in its environment.
 
+## The relay for a stack no project defines
+
+When the stack is a machine-wide service run by its own scripts and shared
+by every repo, there is no `stacks:` definition to hang `relay:` on. The
+relay then runs on its own, as a source of its own:
+
+```yaml
+processes:
+  relay:
+    command: [chappa-stack, relay, --engine, docker, --ports, "14000-14099"]
+    source: {}
+    auto_start: true
+```
+
+It can go in any project's `chappa.yml`, or be started by hand and attached
+in Settings ▸ Sources (`chappa-stack relay --engine docker --ports
+14000-14099 --addr 127.0.0.1:<port> --token-file <file>`, the same way as
+`serve`). `--ports` takes single ports and ranges, comma separated
+(`14000,14010-14020`, at most 1024 ports), and both `--ports` and `--engine`
+repeat; an engine may name a context (`docker@remote`).
+
+It follows the same rules as a stack's relay (see the local example's
+README): it listens only on each engine's gateway address, never on a
+wildcard, serves only peers from the gateway's own network, follows the
+gateway when it moves (looked at every few seconds, asked of the engine at
+most once a minute), and on Windows checks the firewall and offers the
+same Allow, Allow-and-block and Remove actions and **Test from a
+container**. Unlike a stack's relay it listens on every given port from the
+start: it does not know what runs behind it, and a connection to a port
+nothing serves on loopback is closed. Its Environment view is one block,
+the Relay section with its banners and alerts.
+
 ## Running it by hand
 
 From this folder, with `CHAPPA_STACK_INSTANCE=scripted-0`,

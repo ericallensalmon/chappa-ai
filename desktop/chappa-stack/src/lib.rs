@@ -26,6 +26,8 @@
 //! | [`background`] | registry digests, engine facts and script components' status and plan output, refreshed off the status path |
 //! | [`relay`] | the gateway-only TCP relay and its peer check |
 //! | [`relay_firewall`] | the relay's Windows Firewall check and its one-step allow |
+//! | [`relay_probe`] | the relay's confirm-gated "Test from a container" |
+//! | [`relay_source`] | `chappa-stack relay`: the relay alone, as a source |
 //! | [`timeouts`] | the per-step time limits |
 //! | [`world`] | every outside tool as a shareable trait object, real or fake |
 //! | [`workspaces`] | item workspaces: Start work, worktrees, activate, archive, drift, served as overlays on a tracker's Work rows |
@@ -47,6 +49,8 @@ pub mod project;
 pub mod records;
 pub mod relay;
 pub mod relay_firewall;
+pub mod relay_probe;
+pub mod relay_source;
 pub mod reviews;
 pub mod runjob;
 pub mod secret_scan;

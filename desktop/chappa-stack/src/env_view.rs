@@ -731,32 +731,7 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
     }
 
     if let Some(relay) = &inp.relay {
-        let mut rows: Vec<Value> = relay
-            .listening
-            .iter()
-            .map(|w| row(&w.engine, format!("{} → {}", w.bind, w.target)))
-            .collect();
-        for g in &relay.guards {
-            let mut r = row(&format!("{} at {}", g.engine, g.gateway), g.summary());
-            if g.refused > 0 {
-                r["badges"] = json!([badge("refused", "warn", None)]);
-            }
-            rows.push(r);
-        }
-        for (engine, why) in &relay.not_needed {
-            rows.push(row(engine, why.clone()));
-        }
-        for p in &relay.problems {
-            rows.push(json!({
-                "label": p.engine,
-                "value": p.text,
-                "badges": [badge("problem", "bad", None)],
-            }));
-        }
-        if rows.is_empty() {
-            rows.push(row("Listeners", "none (nothing is running)"));
-        }
-        sections.push(json!({ "id": "relay", "title": "Relay", "rows": rows }));
+        sections.push(relay_section(relay, "none (nothing is running)"));
     }
 
     sections.extend(script_facts(inp));
@@ -862,6 +837,88 @@ fn data_safety_facts(s: &InstanceSafety) -> Value {
         section["actions"] = actions.into();
     }
     section
+}
+
+/// The Relay facts section: per engine and gateway, the ports listened on
+/// (each forwarded to the same port on loopback), what the peer check
+/// serves and refused, engines that need no relay, and the problems.
+/// `idle` is the row shown when nothing listens.
+pub fn relay_section(relay: &RelayState, idle: &str) -> Value {
+    let mut rows: Vec<Value> = Vec::new();
+    let mut seen: Vec<(String, std::net::IpAddr)> = Vec::new();
+    for w in &relay.listening {
+        let key = (w.engine.clone(), w.bind.ip());
+        if seen.contains(&key) {
+            continue;
+        }
+        let ports: Vec<u16> = relay
+            .listening
+            .iter()
+            .filter(|x| x.engine == key.0 && x.bind.ip() == key.1)
+            .map(|x| x.bind.port())
+            .collect();
+        let runs = crate::relay_firewall::normalize(
+            ports
+                .iter()
+                .map(|p| crate::relay_firewall::PortRange { lo: *p, hi: *p }),
+        );
+        let target = if relay
+            .listening
+            .iter()
+            .filter(|x| x.engine == key.0 && x.bind.ip() == key.1)
+            .all(|x| x.target.ip() == w.target.ip() && x.target.port() == x.bind.port())
+        {
+            format!("{} (same ports)", w.target.ip())
+        } else {
+            "loopback".to_string()
+        };
+        let mut value = format!(
+            "{} port{} {} → {target}",
+            key.1,
+            if ports.len() == 1 { "" } else { "s" },
+            crate::relay_firewall::ranges_text(&runs)
+        );
+        if let Some(g) = relay
+            .guards
+            .iter()
+            .find(|g| g.engine == key.0 && g.gateway == key.1)
+        {
+            value = format!("{value} · {}", g.summary());
+        }
+        let mut r = row(&key.0, value);
+        if relay
+            .guards
+            .iter()
+            .any(|g| g.engine == key.0 && g.gateway == key.1 && g.refused > 0)
+        {
+            r["badges"] = json!([badge("refused", "warn", None)]);
+        }
+        rows.push(r);
+        seen.push(key);
+    }
+    for (engine, why) in &relay.not_needed {
+        rows.push(row(engine, why.clone()));
+    }
+    for p in &relay.problems {
+        rows.push(json!({
+            "label": p.engine,
+            "value": p.text,
+            "badges": [badge("problem", "bad", None)],
+        }));
+    }
+    if rows.is_empty() {
+        rows.push(row("Listeners", idle));
+    }
+    json!({ "id": "relay", "title": "Relay", "rows": rows })
+}
+
+/// The alerts of the relay's problems.
+pub fn relay_alerts(relay: &RelayState) -> Vec<Value> {
+    relay
+        .problems
+        .iter()
+        .map(|p| json!({ "text": p.text, "severity": "bad" }))
+        .collect()
 }
 
 /// One alert per component whose data is not clean, cannot be judged, or
@@ -989,9 +1046,7 @@ fn alerts(inp: &EnvInputs<'_>, components: &[Value]) -> Vec<Value> {
         }
     }
     if let Some(relay) = &inp.relay {
-        for p in &relay.problems {
-            out.push(json!({ "text": p.text, "severity": "bad" }));
-        }
+        out.extend(relay_alerts(relay));
     }
     if let Some(h) = &inp.hosts {
         if !h.ok() {
