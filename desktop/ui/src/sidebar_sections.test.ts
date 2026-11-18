@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  SIDEBAR_SECTIONS_CSS,
   makeCollapsibleSection,
   readCollapsed,
   sectionIcon,
@@ -18,7 +19,7 @@ function makeHeader(): { header: HTMLElement; button: HTMLButtonElement } {
   const count = document.createElement("span");
   count.textContent = "2";
   const button = document.createElement("button");
-  button.textContent = "＋";
+  button.textContent = "ï¼‹";
   header.append(label, count, button);
   return { header, button };
 }
@@ -89,6 +90,25 @@ describe("makeCollapsibleSection", () => {
     header.click();
     expect(body.hidden).toBe(false);
     expect(readCollapsed("s")).toBe(false);
+  });
+
+  it("hides a folded body even when its own style says display:flex", () => {
+    const style = document.createElement("style");
+    style.textContent = `${SIDEBAR_SECTIONS_CSS}
+.flex-list{display:flex;flex-direction:column;}`;
+    document.head.appendChild(style);
+    const { header } = makeHeader();
+    const body = document.createElement("div");
+    body.className = "flex-list";
+    document.body.appendChild(body);
+    makeCollapsibleSection({ header, body, storageKey: "flex", icon: "commands" });
+    expect(getComputedStyle(body).display).toBe("flex");
+    header.click();
+    expect(getComputedStyle(body).display).toBe("none");
+    header.click();
+    expect(getComputedStyle(body).display).toBe("flex");
+    body.remove();
+    style.remove();
   });
 
   it("restores a remembered collapsed state on build", () => {

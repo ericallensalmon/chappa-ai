@@ -133,6 +133,9 @@ export function makeCollapsibleSection(
 
   const apply = (): void => {
     opts.body.hidden = collapsed;
+    // The class does the hiding: a list styled `display:flex` (as the
+    // project lists are) would otherwise override the `hidden` attribute.
+    opts.body.classList.toggle(FOLDED_CLASS, collapsed);
     chevron.textContent = collapsed ? "▸" : "▾"; // ▸ / ▾
     opts.header.classList.toggle("chappa-sub-collapsed", collapsed);
     opts.header.setAttribute("aria-expanded", String(!collapsed));
@@ -169,7 +172,11 @@ export function makeCollapsibleSection(
 
 /** The CSS these sections need. Appended to the app's stylesheet by app.ts so
  *  there is one injection point. */
+/** Set on a folded section's body; hides it whatever display it has. */
+export const FOLDED_CLASS = "chappa-section-folded";
+
 export const SIDEBAR_SECTIONS_CSS = `
+.chappa-section-folded{display:none !important;}
 .chappa-sub-toggle{cursor:pointer;user-select:none;}
 .chappa-sub-toggle:hover{color:#9aa3ad;}
 .chappa-sub-chevron{flex:none;display:inline-flex;justify-content:center;width:10px;font-size:9px;line-height:1;color:#6b7280;}
