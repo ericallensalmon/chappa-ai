@@ -2635,12 +2635,14 @@ mod tests {
     fn reading_the_view_checks_again_after_the_recheck_time() {
         let shell = Shell::answering(r#"{"rules":[],"interfaces":[]}"#);
         let fw = FirewallCheck::new(HostOs::Windows, shell.clone(), Some(PROGRAM.into()))
-            .with_recheck(Duration::from_millis(50));
+            // Far longer than a settle takes on a slow runner: `settle` reads
+            // the view in a loop, and a read past the window checks again.
+            .with_recheck(Duration::from_millis(1500));
         fw.want(gw(), ports(), false);
         settle(&fw);
         fw.want(gw(), ports(), false);
         assert_eq!(shell.calls().len(), 1, "not yet");
-        thread::sleep(Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(1700));
         fw.want(gw(), ports(), false);
         settle(&fw);
         assert_eq!(shell.calls().len(), 2);
