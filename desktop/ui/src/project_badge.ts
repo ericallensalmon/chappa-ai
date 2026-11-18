@@ -44,12 +44,35 @@ export const MAX_INITIALS = 5;
 
 /** Initials from a name: the first letter of each of the first three words
  *  ("lab cluster" → LC, "chappa-ai" → CA, "Demo Project 2" → DP2), or the
- *  first two characters of a one-word name ("twofivesix" → TW). Uppercased. */
+ *  first two characters of a one-word name ("twofivesix" → TW). Uppercased.
+ *  A name that starts with a work-item key badges the key instead
+ *  ({@link keyInitials}). */
 export function deriveInitials(name: string): string {
+  const key = keyInitials(name);
+  if (key !== null) return key;
   const words = name.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 0);
   if (words.length >= 2) return words.slice(0, 3).map((w) => w[0]).join("").toUpperCase();
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
   return "?";
+}
+
+/** A name that starts with a work-item style key — letters, an optional
+ *  `-` or `_`, digits, then the end or a non-letter ("vtc-12345",
+ *  "ca123 checkout") — badges as much of the key as fits in
+ *  {@link MAX_INITIALS}: the whole key (CA123), else its first letter and
+ *  number (V1234), else the number (12345), else the number's last digits.
+ *  `null` for any other name. */
+export function keyInitials(name: string): string | null {
+  const m = /^\s*(\p{L}+)[-_]?(\p{N}+)(?!\p{L})/u.exec(name);
+  if (!m) return null;
+  const letters = m[1].toUpperCase();
+  const digits = m[2];
+  const fits = (s: string): boolean => [...s].length <= MAX_INITIALS;
+  if (fits(letters + digits)) return letters + digits;
+  const first = [...letters][0];
+  if (fits(first + digits)) return first + digits;
+  if (fits(digits)) return digits;
+  return digits.slice(-MAX_INITIALS);
 }
 
 /** A stable colour for a name: a small string hash into the palette, so the

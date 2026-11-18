@@ -22,6 +22,22 @@ describe("project badge", () => {
     expect(deriveInitials("---")).toBe("?");
   });
 
+  it("badges a work-item key with as much of it as fits in five characters", () => {
+    expect(deriveInitials("ca123")).toBe("CA123");
+    expect(deriveInitials("ab-12")).toBe("AB12");
+    expect(deriveInitials("vtc-1234")).toBe("V1234");
+    expect(deriveInitials("vtc-12345")).toBe("12345");
+    expect(deriveInitials("VTC_12345 checkout redesign")).toBe("12345");
+    expect(deriveInitials("vtc-1234567")).toBe("34567");
+    expect(deriveInitials("ca123-web")).toBe("CA123");
+    // Not keys: letters run on after the digits, no digits, or words first.
+    expect(deriveInitials("v2ray")).toBe("V2");
+    expect(deriveInitials("chappa-ai")).toBe("CA");
+    expect(deriveInitials("Demo Project 2")).toBe("DP2");
+    // A typed badge still wins over a derived one.
+    expect(resolveIdentity({ name: "vtc-12345", initials: "X" }).initials).toBe("X");
+  });
+
   it("derives a stable palette colour, never gray", () => {
     const first = deriveColor("chappa-ai");
     expect(isProjectColor(first)).toBe(true);

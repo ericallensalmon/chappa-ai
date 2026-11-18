@@ -22,6 +22,7 @@ import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
 import { shortcutLabel } from "./platform";
 import { closeForCmdW } from "./close_shortcut";
+import { makeHScroller, type HScroller } from "./h_scroller";
 import { baseFor, type Mount, type PathBase } from "./term/paths";
 import { openFileTarget, tauriFileOpener, type FileOpenerApi } from "./open_file";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
@@ -892,8 +893,8 @@ const APP_CSS = `
 /* The project tiles: every stored project as its badge, in a row atop the
    Projects tab's sidebar, then the add button. The expanded project wears a
    ring; a project that is not open is dimmed. */
-.chappa-badge-bar{flex:none;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 10px 6px;box-sizing:border-box;}
-.chappa-badge-bar-list{display:contents;}
+.chappa-badge-bar{flex:none;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;gap:8px;padding:10px 10px 6px;box-sizing:border-box;}
+.chappa-badge-bar-list{padding:3px 2px;}
 .chappa-badge-bar-item{border:0;background:none;padding:2px;border-radius:10px;cursor:pointer;opacity:.5;line-height:0;}
 .chappa-badge-bar-item.open{opacity:1;}
 /* Shown at start-up but not opened yet: its launch waits for a click. */
@@ -1004,6 +1005,8 @@ const APP_CSS = `
    terminal-row / workspace-spawner classes, so no parallel widget CSS. */
 .chappa-project-agents{padding:0 0 4px;}
 .chappa-rail-list{flex:1 1 auto;overflow-y:auto;padding:0 6px 8px;}
+.chappa-rail-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;}
+.chappa-rail-scroll > .chappa-rail-list{flex:1 0 auto;overflow-y:visible;}
 /* margin-top:auto pins the footer to the rail's bottom edge even when the
    workspace TERMINALS list above it is folded away (hidden = no flex spacer). */
 .chappa-rail-footer{flex:none;margin-top:auto;display:flex;align-items:center;gap:4px;border-top:1px solid #1c1f24;padding:6px;}
@@ -1420,6 +1423,8 @@ export class App {
    *  expanded one ringed, plus the add button. */
   private readonly badgeBar: HTMLElement;
   private readonly badgeBarList: HTMLElement;
+  /** The tiles' one-line strip, with its arrows. */
+  private readonly tileScroller: HScroller;
   // --- project agents --------------------------------------------
   /** The AGENTS subsection of the expanded project (agents nest under their
    *  project): header
@@ -2060,8 +2065,11 @@ export class App {
     // The workspace block, under its title: ACTIVE first (the cross-project
     // overview), then COMMANDS directly ABOVE the workspace TERMINALS header
     // (`header`) and its rail list, then AGENTS.
-    rail.append(
-      projectBar,
+    // Everything under the project picker scrolls as one: a project with
+    // many commands or terminals pushes the rest down, never off the end.
+    const railScroll = document.createElement("div");
+    railScroll.className = "chappa-rail-scroll";
+    railScroll.append(
       this.projectSummariesEl,
       this.projectSection,
       wsGroupHeader,
@@ -2071,6 +2079,7 @@ export class App {
       this.railList,
       this.wsAgentsEl,
     );
+    rail.append(projectBar, railScroll);
 
     this.stack = document.createElement("main");
     this.stack.className = "chappa-stack";
@@ -2250,8 +2259,11 @@ export class App {
     this.badgeBar.className = "chappa-badge-bar";
     this.badgeBar.setAttribute("role", "group");
     this.badgeBar.setAttribute("aria-label", "Project tiles");
-    this.badgeBarList = document.createElement("div");
-    this.badgeBarList.className = "chappa-badge-bar-list";
+    // One line of tiles that scrolls sideways, with an arrow at each end
+    // while more tiles are out of view.
+    this.tileScroller = makeHScroller("Projects");
+    this.badgeBarList = this.tileScroller.track;
+    this.badgeBarList.classList.add("chappa-badge-bar-list");
     const barAdd = document.createElement("button");
     barAdd.type = "button";
     barAdd.className = "chappa-badge-bar-add";
@@ -2259,7 +2271,7 @@ export class App {
     barAdd.title = "Add project…";
     barAdd.addEventListener("mousedown", (e) => e.preventDefault());
     barAdd.addEventListener("click", () => void this.addProjectFlow());
-    this.badgeBar.append(this.badgeBarList, barAdd);
+    this.badgeBar.append(this.tileScroller.el, barAdd);
     rail.insertBefore(this.badgeBar, rail.firstChild);
 
     this.root.append(
@@ -4829,6 +4841,9 @@ export class App {
       });
       this.badgeBarList.appendChild(item);
     }
+    this.tileScroller.update();
+    const selected = this.badgeBarList.querySelector<HTMLElement>(".chappa-badge-bar-item.expanded");
+    if (selected) this.tileScroller.reveal(selected);
   }
 
   private renderProjectMenu(): void {

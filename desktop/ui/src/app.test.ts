@@ -5474,7 +5474,7 @@ describe("App workspace commands", () => {
     expect(section.querySelector(".chappa-subsection-count")?.textContent).toBe("2");
 
     // COMMANDS sits DIRECTLY ABOVE the workspace TERMINALS header.
-    const rail = root.querySelector<HTMLElement>(".chappa-rail")!;
+    const rail = root.querySelector<HTMLElement>(".chappa-rail-scroll")!;
     const children = [...rail.children];
     const cIdx = children.indexOf(section);
     const tIdx = children.indexOf(root.querySelector(".chappa-rail-header")!);
