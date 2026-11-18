@@ -24,7 +24,7 @@
 import { isBackKey, mountPageHeader } from "./page_header";
 import { Segmented } from "./segmented";
 import { LEVELS, LEVEL_LABELS, resolveLevel, type Level } from "./notifications";
-import { PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
+import { MAX_INITIALS, PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
 
 const PANE_CSS =
   "position:fixed;top:0;right:0;bottom:0;left:0;z-index:60;display:none;" +
@@ -211,9 +211,9 @@ export class EditPane {
     this.badgePreview.dataset.role = "badge-preview";
     this.initialsInput = document.createElement("input");
     this.initialsInput.type = "text";
-    this.initialsInput.maxLength = 3;
+    this.initialsInput.maxLength = MAX_INITIALS;
     this.initialsInput.spellcheck = false;
-    this.initialsInput.style.cssText = `${INPUT_CSS}width:52px;text-align:center;text-transform:uppercase;`;
+    this.initialsInput.style.cssText = `${INPUT_CSS}width:68px;text-align:center;text-transform:uppercase;`;
     this.initialsInput.dataset.field = "initials";
     this.initialsInput.addEventListener("change", () => void this.commitIdentity());
     const swatchRow = document.createElement("div");

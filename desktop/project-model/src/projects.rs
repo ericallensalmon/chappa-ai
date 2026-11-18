@@ -32,6 +32,10 @@ use crate::yml::ProcessDef;
 /// labels plus the `"all"` casing — nothing external pins the other two.
 pub const NOTIFICATION_LEVELS: [&str; 3] = ["all", "important", "none"];
 
+/// The most characters a project badge's typed initials may hold: enough
+/// for a short key or ticket number, still one glance wide.
+pub const MAX_INITIALS: usize = 5;
+
 /// `None` (unset) is always valid: it means "inherit", "level: None
 /// CLEARS (removes the override / resets the project field to None = 'all')".
 pub(crate) fn validate_level(level: Option<&str>) -> Result<(), String> {
@@ -399,7 +403,7 @@ impl ProjectStore {
 
     /// Set the badge identity. Blank initials or no colour CLEAR that
     /// override (the badge derives from the name again); initials are at
-    /// most three characters and a colour must be a palette key. Validated
+    /// most five characters and a colour must be a palette key. Validated
     /// before anything mutates, so a rejection leaves the file untouched.
     pub fn set_identity(
         &mut self,
@@ -411,8 +415,8 @@ impl ProjectStore {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
         if let Some(i) = &initials {
-            if i.chars().count() > 3 {
-                return Err("initials are at most three characters".to_owned());
+            if i.chars().count() > MAX_INITIALS {
+                return Err(format!("initials are at most {MAX_INITIALS} characters"));
             }
         }
         let color = color
@@ -987,7 +991,7 @@ mod tests {
         assert_eq!(reopened.get(1).unwrap().color.as_deref(), Some("teal"));
 
         // Too long / unknown colour: refused, nothing written.
-        assert!(store.set_identity(1, Some("FOUR".into()), None).is_err());
+        assert!(store.set_identity(1, Some("ABC123".into()), None).is_err());
         assert!(store.set_identity(1, None, Some("plaid".into())).is_err());
         assert_eq!(store.get(1).unwrap().initials.as_deref(), Some("CH"));
         assert_eq!(store.get(1).unwrap().color.as_deref(), Some("teal"));
@@ -998,6 +1002,10 @@ mod tests {
         assert!(store.get(1).unwrap().initials.is_none());
         assert!(store.get(1).unwrap().color.is_none());
         assert!(!fs::read_to_string(&store_path).unwrap().contains("color"));
+
+        // Five characters fit: a short key or ticket number.
+        store.set_identity(1, Some("ABC12".into()), None).unwrap();
+        assert_eq!(store.get(1).unwrap().initials.as_deref(), Some("ABC12"));
     }
 
     // ---- override records, favorites, renaming, backup flag -------

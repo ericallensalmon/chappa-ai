@@ -39,6 +39,9 @@ export function paletteEntry(color: ProjectColor): PaletteEntry {
   return PROJECT_COLORS.find((c) => c.key === color) ?? PROJECT_COLORS[0];
 }
 
+/** The most characters typed initials may hold (the store refuses more). */
+export const MAX_INITIALS = 5;
+
 /** Initials from a name: the first letter of each of the first three words
  *  ("lab cluster" → LC, "chappa-ai" → CA, "Demo Project 2" → DP2), or the
  *  first two characters of a one-word name ("twofivesix" → TW). Uppercased. */
@@ -82,7 +85,10 @@ export function projectBadge(src: ProjectIdentitySource, size: "row" | "bar" = "
   const { initials, color } = resolveIdentity(src);
   const el = document.createElement("span");
   el.className = "chappa-project-badge";
-  el.style.cssText = `${BADGE_CSS}${size === "bar" ? BAR_BADGE_CSS : ""}background:${color.bg};color:${color.fg};`;
+  // Four or five characters set a little tighter, so the badge stays a
+  // glance wide instead of growing into a label.
+  const long = [...initials].length > 3 ? (size === "bar" ? "font-size:10px;letter-spacing:0;" : "font-size:9px;letter-spacing:0;") : "";
+  el.style.cssText = `${BADGE_CSS}${size === "bar" ? BAR_BADGE_CSS : ""}${long}background:${color.bg};color:${color.fg};`;
   el.textContent = initials;
   el.title = src.name;
   el.dataset.color = color.key;

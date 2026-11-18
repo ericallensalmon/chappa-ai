@@ -10,7 +10,7 @@
 // or an identity actually changes, so a name being typed is never torn down
 // under the cursor.
 
-import { PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
+import { MAX_INITIALS, PROJECT_COLORS, deriveInitials, projectBadge, type ProjectColor } from "./project_badge";
 import { INPUT_CSS, SELECT_CSS, SMALL_BTN_CSS, settingsBlock, settingsSection } from "./settings_widgets";
 
 /** One project as the section reads it. */
@@ -142,11 +142,11 @@ export class ProjectsSection {
 
     const initials = document.createElement("input");
     initials.type = "text";
-    initials.maxLength = 3;
+    initials.maxLength = MAX_INITIALS;
     initials.spellcheck = false;
     initials.value = row.initials ?? "";
     initials.placeholder = deriveInitials(row.name);
-    initials.style.cssText = `${INPUT_CSS}width:52px;text-align:center;text-transform:uppercase;`;
+    initials.style.cssText = `${INPUT_CSS}width:68px;text-align:center;text-transform:uppercase;`;
     initials.dataset.field = "initials";
     initials.addEventListener("change", () => {
       const typed = initials.value.trim().toUpperCase();
