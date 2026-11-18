@@ -5474,6 +5474,10 @@ describe("App workspace commands", () => {
     expect(section.querySelector(".chappa-subsection-label")?.textContent).toBe("COMMANDS");
     expect(section.querySelector(".chappa-subsection-count")?.textContent).toBe("2");
 
+    // The TERMINALS list takes only its rows' room: it does not stretch and
+    // push AGENTS to the bottom edge.
+    expect(getComputedStyle(root.querySelector<HTMLElement>(".chappa-rail-list")!).flexGrow).toBe("0");
+
     // COMMANDS sits DIRECTLY ABOVE the workspace TERMINALS header.
     const rail = root.querySelector<HTMLElement>(".chappa-rail-scroll")!;
     const children = [...rail.children];

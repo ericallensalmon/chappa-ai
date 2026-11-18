@@ -1007,7 +1007,9 @@ const APP_CSS = `
 .chappa-project-agents{padding:0 0 4px;}
 .chappa-rail-list{flex:1 1 auto;overflow-y:auto;padding:0 6px 8px;}
 .chappa-rail-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;}
-.chappa-rail-scroll > .chappa-rail-list{flex:1 0 auto;overflow-y:visible;}
+/* The workspace TERMINALS list takes only the room its rows need, so AGENTS
+   sits right under it instead of being pushed to the bottom edge. */
+.chappa-rail-scroll > .chappa-rail-list{flex:none;overflow-y:visible;}
 /* margin-top:auto pins the footer to the rail's bottom edge even when the
    workspace TERMINALS list above it is folded away (hidden = no flex spacer). */
 .chappa-rail-footer{flex:none;margin-top:auto;display:flex;align-items:center;gap:4px;border-top:1px solid #1c1f24;padding:6px;}
