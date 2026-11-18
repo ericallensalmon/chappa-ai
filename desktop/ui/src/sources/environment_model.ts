@@ -406,6 +406,50 @@ export function readComponent(raw: unknown, sourceId: string, sourceLabel: strin
 
 /** The header counts: the source's `summary` when it sent one, else counted
  *  from the components. Non-zero only, table order. */
+/** `HH:MM` of an ISO time (UTC as the source sent it), or "". */
+function clockOf(utc: string): string {
+  const m = /T(\d\d:\d\d)/.exec(utc);
+  return m ? m[1] : "";
+}
+
+/** The stack's changing jobs (the payload's `job`) as header chips:
+ *  "running: <label> since 10:02" while one holds the stack ("cancelling"
+ *  once asked to stop), and the last one that ended, toned by how it
+ *  ended, with its error line as the title. */
+export function jobChips(job: unknown): Chip[] {
+  const j = obj(job);
+  if (!j) return [];
+  const out: Chip[] = [];
+  const active = obj(j.active);
+  if (active && text(active.label)) {
+    const since = clockOf(text(active.startedUtc) || text(active.createdUtc));
+    const verb = active.cancelling === true ? "cancelling" : active.status === "pending" ? "starting" : "running";
+    out.push({
+      text: `${verb}: ${text(active.label)}${since ? ` since ${since}` : ""}`,
+      tone: "info",
+      title: "Other changes to this stack wait until it ends; Cancel stops it, Job log follows it",
+    });
+  }
+  const last = obj(j.last);
+  if (!active && last && text(last.label)) {
+    const status = text(last.status) || "ended";
+    const when = clockOf(text(last.endedUtc));
+    const tone: Tone = status === "done" ? "ok" : status === "cancelled" ? "warn" : "bad";
+    const code = num(last.exitCode);
+    const error = text(last.error);
+    const title = [
+      `Last change: ${text(last.label)}, ${status}${when ? ` at ${when}` : ""}`,
+      code !== null && status !== "done" ? `exit code ${code}` : "",
+      error,
+      "Last job's log shows its output",
+    ]
+      .filter(Boolean)
+      .join("; ");
+    out.push({ text: `last: ${text(last.label)} ${status}${when ? ` ${when}` : ""}`, tone, title });
+  }
+  return out;
+}
+
 export function headerCounts(summary: unknown, rows: EnvRow[]): string[] {
   return headerChips(summary, rows).filter((c) => !c.text.startsWith("endpoints ")).map((c) => c.text);
 }
@@ -566,7 +610,7 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
       sourceLabel: p.sourceLabel,
       hasData: true,
       header: headerCounts(body.summary, rows),
-      chips: headerChips(body.summary, rows),
+      chips: [...headerChips(body.summary, rows), ...jobChips(body.job)],
       actionIds: actionIdsOf(body.actions),
       factsLine: factsLine(facts),
       meta: metaLine(facts),

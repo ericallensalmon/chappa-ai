@@ -83,6 +83,7 @@ export function defaultSettings(): Settings {
     ctrlVPastes: true,
     ctrlCCopyOnly: true,
     optionAsMeta: false,
+    closeSuccessfulJobPanes: true,
     scrollWheelSpeed: 3,
     fontSize: 14,
     fontFamily: BUNDLED_FONTS[0],
@@ -242,6 +243,8 @@ export function clampSettings(raw: Partial<Settings> | null | undefined): Settin
     ctrlCCopyOnly: s.ctrlCCopyOnly !== false,
     // Off unless explicitly on: Option keeps typing characters.
     optionAsMeta: s.optionAsMeta === true,
+    // On unless explicitly off, like Rust's default.
+    closeSuccessfulJobPanes: s.closeSuccessfulJobPanes !== false,
     scrollWheelSpeed: clampInt(s.scrollWheelSpeed, WHEEL_SPEED_MIN, WHEEL_SPEED_MAX, d.scrollWheelSpeed),
     fontSize: clampInt(s.fontSize, FONT_SIZE_MIN, FONT_SIZE_MAX, d.fontSize),
     fontFamily: family,

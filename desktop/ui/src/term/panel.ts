@@ -260,6 +260,9 @@ export interface PanelHost {
   restoreGlContext(): void;
   /** Re-point file-path resolution (a container agent's mounts arrived). */
   setPathBase(base: PathBase | null): void;
+  /** The person typed, pasted or scrolled in this pane: an automatic close
+   *  must leave it alone. Absent: never. */
+  readonly userTouched?: boolean;
   dispose(closeTerminal?: boolean): void;
 }
 
@@ -409,6 +412,8 @@ export function probeCellMetrics(
 
 export class TerminalPanel {
   readonly host: HTMLElement;
+  /** See {@link PanelHost.userTouched}. */
+  userTouched = false;
   private readonly api: TerminalApi;
   /** A full CSS font-family STACK (already interpolated through
    *  `cssFontFamily`); mutable — `setFontMetrics` swaps it. */
@@ -553,9 +558,11 @@ export class TerminalPanel {
       rows: () => this.grid?.rows ?? 0,
       cursorCell: () => this.lastCursor,
       onKey: (ev) => {
+        this.userTouched = true;
         if (this.termId >= 0 && this.active) void this.api.writeKey(this.termId, ev);
       },
       onPaste: (text) => {
+        this.userTouched = true;
         if (this.termId >= 0 && this.active) void this.api.paste(this.termId, text);
       },
       onMouse: (ev) => {
@@ -567,6 +574,7 @@ export class TerminalPanel {
         if (this.termId >= 0 && this.active) void this.api.mouse(this.termId, ev);
       },
       onScroll: (delta) => {
+        this.userTouched = true;
         if (this.termId >= 0 && this.active) void this.api.scroll(this.termId, delta);
       },
       onSelection: (op) => {
@@ -738,6 +746,7 @@ export class TerminalPanel {
    *  default drag-drop interception the webview never sees an HTML5 drop, so
    *  OS file paths arrive via that event, not InputController.onDrop. */
   pasteText(text: string): void {
+    this.userTouched = true;
     if (this.termId >= 0 && this.active) void this.api.paste(this.termId, text);
   }
 

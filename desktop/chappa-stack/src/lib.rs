@@ -21,6 +21,7 @@
 //! | [`actions`] | the verbs offered, planned for their confirm text |
 //! | [`hidden_output`] | the `logs` terminals' output with the generated secrets hidden |
 //! | [`records`] | job records under `.work/jobs/`, exit reports, retention |
+//! | [`lease`] | one changing job per instance at a time, a job's runner alive or not, cancel requests, settling jobs whose runner is gone |
 //! | [`runjob`] | `run-job`: one stored job, start to finish |
 //! | [`procs`] | the process table of process components |
 //! | [`background`] | registry digests, engine facts and script components' status and plan output, refreshed off the status path |
@@ -43,6 +44,7 @@ pub mod data_safety;
 pub mod env_view;
 pub mod hidden_output;
 pub mod identity;
+pub mod lease;
 pub mod local_status;
 pub mod procs;
 pub mod project;

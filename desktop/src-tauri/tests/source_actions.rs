@@ -424,6 +424,14 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
         job.log.is_none(),
         "a delivered report leaves no complaint: {job:?}"
     );
+    // Named for the quit question and the done toast: the run's title, else
+    // the source and the action.
+    assert!(
+        job.label.as_deref().is_some_and(|l| !l.is_empty()),
+        "{job:?}"
+    );
+    // Nothing runs in a pane any more, so a quit would not be held.
+    assert!(deps.sources.running_pane_jobs().is_empty());
     let remote = deps.sources.job_get(sid, &job_id).unwrap();
     assert_eq!(remote["state"], "done");
     assert!(

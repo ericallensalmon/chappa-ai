@@ -181,6 +181,7 @@ export class SettingsPane {
   private readonly ctrlCToggle: HTMLInputElement;
   private readonly optionMetaToggle: HTMLInputElement;
   private readonly marksToggle: HTMLInputElement;
+  private readonly jobPanesToggle: HTMLInputElement;
   private readonly wheelPicker: Segmented<number>;
   /** OSC 52 clipboard writes from terminal output: Off | Ask | Allow. */
   private readonly clipboardWritesPicker: Segmented<ClipboardWritesMode>;
@@ -398,6 +399,16 @@ export class SettingsPane {
           "that only cancels a dialog or answers a y/n. Off by default; turn it on for agent CLIs that " +
           "emit no real OSC 133 marks. Full-screen (alt-screen) apps plant nothing — Claude Code needs " +
           "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 to stay in normal scrollback.",
+      ),
+    );
+    this.jobPanesToggle = this.toggle("closeSuccessfulJobPanes");
+    behavior.card.appendChild(
+      settingsRow(
+        "Close successful job panes",
+        this.jobPanesToggle,
+        "A stack job's pane closes about five seconds after the job is done; a toast names it and the " +
+          "Environment view keeps its last-job line and log. A job that fails or is cancelled keeps its pane, " +
+          "and so does a pane you typed or scrolled in or are looking at.",
       ),
     );
 
@@ -679,6 +690,7 @@ export class SettingsPane {
     this.ctrlCToggle.checked = s.ctrlCCopyOnly;
     this.optionMetaToggle.checked = s.optionAsMeta;
     this.marksToggle.checked = s.syntheticPromptMarks;
+    this.jobPanesToggle.checked = s.closeSuccessfulJobPanes;
     this.wheelPicker.setValue(s.scrollWheelSpeed);
     this.clipboardWritesPicker.setValue(s.clipboardWrites);
     this.atLaunchPicker.setValue(s.atLaunch);
@@ -709,7 +721,13 @@ export class SettingsPane {
   // --- builders ------------------------------------------------------------
 
   private toggle(
-    setting: "copyOnSelect" | "ctrlVPastes" | "ctrlCCopyOnly" | "optionAsMeta" | "syntheticPromptMarks",
+    setting:
+      | "copyOnSelect"
+      | "ctrlVPastes"
+      | "ctrlCCopyOnly"
+      | "optionAsMeta"
+      | "syntheticPromptMarks"
+      | "closeSuccessfulJobPanes",
   ): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "checkbox";

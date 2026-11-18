@@ -39,6 +39,7 @@ import {
   type CommandForm,
 } from "./dialog";
 import { settingsStore, type Settings, type SettingsStore } from "./settings";
+import { JobPaneCloser, cancelQuestion, jobLabel, quitQuestion, runningJobInPane } from "./job_panes";
 import { ClipboardGate } from "./clipboard_gate";
 import {
   decide,
@@ -1335,6 +1336,8 @@ export class App {
    *  yet (spawn response in flight), replayed after adopt. Bounded. */
   private readonly pendingAgentEvents = new Map<number, ipc.AgentEventEvent[]>();
   private activeId: number | null = null;
+  /** Closes the panes of jobs that ended done (see job_panes). */
+  private readonly jobPanes: JobPaneCloser;
   private readonly promptCommand: (
     initial: CommandForm | null,
     title: string,
@@ -1654,6 +1657,14 @@ export class App {
     this.sourceActionsApi = opts.sourceActions ?? tauriSourceActions;
     this.dataSafetyApi = opts.dataSafety ?? tauriDataSafety;
     this.viewsData = new SourceViewsData(this.sources, (change) => this.onSourceData(change));
+    this.jobPanes = new JobPaneCloser({
+      enabled: () => this.settings.get().closeSuccessfulJobPanes,
+      closable: (termId) => this.jobPaneClosable(termId),
+      close: (termId) => this.forceClosePanel(termId),
+      say: (text) => this.showToast(text),
+      setTimer: (fn, ms) => void setTimeout(fn, ms),
+    });
+    this.sources.subscribe?.((listing) => this.jobPanes.observe(listing.sources));
     this.root = opts.root;
     this.root.textContent = "";
     // The flex-row layout (rail | stack) lives on this class; without it the
@@ -2955,6 +2966,13 @@ export class App {
     const entry = this.entries.get(id);
     if (!entry) return;
     const running = entry.status === "starting" || entry.status === "running";
+    // A source job's pane is its runner: closing it would end the job
+    // part-way, so the job is cancelled instead (the pane ends with it).
+    const job = running ? runningJobInPane(this.sources.get().sources, id) : null;
+    if (job) {
+      await this.ask(`close:${id}`, () => this.cancelJobInPane(id, job.sourceId, job.job));
+      return;
+    }
     if (running) {
       const ok = await this.ask(`close:${id}`, () =>
         this.confirmClose(entry.title ?? entry.name),
@@ -2966,6 +2984,40 @@ export class App {
       if (!this.entries.has(id)) return;
     }
     this.forceClosePanel(id);
+  }
+
+  /** Closing a running job's pane: cancel the job (asked first); a source
+   *  that cannot cancel leaves the choice to close the pane anyway. */
+  private async cancelJobInPane(id: number, sourceId: string, job: ipc.SourceJobDto): Promise<boolean> {
+    const ok = await confirmDialog(cancelQuestion(job), { okLabel: "Cancel the job", cancelLabel: "Keep it running", safeDefault: true });
+    if (!ok) return false;
+    let refused: string;
+    try {
+      const outcome = await ipc.sourceCancelJob(sourceId, job.jobId);
+      if (outcome.accepted) {
+        this.showToast(outcome.message);
+        return true;
+      }
+      refused = outcome.message;
+    } catch (e) {
+      refused = e instanceof Error ? e.message : String(e);
+    }
+    const anyway = await confirmDialog(
+      `${jobLabel(job)} could not be cancelled: ${refused}\n\nClose its pane anyway? The job stops part-way.`,
+      { okLabel: "Close anyway", safeDefault: true },
+    );
+    if (anyway && this.entries.has(id)) this.forceClosePanel(id);
+    return anyway;
+  }
+
+  /** Whether a done job's pane may close on its own: it still exists,
+   *  nobody typed or scrolled in it, and it is not the pane on screen. */
+  private jobPaneClosable(termId: number): boolean {
+    const entry = this.entries.get(termId);
+    if (!entry || entry.panel.userTouched) return false;
+    if (this.activeId === termId) return false;
+    const focused = document.activeElement;
+    return !(focused && entry.host.contains(focused));
   }
 
   /** Close `id` unconditionally (app teardown — never prompts). Process
@@ -3185,6 +3237,14 @@ export class App {
     }
   };
 
+  /** Quit while jobs run in panes? "Quit anyway" lets the exit through. */
+  private async askQuit(p: ipc.QuitBlockedDto): Promise<void> {
+    const ok = await this.ask("quit", () =>
+      confirmDialog(quitQuestion(p.jobs), { okLabel: "Quit anyway", cancelLabel: "Keep running", safeDefault: true }),
+    );
+    if (ok === true) await ipc.confirmQuit().catch(() => {});
+  }
+
   private async wireEvents(): Promise<void> {
     if (!ipc.inTauri()) return;
     const on = <T>(event: string, apply: (payload: T) => void): void => {
@@ -3199,6 +3259,8 @@ export class App {
     // unknown id is a no-op; the frontend's own × path must not double-remove
     // (this is idempotent by id — the entry is already deleted).
     on<ipc.TerminalClosedEvent>("term://closed", (p) => this.dropEntry(p.term_id, false));
+    // Rust held a quit because jobs run in panes here: ask.
+    on<ipc.QuitBlockedDto>(ipc.QUIT_BLOCKED_EVENT, (p) => void this.askQuit(p));
     // A run learned its provider session: keep it on the record's newest
     // run, so the card and menu offer to resume it once the agent stops.
     on<ipc.TerminalSessionEvent>("term://session", (p) => {

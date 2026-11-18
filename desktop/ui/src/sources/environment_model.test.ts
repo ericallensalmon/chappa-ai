@@ -4,6 +4,7 @@ import {
   buildEnvironmentModel,
   groupCountText,
   headerCounts,
+  jobChips,
   problemsText,
   readProbe,
   readSourceCell,
@@ -386,5 +387,24 @@ describe("environment model: the header's parts", () => {
     expect(problemsText(p(3))).toBe("c0: unhealthy · c1: unhealthy · c2: unhealthy");
     expect(problemsText(p(4))).toBe("c0: unhealthy · c1: unhealthy · c2: unhealthy and 1 more");
     expect(problemsText(p(56))).toMatch(/and 53 more$/);
+  });
+});
+
+describe("the stack's jobs in the header", () => {
+  it("names the running job and when it started, and the last one by how it ended", () => {
+    expect(jobChips(null)).toEqual([]);
+    const running = jobChips({ active: { label: "stack: bring up", status: "running", startedUtc: "2026-11-14T10:02:11Z", cancelling: false }, last: null });
+    expect(running).toEqual([expect.objectContaining({ text: "running: stack: bring up since 10:02", tone: "info" })]);
+    expect(jobChips({ active: { label: "x", status: "pending", createdUtc: "2026-11-14T10:00:00Z" } })[0].text).toBe("starting: x since 10:00");
+    expect(jobChips({ active: { label: "x", status: "running", cancelling: true } })[0].text).toBe("cancelling: x");
+    const failed = jobChips({ active: null, last: { label: "stack: start", status: "failed", endedUtc: "2026-11-14T11:00:00Z", exitCode: 1, error: "up api: exited with code 1" } });
+    expect(failed[0]).toMatchObject({ text: "last: stack: start failed 11:00", tone: "bad" });
+    expect(failed[0].title).toContain("exit code 1");
+    expect(failed[0].title).toContain("up api: exited with code 1");
+    expect(jobChips({ last: { label: "s", status: "done" } })[0].tone).toBe("ok");
+    expect(jobChips({ last: { label: "s", status: "cancelled" } })[0].tone).toBe("warn");
+    expect(jobChips({ last: { label: "s", status: "interrupted" } })[0].tone).toBe("bad");
+    // While one runs, the last one is not shown.
+    expect(jobChips({ active: { label: "a", status: "running" }, last: { label: "b", status: "done" } }).length).toBe(1);
   });
 });

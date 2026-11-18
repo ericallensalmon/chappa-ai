@@ -35,11 +35,28 @@ pub enum JobStatus {
     Running,
     Done,
     Failed,
+    /// Stopped on request: the step running then was ended with every
+    /// process it started, the steps after it were skipped.
+    Cancelled,
+    /// Its runner ended before the job did (the app quit, the pane was
+    /// closed, the machine went down): the stack may be part-way changed.
+    Interrupted,
 }
 
 impl JobStatus {
     pub fn finished(self) -> bool {
-        matches!(self, JobStatus::Done | JobStatus::Failed)
+        !matches!(self, JobStatus::Pending | JobStatus::Running)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobStatus::Pending => "pending",
+            JobStatus::Running => "running",
+            JobStatus::Done => "done",
+            JobStatus::Failed => "failed",
+            JobStatus::Cancelled => "cancelled",
+            JobStatus::Interrupted => "interrupted",
+        }
     }
 }
 
@@ -83,6 +100,29 @@ pub enum JobWork {
     },
     /// A git change to an item workspace (see [`crate::workspaces`]).
     Workspace { op: crate::workspaces::WorkspaceOp },
+}
+
+impl JobWork {
+    /// Whether a job of this kind changes the instance, and so holds the
+    /// instance's lease while it runs: two of them side by side would race
+    /// each other's engine commands and scripts, and each other's intent
+    /// record. A data-safety check only reads (its policy stop runs after
+    /// the check, and is safe beside a change), and most workspace and
+    /// review jobs are git changes to a folder; those run alongside.
+    pub fn takes_lease(&self) -> bool {
+        match self {
+            JobWork::DataSafety { .. } => false,
+            JobWork::Workspace { op } => matches!(
+                op,
+                crate::workspaces::WorkspaceOp::Archive { save: Some(_), .. }
+            ),
+            JobWork::Review { op } => match op {
+                crate::reviews::ReviewOp::Create { up, save, .. } => *up || save.is_some(),
+                crate::reviews::ReviewOp::Remove { .. } => false,
+            },
+            _ => true,
+        }
+    }
 }
 
 /// The app's report when the pane that ran the job exits.
@@ -220,6 +260,11 @@ pub fn new_job_id(now_utc: &str) -> Result<String, String> {
 }
 
 impl JobRecord {
+    /// Whether this job holds the instance's lease while it runs.
+    pub fn takes_lease(&self) -> bool {
+        self.mutates && self.work.takes_lease()
+    }
+
     pub fn path(work_dir: &Path, id: &str) -> PathBuf {
         jobs_dir(work_dir).join(format!("{id}.json"))
     }
@@ -285,23 +330,39 @@ pub fn log_tail(path: &Path) -> Option<String> {
     ))
 }
 
+/// Why a job whose runner went away is `interrupted`.
+pub const INTERRUPTED: &str =
+    "interrupted: the job's runner ended before the job did (the app quit, its pane was closed, or the machine stopped); the stack may be part-way changed, so look before running it again";
+/// Why a job nobody started is failed.
+pub const NEVER_STARTED: &str =
+    "never started: no runner picked the job up (its pane did not open)";
+/// The longest error line kept from an exit report.
+const REPORTED_ERROR_CAP: usize = 400;
+
 /// What `GET jobs/{id}` answers: `running` until the job ends, then `done`
-/// or `failed` with the log. A record whose runner died without finishing
-/// it reads as failed.
-pub fn api_state(rec: &JobRecord, runner_alive: impl Fn(u32) -> bool) -> serde_json::Value {
-    let (state, error) = match rec.status {
-        JobStatus::Done => ("done", None),
-        JobStatus::Failed => ("failed", rec.error.clone()),
-        JobStatus::Pending => ("running", None),
-        JobStatus::Running => match rec.runner_pid {
-            Some(pid) if !runner_alive(pid) && rec.report.is_none() => (
-                "failed",
-                Some("the job's runner ended without finishing the job".to_string()),
-            ),
-            _ => ("running", None),
-        },
+/// or `failed` with the log. A cancelled or interrupted job is `failed`
+/// with `outcome` saying which (the protocol knows two end states). A
+/// running record whose runner is gone (`runner_alive` false) reads as
+/// interrupted.
+pub fn api_state(rec: &JobRecord, runner_alive: bool) -> serde_json::Value {
+    let (state, error, outcome) = match rec.status {
+        JobStatus::Done => ("done", None, None),
+        JobStatus::Failed => ("failed", rec.error.clone(), None),
+        JobStatus::Cancelled | JobStatus::Interrupted => {
+            ("failed", rec.error.clone(), Some(rec.status.as_str()))
+        }
+        JobStatus::Pending => ("running", None, None),
+        JobStatus::Running if !runner_alive && rec.report.is_none() => (
+            "failed",
+            Some(INTERRUPTED.to_string()),
+            Some(JobStatus::Interrupted.as_str()),
+        ),
+        JobStatus::Running => ("running", None, None),
     };
     let mut out = serde_json::json!({ "state": state });
+    if let Some(o) = outcome {
+        out["outcome"] = o.into();
+    }
     if state != "running" {
         if let Some(log) = log_tail(&rec.log) {
             out["log"] = log.into();
@@ -319,11 +380,26 @@ pub fn api_state(rec: &JobRecord, runner_alive: impl Fn(u32) -> bool) -> serde_j
     out
 }
 
+/// One line of at most [`REPORTED_ERROR_CAP`] characters, controls dropped.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(REPORTED_ERROR_CAP)
+        .collect()
+}
+
 /// Apply the app's exit report (`POST jobs/{id}`): the pane's exit code and
 /// end time are recorded; its output becomes the log only when the runner
 /// wrote none (the runner's own log is the better copy: no terminal
 /// redraws). A runner that never finished its record is settled by the
-/// report.
+/// report: a job that was running is `interrupted` (its runner ended with
+/// the pane), one that never started is `failed`. The report may carry an
+/// `error` (the app could not open the pane), which becomes the job's.
 pub fn record_exit_report(
     work_dir: &Path,
     id: &str,
@@ -339,6 +415,11 @@ pub fn record_exit_report(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let output = body.get("output").and_then(serde_json::Value::as_str);
+    let reported = body
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .map(one_line)
+        .filter(|e| !e.is_empty());
     let log = JobRecord::log_path(work_dir, id);
     if let Some(text) = output {
         let empty = fs::metadata(&log).map(|m| m.len() == 0).unwrap_or(true);
@@ -353,17 +434,20 @@ pub fn record_exit_report(
             received_utc: now_utc.to_string(),
         });
         if !rec.status.finished() {
-            rec.status = if exit_code == Some(0) {
-                JobStatus::Done
-            } else {
-                JobStatus::Failed
+            let was_running = rec.status == JobStatus::Running;
+            rec.status = match (exit_code, was_running) {
+                (Some(0), _) if reported.is_none() => JobStatus::Done,
+                (_, true) => JobStatus::Interrupted,
+                (_, false) => JobStatus::Failed,
             };
             rec.exit_code = exit_code;
             rec.ended_utc = ended.or_else(|| Some(now_utc.to_string()));
-            if rec.status == JobStatus::Failed && rec.error.is_none() {
-                rec.error = Some(match exit_code {
-                    Some(c) => format!("the job's pane exited with code {c}"),
-                    None => "the job's pane ended without an exit code".to_string(),
+            if rec.status != JobStatus::Done && rec.error.is_none() {
+                rec.error = Some(match (&reported, rec.status, exit_code) {
+                    (Some(e), _, _) => e.clone(),
+                    (None, JobStatus::Interrupted, _) => INTERRUPTED.to_string(),
+                    (None, _, Some(c)) => format!("the job's pane exited with code {c}"),
+                    (None, _, None) => "the job's pane ended without an exit code".to_string(),
                 });
             }
         }
@@ -418,6 +502,8 @@ pub fn prune(work_dir: &Path, keep: &JobsDef, now_utc: &str) -> Vec<String> {
             JobRecord::path(work_dir, &rec.id),
             JobRecord::log_path(work_dir, &rec.id),
             JobRecord::result_path(work_dir, &rec.id),
+            crate::lease::job_lock_path(work_dir, &rec.id),
+            crate::lease::cancel_path(work_dir, &rec.id),
         ] {
             let _ = fs::remove_file(path);
         }

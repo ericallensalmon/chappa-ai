@@ -5,7 +5,12 @@
 //! live: the checks before up, each step's command and output, a line per
 //! file written, and a last line with the outcome. In order:
 //!
-//! 1. the record goes to `running` with this process's pid;
+//! 1. the runner takes the job's own lock, refuses a job that is not
+//!    `pending` (it ran, or another runner has it), and, for a job that
+//!    changes the instance, takes the instance's lease (see
+//!    [`crate::lease`]): while another changing job holds it, this one is
+//!    refused, not queued. Then the record goes to `running` with this
+//!    process's pid;
 //! 2. the instance is observed again and the stored plan is applied to it.
 //!    Applying asks the engines quick questions (digests, existing images),
 //!    which is why the pane first says "resolving images…". If the stack
@@ -33,7 +38,20 @@
 //!    the planner, its volume kept, and the job fails;
 //! 7. `<id>.result.json`, then the record's final status; the exit code is
 //!    0 done, 1 a step failed (or data safety stopped something), 2
-//!    refused before running anything.
+//!    refused before running anything, 3 cancelled.
+//!
+//! **Cancel.** A cancel request (`<id>.cancel`, written by the source) is
+//! picked up within a fraction of a second: the step running then is
+//! stopped with every process it started (see [`crate::world::StepExec`]),
+//! the steps after it are skipped like after a failure (the intent record
+//! is still written), and the job ends `cancelled`. The lease is let go
+//! only after that, so the next change never starts beside the remains of
+//! this one. Work that is not a command (a snapshot hook, a git change)
+//! finishes first; the cancel takes effect at the next step.
+//!
+//! **The intent record** is written as the plan's last step by reading the
+//! record as it is then and applying only this plan's change to it, so a
+//! record that moved while the job ran keeps what moved.
 //!
 //! When the slot's work item asks state seeds for a recipe component the
 //! plan creates or recreates, that component's recipe is replayed after
@@ -64,7 +82,7 @@ use stack_core::definition::ScanWhen;
 use stack_core::definition::StacksDocument;
 use stack_core::driver::{Check, Outcome, ResolvedInstance};
 use stack_core::images::ProvenanceCache;
-use stack_core::intent::{utc_now, ActiveRecord};
+use stack_core::intent::{utc_now, ActiveRecord, IntentRecord};
 use stack_core::jobs::{JobStep, LocalStep, RunBlock};
 use stack_core::planner::{Change, Plan, PlanError, Step, Verb};
 use stack_core::runner::Observation;
@@ -75,6 +93,7 @@ use stack_core::states::{DataSnapshot, RecipeRecord, SavedState, SeedChoice};
 use stack_core::workspace::{c8, ItemRecord};
 
 use crate::data_safety::{self, CheckEntry, SafetyState, Trigger, AFTER_UP_ATTEMPTS};
+use crate::lease;
 use crate::procs::{log_path, ProcessEntry, ProcessTable};
 use crate::project::Loaded;
 use crate::records::{JobRecord, JobResult, JobStatus, JobWork, StepOutcome};
@@ -83,12 +102,16 @@ use crate::secret_scan;
 use crate::states::{self, Exists, ResumeWork, SaveSpec};
 use crate::timeouts::{self, StepKind};
 use crate::workspaces::{Git, WorkspaceOp};
-use crate::world::{open_log, World};
+use crate::world::{open_log, Cancel, World};
 
 /// Exit codes of `run-job`.
 pub const EXIT_DONE: i32 = 0;
 pub const EXIT_FAILED: i32 = 1;
 pub const EXIT_REFUSED: i32 = 2;
+pub const EXIT_CANCELLED: i32 = 3;
+
+/// How often the runner looks for a cancel request.
+const CANCEL_POLL: Duration = Duration::from_millis(200);
 
 /// The environment key every process component's run block carries (the
 /// instance environment); engine commands carry none. It is how a run step
@@ -105,6 +128,8 @@ struct Out<'a> {
     pane: &'a mut dyn Write,
     log: Option<File>,
     work_dir: PathBuf,
+    /// Set once someone cancels the job; every step command watches it.
+    cancel: Cancel,
 }
 
 impl Out<'_> {
@@ -137,18 +162,48 @@ pub fn find_record(project_dir: &Path, id: &str) -> Result<(PathBuf, JobRecord),
 
 /// Run job `id` of the project in `project_dir`; the exit code.
 pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write) -> i32 {
-    let (work_dir, rec) = match find_record(project_dir, id) {
+    let (work_dir, _) = match find_record(project_dir, id) {
         Ok(found) => found,
         Err(e) => {
             crate::world::line(pane, &format!("chappa-stack: {e}"));
             return EXIT_REFUSED;
         }
     };
-    if rec.status.finished() {
-        crate::world::line(
-            pane,
-            &format!("chappa-stack: job {id} already ran ({:?})", rec.status),
-        );
+    // The job's own lock first: with it held nobody else runs or settles
+    // this job, and the record read under it is the one to go by.
+    let _job_lock =
+        match lease::hold_within(&lease::job_lock_path(&work_dir, id), lease::ACQUIRE_WAIT) {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                crate::world::line(
+                    pane,
+                    &format!("chappa-stack: job {id} is already being run by another runner"),
+                );
+                return EXIT_REFUSED;
+            }
+            Err(e) => {
+                crate::world::line(pane, &format!("chappa-stack: {e}"));
+                return EXIT_REFUSED;
+            }
+        };
+    let rec = match JobRecord::load(&work_dir, id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            crate::world::line(pane, &format!("chappa-stack: no job {id}"));
+            return EXIT_REFUSED;
+        }
+        Err(e) => {
+            crate::world::line(pane, &format!("chappa-stack: {e}"));
+            return EXIT_REFUSED;
+        }
+    };
+    if rec.status != JobStatus::Pending {
+        let why = if rec.status.finished() {
+            format!("job {id} already ran ({})", rec.status.as_str())
+        } else {
+            format!("job {id} was started before and is not waiting to run")
+        };
+        crate::world::line(pane, &format!("chappa-stack: {why}"));
         return EXIT_REFUSED;
     }
     let log = open_log(&rec.log, true).ok();
@@ -156,13 +211,42 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
         pane,
         log,
         work_dir: work_dir.clone(),
+        cancel: Cancel::new(),
     };
+    if let Some(req) = lease::cancel_requested(&work_dir, id) {
+        let why = format!("{} before it started", lease::cancelled_text(Some(&req)));
+        out.say(&format!("✗ {why}"));
+        end_record(
+            &work_dir,
+            id,
+            JobStatus::Cancelled,
+            EXIT_CANCELLED,
+            Some(why),
+        );
+        return EXIT_CANCELLED;
+    }
     let started = utc_now();
+    let _lease = if rec.takes_lease() {
+        match lease::take_lease(&work_dir, &rec, &started) {
+            Ok(l) => Some(l),
+            Err(holder) => {
+                let why = format!(
+                    "not run: {holder}; nothing was changed. Run it again once that job ended"
+                );
+                out.say(&format!("✗ {why}"));
+                end_record(&work_dir, id, JobStatus::Failed, EXIT_REFUSED, Some(why));
+                return EXIT_REFUSED;
+            }
+        }
+    } else {
+        None
+    };
     let _ = JobRecord::update(&work_dir, id, |r| {
         r.status = JobStatus::Running;
         r.started_utc = Some(started.clone());
         r.runner_pid = Some(std::process::id());
     });
+    let watcher = watch_for_cancel(&work_dir, id, &out.cancel);
     out.say(&format!("{} · job {id}", rec.label));
     let t0 = Instant::now();
     let mut result = JobResult {
@@ -176,38 +260,97 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
         data_safety: IndexMap::new(),
         error: None,
     };
-    let code = match execute(world, project_dir, &work_dir, &rec, &mut out, &mut result) {
-        Ok(()) => EXIT_DONE,
+    let outcome = execute(world, project_dir, &work_dir, &rec, &mut out, &mut result);
+    let cancelled = out.cancel.is_set();
+    let code = match outcome {
+        Ok(()) if !cancelled => EXIT_DONE,
+        Ok(()) => {
+            // Cancelled after its last command: what ran, ran.
+            let why = lease::cancelled_text(lease::cancel_requested(&work_dir, id).as_ref());
+            out.say(&format!("✗ {why}, after its last step"));
+            result.error = Some(why);
+            EXIT_CANCELLED
+        }
         Err((code, why)) => {
+            let (code, why) = if cancelled {
+                let who = lease::cancelled_text(lease::cancel_requested(&work_dir, id).as_ref());
+                (EXIT_CANCELLED, format!("{who}: {why}"))
+            } else {
+                (code, why)
+            };
             out.say(&format!("✗ {why}"));
             result.error = Some(why);
             code
         }
     };
+    watcher.stop();
     result.ok = code == EXIT_DONE;
     result.exit_code = code;
     let secs = t0.elapsed().as_secs_f64();
-    if code == EXIT_DONE {
-        out.say(&format!("✓ done in {secs:.1} s"));
-    } else {
-        out.say(&format!("job ended with code {code} after {secs:.1} s"));
+    match code {
+        EXIT_DONE => out.say(&format!("✓ done in {secs:.1} s")),
+        EXIT_CANCELLED => out.say(&format!(
+            "job cancelled after {secs:.1} s; the steps after the one stopped did not run"
+        )),
+        _ => out.say(&format!("job ended with code {code} after {secs:.1} s")),
     }
     let _ = stack_core::jobs::write_atomic(
         &rec.result,
         &serde_json::to_string_pretty(&result).expect("result serializes"),
     );
+    let status = match code {
+        EXIT_DONE => JobStatus::Done,
+        EXIT_CANCELLED => JobStatus::Cancelled,
+        _ => JobStatus::Failed,
+    };
+    end_record(&work_dir, id, status, code, result.error.clone());
+    let _ = std::fs::remove_file(lease::cancel_path(&work_dir, id));
+    code
+}
+
+/// The record's end: status, exit code, end time, the error.
+fn end_record(work_dir: &Path, id: &str, status: JobStatus, code: i32, error: Option<String>) {
     let ended = utc_now();
-    let _ = JobRecord::update(&work_dir, id, |r| {
-        r.status = if code == EXIT_DONE {
-            JobStatus::Done
-        } else {
-            JobStatus::Failed
-        };
+    let _ = JobRecord::update(work_dir, id, |r| {
+        r.status = status;
         r.exit_code = Some(code);
         r.ended_utc = Some(ended.clone());
-        r.error = result.error.clone();
+        r.error = error.clone();
     });
-    code
+}
+
+/// The thread that turns a cancel request into [`Cancel::set`].
+struct Watcher {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Watcher {
+    fn stop(mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn watch_for_cancel(work_dir: &Path, id: &str, cancel: &Cancel) -> Watcher {
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let path = lease::cancel_path(work_dir, id);
+    let (flag, cancel) = (done.clone(), cancel.clone());
+    let thread = thread::Builder::new()
+        .name("cancel watch".into())
+        .spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                if path.exists() {
+                    cancel.set();
+                    return;
+                }
+                thread::sleep(CANCEL_POLL);
+            }
+        })
+        .ok();
+    Watcher { done, thread }
 }
 
 type Failure = (i32, String);
@@ -582,18 +725,26 @@ fn execute(
                 None
             }
         };
+        let merge = the_plan.as_ref().map(|plan| IntentChange {
+            plan,
+            item: binds.clone().filter(|_| writes_active),
+        });
         run_steps(
             world,
             work_dir,
             &inst.id,
             &steps,
             forget_processes,
+            merge.as_ref(),
             out,
             result,
             &mut gate,
         )
     };
     for c in &after_up {
+        if out.cancel.is_set() {
+            break;
+        }
         if started_ok.contains(c) && !checked.iter().any(|(d, _)| d == c) {
             let entry = check_now(
                 world,
@@ -1174,12 +1325,17 @@ fn stop_for_data_safety(
     for s in &applied.steps {
         out.say(&format!("  · {}", s.describe()));
     }
+    let merge = IntentChange {
+        plan: &plan,
+        item: None,
+    };
     run_steps(
         world,
         work_dir,
         &inst.id,
         &applied.steps,
         false,
+        Some(&merge),
         out,
         result,
         &mut |_, _| None,
@@ -1257,9 +1413,41 @@ fn is_intent_write(step: &JobStep) -> bool {
     matches!(step, JobStep::Local { step: LocalStep::WriteFile { what, .. } } if what == "intent record")
 }
 
+/// The change a plan makes to the intent record, applied to the record as
+/// it is when the step runs (not to the copy read when the job started).
+struct IntentChange<'a> {
+    plan: &'a Plan,
+    /// The work item the job binds the slot to, when it binds one.
+    item: Option<String>,
+}
+
+impl IntentChange<'_> {
+    /// Read the instance's intent record, apply this change, write it. With
+    /// no record on disk (or one that cannot be read), the step's own copy
+    /// is written as planned.
+    fn write(&self, work_dir: &Path, instance: &str, planned: &str) -> std::io::Result<()> {
+        let path = IntentRecord::path(work_dir, instance);
+        let current = IntentRecord::load(work_dir, instance).ok().flatten();
+        let text = match current {
+            Some(mut rec) => {
+                let when = serde_json::from_str::<IntentRecord>(planned)
+                    .map(|p| p.updated_utc)
+                    .unwrap_or_else(|_| utc_now());
+                rec.record_plan(self.plan, &when);
+                if let Some(item) = &self.item {
+                    rec.item = Some(item.clone());
+                }
+                serde_json::to_string_pretty(&rec).expect("intent serializes")
+            }
+            None => planned.to_string(),
+        };
+        stack_core::jobs::write_atomic(&path, &text)
+    }
+}
+
 /// Run steps in order. After each step that succeeded, `gate` may end the
 /// run with a reason (the remaining steps are then skipped like after a
-/// failure).
+/// failure). A cancel skips the rest the same way.
 #[allow(clippy::too_many_arguments)]
 fn run_steps(
     world: &World,
@@ -1267,12 +1455,16 @@ fn run_steps(
     instance: &str,
     steps: &[JobStep],
     forget_processes: bool,
+    merge: Option<&IntentChange<'_>>,
     out: &mut Out<'_>,
     result: &mut JobResult,
     gate: &mut dyn FnMut(&JobStep, &mut Out<'_>) -> Option<String>,
 ) -> Result<(), Failure> {
     let mut failure: Option<String> = None;
     for step in steps {
+        if failure.is_none() && out.cancel.is_set() {
+            failure = Some("cancelled before this step".to_string());
+        }
         if failure.is_some() && !is_intent_write(step) {
             result.steps.push(StepOutcome {
                 step: step.describe(),
@@ -1284,7 +1476,15 @@ fn run_steps(
             continue;
         }
         let t = Instant::now();
-        let outcome = run_step(world, work_dir, instance, step, forget_processes, out);
+        let outcome = run_step(
+            world,
+            work_dir,
+            instance,
+            step,
+            forget_processes,
+            merge,
+            out,
+        );
         let seconds = (t.elapsed().as_secs_f64() * 10.0).round() / 10.0;
         match outcome {
             Ok(code) => {
@@ -1330,9 +1530,20 @@ fn run_step(
     instance: &str,
     step: &JobStep,
     forget_processes: bool,
+    merge: Option<&IntentChange<'_>>,
     out: &mut Out<'_>,
 ) -> Result<Option<i32>, (Option<i32>, String)> {
     match step {
+        JobStep::Local {
+            step: local @ LocalStep::WriteFile { contents, .. },
+        } if merge.is_some() && is_intent_write(step) => {
+            merge
+                .expect("checked")
+                .write(work_dir, instance, contents)
+                .map_err(|e| (None, e.to_string()))?;
+            out.say(&format!("✓ {}", local.describe()));
+            Ok(None)
+        }
         JobStep::Local { step: local } => {
             local.perform().map_err(|e| (None, e.to_string()))?;
             match local {
@@ -1352,9 +1563,12 @@ fn run_step(
                 run.title.clone().unwrap_or_else(|| run.command_line())
             ));
             out.say(&format!("  $ {}", run.command_line()));
+            let cancel = out.cancel.clone();
             let code = world
                 .steps
-                .run(run, kind.limit(), &mut |l| out.say(&format!("  {l}")))
+                .run(run, kind.limit(), &cancel, &mut |l| {
+                    out.say(&format!("  {l}"))
+                })
                 .map_err(|e| (None, e))?;
             if code == 0 {
                 Ok(Some(0))
@@ -1431,9 +1645,10 @@ fn run_script(
         run.command_line(),
         run.cwd.display()
     ));
+    let cancel = out.cancel.clone();
     let outcome = world
         .steps
-        .run_tree(run, limit, &mut |l| out.say(&format!("  {l}")));
+        .run_tree(run, limit, &cancel, &mut |l| out.say(&format!("  {l}")));
     let (result, last) = match outcome {
         Ok(0) => (Ok(Some(0)), (true, Some(0), None)),
         Ok(code) => (
@@ -1533,6 +1748,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_intent_write_applies_only_its_plan_to_the_record_as_it_is_then() {
+        use stack_core::intent::Desired;
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path();
+        // When this job started nothing was recorded; it plans api up.
+        let mut plan = Plan {
+            instance: "app-0".into(),
+            verb: Verb::Up,
+            steps: Vec::new(),
+            notes: Vec::new(),
+            fingerprint: String::new(),
+            desired: IndexMap::new(),
+            row_desired: IndexMap::new(),
+            modes: IndexMap::new(),
+            refs: IndexMap::new(),
+            channel: None,
+            pins: IndexMap::new(),
+        };
+        plan.desired.insert("api".into(), Desired::Running);
+        let mut planned = IntentRecord::new("app", 0, "2026-11-14T12:00:00Z");
+        planned.record_plan(&plan, "2026-11-14T12:00:00Z");
+        let planned = serde_json::to_string_pretty(&planned).unwrap();
+        // Meanwhile another change stopped db.
+        let mut moved = IntentRecord::new("app", 0, "2026-11-14T12:00:05Z");
+        moved.components.entry("db".into()).or_default().desired = Desired::Stopped;
+        moved.components.entry("api".into()).or_default().desired = Desired::Absent;
+        moved.save(work).unwrap();
+        let change = IntentChange {
+            plan: &plan,
+            item: Some("ITEM-7".into()),
+        };
+        change.write(work, "app-0", &planned).unwrap();
+        let now = IntentRecord::load(work, "app-0").unwrap().unwrap();
+        assert_eq!(now.components["db"].desired, Desired::Stopped, "kept");
+        assert_eq!(
+            now.components["api"].desired,
+            Desired::Running,
+            "this job's"
+        );
+        assert_eq!(now.item.as_deref(), Some("ITEM-7"));
+        // With no record on disk, the planned copy is written as it is.
+        std::fs::remove_file(IntentRecord::path(work, "app-0")).unwrap();
+        change.write(work, "app-0", &planned).unwrap();
+        let text = std::fs::read_to_string(IntentRecord::path(work, "app-0")).unwrap();
+        assert_eq!(text, planned);
+    }
+
+    #[test]
     fn a_job_line_shows_a_generated_value_as_the_mask_in_the_pane_and_the_log() {
         let tmp = tempfile::tempdir().unwrap();
         let work = tmp.path().join(".work");
@@ -1542,6 +1805,7 @@ mod tests {
             pane: &mut pane,
             log: Some(File::create(&log_path).unwrap()),
             work_dir: work.clone(),
+            cancel: Cancel::new(),
         };
         out.say("before any value exists");
         // Generated while the job runs (as an instance resolution does).

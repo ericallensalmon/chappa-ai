@@ -169,7 +169,8 @@ pub trait Periodic {
 }
 
 /// Whether status and plan scripts may run now: a source answers no while
-/// its definition is not the one the person trusted.
+/// its definition is not the one the person trusted, and while a job is
+/// changing its instance.
 pub trait ScriptGate {
     fn scripts_allowed(&self) -> bool;
 }

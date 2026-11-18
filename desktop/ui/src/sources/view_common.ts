@@ -408,13 +408,17 @@ export class ActionsCell {
         btn.title = many ? `${state.title} (${t.sourceLabel})` : state.title;
         btn.disabled = state.disabled;
         btn.addEventListener("mousedown", (e) => e.preventDefault());
-        btn.addEventListener("click", () => void this.click(t, entry));
+        btn.addEventListener("click", () => void this.click(t, entry, btn));
         this.el.appendChild(btn);
       }
     });
   }
 
-  private async click(t: ActionTarget, entry: ipc.SourceActionDto): Promise<void> {
+  /** One call at a time per button: it is disabled from the click until
+   *  the call returns (a second click would only be refused as busy). */
+  private async click(t: ActionTarget, entry: ipc.SourceActionDto, btn?: HTMLButtonElement): Promise<void> {
+    if (btn?.disabled) return;
+    if (btn) btn.disabled = true;
     try {
       const outcome = await runAction(t.sourceId, t.sourceLabel, t.view, t.key, entry, { run: this.deps.run }, t.owner ? { owner: t.owner } : {});
       if (!outcome) return;
@@ -426,6 +430,8 @@ export class ActionsCell {
       if (text) this.deps.say(text, outcome.kind === "uncertain" ? "error" : "info");
     } catch (e) {
       this.deps.say(`${entry.action.label}: ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      if (btn) btn.disabled = actionButtonState(entry).disabled;
     }
   }
 }

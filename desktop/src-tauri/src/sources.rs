@@ -2095,6 +2095,24 @@ impl Sources {
             .cloned()
     }
 
+    /// The jobs running in a pane of this app now, as `(label, started)`:
+    /// quitting would end them part-way, so the app asks first.
+    pub fn running_pane_jobs(&self) -> Vec<(String, String)> {
+        let inner = self.lock();
+        inner
+            .sources
+            .values()
+            .flat_map(|s| s.jobs.iter())
+            .filter(|j| j.run && j.state == "running")
+            .map(|j| {
+                (
+                    j.label.clone().unwrap_or_else(|| j.action_id.clone()),
+                    j.started_utc.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Whether the app is shutting down (job threads end then).
     pub fn is_shutting_down(&self) -> bool {
         self.lock().shutting_down
@@ -2462,6 +2480,9 @@ pub struct SourceDto {
 #[serde(rename_all = "camelCase")]
 pub struct JobRecord {
     pub job_id: String,
+    /// What the job is called (its pane's title): the quit question and
+    /// the done toast name it.
+    pub label: Option<String>,
     pub action_id: String,
     pub view: String,
     pub key: Option<String>,

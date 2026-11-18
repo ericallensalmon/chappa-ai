@@ -19,6 +19,7 @@
 //! | `banners` | definition warnings or errors; the hosts-file fix; the relay's Windows Firewall findings (added by the server, see [`crate::relay_firewall`]); agents blocked by data safety (with the acknowledge action) |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //! | `secretScan` | the instance's secret-scan block, added by the server with its alerts, banner and facts section (see [`crate::secret_scan`]) |
+//! | `job` | the instance's changing jobs, added by the server ([`decorate_jobs`]): `active` (pending or running: label, action, target, actor, times, `cancelling`, the log) and `last` (the newest that ended: its status `done` / `failed` / `cancelled` / `interrupted`, exit code, error line, the log); with an active job the `cancel-job` and `job-log` actions, a `running: <verb>` badge on the row it acts on and, for script stacks, a notice that status waits; a last job that did not end `done` is an alert (`bad`, `warn` when cancelled) with its `job-log` action |
 //!
 //! A script component shows as one row, or, when its status script reports
 //! several components (a wrapped whole stack), as one row per reported
@@ -1355,6 +1356,148 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
         "banners": banners(inp),
         "dataSafety": data_safety_block(inp),
     })
+}
+
+/// What [`decorate_jobs`] needs besides the jobs.
+pub struct JobsContext<'a> {
+    /// The `chappa-stack` program the `job-log` terminal runs.
+    pub exe: &'a Path,
+    /// Where that terminal opens.
+    pub project_dir: &'a Path,
+    /// The stack has script components whose status scripts wait while a
+    /// change runs (the view says so).
+    pub scripts: bool,
+}
+
+fn job_json(rec: &crate::records::JobRecord) -> Value {
+    let mut j = json!({
+        "id": rec.id,
+        "label": rec.label,
+        "action": rec.action,
+        "status": rec.status.as_str(),
+        "createdUtc": rec.created_utc,
+        "headless": rec.headless,
+        "log": rec.log.display().to_string(),
+    });
+    for (k, v) in [
+        ("target", rec.target.clone()),
+        ("actor", rec.actor.clone()),
+        ("startedUtc", rec.started_utc.clone()),
+        ("endedUtc", rec.ended_utc.clone()),
+        ("error", rec.error.clone()),
+    ] {
+        if let Some(v) = v {
+            j[k] = v.into();
+        }
+    }
+    if let Some(c) = rec.exit_code {
+        j["exitCode"] = c.into();
+    }
+    j
+}
+
+fn log_action(rec: &crate::records::JobRecord, label: &str, cx: &JobsContext<'_>) -> Value {
+    json!({
+        "kind": "terminal",
+        "id": crate::server::JOB_LOG_ACTION_ID,
+        "label": label,
+        "cwd": cx.project_dir.display().to_string(),
+        "command": [cx.exe.display().to_string(), "follow", rec.log.display().to_string()],
+    })
+}
+
+/// Add the instance's changing jobs to an Environment payload `v` (see the
+/// table above). The busy actions are disabled by the server before this.
+pub fn decorate_jobs(v: &mut Value, jobs: &crate::lease::JobsView, cx: &JobsContext<'_>) {
+    let mut block = json!({ "active": null, "last": null });
+    if let Some(a) = &jobs.active {
+        let since = a.started_utc.as_deref().unwrap_or(&a.created_utc);
+        let mut j = job_json(a);
+        j["cancelling"] = jobs.cancelling.into();
+        block["active"] = j;
+        let mut cancel = json!({
+            "kind": "endpoint",
+            "id": crate::server::CANCEL_ACTION_ID,
+            "label": "Cancel",
+            "mutates": true,
+            "confirm": format!(
+                "Cancel {}? The step running now is stopped with every process it started, and the steps after it do not run. The stack may be left part-way; look at it before changing it again.",
+                a.label
+            ),
+            "params": { "jobId": a.id },
+        });
+        if jobs.cancelling {
+            cancel["disabled"] =
+                "already cancelling; it ends once its current step has stopped".into();
+        }
+        if let Some(list) = v.get_mut("actions").and_then(Value::as_array_mut) {
+            list.push(cancel);
+            list.push(log_action(a, "Job log", cx));
+        } else {
+            v["actions"] = json!([cancel, log_action(a, "Job log", cx)]);
+        }
+        if let Some(target) = &a.target {
+            let badge = badge(
+                &format!("running: {}", a.action),
+                "info",
+                Some(crate::lease::busy_text(&a.label, since)),
+            );
+            if let Some(rows) = v.get_mut("components").and_then(Value::as_array_mut) {
+                for c in rows.iter_mut().filter(|c| c["id"] == target.as_str()) {
+                    match c.get_mut("badges").and_then(Value::as_array_mut) {
+                        Some(b) => b.push(badge.clone()),
+                        None => c["badges"] = json!([badge.clone()]),
+                    }
+                }
+            }
+        }
+        if cx.scripts {
+            let note = format!(
+                "status scripts wait while {} runs; rows show their last answer",
+                a.label
+            );
+            match v
+                .pointer_mut("/freshness/notices")
+                .and_then(Value::as_array_mut)
+            {
+                Some(n) => n.push(note.into()),
+                None => v["freshness"]["notices"] = json!([note]),
+            }
+        }
+    }
+    if let Some(l) = &jobs.last {
+        block["last"] = job_json(l);
+        if l.status != crate::records::JobStatus::Done {
+            let when = l
+                .ended_utc
+                .as_deref()
+                .map(crate::lease::clock_of)
+                .unwrap_or_default();
+            let mut text = format!("{} {} at {when}", l.label, l.status.as_str());
+            if let Some(c) = l.exit_code {
+                text.push_str(&format!(" (exit code {c})"));
+            }
+            if let Some(e) = &l.error {
+                text.push_str(&format!(": {e}"));
+            }
+            let severity = if l.status == crate::records::JobStatus::Cancelled {
+                "warn"
+            } else {
+                "bad"
+            };
+            if let Some(alerts) = v.get_mut("alerts").and_then(Value::as_array_mut) {
+                alerts.push(json!({ "text": text, "severity": severity, "kind": "job" }));
+            }
+        }
+        if jobs.active.is_none() {
+            let action = log_action(l, "Last job's log", cx);
+            match v.get_mut("actions").and_then(Value::as_array_mut) {
+                Some(list) => list.push(action),
+                None => v["actions"] = json!([action]),
+            }
+        }
+    }
+    v["job"] = block;
 }
 
 /// A payload for a project whose definition cannot be loaded: no rows,

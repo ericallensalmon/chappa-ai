@@ -426,8 +426,19 @@ fn run_found(
                         .ok_or("the source answered 202 without a jobId")?
                         .to_owned();
                     let run = reply.body.get("run").filter(|r| r.is_object()).cloned();
+                    // The view shows the job (and its verbs disabled) now,
+                    // not at the next poll.
+                    deps.sources.refresh_soon(source_id);
+                    let label = run
+                        .as_ref()
+                        .and_then(|r| r["title"].as_str())
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{}: {action_label}", info.label));
                     let record = JobRecord {
                         job_id: job_id.clone(),
+                        label: Some(label),
                         action_id: id.clone(),
                         view: view.to_owned(),
                         key: key.map(str::to_owned),
@@ -448,9 +459,15 @@ fn run_found(
                                 view,
                                 key,
                             };
-                            let term_id = spawn_job_run(
+                            let term_id = match spawn_job_run(
                                 deps, source_id, &info, &job_id, &origin, &run, &actor,
-                            )?;
+                            ) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    report_spawn_failure(&deps.sources, source_id, &job_id, &e);
+                                    return Err(e);
+                                }
+                            };
                             deps.sources
                                 .job_update(source_id, &job_id, |j| j.term_id = Some(term_id));
                             Ok(ActionOutcome::Run { job_id, term_id })
@@ -843,6 +860,28 @@ fn job_record(
     }
 }
 
+/// The job's pane never opened: tell the source why (`POST {jobs}/{id}`
+/// with `error`, so the job does not wait as `pending` for a runner that
+/// will not come), and end the app's record of it.
+fn report_spawn_failure(sources: &Sources, source_id: &str, job_id: &str, why: &str) {
+    let ended = iso_utc(epoch_ms());
+    let report = json!({
+        "exitCode": null,
+        "endedUtc": ended,
+        "output": "",
+        "error": format!("the job's pane did not open: {why}"),
+    });
+    if let Err(e) = sources.job_report(source_id, job_id, &report) {
+        log::warn!("[sources] job {job_id}: the spawn failure did not reach the source: {e}");
+    }
+    sources.job_update(source_id, job_id, |j| {
+        j.state = "failed".into();
+        j.ended_utc = Some(ended.clone());
+        j.log = Some(format!("the job's pane did not open: {why}"));
+    });
+    sources.refresh_soon(source_id);
+}
+
 /// `POST {jobs}/{id}` with `{exitCode, endedUtc, output}` once the run's
 /// pane exited, and the job record's end.
 fn report_job_exit(
@@ -875,6 +914,8 @@ fn report_job_exit(
         j.ended_utc = Some(ended.clone());
         j.log = note;
     });
+    // The view's last-job line and the verbs come back now.
+    sources.refresh_soon(source_id);
 }
 
 /// Poll `GET jobs/{id}` until `done` / `failed`, updating the record; a
@@ -901,6 +942,7 @@ fn poll_job(sources: Sources, source_id: String, job_id: String) {
                                 j.log = log.clone();
                                 j.ended_utc = Some(iso_utc(epoch_ms()));
                             });
+                            sources.refresh_soon(&source_id);
                             return;
                         }
                     }
@@ -1021,6 +1063,84 @@ pub async fn source_run_action(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The action a stack source stops a running job with (`params.jobId`).
+pub const CANCEL_JOB_ACTION: &str = "cancel-job";
+
+/// What [`source_cancel_job`] answers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelOutcome {
+    /// The source took the request; the job's pane ends by itself once
+    /// the job stopped.
+    pub accepted: bool,
+    pub message: String,
+}
+
+/// Ask `source_id` to stop its job `job_id` (the person confirmed it, from
+/// closing the job's pane). A source that cannot cancel answers so, and the
+/// caller decides whether to close the pane anyway.
+pub fn cancel_job(
+    deps: &ActionDeps,
+    source_id: &str,
+    job_id: &str,
+) -> Result<CancelOutcome, String> {
+    let info = deps.sources.info(source_id)?;
+    let body = json!({
+        "id": CANCEL_JOB_ACTION,
+        "target": { "view": "environment", "key": null },
+        "params": { "jobId": job_id },
+        "confirmed": true,
+    });
+    let reply = deps
+        .sources
+        .call_endpoint(source_id, &body, &CallActor::human())?;
+    journal_endpoint(
+        deps,
+        &info,
+        &actor_for(&info),
+        &format!("cancel job {job_id} → {}", reply.status),
+    );
+    deps.sources.refresh_soon(source_id);
+    Ok(if (200..300).contains(&reply.status) {
+        CancelOutcome {
+            accepted: true,
+            message: reply.body["message"]
+                .as_str()
+                .unwrap_or("Cancelling the job.")
+                .to_owned(),
+        }
+    } else {
+        CancelOutcome {
+            accepted: false,
+            message: reply.as_error().to_string(),
+        }
+    })
+}
+
+/// Cancel a source's job (closing its running pane asks first).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn source_cancel_job(
+    window: tauri::Window,
+    app: AppHandle,
+    registry: State<'_, Registry>,
+    tools: State<'_, AgentToolsState>,
+    settings: State<'_, SettingsState>,
+    projects: State<'_, Projects>,
+    records: State<'_, Records>,
+    sources: State<'_, Sources>,
+    source_id: String,
+    job_id: String,
+) -> Result<CancelOutcome, String> {
+    main_window_only(&window)?;
+    let deps = deps_of(
+        &registry, &tools, &settings, &projects, &records, &sources, app,
+    );
+    tauri::async_runtime::spawn_blocking(move || cancel_job(&deps, &source_id, &job_id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// One job's record (as last polled or reported).

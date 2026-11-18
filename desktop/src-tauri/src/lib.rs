@@ -19,6 +19,7 @@ pub mod login_path;
 pub mod open_path;
 pub mod profile;
 pub mod projects;
+pub mod quit_guard;
 pub mod records;
 pub mod registry;
 pub mod roots;
@@ -101,6 +102,18 @@ pub fn run() {
         .manage(Workspace::default())
         .manage(Records::default())
         .manage(Sources::default())
+        .manage(quit_guard::QuitGate::default())
+        // Closing the main window while a job runs in one of its panes
+        // asks first (see quit_guard).
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == sources::MAIN_WINDOW_LABEL
+                    && quit_guard::hold_quit(window.app_handle())
+                {
+                    api.prevent_close();
+                }
+            }
+        })
         .setup(move |app| {
             let dirs = profile::AppDirs::resolve(profile.as_ref(), app.handle());
             if let Some(profile) = &profile {
@@ -370,6 +383,8 @@ pub fn run() {
         source_actions::source_actions,
         source_actions::source_run_action,
         source_actions::source_job,
+        source_actions::source_cancel_job,
+        quit_guard::confirm_quit,
         source_actions::source_panel,
         source_actions::open_source_link,
         source_actions::set_source_prompt_policy,
@@ -452,6 +467,8 @@ pub fn run() {
         source_actions::source_actions,
         source_actions::source_run_action,
         source_actions::source_job,
+        source_actions::source_cancel_job,
+        quit_guard::confirm_quit,
         source_actions::source_panel,
         source_actions::open_source_link,
         source_actions::set_source_prompt_policy,
@@ -478,6 +495,12 @@ pub fn run() {
         // exit, stop every project process (cancelling pending respawns) and
         // shut every actor down + join its pump before the process goes.
         // Idempotent — a second Exit finds the registry empty.
+        if let RunEvent::ExitRequested { api, .. } = &event {
+            if quit_guard::hold_quit(app_handle) {
+                api.prevent_exit();
+                return;
+            }
+        }
         if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
             let projects = app_handle.state::<Projects>();
             let workspace = app_handle.state::<Workspace>();

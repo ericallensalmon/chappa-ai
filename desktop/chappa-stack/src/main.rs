@@ -198,6 +198,13 @@ fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
         eprintln!("chappa-stack: no trusted stack definition; read-only until it is trusted");
     }
     source.set_definition_pin(pin);
+    let settled = source.settle_jobs();
+    if !settled.is_empty() {
+        eprintln!(
+            "chappa-stack: {} job(s) whose runner ended before them marked interrupted",
+            settled.len()
+        );
+    }
     let pruned = source.prune_jobs();
     if !pruned.is_empty() {
         eprintln!("chappa-stack: pruned {} old job record(s)", pruned.len());

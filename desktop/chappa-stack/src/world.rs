@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -367,14 +368,40 @@ impl Clock for ManualClock {
 
 // ------------------------------------------------------------- step exec
 
+/// A job's stop request, shared between the thread that watches for it and
+/// the steps that must end when it comes.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// What a step that was cancelled answers (the runner tells a cancel from
+/// a failure by [`Cancel::is_set`]).
+pub const CANCELLED_STEP: &str = "cancelled; it was stopped with every process it started";
+
 /// Runs one engine command of a job, sending its output, line by line, to
 /// `out`, and returns its exit code. Errors are a command that could not
-/// start or ran out of time.
+/// start, ran out of time, or was cancelled: once `cancel` is set the
+/// command is stopped with every process it started, and the call returns
+/// only after they are gone.
 pub trait StepExec {
     fn run(
         &self,
         run: &RunBlock,
         limit: Duration,
+        cancel: &Cancel,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String>;
 
@@ -385,9 +412,10 @@ pub trait StepExec {
         &self,
         run: &RunBlock,
         limit: Duration,
+        cancel: &Cancel,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String> {
-        self.run(run, limit, out)
+        self.run(run, limit, cancel, out)
     }
 }
 
@@ -399,18 +427,20 @@ impl StepExec for ChildSteps {
         &self,
         run: &RunBlock,
         limit: Duration,
+        cancel: &Cancel,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String> {
-        run_child(run, limit, out, false)
+        run_child(run, limit, cancel, out, false)
     }
 
     fn run_tree(
         &self,
         run: &RunBlock,
         limit: Duration,
+        cancel: &Cancel,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String> {
-        run_child(run, limit, out, true)
+        run_child(run, limit, cancel, out, true)
     }
 }
 
@@ -580,12 +610,24 @@ fn kill_tree(pid: u32) {
         .status();
 }
 
+/// What a timed-out step says about work it handed elsewhere: a container
+/// engine runs builds and containers in its own daemon, which stopping the
+/// command does not reach.
+pub const ENGINE_WORK_MAY_CONTINUE: &str =
+    "work it handed to a container engine (a build, containers starting) may still be running there";
+
 /// Run one command with both pipes streamed to `out`, under `limit`. With
-/// `tree`, the command leads its own process group (Unix) and a timeout
-/// stops all of its descendants.
+/// `tree`, the command leads its own process group (Unix) and a timeout or
+/// a cancel stops all of its descendants. On Windows every command runs in
+/// a job object of its own: a timeout or a cancel ends the whole tree,
+/// children whose parent already exited included, and when the runner
+/// itself dies mid-step (its pane closed) the job object takes the tree
+/// with it. A command that ends normally may leave processes it meant to
+/// leave (a script starting a daemon): they are let go.
 fn run_child(
     run: &RunBlock,
     limit: Duration,
+    cancel: &Cancel,
     out: &mut dyn FnMut(&str),
     tree: bool,
 ) -> Result<i32, String> {
@@ -600,9 +642,25 @@ fn run_child(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    #[cfg(windows)]
+    let job = job_object::Tree::new();
+    #[cfg(windows)]
+    if job.is_some() {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(job_object::CREATE_SUSPENDED);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start `{}`: {e}", run.argv[0]))?;
+    // Adopted while still suspended, so nothing it starts escapes; a job
+    // object that cannot take it (an outer job forbids nesting) leaves the
+    // `taskkill /T` stop.
+    #[cfg(windows)]
+    let job = job.filter(|j| {
+        let adopted = j.adopt(&child);
+        job_object::resume(child.id());
+        adopted
+    });
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let readers: Vec<_> = [
         child
@@ -633,6 +691,24 @@ fn run_child(
     })
     .collect();
     drop(tx);
+    let stops_tree = tree || cfg!(windows);
+    // Stop the command and everything it started that can be reached, and
+    // come back once they are gone.
+    let stop_all = |child: &mut Child| {
+        #[cfg(windows)]
+        if let Some(j) = &job {
+            j.kill_and_wait(Duration::from_secs(10));
+        }
+        if stops_tree {
+            kill_tree(child.id());
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        #[cfg(unix)]
+        if tree {
+            wait_group_gone(child.id(), Duration::from_secs(10));
+        }
+    };
     let deadline = Instant::now() + limit;
     let status = loop {
         while let Ok(line) = rx.try_recv() {
@@ -643,16 +719,23 @@ fn run_child(
             Ok(None) => {}
             Err(e) => return Err(format!("cannot wait for `{}`: {e}", run.argv[0])),
         }
-        if Instant::now() >= deadline {
-            if tree {
-                kill_tree(child.id());
+        if cancel.is_set() {
+            stop_all(&mut child);
+            while let Ok(line) = rx.try_recv() {
+                out(&line);
             }
-            let _ = child.kill();
-            let _ = child.wait();
+            return Err(if stops_tree {
+                CANCELLED_STEP.to_string()
+            } else {
+                "cancelled; the command was stopped".to_string()
+            });
+        }
+        if Instant::now() >= deadline {
+            stop_all(&mut child);
             return Err(format!(
-                "timed out after {}; {} was stopped",
+                "timed out after {}; {} was stopped, and {ENGINE_WORK_MAY_CONTINUE}",
                 crate::timeouts::describe(limit),
-                if tree {
+                if stops_tree {
                     "it and every process it started"
                 } else {
                     "the command"
@@ -661,6 +744,10 @@ fn run_child(
         }
         thread::sleep(Duration::from_millis(50));
     };
+    #[cfg(windows)]
+    if let Some(j) = job {
+        j.release();
+    }
     // A process the command left running may still hold its pipes:
     // read what is there, and stop waiting after a short grace.
     let grace = Instant::now() + Duration::from_secs(2);
@@ -676,6 +763,157 @@ fn run_child(
     Ok(status.code().unwrap_or(-1))
 }
 
+/// Wait until no process of the group `pgid` is left (Unix).
+#[cfg(unix)]
+fn wait_group_gone(pgid: u32, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        let alive =
+            quiet("kill", &["-0", "--", &format!("-{pgid}")]).is_some_and(|o| o.status.success());
+        if !alive {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A job object per step command (Windows): every process the command
+/// starts stays in it, so the tree ends as one, including children whose
+/// parent already exited (which `taskkill /T` cannot find).
+#[cfg(windows)]
+mod job_object {
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    pub use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    /// One job object; while it is held, closing it (this process ending
+    /// included) ends every process in it.
+    pub struct Tree(HANDLE);
+
+    impl Tree {
+        pub fn new() -> Option<Tree> {
+            // SAFETY: both arguments may be null (default security, no name).
+            let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if h.is_null() {
+                return None;
+            }
+            let tree = Tree(h);
+            tree.set_kill_on_close(true).then_some(tree)
+        }
+
+        fn set_kill_on_close(&self, on: bool) -> bool {
+            // SAFETY: a zeroed limit block is valid (no limits).
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            if on {
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            }
+            // SAFETY: the handle is ours and the block is the size given.
+            unsafe {
+                SetInformationJobObject(
+                    self.0,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ) != 0
+            }
+        }
+
+        /// Put `child` in the job.
+        pub fn adopt(&self, child: &std::process::Child) -> bool {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: both handles are valid for the call.
+            unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) != 0 }
+        }
+
+        fn active(&self) -> u32 {
+            // SAFETY: a zeroed accounting block is valid.
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: the handle is ours and the block is the size given.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                0
+            } else {
+                info.ActiveProcesses
+            }
+        }
+
+        /// End every process in the job and wait (up to `within`) until
+        /// none is left.
+        pub fn kill_and_wait(&self, within: Duration) {
+            // SAFETY: the handle is ours.
+            unsafe { TerminateJobObject(self.0, 1) };
+            let deadline = Instant::now() + within;
+            while self.active() > 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        /// Let what is left run on after this handle closes.
+        pub fn release(self) {
+            self.set_kill_on_close(false);
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            // SAFETY: the handle is ours and closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// Resume the threads of `pid`, which was created suspended.
+    pub fn resume(pid: u32) {
+        // SAFETY: a thread snapshot of the whole system; closed below.
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snap == INVALID_HANDLE_VALUE || snap.is_null() {
+            return;
+        }
+        // SAFETY: a zeroed entry is valid once its size is set.
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        // SAFETY: `entry` carries its size, as the calls require.
+        let mut more = unsafe { Thread32First(snap, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: a thread id from the snapshot; the handle is closed.
+                unsafe {
+                    let t = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !t.is_null() {
+                        ResumeThread(t);
+                        CloseHandle(t);
+                    }
+                }
+            }
+            // SAFETY: as above.
+            more = unsafe { Thread32Next(snap, &mut entry) } != 0;
+        }
+        // SAFETY: the snapshot handle is ours.
+        unsafe { CloseHandle(snap) };
+    }
+}
+
 /// Engine commands through an [`EngineCli`] (captured, not streamed): what
 /// tests run jobs against, with a scripted fake.
 pub struct CliSteps(pub Shared<dyn EngineCli + Send + Sync>);
@@ -685,8 +923,12 @@ impl StepExec for CliSteps {
         &self,
         run: &RunBlock,
         limit: Duration,
+        cancel: &Cancel,
         out: &mut dyn FnMut(&str),
     ) -> Result<i32, String> {
+        if cancel.is_set() {
+            return Err(CANCELLED_STEP.to_string());
+        }
         let mut inv = Invocation::from_argv(&run.argv)
             .cwd(&run.cwd)
             .timeout(limit);
@@ -1219,6 +1461,7 @@ mod tests {
             run_child(
                 &run,
                 Duration::from_secs(20),
+                &Cancel::new(),
                 &mut |l| lines.push(l.to_string()),
                 tree,
             )
@@ -1234,6 +1477,108 @@ mod tests {
         }
         let out = scripts.run(&inv).unwrap();
         sees_nothing_scrubbed(&out.stdout);
+    }
+
+    /// A step whose child starts a grandchild through a process that exits
+    /// at once (so the grandchild's parent is gone), the grandchild writing
+    /// `beat` every 200 ms, the step then waiting a minute.
+    fn orphaning_step(dir: &Path) -> RunBlock {
+        #[cfg(windows)]
+        let argv: Vec<String> = {
+            std::fs::write(
+                dir.join("inner.ps1"),
+                "while ($true) { Get-Date -Format o | Out-File -FilePath beat; Start-Sleep -Milliseconds 200 }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("outer.ps1"),
+                "cmd /c start /b powershell -NoProfile -ExecutionPolicy Bypass -File inner.ps1\nStart-Sleep -Seconds 60\n",
+            )
+            .unwrap();
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "outer.ps1",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+        };
+        #[cfg(not(windows))]
+        let argv: Vec<String> = [
+            "sh",
+            "-c",
+            "(sh -c 'while :; do date > beat; sleep 0.2; done' &) ; sleep 60",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        RunBlock {
+            argv,
+            cwd: dir.to_path_buf(),
+            env: Default::default(),
+            title: None,
+        }
+    }
+
+    /// Whether `beat` stops changing (the grandchild is gone).
+    fn heartbeat_stops(dir: &Path) -> bool {
+        let beat = dir.join("beat");
+        thread::sleep(Duration::from_millis(800));
+        let a = std::fs::read_to_string(&beat).unwrap_or_default();
+        thread::sleep(Duration::from_millis(1200));
+        let b = std::fs::read_to_string(&beat).unwrap_or_default();
+        a == b
+    }
+
+    fn wait_for_heartbeat(dir: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !dir.join("beat").exists() {
+            assert!(Instant::now() < deadline, "the grandchild never started");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_cancel_stops_the_step_and_a_grandchild_whose_parent_already_exited() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = orphaning_step(dir.path());
+        let cancel = Cancel::new();
+        let (c, d) = (cancel.clone(), dir.path().to_path_buf());
+        let setter = thread::spawn(move || {
+            wait_for_heartbeat(&d);
+            c.set();
+        });
+        let t0 = Instant::now();
+        let got = run_child(&run, Duration::from_secs(120), &cancel, &mut |_| {}, true);
+        setter.join().unwrap();
+        assert_eq!(got, Err(CANCELLED_STEP.to_string()));
+        assert!(t0.elapsed() < Duration::from_secs(40), "{:?}", t0.elapsed());
+        assert!(heartbeat_stops(dir.path()), "the grandchild still runs");
+    }
+
+    #[test]
+    fn a_timeout_stops_the_whole_tree_and_says_engine_work_may_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = orphaning_step(dir.path());
+        let got = run_child(
+            &run,
+            Duration::from_secs(8),
+            &Cancel::new(),
+            &mut |_| {},
+            true,
+        );
+        let why = got.unwrap_err();
+        assert!(
+            dir.path().join("beat").exists(),
+            "the grandchild never started"
+        );
+        assert!(why.starts_with("timed out after"), "{why}");
+        assert!(why.contains(ENGINE_WORK_MAY_CONTINUE), "{why}");
+        assert!(heartbeat_stops(dir.path()), "the grandchild still runs");
     }
 
     #[test]

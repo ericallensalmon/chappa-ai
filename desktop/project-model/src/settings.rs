@@ -407,6 +407,13 @@ pub struct Settings {
     /// in. FRONTEND-ONLY consumer, like the clipboard keys; ignored on other
     /// systems, where Alt is always Meta.
     pub option_as_meta: bool,
+    /// A stack job's pane closes a few seconds after the job ended `done`
+    /// (its record, its log and the stack's last-job line keep the
+    /// result); a job that failed, was cancelled or interrupted keeps its
+    /// pane. A pane the person typed into, scrolled back in or is looking
+    /// at stays. Default TRUE: successful runs otherwise pile up as panes.
+    /// FRONTEND-ONLY consumer.
+    pub close_successful_job_panes: bool,
     /// Sweep docker containers for marker-bearing container
     /// processes no live row owns (orphans) at app start and on each bridge
     /// probe tick. Default TRUE — orphans from a hard restart / mid-close
@@ -475,6 +482,7 @@ impl Default for Settings {
             ctrl_v_pastes: default_ctrl_v_pastes(),
             ctrl_c_copy_only: default_ctrl_c_copy_only(),
             option_as_meta: false,
+            close_successful_job_panes: true,
             agent_reap_orphans: default_agent_reap_orphans(),
             clipboard_writes: ClipboardWrites::default(),
             at_launch: AtLaunch::default(),
@@ -977,6 +985,21 @@ mod tests {
             "false survives set + restart"
         );
         assert!(reopened.get().copy_on_select, "unrelated fields untouched");
+    }
+
+    #[test]
+    fn successful_job_panes_close_unless_turned_off_and_it_round_trips() {
+        assert!(Settings::default().close_successful_job_panes);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"fontSize": 14}"#).unwrap();
+        assert!(
+            SettingsStore::new(path.clone())
+                .get()
+                .close_successful_job_panes
+        );
+        std::fs::write(&path, r#"{"closeSuccessfulJobPanes": false}"#).unwrap();
+        assert!(!SettingsStore::new(path).get().close_successful_job_panes);
     }
 
     #[test]

@@ -1040,6 +1040,10 @@ export interface SettingsDto {
    *  other systems, instead of the character Option types on the layout.
    *  Default false. Frontend-only consumer (term/input.ts reads it live). */
   optionAsMeta: boolean;
+  /** A stack job's pane closes a few seconds after the job ended `done`,
+   *  unless the person typed or scrolled in it or is looking at it; a job
+   *  that did not succeed keeps its pane. Default true. Frontend-only. */
+  closeSuccessfulJobPanes: boolean;
   /** TUI wheel multiplier, 1..=6 (default 3). Applied Rust-side (term-core
    *  `keys.rs::alt_screen_wheel`); normal scrollback stays at system speed. */
   scrollWheelSpeed: number;
@@ -1693,6 +1697,8 @@ export type SourcePromptPolicy = "first_time" | "always";
 /** One job a source started with a 202 reply. */
 export interface SourceJobDto {
   jobId: string;
+  /** Its pane's title ("stack: bring up"); absent from older builds. */
+  label?: string | null;
   actionId: string;
   view: string;
   key: string | null;
@@ -1797,6 +1803,30 @@ export function sourceRunAction(
 
 export function sourceJob(sourceId: string, jobId: string): Promise<SourceJobDto> {
   return call("source_job", { sourceId, jobId });
+}
+
+/** What `source_cancel_job` answers: whether the source took the request. */
+export interface CancelOutcomeDto {
+  accepted: boolean;
+  message: string;
+}
+
+/** Ask a source to stop one of its jobs (its pane ends once it stopped). */
+export function sourceCancelJob(sourceId: string, jobId: string): Promise<CancelOutcomeDto> {
+  return call("source_cancel_job", { sourceId, jobId });
+}
+
+/** The quit the app held because jobs run in its panes. */
+export interface QuitBlockedDto {
+  jobs: { label: string; startedUtc: string }[];
+}
+
+/** Rust holds a quit while a job runs in a pane and emits this. */
+export const QUIT_BLOCKED_EVENT = "app://quit-blocked";
+
+/** "Quit anyway": the next exit goes through. */
+export function confirmQuit(): Promise<void> {
+  return call("confirm_quit", {});
 }
 
 /** A panel's page (re-call while it is open). `path` must be a panel

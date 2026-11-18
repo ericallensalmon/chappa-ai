@@ -6,7 +6,7 @@
 //! | `GET /chappa/v1/identity?challenge=<64 hex>` | none (that is its point) | `{proof}` |
 //! | `GET /chappa/v1/manifest` | bearer | the manifest |
 //! | `GET /api/environment` | bearer | the Environment payload |
-//! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement, `409` unconfirmed / no longer offered / stale plan / plan preview still pending / note missing, `404` unknown target |
+//! | `POST /api/actions` | bearer | `202 {jobId, run}` with `X-Chappa-Runs-Jobs: 1`, `202 {jobId}` without (the job runs headless), `200 {message}` for an acknowledgement or a cancel, `409` unconfirmed / no longer offered / stale plan / plan preview still pending / note missing / `busy` (another change of the instance is running), `404` unknown target |
 //! | `GET /api/work` | bearer | the Work view: one overlay per item workspace (see [`crate::workspaces`]) |
 //! | `GET /api/work/archived` | bearer | the Archived panel |
 //! | `GET /api/work/reviews` | bearer | the Review workspaces panel (see [`crate::reviews`]) |
@@ -26,6 +26,13 @@
 //! No action answers `503` (outcome unknown): every refusal happens before
 //! anything runs, and once a job is accepted its outcome is what
 //! `GET jobs/{id}` reports.
+//!
+//! **One change at a time.** While a job that changes the instance is
+//! pending or running (see [`crate::lease`]), every other changing action
+//! is drawn disabled with "<label> is running since <time>" and refused
+//! with `409 busy`; the view shows the job, its log and a `cancel-job`
+//! action (`params.jobId`), and the status and plan scripts wait until it
+//! ends. Acknowledgements, checks and the relay's actions stay live.
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -50,6 +57,7 @@ use crate::data_safety::{
 };
 use crate::env_view::{self, EnvInputs};
 use crate::identity::{is_valid_challenge, Token, IDENTITY_PATH, MANIFEST_PATH};
+use crate::lease::{self, JobsView};
 use crate::procs::ProcessTable;
 use crate::project::{Loaded, ProjectConfig};
 use crate::records::{self, JobRecord, JobStatus, JobWork};
@@ -69,6 +77,14 @@ pub const ACTIONS_PATH: &str = "/api/actions";
 pub const JOBS_PREFIX: &str = "/api/jobs/";
 pub const RUNS_JOBS_HEADER: &str = "X-Chappa-Runs-Jobs";
 pub const ACTOR_HEADER: &str = "X-Chappa-Actor";
+/// The action that stops the running job (`params.jobId`; none = the
+/// instance's changing job).
+pub const CANCEL_ACTION_ID: &str = "cancel-job";
+/// The terminal action that follows a job's log.
+pub const JOB_LOG_ACTION_ID: &str = "job-log";
+/// How long the instance's job view is reused before it is read again
+/// (the script pool asks before every run).
+const JOBS_VIEW_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 /// How often the app should poll the Environment view, in seconds.
 pub const POLL_SECONDS: u64 = 15;
 /// Request threads.
@@ -261,6 +277,8 @@ pub struct Source {
     /// The work folder of the definition last read, where the instances'
     /// generated secrets are kept (see [`Source::handle_as`]).
     last_work_dir: Mutex<Option<PathBuf>>,
+    /// The instance's changing jobs as last read, and when.
+    jobs_seen: Mutex<Option<(std::time::Instant, JobsView)>>,
 }
 
 /// The least time between two looks at the workspaces on the refresher
@@ -304,6 +322,7 @@ impl Source {
             secret_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pin: Mutex::new(DefinitionPin::Unchecked),
             last_work_dir: Mutex::new(None),
+            jobs_seen: Mutex::new(None),
         });
         let _ = source.me.set(Arc::downgrade(&source));
         let weak: Weak<dyn Periodic + Send + Sync> = Arc::downgrade(&source) as Weak<Source>;
@@ -330,6 +349,58 @@ impl Source {
             DefinitionPin::Trusted(h) => loaded.definition_hash.as_deref() == Some(h.as_str()),
             DefinitionPin::Nothing => false,
         }
+    }
+
+    /// Whether `pid` runs: this process (a job on one of its threads) or
+    /// one the process host sees.
+    fn pid_alive(&self, pid: u32) -> bool {
+        pid == std::process::id() || self.world.procs.alive(pid)
+    }
+
+    /// The instance's changing jobs (the active one, the last that ended),
+    /// read now; settles on the way the ones whose runner is gone.
+    pub fn jobs_view(&self, work_dir: &std::path::Path, instance: &str) -> JobsView {
+        let v = lease::view(work_dir, instance, &utc_now(), &|pid| self.pid_alive(pid));
+        *self.jobs_seen.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((std::time::Instant::now(), v.clone()));
+        v
+    }
+
+    /// [`Source::jobs_view`] reused for up to [`JOBS_VIEW_TTL`]: for the
+    /// script pool, which asks before every run.
+    fn jobs_view_recent(&self, work_dir: &std::path::Path, instance: &str) -> JobsView {
+        let recent = self
+            .jobs_seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < JOBS_VIEW_TTL)
+            .map(|(_, v)| v.clone());
+        recent.unwrap_or_else(|| self.jobs_view(work_dir, instance))
+    }
+
+    fn forget_jobs_view(&self) {
+        *self.jobs_seen.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    /// "<label> is running since <time>" while a changing job holds the
+    /// configured instance.
+    fn busy(&self, loaded: &Loaded) -> Option<String> {
+        let instance = stack_core::intent::instance_id(&loaded.stack_name, loaded.slot);
+        self.jobs_view(&loaded.work_dir(), &instance)
+            .active
+            .map(|a| busy_reason(&a))
+    }
+
+    /// Settle every job whose runner is gone (at start: a job killed with
+    /// the app reads `interrupted`, not `running` forever). The ids.
+    pub fn settle_jobs(&self) -> Vec<String> {
+        let Ok(loaded) = self.load() else {
+            return Vec::new();
+        };
+        let settled = lease::settle_all(&loaded.work_dir(), &utc_now(), &|pid| self.pid_alive(pid));
+        self.forget_jobs_view();
+        settled
     }
 
     /// The definition, when it may run things: a definition that differs
@@ -617,6 +688,24 @@ impl Source {
             now_utc: now,
         };
         let mut v = env_view::environment(&inputs, &errors);
+        let jobs = self.jobs_view(&work_dir, &inst.id);
+        if let Some(active) = &jobs.active {
+            disable_where(&mut v, &busy_reason(active), &|id| !stays_live(id));
+        }
+        env_view::decorate_jobs(
+            &mut v,
+            &jobs,
+            &env_view::JobsContext {
+                exe: &self.world.exe,
+                project_dir: &loaded.dir,
+                scripts: trusted
+                    && loaded
+                        .stack
+                        .components
+                        .values()
+                        .any(|c| c.driver == stack_core::definition::DriverKind::Script),
+            },
+        );
         if let Some(fw) = &firewall {
             relay_firewall::decorate(&mut v, fw);
         }
@@ -723,10 +812,15 @@ impl Source {
     }
 
     /// `view` as is under the trusted definition; otherwise with every
-    /// mutating action disabled (the calls are refused anyway).
+    /// mutating action disabled (the calls are refused anyway). While a
+    /// changing job runs, the actions that would change the instance too
+    /// are disabled with its name.
     fn read_only_unless_trusted(&self, loaded: &Loaded, mut view: Value) -> Value {
         if !self.is_trusted(loaded) {
             disable_mutating(&mut view, UNTRUSTED_DISABLED);
+        }
+        if let Some(why) = self.busy(loaded) {
+            disable_where(&mut view, &why, &changes_instance);
         }
         view
     }
@@ -913,6 +1007,11 @@ impl Source {
         let confirmed = body.get("confirmed").and_then(Value::as_bool) == Some(true);
         let fingerprint = body.pointer("/params/fingerprint").and_then(Value::as_str);
         let now = utc_now();
+        // Stopping is allowed whatever the definition says now: the job runs
+        // under the one it was accepted with.
+        if id == CANCEL_ACTION_ID {
+            return self.cancel_action(body, caller, confirmed);
+        }
         let loaded = match self.load_trusted() {
             Ok(l) => l,
             Err(r) => return r,
@@ -975,6 +1074,10 @@ impl Source {
         }
         if id == CHECK_ACTION_ID {
             return self.check_action(key.as_deref(), caller, &loaded, &inst, &obs, &now);
+        }
+        // Everything below is a change of the instance: one at a time.
+        if let Some(why) = self.busy(&loaded) {
+            return error(409, "busy", busy_refusal(&why));
         }
         let channel = channel_for(&obs, &self.config.channel);
         let offered = states::offered(&loaded, &runner, &inst, &obs, &channel);
@@ -1073,6 +1176,11 @@ impl Source {
     ) -> Reply {
         let runs_jobs = caller.runs_jobs;
         let work_dir = loaded.work_dir();
+        if mutates && chosen.work.takes_lease() {
+            if let Some(active) = self.jobs_view(&work_dir, &inst.id).active {
+                return error(409, "busy", busy_refusal(&busy_reason(&active)));
+            }
+        }
         let job_id = match records::new_job_id(now) {
             Ok(i) => i,
             Err(e) => return error(500, "job", e),
@@ -1120,6 +1228,7 @@ impl Source {
             return error(500, "job", format!("cannot record the job: {e}"));
         }
         records::prune(&work_dir, &records::retention(&loaded.stack), now);
+        self.forget_jobs_view();
         self.background.invalidate_facts();
         if runs_jobs {
             return (
@@ -1473,6 +1582,11 @@ impl Source {
             return Vec::new();
         };
         let inst = runner_inst.0;
+        // A scheduled check waits while the instance is being changed: what
+        // it would look at is still moving.
+        if self.jobs_view(&work_dir, &inst.id).active.is_some() {
+            return Vec::new();
+        }
         let store = CheckStore::load(&work_dir, &inst.id).unwrap_or_default();
         let due = data_safety::due(&loaded, &store, now_secs);
         if due.is_empty() {
@@ -1548,12 +1662,10 @@ impl Source {
             Err(r) => return r,
         };
         match JobRecord::load(&work_dir, id) {
-            Ok(Some(rec)) => (
-                200,
-                records::api_state(&rec, |pid| {
-                    pid == std::process::id() || self.world.procs.alive(pid)
-                }),
-            ),
+            Ok(Some(rec)) => {
+                let alive = lease::runner_alive(&work_dir, &rec, &|pid| self.pid_alive(pid));
+                (200, records::api_state(&rec, alive))
+            }
             Ok(None) => error(404, "unknown-job", format!("no job {id}")),
             Err(e) => error(500, "job", e),
         }
@@ -1569,12 +1681,74 @@ impl Source {
         }
         match records::record_exit_report(&work_dir, id, body, &utc_now()) {
             Ok(_) => {
+                self.forget_jobs_view();
                 self.background.invalidate_facts();
                 self.work.invalidate();
                 (200, json!({}))
             }
             Err(e) => error(500, "job", e),
         }
+    }
+
+    /// `cancel-job`: ask the job `params.jobId` (none: the instance's
+    /// changing job) to stop. A job no runner picked up yet ends here and
+    /// now; a running one stops its current step with every process it
+    /// started, skips the rest and ends `cancelled`.
+    fn cancel_action(&self, body: &Value, caller: &Caller, confirmed: bool) -> Reply {
+        if !confirmed {
+            return error(
+                409,
+                "confirmation-required",
+                "cancelling a job must be confirmed",
+            );
+        }
+        let loaded = match self.load() {
+            Ok(l) => l,
+            Err(e) => return error(409, "definition", e),
+        };
+        let work_dir = loaded.work_dir();
+        let instance = stack_core::intent::instance_id(&loaded.stack_name, loaded.slot);
+        let id = match body.pointer("/params/jobId").and_then(Value::as_str) {
+            Some(id) => id.to_string(),
+            None => {
+                self.forget_jobs_view();
+                match self.jobs_view(&work_dir, &instance).active {
+                    Some(a) => a.id,
+                    None => return error(409, "not-running", "no job of this stack is running"),
+                }
+            }
+        };
+        let rec = match JobRecord::load(&work_dir, &id) {
+            Ok(Some(r)) => r,
+            Ok(None) => return error(404, "unknown-job", format!("no job {id}")),
+            Err(e) => return error(500, "job", e),
+        };
+        if rec.status.finished() {
+            return error(
+                409,
+                "not-running",
+                format!("{} already ended ({})", rec.label, rec.status.as_str()),
+            );
+        }
+        let actor = caller
+            .actor
+            .as_deref()
+            .map(|a| stack_core::workflow::clean_actor(Some(a)));
+        if let Err(e) = lease::request_cancel(&work_dir, &id, actor.as_deref(), &utc_now()) {
+            return error(500, "job", e);
+        }
+        // Nobody runs it yet: it ends now, and never starts.
+        let settled = lease::settle(&work_dir, &id, &utc_now(), &|pid| self.pid_alive(pid));
+        self.forget_jobs_view();
+        self.background.invalidate_facts();
+        let message = match settled {
+            Some(_) => format!("{} was cancelled before it started.", rec.label),
+            None => format!(
+                "Cancelling {}: the step running now is stopped with every process it started, and the steps after it do not run.",
+                rec.label
+            ),
+        };
+        (200, json!({ "message": message, "jobId": id }))
     }
 
     /// Apply job-record retention now (at start; it also runs after every
@@ -1600,28 +1774,70 @@ impl Source {
 /// sections, banners, the payload's own) as disabled with `why`. A
 /// `disabled` reason already there stays.
 pub fn disable_mutating(v: &mut Value, why: &str) {
+    disable_where(v, why, &|_| true);
+}
+
+/// [`disable_mutating`] for the mutating actions whose id `pick` accepts.
+pub fn disable_where(v: &mut Value, why: &str, pick: &dyn Fn(&str) -> bool) {
     match v {
         Value::Object(map) => {
             if let Some(Value::Array(actions)) = map.get_mut("actions") {
                 for a in actions.iter_mut() {
                     if a.get("mutates").and_then(Value::as_bool) == Some(true)
                         && a.get("disabled").is_none()
+                        && pick(a.get("id").and_then(Value::as_str).unwrap_or(""))
                     {
                         a["disabled"] = Value::String(why.to_string());
                     }
                 }
             }
             for (_, child) in map.iter_mut() {
-                disable_mutating(child, why);
+                disable_where(child, why, pick);
             }
         }
         Value::Array(items) => {
             for child in items {
-                disable_mutating(child, why);
+                disable_where(child, why, pick);
             }
         }
         _ => {}
     }
+}
+
+/// The Environment actions that do not change the instance, and so stay
+/// live while a change runs: the acknowledgements, the relay's firewall
+/// and test actions, the cancel itself.
+fn stays_live(id: &str) -> bool {
+    id == ACK_ACTION_ID
+        || id == secret_scan::ACK_ACTION_ID
+        || id == relay_probe::TEST_ACTION_ID
+        || id == CANCEL_ACTION_ID
+        || FirewallCheck::is_action(id)
+}
+
+/// The Work view and review panel actions that change the instance (they
+/// plan, save or resume a stack state); the rest are git changes to a
+/// folder, which run alongside.
+fn changes_instance(id: &str) -> bool {
+    id == workspaces::ACTIVATE_ID
+        || id.starts_with(workspaces::REBUILD_PREFIX)
+        || id == reviews::REVIEW_ENV_UP_ID
+        || id.starts_with(reviews::UP_PREFIX)
+        || id == states::SAVE_ID
+        || id.starts_with("resume")
+        || id == states::DOWN_VOLUMES_ID
+}
+
+/// "<label> is running since <time>" for the job holding the instance.
+fn busy_reason(active: &JobRecord) -> String {
+    lease::busy_text(
+        &active.label,
+        active.started_utc.as_deref().unwrap_or(&active.created_utc),
+    )
+}
+
+fn busy_refusal(why: &str) -> String {
+    format!("{why}; wait for it to end, or cancel it, then look again")
 }
 
 /// The view an actions call names (`environment` when it names none).
@@ -1707,8 +1923,18 @@ fn respond<H: Handler>(source: &H, mut request: tiny_http::Request) {
 }
 
 impl crate::background::ScriptGate for Source {
+    /// Not while the definition is untrusted, and not while a job changes
+    /// the instance: a status script read mid-change races the change's
+    /// own scripts over the same state, and a plan made then is stale
+    /// before anyone reads it. The rows keep their last answer meanwhile
+    /// (the view says so).
     fn scripts_allowed(&self) -> bool {
-        self.trusted_for_background().is_some()
+        self.trusted_for_background().is_some_and(|l| {
+            let instance = stack_core::intent::instance_id(&l.stack_name, l.slot);
+            self.jobs_view_recent(&l.work_dir(), &instance)
+                .active
+                .is_none()
+        })
     }
 }
 
