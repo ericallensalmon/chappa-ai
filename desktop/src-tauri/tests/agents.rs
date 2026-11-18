@@ -20,6 +20,7 @@ use app_lib::projects::Projects;
 use app_lib::registry::{EventSink, JsonEvent, Registry};
 use app_lib::settings::SettingsState;
 use serde_json::{json, Value};
+use stack_core::test_support::write_executable;
 use term_core::actor::ActorConfig;
 use term_core::pty::PtySpec;
 
@@ -555,18 +556,6 @@ fn fake_json_cli_script(dir: &std::path::Path) -> std::path::PathBuf {
     } else {
         "fake_json_cli.sh"
     })
-}
-
-#[cfg(unix)]
-fn write_executable(path: &std::path::Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-}
-
-#[cfg(not(unix))]
-fn write_executable(path: &std::path::Path, body: &str) {
-    std::fs::write(path, body).unwrap();
 }
 
 /// Spawn a json-transport tool (claude type, fake program): machine-mode

@@ -31,5 +31,10 @@ thiserror = "1"
 # `[extend] path`) by parsing it, not by searching its text.
 toml = "0.9"
 
+[features]
+# `test_support`: helpers for the tests of crates that depend on this one.
+# Enable it from `[dev-dependencies]` only.
+test-support = []
+
 [dev-dependencies]
 tempfile = "3"

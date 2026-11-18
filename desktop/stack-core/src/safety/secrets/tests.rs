@@ -382,12 +382,7 @@ fn script(dir: &Path, name: &str, windows: &str, unix: &str) -> PathBuf {
         p
     } else {
         let p = dir.join(name);
-        fs::write(&p, format!("#!/bin/sh\n{unix}\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_support::write_executable(&p, &format!("#!/bin/sh\n{unix}\n"));
         p
     }
 }

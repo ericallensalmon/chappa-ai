@@ -9,10 +9,10 @@
 // - Linux: /usr/bin/chappa-ai-mcp in the .deb, .rpm and AppImage;
 // - Windows: chappa-ai-mcp.exe in the install folder (an installer resource).
 //
-// Not a Tauri sidecar (`bundle.externalBin`): the framework's build script
-// copies sidecars to `<OUT_DIR>/../../..`, which with Cargo's current build
-// directory layout is the build folder, where a `chappa-ai-mcp` directory
-// already exists, so the app crate would not compile.
+// Not a Tauri sidecar (`bundle.externalBin`): a sidecar is copied into
+// `target/<profile>/` under its bundled name, which is the name of the
+// workspace's own `chappa-ai-mcp` binary there, and every cargo build of the
+// app would need the target-suffixed copy to exist first.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";

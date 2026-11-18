@@ -3,7 +3,9 @@
 GENERATED from `desktop/src-tauri/src/control_http.rs::ROUTES` — do not edit by hand.
 Regenerate: `CONTROL_API_WRITE=1 cargo test -p chappa-ai-desktop control_api_doc`.
 
-Bound to `http://127.0.0.1:8324` in every build. Every request must carry
+Bound to `http://127.0.0.1:8324` in every build; a run under `CHAPPA_PROFILE_DIR` binds
+`127.0.0.1` on a port the OS chooses instead and publishes it only in that profile's
+endpoint file (below). Every request must carry
 `Authorization: Bearer <token>` where the token is the contents of
 `<app-config>/control_token` (created at first launch, owner-only permissions;
 `<app-config>` is Tauri's app config dir for `com.chappa-ai.desktop`, e.g.

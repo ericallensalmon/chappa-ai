@@ -41,9 +41,11 @@ CHAPPA_PROFILE_DIR="<demo-folder>/profile" PATH="$PWD/target/debug:$PATH" npm ru
 $env:CHAPPA_PROFILE_DIR = "<demo-folder>\profile"; $env:PATH = "$PWD\target\debug;$env:PATH"; npm run dev
 ```
 
-Quit any other running copy of the app first: the control surface listens
-on one fixed port, so a second instance runs without one (its agents
-cannot reach it through `chappa-ai-mcp`).
+It can run beside your everyday copy of the app: under a profile the
+control surface listens on a port the OS picks and publishes it in the
+profile's `config/control_endpoint`, where the demo's agents find it
+through `chappa-ai-mcp`. Only a second copy of the demo itself, on the same
+profile, starts without one.
 
 Once it is up:
 

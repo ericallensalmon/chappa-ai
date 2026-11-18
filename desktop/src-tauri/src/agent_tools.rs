@@ -67,8 +67,10 @@
 //! on load and when such a tool is first saved, and a tool whose
 //! `--settings` the user removed is marked `hooks_opt_out` and left alone
 //! from then on. The command names the `chappa-ai-mcp` binary beside the
-//! app's executable (else the first one on `PATH`); with none found the
-//! file holds no hooks and no tool is changed.
+//! app's executable (else the first one on `PATH`) by its absolute path, so
+//! a bundled install works with its folder off `PATH`; with none found the
+//! file holds no hooks, no tool is changed, and Settings ▸ Agents says that
+//! nothing was found.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -751,14 +753,20 @@ pub fn has_settings_flag(args: &[String]) -> bool {
     })
 }
 
+/// The MCP server's name, without the platform's executable suffix: what a
+/// config names when no binary was found (a shell resolves it on `PATH`
+/// when it runs, `.exe` included on Windows).
+pub const MCP_BINARY_NAME: &str = "chappa-ai-mcp";
+
 /// The `chappa-ai-mcp` binary: beside `exe_dir` (the app's own executable;
-/// a cargo build puts both in one target dir), else the first absolute
+/// a cargo build puts both in one target dir, and every bundle ships it
+/// there, where `PATH` usually does not reach), else the first absolute
 /// `PATH` entry holding it. `None` when neither exists.
 pub fn find_mcp_binary(
     exe_dir: Option<&std::path::Path>,
     path_var: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
-    let name = format!("chappa-ai-mcp{}", std::env::consts::EXE_SUFFIX);
+    let name = format!("{MCP_BINARY_NAME}{}", std::env::consts::EXE_SUFFIX);
     let beside = exe_dir.map(|d| d.join(&name)).filter(|p| p.is_file());
     beside.or_else(|| {
         std::env::split_paths(path_var?)
@@ -1034,6 +1042,9 @@ impl AgentToolStore {
 #[derive(Clone, Default)]
 pub struct AgentToolsState {
     inner: Arc<Mutex<Option<AgentToolStore>>>,
+    /// The MCP server binary found at startup (`None`: nothing resolved),
+    /// shown in Settings so the person knows the path to register.
+    mcp_server: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl AgentToolsState {
@@ -1046,14 +1057,25 @@ impl AgentToolsState {
         let binary = find_mcp_binary(exe_dir.as_deref(), std::env::var_os("PATH").as_deref());
         if binary.is_none() {
             log::warn!(
-                "[agent_tools] no chappa-ai-mcp binary found; claude tty tools get no session hook"
+                "[agent_tools] no chappa-ai-mcp binary beside the app or on PATH; claude tty \
+                 tools get no session hook"
             );
         }
+        // Nothing found: no hook at all. A bare name would fail on every
+        // agent start; Settings ▸ Agents says that nothing was found.
         let hooks = write_claude_hooks(&config_dir, binary.as_deref());
         let store = AgentToolStore::with_claude_hooks(config_dir.join(FILE_NAME), hooks);
         if let Ok(mut guard) = self.inner.lock() {
             *guard = Some(store);
         }
+        if let Ok(mut guard) = self.mcp_server.lock() {
+            *guard = binary;
+        }
+    }
+
+    /// The MCP server binary found at startup, `None` when nothing resolved.
+    pub fn mcp_server(&self) -> Option<PathBuf> {
+        self.mcp_server.lock().ok().and_then(|g| g.clone())
     }
 
     /// Tests: a store over an explicit file.
@@ -1126,11 +1148,14 @@ pub fn delete_refusal(id: u32, live: &[crate::registry::AgentRow]) -> Option<Str
 
 /// What the webview's `list_agent_tools` answers: the rows plus the tool
 /// types with a machine mode (the Transport picker offers `json` only for
-/// those) — ONE Rust source, no frontend copy.
+/// those) — ONE Rust source, no frontend copy — and the absolute path of the
+/// MCP server binary the app found (`null`: none beside the app or on
+/// `PATH`), which Settings shows as the path to register with an agent CLI.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentToolsListing {
     pub tools: Vec<AgentTool>,
     pub machine_mode_types: Vec<ToolType>,
+    pub mcp_server: Option<String>,
 }
 
 #[tauri::command]
@@ -1138,6 +1163,7 @@ pub fn list_agent_tools(tools: State<'_, AgentToolsState>) -> Result<AgentToolsL
     Ok(AgentToolsListing {
         tools: tools.list(),
         machine_mode_types: crate::agent_json::MACHINE_MODE_TYPES.to_vec(),
+        mcp_server: tools.mcp_server().map(|p| p.display().to_string()),
     })
 }
 
@@ -1840,6 +1866,59 @@ mod tests {
             None
         );
         assert_eq!(find_mcp_binary(None, None), None);
+    }
+
+    #[test]
+    fn configs_name_the_resolved_binary_by_its_absolute_path_and_write_no_hook_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder with a space, as an install folder often has.
+        let app_dir = dir.path().join("chappa ai");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let name = format!("chappa-ai-mcp{}", std::env::consts::EXE_SUFFIX);
+        let beside = app_dir.join(&name);
+        std::fs::write(&beside, "").unwrap();
+        // The bundle folder is not on PATH; another copy is.
+        let path_dir = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::write(path_dir.join(&name), "").unwrap();
+        let path_var = std::env::join_paths([path_dir.as_path()]).unwrap();
+
+        let found = find_mcp_binary(Some(&app_dir), Some(&path_var));
+        assert_eq!(found.as_deref(), Some(beside.as_path()));
+        let binary = found.expect("the copy beside the app");
+        assert!(binary.is_absolute());
+        write_claude_hooks(dir.path(), Some(&binary)).expect("a --settings argument");
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(CLAUDE_HOOKS_FILE)).unwrap(),
+        )
+        .unwrap();
+        let command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // The whole path, spaces and all, as one quoted word.
+        let shown = if cfg!(windows) {
+            format!("\"{}\"", beside.display().to_string().replace('\\', "/"))
+        } else {
+            format!("'{}'", beside.display())
+        };
+        assert_eq!(command, format!("{shown} session-hook"));
+
+        // Nothing beside the app: the PATH copy, still absolute.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(
+            find_mcp_binary(Some(&empty), Some(&path_var)),
+            Some(path_dir.join(&name))
+        );
+
+        // Nothing anywhere: no hook, rather than a bare name that would fail
+        // on every agent start.
+        let none = find_mcp_binary(Some(&empty), None);
+        assert_eq!(none, None);
+        assert_eq!(write_claude_hooks(dir.path(), none.as_deref()), None);
+        let text = std::fs::read_to_string(dir.path().join(CLAUDE_HOOKS_FILE)).unwrap();
+        assert!(!text.contains("session-hook"), "{text}");
     }
 
     use std::path::Path;

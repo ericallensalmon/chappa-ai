@@ -1156,7 +1156,9 @@ stacks:
         assert!(PORT_RELEASE_GRACE <= Duration::from_secs(2));
         // Closed right before the check, as after a stop: reads free.
         let i = inst(1, false);
-        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        // Loopback: a listener on the wildcard address would raise the
+        // firewall prompt for the test binary on every rebuild.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let out = ports_outcome(&i, &[port], &StdPortProbe, &BTreeMap::new());
@@ -1171,21 +1173,47 @@ stacks:
     }
 
     #[test]
-    fn std_port_probe_sees_a_real_listener_on_either_address_and_never_keeps_the_port() {
-        // A listener on loopback, then one on the wildcard address: taken.
-        // Once it is dropped the port is free and the probe must not keep
-        // it: a real listener binds each address right after the probe,
-        // twice over. A released ephemeral port can be picked up by another
+    fn std_port_probe_sees_a_holder_on_either_address_and_never_keeps_the_port() {
+        // A listener on loopback, then a socket bound to the wildcard
+        // address: taken. Once it is dropped the port is free and the probe
+        // must not keep it: each address binds right after the probe, twice
+        // over. A released ephemeral port can be picked up by another
         // process's outgoing connection at any moment, so that half retries
         // on a fresh port instead of failing on someone else's socket.
+        //
+        // Nothing here listens on the wildcard address: that is what makes
+        // Windows Firewall prompt for the program, and every rebuild names a
+        // new test binary, so it would ask again each time (and a Cancel
+        // leaves Block rules behind). A wildcard socket that is bound but not
+        // listening holds the port just the same for a bind.
         //
         // macOS frees a closed socket's port a moment after the close, so
         // the probe may read a just-released port as taken for a while
         // (the safe side); the wait below allows for that.
         fn binds(host: &str, port: u16) -> Result<(), String> {
-            TcpListener::bind((host, port)) // dropped on return
-                .map(drop)
-                .map_err(|e| format!("a listener on {host}:{port} after the probe: {e}"))
+            let addr: std::net::SocketAddr = format!("{host}:{port}").parse().unwrap();
+            if addr.ip().is_loopback() {
+                TcpListener::bind(addr) // dropped on return
+                    .map(drop)
+                    .map_err(|e| format!("a listener on {addr} after the probe: {e}"))
+            } else {
+                StdPortProbe::bind(addr)
+                    .map_err(|e| format!("a bind of {addr} after the probe: {e}"))
+            }
+        }
+        /// Hold a port on `host`: a loopback listener, or a wildcard socket
+        /// that is bound and never listens.
+        fn hold(host: &str) -> (socket2::Socket, u16) {
+            use socket2::{Domain, Protocol, Socket, Type};
+            let addr: std::net::SocketAddr = format!("{host}:0").parse().unwrap();
+            let socket =
+                Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP)).unwrap();
+            socket.bind(&addr.into()).unwrap();
+            if addr.ip().is_loopback() {
+                socket.listen(16).unwrap();
+            }
+            let port = socket.local_addr().unwrap().as_socket().unwrap().port();
+            (socket, port)
         }
         fn probe_reads_free(port: u16) -> Result<(), String> {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1208,10 +1236,9 @@ stacks:
         for host in ["127.0.0.1", "0.0.0.0"] {
             let mut tries = Vec::new();
             let freed = (0..5).any(|_| {
-                let listener = TcpListener::bind((host, 0)).unwrap();
-                let port = listener.local_addr().unwrap().port();
-                assert!(!StdPortProbe.is_free(port), "{host}:{port} is listened on");
-                drop(listener);
+                let (holder, port) = hold(host);
+                assert!(!StdPortProbe.is_free(port), "{host}:{port} is held");
+                drop(holder);
                 let outcome = released_and_kept_free(port);
                 let ok = outcome.is_ok();
                 tries.extend(outcome.err());

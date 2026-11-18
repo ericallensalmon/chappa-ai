@@ -1,5 +1,8 @@
 //! `chappa-ai-mcp` — stdio MCP server for the chappa-ai desktop app.
-//! Register with Claude Code: `claude mcp add chappa-ai -- chappa-ai-mcp`.
+//! Register with Claude Code by its full path, so an agent finds it whether
+//! or not its folder is on `PATH` (an app bundle's is not):
+//! `claude mcp add chappa-ai -- "/full/path/to/chappa-ai-mcp"`; `--help`
+//! prints that line with this binary's own path.
 //! Environment: CHAPPA_AI_CONTROL_URL (default: the address in the app's
 //! `control_endpoint` file, or CHAPPA_AI_CONTROL_ENDPOINT_FILE),
 //! CHAPPA_AI_CONTROL_TOKEN or CHAPPA_AI_CONTROL_TOKEN_FILE (default: the
@@ -18,9 +21,13 @@ fn main() {
         return;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
+        // This binary's own path, so the registration line works as printed.
+        let me = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "chappa-ai-mcp".to_owned());
         eprintln!(
             "chappa-ai-mcp {} — stdio MCP server proxying to the chappa-ai control surface.\n\
-             Usage: claude mcp add chappa-ai -- chappa-ai-mcp\n\
+             Usage: claude mcp add chappa-ai -- \"{me}\"\n\
              \x20      chappa-ai-mcp session-hook  (Claude Code SessionStart hook; JSON on stdin)\n\
              Env: CHAPPA_AI_CONTROL_URL, CHAPPA_AI_CONTROL_ENDPOINT_FILE,\n\
              CHAPPA_AI_CONTROL_TOKEN, CHAPPA_AI_CONTROL_TOKEN_FILE, CHAPPA_PROFILE_DIR\n\

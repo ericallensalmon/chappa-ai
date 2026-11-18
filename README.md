@@ -336,7 +336,8 @@ keeps the last block in force: it fails closed.
   `CHAPPA_SOURCE_TOKEN` are removed from the app's own environment at
   startup, and the stack runner removes them from everything it starts, so
   code built from a worktree cannot call the source with your authority.
-- **The control surface** listens on `127.0.0.1:8324` only, requires a
+- **The control surface** listens on loopback only (`127.0.0.1:8324`, or
+  a port the OS picks under a profile, see [Profiles](#profiles)), requires a
   bearer token kept in an owner-only file, and proves its identity before
   `chappa-ai-mcp` sends that token. The app's config folder is owner-only.
 - **Clipboard.** A program that asks to set the clipboard (OSC 52) needs
@@ -368,8 +369,11 @@ CHAPPA_PROFILE_DIR="$HOME/chappa-demo/profile" npm run dev   # from desktop/
 ```
 
 Processes the app starts inherit the variable, so `chappa-ai-mcp` finds the
-same instance. The control surface's port is fixed, so run one instance at
-a time: a second one starts without its control surface. On macOS the
+same instance. Under a profile the control surface listens on a loopback
+port the OS picks, written to `<folder>/config/control_endpoint` (where
+`chappa-ai-mcp` reads it), so a profile runs beside the everyday app, which
+keeps the fixed `127.0.0.1:8324`. Two copies of the same profile do not
+share it: the second starts without a control surface. On macOS the
 webview cannot be given a folder, so under a profile it keeps its own
 storage (a remembered settings tab, collapsed sections) in memory only.
 
@@ -449,8 +453,10 @@ on a machine with 16 GB or less, `CARGO_BUILD_JOBS=2` and
 
 Every bundle ships the `chappa-ai-mcp` server beside the app's executable:
 in the install folder on Windows, in `/usr/bin` from the Linux packages, and
-in `Contents/MacOS` inside the macOS app. The app finds it there for its own
-hooks; register it with an agent CLI by that path.
+in `Contents/MacOS` inside the macOS app. The app finds it there (else on
+`PATH`) and writes that full path into its own hooks; Settings ▸ Agents shows
+it, ready to register with an agent CLI (`chappa-ai-mcp --help` prints the
+same line).
 
 ### macOS
 

@@ -7,7 +7,7 @@ import type { TerminalApi } from "./term/panel";
 import { emptyAgentTool, frame, stubSettings } from "./term/test-utils";
 import { AgentToolsStore, type AgentToolsApi } from "./agent_tools";
 import type * as ipc from "./ipc";
-import type { CommandForm } from "./dialog";
+import { promptDialog, type CommandForm } from "./dialog";
 import { SourcesStore, type SourcesApi, type SourcesListing } from "./sources_store";
 import { fixture as sourceFixture, pr as prItem, source as sourceRow } from "./sources/test-utils";
 import { readNavProject, readNavTab, readViewSource, writeNavProject, writeNavTab } from "./nav_bar";
@@ -520,6 +520,128 @@ describe("closing the pane by key", () => {
     panelDispose(app);
   });
 
+  /** A mounted app with `n` shells, attached to the document so fields can
+   *  take the focus. */
+  async function attached(n: number, confirm: () => Promise<boolean> = async () => true) {
+    const { api } = stubApi();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const app = new App({ root, api, settings: stubSettings().store, confirm });
+    await app.mount();
+    for (let i = 0; i < n; i++) await app.newShell();
+    const done = (): void => {
+      panelDispose(app);
+      root.remove();
+    };
+    return { api, root, app, done };
+  }
+
+  /** Let the double-press guard of the last close pass. */
+  const nextPress = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, CLOSE_SHORTCUT_REPEAT_MS + 20));
+
+  it("on macOS, Cmd+W in a Settings text field closes Settings, not the pane hidden behind it", async () => {
+    setPlatform("mac");
+    const { api, root, app, done } = await attached(1);
+    root.querySelector<HTMLButtonElement>(".chappa-rail-gear")!.click();
+    const pane = app.settingsPaneElement!;
+    expect(pane.style.display).toBe("flex");
+    const field = pane.querySelector<HTMLInputElement>('input[type="text"]')!;
+    field.focus();
+    expect(document.activeElement).toBe(field);
+    const ev = new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true });
+    field.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    await FLUSH();
+    expect(pane.style.display).toBe("none");
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    expect(root.querySelectorAll(".chappa-rail-item").length).toBe(1);
+    done();
+  });
+
+  it("on macOS, the menu's Close Pane with the focus in Settings closes Settings too", async () => {
+    setPlatform("mac");
+    const { api, root, app, done } = await attached(1);
+    root.querySelector<HTMLButtonElement>(".chappa-rail-gear")!.click();
+    const pane = app.settingsPaneElement!;
+    pane.querySelector<HTMLInputElement>('input[type="text"]')!.focus();
+    // What the menu event runs: no key event, the focus says where.
+    app.closeByCmdW();
+    await FLUSH();
+    expect(pane.style.display).toBe("none");
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    done();
+  });
+
+  it("on macOS, Cmd+W in a drill-in page's text field leaves the page by its back arrow", async () => {
+    setPlatform("mac");
+    const { api, root, app, done } = await attached(1);
+    app.openDashboard();
+    const filter = root.querySelector<HTMLInputElement>(".chappa-dash-filter")!;
+    filter.focus();
+    expect(document.activeElement).toBe(filter);
+    filter.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true }));
+    await FLUSH();
+    expect(root.querySelector(".chappa-dashboard-open")!.classList.contains("open")).toBe(false);
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    // With the panes back on screen, the next Cmd+W closes the active one.
+    await nextPress();
+    press({ key: "w", metaKey: true });
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledWith(1);
+    done();
+  });
+
+  it("on macOS, Cmd+W in a dialog's text field closes the dialog as Escape does", async () => {
+    setPlatform("mac");
+    const { api, root, done } = await attached(1);
+    const answer = promptDialog("Name?", { container: root });
+    const input = root.querySelector<HTMLInputElement>(".chappa-dialog-input")!;
+    expect(document.activeElement).toBe(input);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true }));
+    expect(await answer).toBeNull();
+    expect(root.querySelector(".chappa-dialog-backdrop")).toBeNull();
+    await FLUSH();
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    done();
+  });
+
+  it("on macOS, Cmd+W in a text field beside the panes, or in the terminal, closes the active pane", async () => {
+    setPlatform("mac");
+    const { api, root, app, done } = await attached(2);
+    // The find bar of the pane on screen: a text field in the main area.
+    const entries = (app as unknown as { entries: Map<number, RailEntry> }).entries;
+    (entries.get(2)!.panel as unknown as { openSearch(): void }).openSearch();
+    // Opening the bar focuses its field.
+    const find = document.activeElement as HTMLInputElement;
+    expect(find.placeholder).toBe("Search…");
+    expect(root.contains(find)).toBe(true);
+    find.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true }));
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledWith(2);
+
+    // In the terminal itself: unchanged.
+    await nextPress();
+    const term = root.querySelector<HTMLTextAreaElement>(".chappa-textarea")!;
+    term.focus();
+    term.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true }));
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledWith(1);
+    done();
+  });
+
+  it("elsewhere, Ctrl+Shift+W in a Settings text field still closes the active pane", async () => {
+    setPlatform("other");
+    const { api, root, app, done } = await attached(1);
+    root.querySelector<HTMLButtonElement>(".chappa-rail-gear")!.click();
+    const field = app.settingsPaneElement!.querySelector<HTMLInputElement>('input[type="text"]')!;
+    field.focus();
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "W", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await FLUSH();
+    expect(api.closeTerminal).toHaveBeenCalledWith(1);
+    expect(app.settingsPaneElement!.style.display).toBe("flex");
+    done();
+  });
+
   it("leaves Ctrl+W to the terminal elsewhere and closes with Ctrl+Shift+W", async () => {
     setPlatform("other");
     const { api } = stubApi();
@@ -543,6 +665,9 @@ describe("closing the pane by key", () => {
 function panelDispose(app: App): void {
   // Teardown without tripping the confirm dialogs: close all directly.
   (app as unknown as { entries: Map<number, RailEntry> }).entries.forEach((e) => e.panel.dispose());
+  // A finished test's app must not hear the next test's keys: one press
+  // reaching two apps acts twice (a page closed by one, the pane by the other).
+  window.removeEventListener("keydown", (app as unknown as { onWindowKeydown: (e: KeyboardEvent) => void }).onWindowKeydown);
 }
 
 // --- project view --------------------------------------------------

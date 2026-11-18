@@ -202,8 +202,9 @@ pub fn run() {
                 timers.set_hold(std::sync::Arc::new(registry.clone()));
                 data_safety::spawn_watch(sources, registry, app.handle().clone());
             }
-            // The control surface (127.0.0.1:8324, bearer token) —
-            // ALL builds; the chappa-ai-mcp stdio server talks to this.
+            // The control surface (127.0.0.1:8324, or an OS-chosen port
+            // under a profile; bearer token) — ALL builds; the chappa-ai-mcp
+            // stdio server talks to this.
             control_http::start(
                 control_http::ControlState {
                     registry: app.state::<Registry>().inner().clone(),
@@ -220,6 +221,7 @@ pub fn run() {
                     ..control_http::ControlState::default()
                 },
                 config_dir,
+                control_http::bind_for(profile.as_ref()),
             );
             // The one process-stats poller. It parks immediately (the
             // registry is empty at setup) and is woken by the first terminal.

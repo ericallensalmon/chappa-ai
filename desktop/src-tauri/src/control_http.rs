@@ -14,8 +14,15 @@
 //! EVERY request must carry `Authorization: Bearer <token>` — `GET /` too —
 //! except `GET /identity`.
 //!
+//! ## Port
+//! The everyday app binds the fixed [`BIND`]. A run under a separate profile
+//! (`CHAPPA_PROFILE_DIR`) binds an OS-chosen loopback port instead
+//! ([`PROFILE_BIND`]), so it can run beside the everyday app with a control
+//! surface of its own; its clients find the port in the profile's endpoint
+//! file, the same file that proves the server's identity. See [`bind_for`].
+//!
 //! ## Identity
-//! The port is fixed, so another local program can hold it first. After a
+//! Another local program can hold the port first. After a
 //! successful bind the app writes `<app-config>/control_endpoint` (owner-only,
 //! like the token) with the bound address and a per-run nonce, and answers
 //! the tokenless `GET /identity?challenge=…` with a proof keyed by the token.
@@ -63,7 +70,12 @@ use crate::settings::SettingsState;
 use crate::timers::TimerService;
 use crate::timers_http as timers;
 
+/// The everyday app's address: fixed, so clients without an endpoint file
+/// (a curl, an older client) still know where to look.
 pub const BIND: &str = "127.0.0.1:8324";
+/// A separate profile's address: loopback, port chosen by the OS. The port
+/// is published only in the profile's endpoint file.
+pub const PROFILE_BIND: &str = "127.0.0.1:0";
 pub const TOKEN_FILE: &str = "control_token";
 /// `<app-config>/control_endpoint` (written on each successful bind) and the
 /// one tokenless route. Defined in the MCP crate, which owns the client side
@@ -796,10 +808,30 @@ pub fn retire_stale_endpoint(config_dir: &Path, token: &str) -> bool {
 
 // ---- server -----------------------------------------------------------------
 
-/// App entry point: load/create the token and serve on [`BIND`] from its own
-/// thread. A bind failure is loud but not fatal (the app still runs; only
-/// the control surface is missing).
-pub fn start(mut state: ControlState, config_dir: PathBuf) {
+/// The address to bind: [`BIND`] for the everyday app, [`PROFILE_BIND`] when
+/// the run has a separate profile.
+pub fn bind_for(profile: Option<&crate::profile::Profile>) -> &'static str {
+    if profile.is_some() {
+        PROFILE_BIND
+    } else {
+        BIND
+    }
+}
+
+/// The endpoint file in `config_dir` when it names a live instance that
+/// proves it holds `token`, else `None`. Never sends the token.
+fn live_endpoint(config_dir: &Path, token: &str) -> Option<chappa_ai_mcp::Endpoint> {
+    let path = endpoint_path(config_dir);
+    if !path.exists() {
+        return None;
+    }
+    chappa_ai_mcp::identity::probe_endpoint(&path, token, Duration::from_secs(2)).ok()
+}
+
+/// App entry point: load/create the token and serve on `bind` (see
+/// [`bind_for`]) from its own thread. A bind failure is loud but not fatal
+/// (the app still runs; only the control surface is missing).
+pub fn start(mut state: ControlState, config_dir: PathBuf, bind: &'static str) {
     state.config_dir = config_dir.clone();
     std::thread::spawn(move || {
         let token = match load_or_create_token(&config_dir) {
@@ -810,47 +842,81 @@ pub fn start(mut state: ControlState, config_dir: PathBuf) {
                 return;
             }
         };
-        let server = match tiny_http::Server::http(BIND) {
-            Ok(server) => server,
-            Err(err) => {
-                retire_stale_endpoint(&config_dir, &token);
-                // LOUD (review): the overwhelmingly likely cause is a SECOND
-                // chappa-ai already holding 8324 — in which case every agent
-                // tool call lands in the OTHER instance, which looks like the
-                // app ignoring commands rather than a bind failure. `GET /`
-                // reports pid + config dir so the winner can be identified.
-                log::error!(
-                    "[control_http] FAILED TO BIND {BIND}: {err} — the control surface \
-                     (and every chappa-ai-mcp agent tool) is DEAD in this instance. \
-                     Another chappa-ai is probably already running and holding the port; \
-                     `GET /` on {BIND} names the pid and config dir of whichever one did bind."
-                );
-                eprintln!("[control_http] failed to bind {BIND}: {err}");
-                return;
-            }
+        let Some((server, identity)) = bind_and_publish(&config_dir, bind, &token) else {
+            return;
         };
-        // Bound: publish who we are. Without the endpoint file clients refuse
-        // to talk to us (they cannot tell us from an impostor), so a failure
-        // here is loud; any older file is removed rather than left to name
-        // a previous run.
-        let identity = match ServerIdentity::for_server(&server, &token) {
-            Ok(identity) => Arc::new(identity),
-            Err(err) => {
-                log::error!("[control_http] cannot create the instance identity: {err}");
-                return;
-            }
-        };
-        if let Err(err) = publish_endpoint(&config_dir, &identity) {
-            let _ = std::fs::remove_file(endpoint_path(&config_dir));
-            log::error!(
-                "[control_http] cannot write {ENDPOINT_FILE}: {err} — chappa-ai-mcp will refuse \
-                 to connect to this instance"
-            );
-        }
+        eprintln!("[control_http] control surface on http://{}", identity.addr);
         state.identity = Some(identity);
-        eprintln!("[control_http] control surface on http://{BIND}");
         serve(server, state, token);
     });
+}
+
+/// Bind `bind` and publish this run in `config_dir`'s endpoint file; `None`
+/// (logged) when this instance gets no control surface.
+///
+/// With an OS-chosen port no bind conflict can tell a second copy of the
+/// same profile that the first is running, so that is checked first: when
+/// the endpoint file names a live instance, this one binds nothing and
+/// leaves the file to it, as a second copy on the fixed port would.
+pub fn bind_and_publish(
+    config_dir: &Path,
+    bind: &str,
+    token: &str,
+) -> Option<(tiny_http::Server, Arc<ServerIdentity>)> {
+    if bind == PROFILE_BIND {
+        if let Some(ep) = live_endpoint(config_dir, token) {
+            log::error!(
+                "[control_http] another copy of this profile (pid {:?}) serves the control \
+                 surface at {}; this one has none, and every chappa-ai-mcp agent tool \
+                 reaches the other copy",
+                ep.pid,
+                ep.addr
+            );
+            eprintln!(
+                "[control_http] this profile is already served at {}",
+                ep.addr
+            );
+            return None;
+        }
+    }
+    let server = match tiny_http::Server::http(bind) {
+        Ok(server) => server,
+        Err(err) => {
+            retire_stale_endpoint(config_dir, token);
+            // LOUD (review): the overwhelmingly likely cause is a SECOND
+            // chappa-ai already holding the fixed port — in which case every
+            // agent tool call lands in the OTHER instance, which looks like
+            // the app ignoring commands rather than a bind failure. `GET /`
+            // reports pid + config dir so the winner can be identified.
+            log::error!(
+                "[control_http] FAILED TO BIND {bind}: {err} — the control surface \
+                 (and every chappa-ai-mcp agent tool) is DEAD in this instance. \
+                 Another chappa-ai is probably already running and holding the port; \
+                 `GET /` on {bind} names the pid and config dir of whichever one did bind."
+            );
+            eprintln!("[control_http] failed to bind {bind}: {err}");
+            return None;
+        }
+    };
+    // Bound: publish who we are. Without the endpoint file clients refuse
+    // to talk to us (they cannot tell us from an impostor), so a failure
+    // here is loud; any older file is removed rather than left to name
+    // a previous run.
+    let identity = match ServerIdentity::for_server(&server, token) {
+        Ok(identity) => Arc::new(identity),
+        Err(err) => {
+            log::error!("[control_http] cannot create the instance identity: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = publish_endpoint(config_dir, &identity) {
+        let _ = std::fs::remove_file(endpoint_path(config_dir));
+        log::error!(
+            "[control_http] cannot write {ENDPOINT_FILE}: {err} — chappa-ai-mcp will refuse \
+             to connect to this instance"
+        );
+    }
+    Some((server, identity))
 }
 
 /// Serve forever on an already-bound server (tests bind an ephemeral port),
@@ -1051,7 +1117,9 @@ fn route_table(state: &ControlState, _: &Params, _: &str, _: &str) -> Resp {
         200,
         json!({
             "service": "chappa-ai control surface",
-            "bind": BIND,
+            // The address actually bound: the fixed one, or a profile's
+            // OS-chosen port.
+            "bind": state.identity.as_deref().map_or(BIND, |i| i.addr.as_str()),
             "auth": "Authorization: Bearer <contents of <app-config>/control_token>",
             // WHICH instance answered. 8324 is a single fixed port: when two
             // chappa-ai builds are open, one loses the bind and the other
@@ -1755,7 +1823,9 @@ pub fn render_api_doc() -> String {
         "Regenerate: `CONTROL_API_WRITE=1 cargo test -p chappa-ai-desktop control_api_doc`.\n\n",
     );
     out.push_str(&format!(
-        "Bound to `http://{BIND}` in every build. Every request must carry\n\
+        "Bound to `http://{BIND}` in every build; a run under `CHAPPA_PROFILE_DIR` binds\n\
+         `127.0.0.1` on a port the OS chooses instead and publishes it only in that profile's\n\
+         endpoint file (below). Every request must carry\n\
          `Authorization: Bearer <token>` where the token is the contents of\n\
          `<app-config>/control_token` (created at first launch, owner-only permissions;\n\
          `<app-config>` is Tauri's app config dir for `com.chappa-ai.desktop`, e.g.\n\

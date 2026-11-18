@@ -479,6 +479,9 @@ export interface AgentReapEvent {
 export interface AgentToolsListingDto {
   tools: AgentToolDto[];
   machine_mode_types: readonly AgentToolType[];
+  /** The absolute path of the `chappa-ai-mcp` binary the app found beside
+   *  itself or on PATH; `null` when none resolved. Absent outside Tauri. */
+  mcp_server?: string | null;
 }
 
 export function listAgentTools(): Promise<AgentToolsListingDto> {

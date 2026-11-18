@@ -379,7 +379,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_interactive_read_runs_the_shell_with_its_flags_and_ignores_the_noise() {
-        use std::os::unix::fs::PermissionsExt;
         // A shell whose PATH line only an interactive start prints, among
         // the kind of noise an interactive profile makes.
         let dir = tempfile::tempdir().unwrap();
@@ -396,8 +395,7 @@ mod tests {
             "fi".to_owned(),
         ]
         .join("\n");
-        std::fs::write(&shell, script).unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        stack_core::test_support::write_executable(&shell, &script);
         let timeout = Duration::from_secs(5);
         assert_eq!(read_login_path(shell.as_os_str(), false, timeout), None);
         assert_eq!(
@@ -439,11 +437,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_stuck_or_failing_shell_reads_as_nothing_within_the_timeout() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let stuck = dir.path().join("stuck-shell");
-        std::fs::write(&stuck, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).unwrap();
+        stack_core::test_support::write_executable(&stuck, "#!/bin/sh\nsleep 30\n");
         let started = std::time::Instant::now();
         assert_eq!(
             read_login_path(stuck.as_os_str(), false, Duration::from_millis(300)),
@@ -456,8 +452,10 @@ mod tests {
         );
 
         let failing = dir.path().join("failing-shell");
-        std::fs::write(&failing, "#!/bin/sh\necho no path here\nexit 1\n").unwrap();
-        std::fs::set_permissions(&failing, std::fs::Permissions::from_mode(0o700)).unwrap();
+        stack_core::test_support::write_executable(
+            &failing,
+            "#!/bin/sh\necho no path here\nexit 1\n",
+        );
         assert_eq!(
             read_login_path(failing.as_os_str(), true, Duration::from_secs(5)),
             None

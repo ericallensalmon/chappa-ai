@@ -182,6 +182,10 @@ export class AgentToolsStore {
   /** The tool types with a machine mode, as Rust reports them
    *  (`list_agent_tools.machine_mode_types`) — no frontend copy. */
   private machineModeTypes: AgentToolType[] = [];
+  /** `list_agent_tools.mcp_server`: the MCP server's absolute path, `null`
+   *  when the app found none, `undefined` while unknown (not loaded yet, or
+   *  outside Tauri). */
+  private mcpServerPath: string | null | undefined = undefined;
   private loaded = false;
   private readonly subs = new Set<(tools: AgentTool[]) => void>();
 
@@ -208,11 +212,18 @@ export class AgentToolsStore {
     return this.machineModeTypes.includes(toolType);
   }
 
+  /** The MCP server binary's absolute path as the app resolved it; `null`
+   *  when nothing resolved, `undefined` while unknown. */
+  mcpServer(): string | null | undefined {
+    return this.mcpServerPath;
+  }
+
   async load(): Promise<AgentTool[]> {
     try {
       const listing = await this.api.listAgentTools();
       this.tools = listing.tools;
       this.machineModeTypes = [...listing.machine_mode_types];
+      this.mcpServerPath = listing.mcp_server;
       this.loaded = true;
     } catch {
       this.tools = [];

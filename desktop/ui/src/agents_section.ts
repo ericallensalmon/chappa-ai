@@ -118,6 +118,7 @@ export class AgentsSection {
   private readonly maxWaitInput: HTMLInputElement;
   private readonly staleInput: HTMLInputElement;
   private readonly reapInput: HTMLInputElement;
+  private readonly mcpNote: HTMLDivElement;
   private listSig = "\u0000never";
   private unsubscribe: (() => void) | null = null;
   private unsubscribeSettings: (() => void) | null = null;
@@ -205,6 +206,12 @@ export class AgentsSection {
     registryBody.appendChild(
       hint("Paste a tool command; the fields are detected (docker exec -u/-w/-it/-e, container, program, -m model)."),
     );
+    // Where the MCP server is: the full path to register an agent CLI with,
+    // or the news that there is none to point at.
+    this.mcpNote = hint("");
+    this.mcpNote.className = "chappa-agent-mcp";
+    this.mcpNote.style.display = "none";
+    registryBody.appendChild(this.mcpNote);
 
     // The agent knobs: the ready gate, bridge staleness, the orphan reaper.
     const knobs = settingsSection("Agent behavior");
@@ -271,6 +278,12 @@ export class AgentsSection {
     this.element.remove();
   }
 
+  private syncMcpNote(): void {
+    const text = mcpServerNote(this.store.mcpServer());
+    this.mcpNote.textContent = text ?? "";
+    this.mcpNote.style.display = text === null ? "none" : "";
+  }
+
   /** The open edit modal, for tests. */
   get modalElement(): HTMLDivElement | null {
     return this.modal;
@@ -279,6 +292,7 @@ export class AgentsSection {
   // --- list ------------------------------------------------------------------
 
   sync(tools: AgentTool[]): void {
+    this.syncMcpNote();
     // EVERY field signs, not just the rendered ones: the row is only rebuilt
     // on a signature change, and an edit of program/args/env/max_busy that
     // left the old (rendered-fields-only) signature alone kept a row whose
@@ -903,6 +917,21 @@ export class AgentsSection {
     this.modal = wrap;
     nameInput.focus();
   }
+}
+
+/** The MCP server note's text: the registration line with the full path
+ *  (quoted, so a folder with spaces stays one argument), or why there is
+ *  none. `undefined` (not known yet) shows nothing. */
+export function mcpServerNote(path: string | null | undefined): string | null {
+  if (path === undefined) return null;
+  if (path === null) {
+    return (
+      "MCP server: chappa-ai-mcp was not found beside the app or on PATH, so agents cannot reach the app " +
+      "through it, and Claude tools get no session hook. " +
+      "Install it beside the app or on PATH and restart."
+    );
+  }
+  return `MCP server: ${path}. Register it with an agent CLI by this full path, e.g. claude mcp add chappa-ai -- "${path}"`;
 }
 
 function hint(text: string): HTMLDivElement {

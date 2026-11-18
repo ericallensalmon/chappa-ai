@@ -36,6 +36,7 @@ use project_model::projects::ProjectStore;
 use project_model::records::{Run, Session, SessionSource, TailKind};
 use project_model::workspace::WorkspaceStore;
 use serde_json::{json, Value};
+use stack_core::test_support::write_executable;
 use term_core::actor::ActorConfig;
 use term_core::pty::PtySpec;
 use term_core::status::ProcessStatus;
@@ -177,18 +178,6 @@ fn fake_json_cli(dir: &std::path::Path) -> (String, Vec<String>) {
         write_executable(&script, &body);
         (script.to_string_lossy().into_owned(), Vec::new())
     }
-}
-
-#[cfg(unix)]
-fn write_executable(path: &std::path::Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-}
-
-#[cfg(not(unix))]
-fn write_executable(path: &std::path::Path, body: &str) {
-    std::fs::write(path, body).unwrap();
 }
 
 fn wait_until<T>(mut pred: impl FnMut() -> Option<T>) -> T {

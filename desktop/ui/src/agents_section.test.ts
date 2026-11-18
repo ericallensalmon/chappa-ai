@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { SettingsPane } from "./settings_pane";
-import { AgentsSection } from "./agents_section";
+import { AgentsSection, mcpServerNote } from "./agents_section";
 import {
   AgentToolsStore,
   CLAUDE_ALT_SCREEN_ENV,
@@ -9,6 +9,7 @@ import {
   templateFor,
   type AgentTool,
   type AgentToolsApi,
+  type AgentToolsListing,
 } from "./agent_tools";
 import { stubSettings } from "./term/test-utils";
 
@@ -414,5 +415,50 @@ describe("Agents settings section", () => {
     expect(pane.agentsSection.modalElement).toBeNull();
     expect(pane.isOpen()).toBe(true);
     pane.dispose();
+  });
+});
+
+describe("the MCP server note", () => {
+  async function withServer(mcp_server: string | null | undefined) {
+    const listing: AgentToolsListing = {
+      tools: [],
+      machine_mode_types: ["claude"],
+      ...(mcp_server === undefined ? {} : { mcp_server }),
+    };
+    const api: AgentToolsApi = { ...fakeApi([]), listAgentTools: async () => listing };
+    const store = new AgentToolsStore(api);
+    const settings = stubSettings();
+    await settings.store.load();
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const el = new AgentsSection({ store, settings: settings.store, modalContainer: host });
+    host.appendChild(el.element);
+    el.activate();
+    await FLUSH();
+    return { host, section: el, note: host.querySelector<HTMLElement>(".chappa-agent-mcp")! };
+  }
+
+  it("shows the full path to register, quoted so a folder with spaces stays one argument", async () => {
+    const path = "/Applications/chappa ai.app/Contents/MacOS/chappa-ai-mcp";
+    const { note, section: s } = await withServer(path);
+    expect(note.style.display).toBe("");
+    expect(note.textContent).toContain(`MCP server: ${path}.`);
+    expect(note.textContent).toContain(`claude mcp add chappa-ai -- "${path}"`);
+    s.dispose();
+  });
+
+  it("says so when the app found no server", async () => {
+    const { note, section: s } = await withServer(null);
+    expect(note.style.display).toBe("");
+    expect(note.textContent).toContain("not found beside the app or on PATH");
+    expect(note.textContent).toContain("no session hook");
+    s.dispose();
+  });
+
+  it("shows nothing while the path is unknown", async () => {
+    const { note, section: s } = await withServer(undefined);
+    expect(note.style.display).toBe("none");
+    expect(mcpServerNote(undefined)).toBeNull();
+    s.dispose();
   });
 });

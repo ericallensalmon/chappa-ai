@@ -21,6 +21,7 @@ import { TerminalPanel, tauriApi, type OpenPathTarget, type PanelHost, type Term
 import { TranscriptPanel } from "./transcript";
 import { isPanelShortcut, isProjectShortcut, quotePaths } from "./term/input";
 import { shortcutLabel } from "./platform";
+import { closeForCmdW } from "./close_shortcut";
 import { baseFor, type Mount, type PathBase } from "./term/paths";
 import { openFileTarget, tauriFileOpener, type FileOpenerApi } from "./open_file";
 import { SettingsPane, type SettingsTab } from "./settings_pane";
@@ -3094,17 +3095,37 @@ export class App {
   };
 
   /**
-   * The close-pane shortcut (Mod+Shift+W, and Cmd+W on macOS) and the macOS
-   * menu's Close Pane: close the active pane, with the usual confirmation
-   * for a running one. One Cmd+W can reach both the page's keydown and the
-   * native menu's key equivalent, so a second request right after the first
-   * is the same press and is ignored: it must not close the next pane too.
+   * The close-pane shortcut (Mod+Shift+W): close the active pane, with the
+   * usual confirmation for a running one.
    */
   closeActiveByShortcut(): void {
-    const now = performance.now();
-    if (now - this.lastCloseShortcutAt < CLOSE_SHORTCUT_REPEAT_MS) return;
-    this.lastCloseShortcutAt = now;
+    if (!this.firstCloseRequest()) return;
     if (this.activeId !== null) void this.closePanel(this.activeId);
+  }
+
+  /**
+   * Cmd+W on macOS, from the key or from the menu bar's Close Pane (which
+   * carries the same key): it closes what is in front, never something
+   * hidden behind it. With the focus in a dialog, or a page (Settings, a
+   * view, a drill-in page) on screen, that is the dialog or page, as its
+   * Escape or back arrow would; otherwise the active pane, as
+   * {@link closeActiveByShortcut}. `focus` is where the key was pressed.
+   */
+  closeByCmdW(focus: Element | null = document.activeElement): void {
+    if (!this.firstCloseRequest()) return;
+    closeForCmdW(focus, () => {
+      if (this.activeId !== null) void this.closePanel(this.activeId);
+    });
+  }
+
+  /** One Cmd+W can reach both the page's keydown and the native menu's key
+   *  equivalent, so a request right after another is the same press and is
+   *  ignored: it must not close the next pane (or page) too. */
+  private firstCloseRequest(): boolean {
+    const now = performance.now();
+    if (now - this.lastCloseShortcutAt < CLOSE_SHORTCUT_REPEAT_MS) return false;
+    this.lastCloseShortcutAt = now;
+    return true;
   }
 
   private lastCloseShortcutAt = -Infinity;
@@ -3133,7 +3154,11 @@ export class App {
       if (e.key === "PageUp") this.cycle(-1);
       else if (e.key === "PageDown") this.cycle(1);
       else if (e.key.toLowerCase() === "t") void this.newShell();
-      else if (e.key.toLowerCase() === "w") this.closeActiveByShortcut();
+      else if (e.key.toLowerCase() === "w" && e.shiftKey) this.closeActiveByShortcut();
+      // Unshifted, only macOS's Cmd+W gets here (isPanelShortcut).
+      else if (e.key.toLowerCase() === "w") {
+        this.closeByCmdW(e.target instanceof Element ? e.target : document.activeElement);
+      }
       return;
     }
     if (isProjectShortcut(e)) {
@@ -3218,9 +3243,9 @@ export class App {
     on<{ paths?: string[] }>("tauri://drag-drop", (p) => {
       this.handleFileDrop(p.paths ?? []);
     });
-    // The macOS menu bar's File ▸ Close Pane (Cmd+W): the pane, never the
-    // window.
-    on<unknown>(ipc.MENU_CLOSE_PANE_EVENT, () => this.closeActiveByShortcut());
+    // The macOS menu bar's File ▸ Close Pane (Cmd+W): what is in front
+    // (a dialog, a page, else the pane), never the window.
+    on<unknown>(ipc.MENU_CLOSE_PANE_EVENT, () => this.closeByCmdW());
     // OSC 9/777/99 notifications: the Rust pump no longer toasts on its own
     // — everything routes through the decision function.
     on<ipc.TerminalEventDto>("term://notify", (p) => this.applyNotify(p));

@@ -438,8 +438,12 @@ fn the_control_row_keeps_its_exact_wire_shape() {
     assert_eq!(status, 200, "{spawned}");
     let id = spawned["id"].as_u64().unwrap();
     wait_for_text(&addr, &token, id, "a b c");
+    // The screen can show the echo before the event pump has turned
+    // `starting` into `running`; every comparison below needs the settled
+    // state, so wait for it rather than for time.
+    wait_for_status(&addr, &token, id, "running");
 
-    let (_, row) = http(&addr, "GET", &format!("/processes/{id}"), Some(&token), "");
+    let (row, rail_row, list) = consistent_reads(&addr, &token, &registry, id);
     let keys: Vec<&str> = row
         .as_object()
         .unwrap()
@@ -481,14 +485,59 @@ fn the_control_row_keeps_its_exact_wire_shape() {
     assert_eq!(row["rows"], 12);
     // The status string is the status vocabulary, exactly as the rail listing
     // reports it for the same terminal (same `Entry` → snapshot conversion).
-    let rail = registry.list();
-    let rail_row = rail.iter().find(|r| r.id as u64 == id).expect("rail row");
+    assert_eq!(row["status"], "running");
     assert_eq!(row["status"], rail_row.status_str());
     assert_eq!(row["exit_code"], json!(rail_row.exit_code));
     // And the listing carries the identical object.
-    let (_, list) = http(&addr, "GET", "/processes", Some(&token), "");
     assert_eq!(list[0], row);
     registry.close(id as u32);
+}
+
+/// Poll the control row until its `status` is `want` (or panic after 10s).
+fn wait_for_status(addr: &str, token: &str, id: u64, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, row) = http(addr, "GET", &format!("/processes/{id}"), Some(token), "");
+        if row["status"] == want {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "status never became {want:?}; last row: {row}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The control row, the rail row and the control listing, read so that all
+/// three describe the same moment: the row is read again after the other two
+/// and the set is retaken until nothing moved in between (a shell prompt
+/// drawn late bumps `seq` and the output counters). Panics after 10s.
+fn consistent_reads(
+    addr: &str,
+    token: &str,
+    registry: &Registry,
+    id: u64,
+) -> (Value, term_core::status::TerminalSnapshot, Value) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, before) = http(addr, "GET", &format!("/processes/{id}"), Some(token), "");
+        let rail_row = registry
+            .list()
+            .into_iter()
+            .find(|r| r.id as u64 == id)
+            .expect("rail row");
+        let (_, list) = http(addr, "GET", "/processes", Some(token), "");
+        let (_, after) = http(addr, "GET", &format!("/processes/{id}"), Some(token), "");
+        if before == after && list[0] == after {
+            return (after, rail_row, list);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row never held still: {before} vs {after}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The server runs a FIXED pool of worker threads (no thread per request):
@@ -848,4 +897,82 @@ fn a_failed_bind_retires_only_a_stale_endpoint_file() {
 
     // No file: nothing to do.
     assert!(!control_http::retire_stale_endpoint(dead.path(), token));
+}
+
+// ---- the address a profile binds ----------------------------------------------
+
+#[test]
+fn only_a_separate_profile_binds_an_os_chosen_port() {
+    assert_eq!(control_http::bind_for(None), control_http::BIND);
+    assert_eq!(control_http::BIND, "127.0.0.1:8324");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().as_os_str();
+    let profile = app_lib::profile::Profile::from_value(Some(root), Path::new("/")).unwrap();
+    assert_eq!(control_http::bind_for(Some(&profile)), "127.0.0.1:0");
+    assert_eq!(
+        control_http::bind_for(Some(&profile)),
+        control_http::PROFILE_BIND
+    );
+}
+
+#[test]
+fn a_profile_publishes_its_os_chosen_port_and_a_second_copy_leaves_it() {
+    let config = tempfile::tempdir().unwrap();
+    let token = "t0ken-for-profile";
+    let bind = control_http::PROFILE_BIND;
+    let bound_server = control_http::bind_and_publish(config.path(), bind, token);
+    let (server, identity) = bound_server.expect("a free loopback port binds");
+    let bound = server.server_addr().to_ip().unwrap();
+    assert!(bound.ip().is_loopback(), "{bound}");
+    assert_ne!(bound.port(), 0);
+    assert_ne!(bound.port(), 8324);
+    assert_eq!(identity.addr, bound.to_string());
+    let state = ControlState {
+        identity: Some(identity.clone()),
+        config_dir: config.path().to_owned(),
+        ..ControlState::default()
+    };
+    let t = token.to_owned();
+    std::thread::spawn(move || control_http::serve(server, state, t));
+
+    // The endpoint file names the port, and the server there proves it is
+    // this run: what a client checks before it sends the token.
+    let file = control_http::endpoint_path(config.path());
+    let ep = chappa_ai_mcp::identity::probe_endpoint(&file, token, Duration::from_secs(5))
+        .expect("the published endpoint answers the identity check");
+    assert_eq!(ep.addr, bound.to_string());
+    assert_eq!(ep.nonce, identity.nonce);
+    // `GET /` reports the address it really bound.
+    let (status, table) = http(&ep.addr, "GET", "/", Some(token), "");
+    assert_eq!(status, 200);
+    assert_eq!(table["bind"], bound.to_string());
+
+    // A second copy of the same profile binds nothing and keeps the file.
+    let before = std::fs::read_to_string(&file).unwrap();
+    assert!(control_http::bind_and_publish(config.path(), bind, token).is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn a_profile_replaces_a_dead_runs_endpoint_file() {
+    let config = tempfile::tempdir().unwrap();
+    let token = "t0ken-for-profile";
+    // A run that published and then went away: nothing listens there.
+    let dead = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    let stale = chappa_ai_mcp::Endpoint {
+        addr: dead.to_string(),
+        nonce: "an-old-run".into(),
+        pid: Some(1),
+    };
+    let file = control_http::endpoint_path(config.path());
+    std::fs::write(&file, stale.to_json()).unwrap();
+    let bind = control_http::PROFILE_BIND;
+    let bound_server = control_http::bind_and_publish(config.path(), bind, token);
+    let (_server, identity) = bound_server.expect("a dead run does not block the bind");
+    let ep = chappa_ai_mcp::identity::read_endpoint_file(&file).unwrap();
+    assert_eq!(ep.addr, identity.addr);
+    assert_ne!(ep.nonce, "an-old-run");
 }
