@@ -24,7 +24,8 @@
 //! | [`runjob`] | `run-job`: one stored job, start to finish |
 //! | [`procs`] | the process table of process components |
 //! | [`background`] | registry digests, engine facts and script components' status and plan output, refreshed off the status path |
-//! | [`relay`] | the gateway-only TCP relay |
+//! | [`relay`] | the gateway-only TCP relay and its peer check |
+//! | [`relay_firewall`] | the relay's Windows Firewall check and its one-step allow |
 //! | [`timeouts`] | the per-step time limits |
 //! | [`world`] | every outside tool as a shareable trait object, real or fake |
 //! | [`workspaces`] | item workspaces: Start work, worktrees, activate, archive, drift, served as overlays on a tracker's Work rows |
@@ -45,6 +46,7 @@ pub mod procs;
 pub mod project;
 pub mod records;
 pub mod relay;
+pub mod relay_firewall;
 pub mod reviews;
 pub mod runjob;
 pub mod secret_scan;

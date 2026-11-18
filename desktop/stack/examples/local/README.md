@@ -76,15 +76,48 @@ While the instance has something running, the stack runner then listens
 on that engine's gateway address, once per published port, and forwards
 each connection to `127.0.0.1:<same port>`. It never listens on `0.0.0.0`.
 
+**Only the container network.** When a listener binds, the relay looks
+up the interface that owns the gateway address and its prefix (again on
+every bind: the docker NAT subnet moves, within `172.16.0.0/12`), and it
+closes every connection from a peer outside that prefix at once. The
+Environment's Relay section shows the network each gateway serves and how
+many connections it refused from outside the container network.
+
 **Windows Firewall.** The relay is a real listener on an address other
-than loopback, so the first time it starts, Windows Firewall asks whether
-to allow `chappa-stack` on the network. Choose **Allow** (private
-networks are enough: the gateway is a virtual adapter on this machine).
-Without it the containers' connections to the relay are dropped and the
-components that use it cannot reach the host. The stack runner's other
-checks (whether a port is free) only bind a socket without listening, so
-they never raise this prompt. This example does not use `relay:` (`api`
-reaches the database through `{host}`), so it never asks.
+than loopback, so it needs an inbound firewall rule. Without one, the first
+listener raises the system's allow-access prompt, and a Cancel there leaves
+a Block rule that silently drops the containers' connections from then on.
+So whenever the relay's gateway or ports change, and whenever it binds, the
+stack runner checks (read-only, never elevated) and says what it found as
+a warning on the Environment view:
+
+- no rule named `Chappa'Ai relay` for the running `chappa-stack` program,
+  or one whose program, ports, remote range or profiles do not match;
+- a Block rule for the program (from a cancelled prompt);
+- a gateway outside `172.16.0.0/12`, which the rule does not cover;
+- an interface with forwarding or weak-host receive on: then binding the
+  gateway address alone no longer keeps other networks away (the peer check
+  still closes their connections).
+
+The first two come with **Allow the relay through Windows Firewall**. Its
+confirm shows the exact command, which runs elevated after one Windows
+permission prompt: it removes an older `Chappa'Ai relay` rule and the
+program's inbound Block rules, then adds an inbound TCP allow rule for the
+program, on every profile, from `172.16.0.0/12`, on the stack's whole port
+range (every slot, so bringing up another slot asks nothing new) plus any
+explicit ports the replaced rule had. The check runs again when it ends.
+The Relay section offers **Remove the relay's firewall rule** for cleanup.
+If PowerShell cannot run the check, the view says so once; the relay keeps
+running. Nothing is changed without that confirm.
+
+Optional hardening by hand: inbound Block rules for the program on the
+physical adapters (`-InterfaceAlias`). The stack runner does not add them,
+because adapters come and go and such rules need upkeep.
+
+The stack runner's other checks (whether a port is free) only bind a
+socket without listening, so they never raise the system prompt. This
+example does not use `relay:` (`api` reaches the database through
+`{host}`), so it never asks.
 
 ## The database password
 

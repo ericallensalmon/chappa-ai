@@ -14,9 +14,9 @@
 //! | `badges` | staleness (`newer prebuilt`, `behind 2` …), "no data-safety check" on an unscanned persistent component, the data-safety state of a checked one, the mode |
 //! | `actions` | the component's verbs, its data-safety check, its `logs` terminal, its links |
 //! | `alerts` | red components with their cause, engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check, data that is not clean (`bad`) or not checked (`warn` under `unscanned: warn`) |
-//! | `facts` | the stack (instance, slot, port block, bound item, channel), engines and versions, the memory budget, relay listeners, data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
+//! | `facts` | the stack (instance, slot, port block, bound item, channel), engines and versions, the memory budget, relay listeners, which peers each gateway serves and how many it refused, the relay's Windows Firewall state (added by the server, with the remove-rule action), data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
 //! | `freshness.notices` | who reports a script's rows and runs their actions, and how many reported links were left out, once for the whole view |
-//! | `banners` | definition warnings or errors; the hosts-file fix; agents blocked by data safety (with the acknowledge action) |
+//! | `banners` | definition warnings or errors; the hosts-file fix; the relay's Windows Firewall findings (added by the server, see [`crate::relay_firewall`]); agents blocked by data safety (with the acknowledge action) |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //! | `secretScan` | the instance's secret-scan block, added by the server with its alerts, banner and facts section (see [`crate::secret_scan`]) |
 //!
@@ -736,6 +736,13 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
             .iter()
             .map(|w| row(&w.engine, format!("{} → {}", w.bind, w.target)))
             .collect();
+        for g in &relay.guards {
+            let mut r = row(&format!("{} at {}", g.engine, g.gateway), g.summary());
+            if g.refused > 0 {
+                r["badges"] = json!([badge("refused", "warn", None)]);
+            }
+            rows.push(r);
+        }
         for (engine, why) in &relay.not_needed {
             rows.push(row(engine, why.clone()));
         }

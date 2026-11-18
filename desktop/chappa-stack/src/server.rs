@@ -54,6 +54,7 @@ use crate::procs::ProcessTable;
 use crate::project::{Loaded, ProjectConfig};
 use crate::records::{self, JobRecord, JobStatus, JobWork};
 use crate::relay::{self, Relay};
+use crate::relay_firewall::{self, FirewallCheck};
 use crate::reviews;
 use crate::secret_scan;
 use crate::states;
@@ -181,6 +182,8 @@ pub struct Source {
     pub addr: String,
     pub background: Arc<Background>,
     relay: Mutex<Relay>,
+    /// The relay's Windows Firewall check and its elevated commands.
+    firewall: FirewallCheck,
     /// Serialises action acceptance, so two clicks cannot both plan
     /// against the same state.
     accepting: Mutex<()>,
@@ -234,6 +237,7 @@ impl Source {
             addr,
             background: background.clone(),
             relay: Mutex::new(Relay::default()),
+            firewall: FirewallCheck::real(),
             accepting: Mutex::new(()),
             last_tick: Mutex::new(None),
             in_flight: Mutex::new(IndexMap::new()),
@@ -535,9 +539,21 @@ impl Source {
             };
             let (wanted, planned) = relay::plan(&def.engines, &gateways, &ports);
             let mut relay = self.relay.lock().unwrap_or_else(|p| p.into_inner());
-            relay.reconcile(&wanted);
+            let rebound = relay.reconcile(&wanted);
+            let slots = &loaded.stack.slots;
+            self.firewall.want(
+                relay::gateway_ips(&def.engines, &gateways),
+                relay_firewall::stack_ports(
+                    slots.port_base,
+                    slots.port_stride,
+                    slots.count,
+                    &ports,
+                ),
+                rebound,
+            );
             relay.state(planned)
         });
+        let firewall = relay_state.as_ref().and_then(|_| self.firewall.view());
         let safety = Self::safety(loaded, &work_dir, &inst, &obs);
         let errors: Vec<(String, String)> = obs
             .notes
@@ -560,6 +576,24 @@ impl Source {
             now_utc: now,
         };
         let mut v = env_view::environment(&inputs, &errors);
+        if let Some(fw) = &firewall {
+            if let Some(banners) = v.get_mut("banners").and_then(Value::as_array_mut) {
+                banners.extend(fw.banners());
+            }
+            let section = v
+                .get_mut("facts")
+                .and_then(Value::as_array_mut)
+                .and_then(|f| f.iter_mut().find(|s| s["id"] == "relay"));
+            if let Some(section) = section {
+                if let Some(rows) = section.get_mut("rows").and_then(Value::as_array_mut) {
+                    rows.push(fw.row());
+                }
+                let actions = fw.section_actions();
+                if !actions.is_empty() {
+                    section["actions"] = actions.into();
+                }
+            }
+        }
         if let Some(alerts) = v.get_mut("alerts").and_then(Value::as_array_mut) {
             alerts.extend(workspaces::drift_alerts(&self.work.snapshot()));
         }
@@ -862,6 +896,9 @@ impl Source {
         if id == secret_scan::ACK_ACTION_ID {
             return self.secret_ack(body, caller, &loaded);
         }
+        if id == relay_firewall::ALLOW_ACTION_ID || id == relay_firewall::REMOVE_ACTION_ID {
+            return self.firewall_action(id, body, &loaded);
+        }
         let is_script = |c: &str| {
             loaded
                 .stack
@@ -1071,6 +1108,28 @@ impl Source {
                 });
                 error(500, "spawn", e)
             }
+        }
+    }
+
+    /// The relay's firewall commands: refused unconfirmed, when the stack
+    /// has no relay, or when the command is not the one the confirm showed;
+    /// otherwise the elevated PowerShell starts (Windows asks the user) and
+    /// the call answers at once.
+    fn firewall_action(&self, id: &str, body: &Value, loaded: &Loaded) -> Reply {
+        if loaded.stack.relay.is_none() {
+            return error(409, "not-offered", "this stack has no relay");
+        }
+        if body.get("confirmed").and_then(Value::as_bool) != Some(true) {
+            return error(
+                409,
+                "confirmation-required",
+                "a firewall change must be confirmed",
+            );
+        }
+        let fingerprint = body.pointer("/params/fingerprint").and_then(Value::as_str);
+        match self.firewall.run(id, fingerprint) {
+            Ok(message) => (200, json!({ "message": message })),
+            Err((status, message)) => error(status, "firewall", message),
         }
     }
 

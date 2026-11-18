@@ -659,6 +659,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "indexmap 2.14.0",
+ "libc",
  "project-model",
  "serde",
  "serde_json",
@@ -667,6 +668,7 @@ dependencies = [
  "tempfile",
  "term-core",
  "tiny_http",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

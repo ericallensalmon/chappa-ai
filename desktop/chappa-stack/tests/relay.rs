@@ -112,3 +112,45 @@ fn a_wildcard_address_is_never_bound_and_a_busy_port_is_reported() {
     assert!(relay.is_listening(busy));
     assert!(relay.state(Default::default()).problems.is_empty());
 }
+
+#[test]
+fn a_peer_outside_the_gateway_network_is_closed_and_counted() {
+    use chappa_stack::relay::{start_serving, Network};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let target = echo_server();
+    let bind: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    // The listener serves a network that does not hold loopback, so this
+    // test's own connection is a peer from outside.
+    let refused = Arc::new(AtomicU64::new(0));
+    let other = Network::parse("172.29.80.0/20");
+    let l = start_serving(wanted(bind, target), other, refused.clone()).unwrap();
+    assert_eq!(l.network(), other);
+    let mut c = TcpStream::connect(bind).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let _ = c.write_all(b"hello");
+    let mut buf = [0u8; 64];
+    let n = c.read(&mut buf).unwrap_or(0);
+    assert_eq!(n, 0, "nothing is forwarded to a refused peer");
+    assert_eq!(refused.load(Ordering::SeqCst), 1);
+    drop(l);
+
+    // The relay looks the network up itself when it binds: loopback's own
+    // network holds this test, so it is served, and nothing is refused.
+    let mut relay = Relay::default();
+    relay.reconcile(&[wanted(bind, target)]);
+    let mut c = TcpStream::connect(bind).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"in").unwrap();
+    let n = c.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"echo: in");
+    let state = relay.state(Default::default());
+    assert_eq!(state.guards.len(), 1, "{state:?}");
+    let net = state.guards[0]
+        .network
+        .expect("loopback's network is known");
+    assert!(net.contains("127.0.0.1".parse().unwrap()));
+    assert_eq!(relay.refused("docker"), 0);
+    assert!(state.problems.is_empty(), "{state:?}");
+}
