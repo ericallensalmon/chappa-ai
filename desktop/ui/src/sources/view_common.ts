@@ -658,10 +658,15 @@ export class RowMenu {
       own.appendChild(b);
     }
     const cell = new ActionsCell(this.deps);
-    // An action chosen from the menu closes it (its button ran first).
-    cell.el.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest("button:not(:disabled)")) this.close();
-    });
+    // An action chosen from the menu closes it. Read on the way down, before
+    // the button's own handler disables it for the length of its call.
+    cell.el.addEventListener(
+      "click",
+      (e) => {
+        if ((e.target as HTMLElement).closest("button:not(:disabled)")) this.close();
+      },
+      true,
+    );
     menu.append(own, cell.el);
     menu.addEventListener("click", (e) => e.stopPropagation());
     const box = opener.getBoundingClientRect();
