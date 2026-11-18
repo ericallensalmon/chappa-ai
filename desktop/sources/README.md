@@ -320,10 +320,25 @@ The view draws it as a header over a dense table:
 
 - **Header**: the stack's counts as toned chips (from `summary`, else
   counted from `components`), "endpoints a/b" when any component has a
-  `probe`, `facts` as one compact line of label/value pairs (every
-  section, with its actions, is on the "Details" page), alerts and
-  banners, `freshness.notices` (say there, once, who reports the rows and
-  what was left out; never on each row), and the stack-wide `actions`.
+  `probe`, `facts` as label/value chips that wrap (every section, with its
+  actions, is on the "Details" page), alerts and banners,
+  `freshness.notices` (say there, once, what was left out; never on each
+  row), and the stack-wide `actions`.
+- **Facts, optional marks** (all additive; a source without them is drawn
+  as one line of chips):
+  - a row's `tone` (`ok` / `warn` / `bad` / `muted`) colours its chip; a
+    row with a `bad` / `warn` badge reads that tone when it has none;
+  - a section with `kind: "meta"` describes the runner rather than the
+    stack's health (instance, slot, hostname, bound item, channel, the
+    definition file, who reports a script's rows): one muted line under
+    the stack's name, with a "details" toggle when it is long;
+  - a section with `status: {label, text, tone}` is one badge
+    ("Data: clean ✓"); its rows are the details the badge opens, shown
+    open while `tone` is not `ok`.
+- **Problem rows**: components in a red state are listed in ONE short
+  banner, "<label>: <state>" each (the first few, then "and N more"), each
+  a link to its row. An alert with `kind: "state"` only restates such a
+  row's state, so it is not drawn again as an alert line.
 - **Groups**: `groups: [{id, label, actions?}]` in display order, each a
   folding header "<label> (up/deployed up)"; a group's `actions` sit on
   its header. A component whose `group` is not listed shows under "Other".

@@ -12,7 +12,7 @@
 
 import type { ActionTarget } from "./needs_you";
 import { oneLine, readBadges, type Chip, type Tone } from "./prs_model";
-import type { Action, Banner, Link, Section } from "./types";
+import type { Action, Banner, Link, Section, SectionTone } from "./types";
 import { ActionsCell, chipEl, openChecked, type SourceViewDeps } from "./view_common";
 
 type Row = Section["rows"][number];
@@ -27,6 +27,10 @@ const obj = (v: unknown): Record<string, unknown> | null =>
 const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
 const BANNER_TONES: ReadonlySet<string> = new Set(["info", "warn", "bad"]);
+const SECTION_TONES: ReadonlySet<string> = new Set(["ok", "warn", "bad", "muted"]);
+
+/** A section or row tone as sent, or null when it is not one. */
+const sectionTone = (v: unknown): SectionTone | null => (typeof v === "string" && SECTION_TONES.has(v) ? (v as SectionTone) : null);
 
 // ---- reading --------------------------------------------------------------
 
@@ -45,11 +49,13 @@ function readRows(v: unknown): Row[] {
       const links = readLinks(r.links);
       const badges = readBadges(r.badges);
       const value = text(r.value);
+      const tone = sectionTone(r.tone);
       return {
         label: text(r.label)!,
         ...(value !== null ? { value } : {}),
         ...(links.length ? { links } : {}),
         ...(badges.length ? { badges } : {}),
+        ...(tone ? { tone } : {}),
       };
     });
 }
@@ -70,10 +76,15 @@ export function readSection(v: unknown): Section | null {
   const more = obj(s.more);
   const moreRows = readRows(more?.rows);
   const actions = readActions(s.actions);
+  const status = obj(s.status);
+  const statusLabel = text(status?.label);
+  const statusText = text(status?.text);
   return {
     id,
     title,
     collapsed: s.collapsed === true,
+    ...(s.kind === "meta" ? { kind: "meta" as const } : {}),
+    ...(statusLabel && statusText ? { status: { label: statusLabel, text: statusText, tone: sectionTone(status?.tone) ?? "muted" } } : {}),
     rows: readRows(s.rows),
     ...(more && text(more.label) && moreRows.length ? { more: { label: text(more.label)!, rows: moreRows } } : {}),
     ...(actions.length ? { actions } : {}),

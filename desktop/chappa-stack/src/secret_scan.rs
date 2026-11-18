@@ -1695,6 +1695,26 @@ impl SecretsView {
         Some(b)
     }
 
+    /// The one badge the view's header shows for the scan: its state in a
+    /// word or two, and how loud (the rows of [`SecretsView::facts`] are
+    /// its details).
+    pub fn status(&self) -> Value {
+        let text = match self.state {
+            "clean" => "clean",
+            "acknowledged" => "acknowledged",
+            "unscanned" => "not scanned yet",
+            "not-clean" => "possible secrets",
+            _ => "did not finish",
+        };
+        let tone = match self.state {
+            _ if self.blocks_agents() => "bad",
+            "clean" | "acknowledged" => "ok",
+            "unscanned" => "warn",
+            _ => "bad",
+        };
+        json!({ "label": "Scan", "text": text, "tone": tone })
+    }
+
     /// The Secret scan facts section.
     pub fn facts(&self) -> Value {
         let row = |label: &str, value: String| json!({ "label": label, "value": value });
@@ -1750,7 +1770,12 @@ impl SecretsView {
         for u in &self.unscanned {
             rows.push(row(u, "not scanned yet".into()));
         }
-        let mut section = json!({ "id": "secret-scan", "title": "Secret scan", "rows": rows });
+        let mut section = json!({
+            "id": "secret-scan",
+            "title": "Secret scan",
+            "status": self.status(),
+            "rows": rows,
+        });
         if let Some(a) = self.ack_action() {
             section["actions"] = json!([a]);
         }

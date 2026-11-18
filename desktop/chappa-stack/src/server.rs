@@ -994,7 +994,12 @@ impl Source {
         };
         // Offered disabled while a plan preview is pending: nobody has seen
         // what it would run, so it is not accepted (the app refuses it too).
+        // Disabled for any other reason (a script that cannot be resolved
+        // now), it is refused with that reason.
         if let Some(why) = &chosen.disabled {
+            if why != stack_core::script::PLAN_PENDING {
+                return error(409, "cannot-run", why.clone());
+            }
             return error(
                 409,
                 "plan-pending",

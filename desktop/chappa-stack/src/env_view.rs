@@ -13,9 +13,9 @@
 //! | `hint` | why a red or amber state is what it is |
 //! | `badges` | staleness (`newer prebuilt`, `behind 2` …), "no data-safety check" on an unscanned persistent component, the data-safety state of a checked one, the mode |
 //! | `actions` | the component's verbs, its data-safety check, its `logs` terminal, its links |
-//! | `alerts` | red components with their cause, engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check, data that is not clean (`bad`) or not checked (`warn` under `unscanned: warn`) |
-//! | `facts` | the stack (instance, slot, port block, bound item, channel), engines and versions, the memory budget, relay listeners, which peers each gateway serves and how many it refused, the relay's Windows Firewall state (added by the server, with the remove-rule action), data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions) |
-//! | `freshness.notices` | who reports a script's rows and runs their actions, and how many reported links were left out, once for the whole view |
+//! | `alerts` | red components with their cause (`kind: state`: the view lists them in one short banner), engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check, data that is not clean (`bad`) or not checked (`warn` under `unscanned: warn`) |
+//! | `facts` | the stack (instance, slot, port block, bound item, channel, who reports a script's rows; `kind: meta`: it describes the runner, not the stack's health), engines and versions (rows toned `ok` / `bad`), the memory budget, relay listeners, which peers each gateway serves and how many it refused, the relay's Windows Firewall state (added by the server, with the remove-rule action), data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions; its `status` is the one badge the header shows) |
+//! | `freshness.notices` | how many reported links were left out, once for the whole view |
 //! | `banners` | definition warnings or errors; the hosts-file fix; the relay's Windows Firewall findings (added by the server, see [`crate::relay_firewall`]); agents blocked by data safety (with the acknowledge action) |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //! | `secretScan` | the instance's secret-scan block, added by the server with its alerts, banner and facts section (see [`crate::secret_scan`]) |
@@ -629,6 +629,20 @@ fn row(label: &str, value: impl Into<String>) -> Value {
     json!({ "label": label, "value": value.into() })
 }
 
+/// A fact row with the tone the compact facts line colours it by.
+fn toned_row(label: &str, value: impl Into<String>, tone: &str) -> Value {
+    json!({ "label": label, "value": value.into(), "tone": tone })
+}
+
+/// `1 component`, `56 components`.
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {one}s")
+    }
+}
+
 fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
     let loaded = inp.loaded;
     let stack = &loaded.stack;
@@ -667,8 +681,11 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
         .display()
         .to_string();
     rows.push(row("Definition", file));
+    // These describe the runner (where and as what it runs), not how the
+    // stack is doing: the view shows them apart from the facts.
     sections.push(json!({
         "id": "stack",
+        "kind": "meta",
         "title": format!("Stack {} · slot {}", loaded.stack_name, inp.inst.slot),
         "rows": rows,
     }));
@@ -676,6 +693,11 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
     let memory = inp.inst.memory_by_engine();
     let mut engine_rows = Vec::new();
     for (name, f) in &inp.facts {
+        let tone = match f {
+            None => None,
+            Some(f) if !f.reachable => Some("bad"),
+            Some(_) => Some("ok"),
+        };
         let value = match f {
             None => "checking…".to_string(),
             Some(f) if !f.reachable => format!(
@@ -704,7 +726,10 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
                 }
             }
         };
-        engine_rows.push(row(name, value));
+        engine_rows.push(match tone {
+            Some(t) => toned_row(name, value, t),
+            None => row(name, value),
+        });
     }
     for (name, needed) in &memory {
         if *needed == 0 {
@@ -724,7 +749,11 @@ fn facts(inp: &EnvInputs<'_>) -> Vec<Value> {
             ),
             None => format!("needs {}", format_mb(u64::from(*needed))),
         };
-        engine_rows.push(row(&format!("Memory on {name}"), value));
+        let label = format!("Memory on {name}");
+        engine_rows.push(match budget {
+            Some(b) if u64::from(*needed) > b => toned_row(&label, value, "warn"),
+            _ => row(&label, value),
+        });
     }
     if !engine_rows.is_empty() {
         sections.push(json!({ "id": "engines", "title": "Engines", "rows": engine_rows }));
@@ -832,7 +861,18 @@ fn data_safety_facts(s: &InstanceSafety) -> Value {
     if let Some(a) = s.ack_action() {
         actions.push(a);
     }
-    let mut section = json!({ "id": "data-safety", "title": "Data safety", "rows": rows });
+    let tone = match s.state {
+        SafetyState::Clean | SafetyState::Acknowledged => "ok",
+        SafetyState::Unscanned if !s.blocks_agents() => "warn",
+        _ => "bad",
+    };
+    // One badge in the view's header; the rows are its details.
+    let mut section = json!({
+        "id": "data-safety",
+        "title": "Data safety",
+        "status": { "label": "Data", "text": state_words(s.state), "tone": tone },
+        "rows": rows,
+    });
     if !actions.is_empty() {
         section["actions"] = actions.into();
     }
@@ -1016,7 +1056,9 @@ fn alerts(inp: &EnvInputs<'_>, components: &[Value]) -> Vec<Value> {
             Some(h) => format!("{label} {}: {h}", state_phrase(state)),
             None => format!("{label} {}", state_phrase(state)),
         };
-        out.push(json!({ "text": text, "severity": "bad", "componentId": id }));
+        // `kind: state` says the alert only restates the row's state: the
+        // view lists those rows in one short banner instead.
+        out.push(json!({ "text": text, "severity": "bad", "componentId": id, "kind": "state" }));
     }
     for r in inp.reports {
         let Some(view) = &r.script else { continue };
@@ -1173,6 +1215,9 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
     let mut components: Vec<Value> = Vec::new();
     let mut dropped = 0;
     let mut notices: Vec<String> = Vec::new();
+    // Who reports a script's rows and runs their actions: runner metadata,
+    // said once with the stack's own.
+    let mut provenance: Vec<Value> = Vec::new();
     let mut root_actions: Vec<Value> = Vec::new();
     let mut group_actions: IndexMap<String, Vec<Value>> = IndexMap::new();
     let sole = inp.inst.components.len() == 1;
@@ -1198,9 +1243,12 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
                     let shown = if g == id { label.clone() } else { capital(g) };
                     add_group(&mut groups, g, shown);
                 }
-                notices.push(format!(
-                    "{label} reports {} component(s); their actions run {label}'s scripts",
-                    view.rows.len()
+                provenance.push(row(
+                    "Scripts",
+                    format!(
+                        "{label} reports {}; their actions run {label}'s scripts",
+                        plural(view.rows.len(), "component")
+                    ),
                 ));
                 let picks_rows = stack
                     .components
@@ -1267,7 +1315,9 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
     actions.extend(root_actions);
     if dropped > 0 {
         notices.push(format!(
-            "{dropped} reported link(s) to a host other than the stack's own were left out"
+            "{} to a host other than the stack's own {} left out",
+            plural(dropped, "reported link"),
+            if dropped == 1 { "was" } else { "were" }
         ));
     }
     let groups: Vec<Value> = groups
@@ -1287,12 +1337,20 @@ pub fn environment(inp: &EnvInputs<'_>, errors: &[(String, String)]) -> Value {
     if !notices.is_empty() {
         freshness["notices"] = notices.into();
     }
+    let mut facts = facts(inp);
+    if let Some(rows) = facts
+        .iter_mut()
+        .find(|s| s["kind"] == "meta")
+        .and_then(|s| s["rows"].as_array_mut())
+    {
+        rows.extend(provenance);
+    }
     json!({
         "freshness": freshness,
         "groups": groups,
         "components": components,
         "actions": actions,
-        "facts": facts(inp),
+        "facts": facts,
         "alerts": alerts,
         "banners": banners(inp),
         "dataSafety": data_safety_block(inp),

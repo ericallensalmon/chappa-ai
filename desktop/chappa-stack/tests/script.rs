@@ -82,6 +82,30 @@ fn action_ids(row: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The rows of the runner-metadata section that say who reports a
+/// script's rows, as `label=value`.
+fn meta_rows(env: &Value) -> Vec<String> {
+    let meta = env["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "meta")
+        .expect("a runner-metadata section");
+    meta["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["label"] == "Scripts")
+        .map(|r| {
+            format!(
+                "{}={}",
+                r["label"].as_str().unwrap(),
+                r["value"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
 fn stack_actions(env: &Value) -> Value {
     env["actions"].clone()
 }
@@ -169,7 +193,12 @@ fn the_example_stack_runs_status_up_stop_and_down_with_real_node() {
     assert_eq!(groups, ["backend=Back end", "frontend=Front end"]);
     assert_eq!(
         e["freshness"]["notices"],
-        json!(["App reports 2 component(s); their actions run App's scripts"])
+        json!(null),
+        "who reports the rows is runner metadata, not a notice"
+    );
+    assert_eq!(
+        meta_rows(&e),
+        ["Scripts=App reports 2 components; their actions run App's scripts"]
     );
     let facts = e["facts"]
         .as_array()
@@ -489,9 +518,9 @@ fn a_script_component_sits_beside_a_compose_one_in_dependency_order() {
 }
 
 #[test]
-fn a_script_that_needs_a_bound_item_says_so_and_is_refused_before_it_runs() {
+fn a_script_that_needs_a_bound_item_is_offered_disabled_with_why_and_refused_before_it_runs() {
     let p = Project::with(
-        "stacks:\n  app:\n    components:\n      app:\n        driver: script\n        repos: [../api]\n        up: [node, up.js, \"{worktree:api}\"]\n",
+        "stacks:\n  app:\n    components:\n      app:\n        driver: script\n        repos: [../api]\n        up: [node, up.js, \"{worktree:api}\"]\n      web:\n        driver: script\n        up: [node, web.js]\n",
         &[],
     );
     let f = fakes(FakeCli::new(), FakeHttp::default());
@@ -502,12 +531,26 @@ fn a_script_that_needs_a_bound_item_says_so_and_is_refused_before_it_runs() {
         up["confirm"],
         "Run the `up` script for app. It cannot run now: the `up` script of `app` cannot run: `{worktree:api}` needs a bound work item; activate one in this slot first."
     );
-    let (status, body) = act(&src, "up", Some("app"), &up["params"]);
+    // The button says what to do first, rather than a confirm that fails.
     assert_eq!(
-        (status, body["kind"].as_str()),
-        (409, Some("script")),
-        "{body}"
+        up["disabled"],
+        "Bind a work item first: the script needs it for `{worktree:api}`"
     );
+    // A verb whose scripts all resolve stays enabled.
+    let web_up = action(&row(&e, "web")["actions"], "up").unwrap().clone();
+    assert!(web_up.get("disabled").is_none(), "{web_up}");
+    // The stack-wide bring up runs app's script too: disabled the same way.
+    let stack_up = action(&stack_actions(&e), "up").unwrap().clone();
+    assert_eq!(stack_up["disabled"], up["disabled"]);
+    for (key, a) in [(Some("app"), &up), (None, &stack_up)] {
+        let (status, body) = act(&src, "up", key, &a["params"]);
+        assert_eq!(
+            (status, body["kind"].as_str()),
+            (409, Some("cannot-run")),
+            "{body}"
+        );
+        assert_eq!(body["message"], a["disabled"], "{body}");
+    }
     assert!(f.cli.with(|c| c.lines()).is_empty());
 }
 
@@ -777,11 +820,11 @@ fn reported_groups_pass_through_in_order_and_verbs_are_drawn_once() {
     // once for the view.
     assert_eq!(row(&e, "core/api")["hint"], "app-0-api (podman)");
     assert_eq!(
-        e["freshness"]["notices"],
-        json!([
-            "core reports 4 component(s); their actions run core's scripts",
-            "db reports 2 component(s); their actions run db's scripts"
-        ])
+        meta_rows(&e),
+        [
+            "Scripts=core reports 4 components; their actions run core's scripts",
+            "Scripts=db reports 2 components; their actions run db's scripts"
+        ]
     );
 
     // A verb drawn once comes back by its `<component>:<verb>` id, from the
@@ -1106,7 +1149,7 @@ fn a_status_script_fills_every_column_with_the_same_checks_as_any_component() {
     assert!(
         notices
             .iter()
-            .any(|n| n == "1 reported link(s) to a host other than the stack's own were left out"),
+            .any(|n| n == "1 reported link to a host other than the stack's own was left out"),
         "{notices:?}"
     );
     // Not running: no uptime shown even if one was reported.

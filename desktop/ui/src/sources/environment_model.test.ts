@@ -4,6 +4,7 @@ import {
   buildEnvironmentModel,
   groupCountText,
   headerCounts,
+  problemsText,
   readProbe,
   readSourceCell,
   stateInfo,
@@ -131,7 +132,7 @@ describe("environment model: blocks, groups, cells", () => {
     expect(byId.get("web")!.source!.text).toBe("source · main");
     expect(byId.get("db")!.probe).toMatchObject({ up: false, status: 503, text: "health down: 503 fails the health rule" });
     expect(byId.get("db")!.source).toMatchObject({ mode: "prebuilt", text: "prebuilt · registry.example/db:16" });
-    expect(byId.get("db")!.alerts).toEqual([{ text: "db is unhealthy", severity: "bad", componentId: "db" }]);
+    expect(byId.get("db")!.alerts).toEqual([{ text: "db is unhealthy", severity: "bad", componentId: "db", state: false }]);
     expect(byId.get("queue")!.details).toEqual(["7 restarts", "exit 1"]);
     expect(byId.get("migrate")!.oneshot).toBe(true);
     expect(byId.get("api")!.oneshot).toBe(false);
@@ -227,7 +228,7 @@ describe("environment model: lenient reads", () => {
     expect(rows(b).length).toBe(1);
     expect(m.freshness.errors).toEqual(["3 components could not be read"]);
     expect(b.header).toEqual([]);
-    expect(b.alerts).toEqual([{ text: "loud", severity: "warn", componentId: null }]);
+    expect(b.alerts).toEqual([{ text: "loud", severity: "warn", componentId: null, state: false }]);
     expect(b.facts).toEqual([]);
     expect(b.banners).toEqual([]);
   });
@@ -287,8 +288,8 @@ describe("environment model: the dense table", () => {
     expect(b.actionIds).toEqual(["up"]);
     expect(b.groups[0].actionIds).toEqual(["app:up"]);
     expect(b.factsLine).toEqual([
-      { label: "Slot", value: "0", section: "Stack" },
-      { label: "Host", value: "", section: "Stack" },
+      { label: "Slot", value: "0", section: "Stack", tone: null },
+      { label: "Host", value: "", section: "Stack", tone: null },
     ]);
     expect(buildEnvironmentModel([fx()]).blocks[0].actionIds).toEqual(["bring-up"]);
     expect(buildEnvironmentModel([fx()]).blocks[0].groups.map((g) => g.actionIds)).toEqual([[], [], ["run-jobs"]]);
@@ -299,5 +300,91 @@ describe("environment model: the dense table", () => {
     const g = (components: unknown[]) => groupCountText(rows(buildEnvironmentModel([env(components)]).blocks[0]));
     expect(g([r("up", "a"), r("up", "b"), r("stopped-idle", "c"), r("not-deployed", "d")])).toBe("(2/3 up)");
     expect(g([r("not-deployed", "a"), r("not-deployed", "b")])).toBe("(2 not deployed)");
+  });
+});
+
+describe("environment model: the header's parts", () => {
+  const facts = [
+    {
+      id: "stack",
+      kind: "meta",
+      title: "Stack env · slot 0",
+      rows: [
+        { label: "Instance", value: "env-0" },
+        { label: "Bound item", value: "none" },
+      ],
+    },
+    {
+      id: "engines",
+      title: "Engines",
+      rows: [
+        { label: "docker", value: "v29", tone: "ok" },
+        { label: "podman", value: "not reachable (off)", tone: "bad" },
+        { label: "relay", value: "8080", badges: [{ text: "problem", tone: "bad" }] },
+        { label: "Memory", value: "needs 2 GB", tone: "loud" },
+      ],
+    },
+    { id: "data-safety", title: "Data safety", status: { label: "Data", text: "clean", tone: "ok" }, rows: [{ label: "State", value: "clean" }] },
+    { id: "secret-scan", title: "Secret scan", status: { label: "Scan", text: "possible secrets", tone: "bad" }, rows: [{ label: "api", value: "1" }] },
+    { id: "odd", title: "Odd", status: { label: "Odd", text: "?", tone: "purple" }, rows: [] },
+    { id: "half", title: "Half", status: { label: "Half" }, rows: [{ label: "x", value: "y" }] },
+  ];
+
+  it("runner metadata is apart from the facts; facts carry their tone; statuses are badges", () => {
+    const b = buildEnvironmentModel([env([{ id: "a", group: "g", state: "up" }], { facts })]).blocks[0];
+    expect(b.meta.map((m) => `${m.label}=${m.value}`)).toEqual(["Instance=env-0", "Bound item=none"]);
+    expect(b.factsLine.map((f) => `${f.tone}:${f.label}`)).toEqual([
+      "ok:docker",
+      "bad:podman",
+      // no tone of its own: its loudest badge
+      "bad:relay",
+      // an unknown tone reads neutral
+      "null:Memory",
+      // a status without both label and text is not a status: its rows stay facts
+      "null:x",
+    ]);
+    expect(b.statuses.map((s) => `${s.tone}:${s.text}`)).toEqual(["ok:Data: clean ✓", "bad:Scan: possible secrets ✗", "muted:Odd: ?"]);
+    expect(b.statuses[1].section.rows).toEqual([{ label: "api", value: "1" }]);
+    // Every section, meta and status ones too, stays on the details page.
+    expect(b.facts.map((s) => s.id)).toEqual(["stack", "engines", "data-safety", "secret-scan", "odd", "half"]);
+  });
+
+  it("a source without the marks reads as before: every fact a chip, no meta, no statuses", () => {
+    const plain = facts.map(({ id, title, rows }) => ({ id, title, rows }));
+    const b = buildEnvironmentModel([env([], { facts: plain })]).blocks[0];
+    expect(b.meta).toEqual([]);
+    expect(b.statuses).toEqual([]);
+    expect(b.factsLine.map((f) => f.label)).toEqual(["Instance", "Bound item", "docker", "podman", "relay", "Memory", "State", "api", "x"]);
+  });
+
+  it("red components are the problems, in table order, each '<label>: <state>'; state alerts are marked", () => {
+    const comps = [
+      { id: "core", label: "Core", group: "g", state: "stopped-problem", hint: "exited 137" },
+      { id: "ok", group: "g", state: "up" },
+      { id: "web", group: "g", state: "unhealthy" },
+      { id: "idle", group: "g", state: "stopped-idle" },
+    ];
+    const b = buildEnvironmentModel([
+      env(comps, {
+        alerts: [
+          { text: "Core is deployed but not running: exited 137", severity: "bad", componentId: "core", kind: "state" },
+          { text: "core: data not clean", severity: "bad", componentId: "core" },
+        ],
+      }),
+    ]).blocks[0];
+    expect(b.problems).toEqual([
+      { id: "core", key: "s|core", text: "Core: deployed but not running", title: "exited 137" },
+      { id: "web", key: "s|web", text: "web: unhealthy", title: "Running, but its probe or health check keeps failing" },
+    ]);
+    expect(b.alerts.map((a) => a.state)).toEqual([true, false]);
+  });
+
+  it("the problem text names the first few, then how many more", () => {
+    const p = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `c${i}`, key: `s|c${i}`, text: `c${i}: unhealthy`, title: "" }));
+    expect(problemsText([])).toBe("");
+    expect(problemsText(p(1))).toBe("c0: unhealthy");
+    expect(problemsText(p(3))).toBe("c0: unhealthy · c1: unhealthy · c2: unhealthy");
+    expect(problemsText(p(4))).toBe("c0: unhealthy · c1: unhealthy · c2: unhealthy and 1 more");
+    expect(problemsText(p(56))).toMatch(/and 53 more$/);
   });
 });

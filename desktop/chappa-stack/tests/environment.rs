@@ -405,7 +405,18 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
         .collect();
     // (and db, which keeps data with no data-safety check: a warning)
     assert_eq!(alerted, ["search", "worker", "mailer", "seed", "db"]);
+    // The red components' alerts only restate their state (the view lists
+    // them in one short banner); the data-safety one says more.
+    let state_alerts: Vec<&str> = env["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["kind"] == "state")
+        .filter_map(|a| a["componentId"].as_str())
+        .collect();
+    assert_eq!(state_alerts, ["search", "worker", "mailer", "seed"]);
     let db_alert = env["alerts"].as_array().unwrap().last().unwrap();
+    assert!(db_alert.get("kind").is_none(), "{db_alert}");
     assert_eq!(db_alert["severity"], "warn");
     assert_eq!(
         db_alert["text"],
@@ -418,6 +429,19 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
     // facts: the stack, engines, memory; the stack's actions at the top
     let stack = &env["facts"][0];
     assert_eq!(stack["id"], "stack");
+    // Instance, slot, bound item…: about the runner, not the stack's health.
+    assert_eq!(stack["kind"], "meta");
+    // Data safety is one badge; its rows are the details.
+    let safety = env["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "data-safety")
+        .unwrap();
+    assert_eq!(
+        safety["status"],
+        serde_json::json!({ "label": "Data", "text": "not checked", "tone": "warn" })
+    );
     let rows: Vec<String> = stack["rows"]
         .as_array()
         .unwrap()
@@ -459,6 +483,8 @@ fn one_answer_holds_all_nine_states_and_every_cell() {
         env["facts"][1]["rows"][0]["value"],
         "v29.0.0 · linux containers · 16.0 GB total"
     );
+    // A reachable engine reads green in the facts line.
+    assert_eq!(env["facts"][1]["rows"][0]["tone"], "ok");
     // banners: the definition's one warning (db has no data-safety check)
     assert_eq!(env["banners"][0]["id"], "definition-warnings");
 

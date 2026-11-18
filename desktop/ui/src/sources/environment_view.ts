@@ -1,7 +1,10 @@
 // The Environment page: one block per trusted source serving the view (each
 // is its own stack). A block is a header (the stack's name, its counts as
-// toned chips, its facts as one compact line, its banners and alerts, and
-// the stack-wide actions) over a dense table: one line per component,
+// toned chips, one muted line of what the runner is (instance, slot, bound
+// item), its facts as toned chips that wrap with a badge per status the
+// source summarises (data safety, secret scan), one short banner naming the
+// components in a red state, its banners and alerts, and the stack-wide
+// actions) over a dense table: one line per component,
 // grouped as the source groups them, each group folding away under a header
 // that says how many of its components are up and carries the group's own
 // actions. The app hands the page a plain model on every change and only
@@ -26,7 +29,17 @@
 import { isBackKey, mountPageHeader, type PageHeader } from "../page_header";
 import { readCollapsed, writeCollapsed } from "../sidebar_sections";
 import type { ActionTarget } from "./needs_you";
-import { groupCountText, type EnvAlert, type EnvBlock, type EnvGroup, type EnvRow, type EnvironmentModel } from "./environment_model";
+import {
+  PROBLEMS_SHOWN,
+  groupCountText,
+  type EnvAlert,
+  type EnvBlock,
+  type EnvGroup,
+  type EnvRow,
+  type EnvStatus,
+  type EnvironmentModel,
+  type FactPair,
+} from "./environment_model";
 import { withPanels } from "./panel_view";
 import { SectionsBlock, paintBanners } from "./sections";
 import type { Section } from "./types";
@@ -56,20 +69,44 @@ export const ENVIRONMENT_CSS = `
   --env-fg:#1f2328;--env-muted:#59636e;--env-faint:#818b98;--env-line:#d1d9e0;--env-head-bg:#eef1f4;
   --env-row-hover:#f3f5f7;--env-bg:#ffffff;--env-pop-bg:#ffffff;--env-ok:#1a7f37;--env-warn:#9a6700;--env-bad:#cf222e;--env-link:#0969da;
 }
-.chappa-env-block{margin-bottom:22px;}
-.chappa-env-head{display:flex;flex-direction:column;gap:6px;margin:4px 0 8px;}
+.chappa-env-block{margin-bottom:18px;}
+.chappa-env-head{display:flex;flex-direction:column;gap:3px;margin:2px 0 6px;}
 .chappa-env-titleline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;}
 .chappa-env-source{font:600 14px system-ui,sans-serif;color:var(--env-fg);}
 .chappa-env-chips{display:flex;flex-wrap:wrap;gap:4px;}
 .chappa-env-chips .chappa-sv-chip{font-size:11px;padding:1px 8px;}
 .chappa-env-stack-actions{margin-left:auto;}
-.chappa-env-factsline{display:flex;flex-wrap:wrap;gap:2px 14px;align-items:baseline;font:12px system-ui,sans-serif;color:var(--env-muted);}
+.chappa-env-meta{display:flex;align-items:baseline;gap:8px;min-width:0;font:11px system-ui,sans-serif;color:var(--env-faint);}
+.chappa-env-meta[hidden]{display:none;}
+.chappa-env-meta-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chappa-env-meta.open .chappa-env-meta-text{white-space:normal;overflow-wrap:anywhere;}
+.chappa-env-meta-toggle{flex:none;border:0;background:none;padding:0;color:var(--env-link);font:11px system-ui,sans-serif;cursor:pointer;}
+.chappa-env-meta-toggle[hidden]{display:none;}
+.chappa-env-factsline{display:flex;flex-wrap:wrap;gap:3px 4px;align-items:center;font:11px system-ui,sans-serif;color:var(--env-muted);}
 .chappa-env-factsline:empty{display:none;}
-.chappa-env-fact b{font-weight:600;color:var(--env-fg);margin-right:4px;}
+.chappa-env-fact{display:inline-block;max-width:100%;box-sizing:border-box;padding:0 6px;border:1px solid var(--env-line);border-radius:9px;line-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chappa-env-fact b{font-weight:600;color:var(--env-fg);margin-right:3px;}
+.chappa-env-fact[data-tone="ok"]{border-color:var(--env-ok);}
+.chappa-env-fact[data-tone="warn"]{border-color:var(--env-warn);color:var(--env-warn);}
+.chappa-env-fact[data-tone="bad"]{border-color:var(--env-bad);color:var(--env-bad);}
+.chappa-env-fact[data-tone="warn"] b,.chappa-env-fact[data-tone="bad"] b{color:inherit;}
+.chappa-env-status{border:1px solid var(--env-faint);border-radius:9px;background:none;padding:0 7px;line-height:16px;color:var(--env-muted);font:600 11px system-ui,sans-serif;cursor:pointer;}
+.chappa-env-status[data-tone="ok"]{border-color:var(--env-ok);color:var(--env-ok);}
+.chappa-env-status[data-tone="warn"]{border-color:var(--env-warn);color:var(--env-warn);}
+.chappa-env-status[data-tone="bad"]{border-color:var(--env-bad);color:var(--env-bad);}
+.chappa-env-status[aria-expanded="true"]{background:var(--env-head-bg);}
+.chappa-env-status-details:empty{display:none;}
+.chappa-env-status-details .chappa-sec{margin-bottom:4px;}
+.chappa-env-problems{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 6px;padding:2px 8px;border:1px solid #5c1f1c;border-radius:5px;background:#1f0d0c;color:#ffb3ad;font:12px system-ui,sans-serif;}
+.chappa-env-problems[hidden]{display:none;}
+.chappa-env-problem,.chappa-env-problems-more{border:0;background:none;padding:0;color:inherit;font:inherit;cursor:pointer;text-decoration:underline dotted;}
+.chappa-env-problem:hover,.chappa-env-problems-more:hover{text-decoration:underline;}
+.chappa-env-problem-sep{opacity:.6;}
+.chappa-env-banners .chappa-banner{padding:3px 8px;margin-bottom:0;gap:1px;}
 .chappa-env-details-link{border:0;background:none;padding:0;color:var(--env-link);font:12px system-ui,sans-serif;cursor:pointer;}
 .chappa-env-alerts,.chappa-env-banners{display:flex;flex-direction:column;gap:4px;}
 .chappa-env-alerts:empty,.chappa-env-banners:empty,.chappa-env-wait:empty{display:none;}
-.chappa-env-alert{font:12px system-ui,sans-serif;padding:3px 8px;border-radius:5px;border:1px solid #5c4813;color:#f0d68a;background:#1d1708;}
+.chappa-env-alert{font:12px system-ui,sans-serif;padding:1px 8px;border-radius:5px;border:1px solid #5c4813;color:#f0d68a;background:#1d1708;}
 .chappa-env-alert[data-severity="bad"]{border-color:#5c1f1c;color:#ffb3ad;background:#1f0d0c;}
 .chappa-env-wait{font:12px system-ui,sans-serif;color:var(--env-faint);}
 .chappa-env-toggle{display:flex;align-items:center;gap:6px;border:0;background:none;padding:2px 0;color:var(--env-muted);font:12px system-ui,sans-serif;cursor:pointer;}
@@ -157,12 +194,27 @@ export function notDeployedToggleText(n: number): string {
 export const notDeployedKey = (sourceId: string): string => `env-not-deployed:${sourceId}`;
 export const groupFoldKey = (sourceId: string, groupId: string): string => `env-group:${sourceId}:${groupId}`;
 
+/** Past this many characters the runner's metadata line folds to one line
+ *  with a "details" toggle. */
+export const META_FOLD_CHARS = 90;
+
+/** The metadata line's text: "Instance env-0 · Slot 0 of 2 · …". */
+export function metaText(meta: FactPair[]): string {
+  return meta.map((m) => (m.value ? `${m.label} ${m.value}` : m.label)).join(" · ");
+}
+
 interface BlockRefs {
   el: HTMLElement;
   source: HTMLElement;
   chips: HTMLElement;
   actions: ActionsCell;
+  meta: HTMLElement;
+  metaText: HTMLElement;
+  metaToggle: HTMLButtonElement;
   facts: HTMLElement;
+  /** The status sections opened from their badges. */
+  statusDetails: SectionsBlock;
+  problems: HTMLElement;
   wait: HTMLElement;
   banners: HTMLElement;
   alerts: HTMLElement;
@@ -219,6 +271,13 @@ export class EnvironmentView {
   private readonly rows = new Map<string, RowRefs>();
   /** Per source, read from the store on first sight. */
   private readonly showNotDeployed = new Map<string, boolean>();
+  /** Status badges the user opened or closed, per source, id and tone: a
+   *  status that changes tone falls back to its default (open unless ok). */
+  private readonly statusOpen = new Map<string, boolean>();
+  /** Sources whose metadata line is unfolded. */
+  private readonly metaOpen = new Set<string>();
+  /** Sources whose problem banner lists every row. */
+  private readonly problemsOpen = new Set<string>();
   private input: EnvironmentViewInput | null = null;
   /** A focus asked for before the row exists (the first answer pending). */
   private pendingFocus: { id: string; sourceId?: string } | null = null;
@@ -399,7 +458,22 @@ export class EnvironmentView {
     const actions = new ActionsCell(this.ui);
     actions.el.classList.add("chappa-env-stack-actions");
     titleline.append(source, chips, actions.el);
+    const meta = el("div", "chappa-env-meta");
+    const metaTextEl = el("span", "chappa-env-meta-text");
+    const metaToggle = document.createElement("button");
+    metaToggle.type = "button";
+    metaToggle.className = "chappa-env-meta-toggle";
+    metaToggle.addEventListener("click", () => {
+      if (this.metaOpen.has(sourceId)) this.metaOpen.delete(sourceId);
+      else this.metaOpen.add(sourceId);
+      this.paint();
+    });
+    meta.append(metaTextEl, metaToggle);
     const facts = el("div", "chappa-env-factsline");
+    const statusDetails = new SectionsBlock(this.ui);
+    statusDetails.el.classList.add("chappa-env-status-details");
+    const problems = el("div", "chappa-env-problems");
+    problems.setAttribute("role", "status");
     const wait = el("div", "chappa-env-wait");
     const banners = el("div", "chappa-env-banners");
     const alerts = el("div", "chappa-env-alerts");
@@ -411,7 +485,7 @@ export class EnvironmentView {
       this.setNotDeployed(sourceId, !this.notDeployedShown(sourceId));
       this.paint();
     });
-    head.append(titleline, facts, wait, banners, alerts, toggle);
+    head.append(titleline, meta, facts, statusDetails.el, wait, problems, banners, alerts, toggle);
     const table = el("div", "chappa-env-table");
     table.setAttribute("role", "table");
     const cols = el("div", "chappa-env-cols chappa-env-grid");
@@ -425,7 +499,26 @@ export class EnvironmentView {
     const groups = el("div", "chappa-env-groups");
     table.append(cols, groups);
     root.append(head, table);
-    refs = { el: root, source, chips, actions, facts, wait, banners, alerts, toggle, table, groups, sig: "", block: null };
+    refs = {
+      el: root,
+      source,
+      chips,
+      actions,
+      meta,
+      metaText: metaTextEl,
+      metaToggle,
+      facts,
+      statusDetails,
+      problems,
+      wait,
+      banners,
+      alerts,
+      toggle,
+      table,
+      groups,
+      sig: "",
+      block: null,
+    };
     this.blocks.set(sourceId, refs);
     return refs;
   }
@@ -436,16 +529,49 @@ export class EnvironmentView {
     const own: ActionTarget = { sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "environment", key: null };
     refs.actions.load(b.actionIds.length ? [own] : [], version, b.actionIds);
     paintBanners(refs.banners, this.ui, b.banners.map((banner) => ({ banner, ctx: { sourceId: b.sourceId, target: own, version } })));
+    const open = b.statuses.filter((s) => this.statusShown(b.sourceId, s));
+    refs.statusDetails.update(
+      open.map((s) => s.section),
+      { sourceId: b.sourceId, target: own, version },
+    );
     const shown = this.notDeployedShown(b.sourceId);
-    const sig = JSON.stringify([b.sourceLabel, b.hasData, b.chips, b.factsLine, b.facts.length, b.alerts, b.notDeployed, shown]);
+    const metaOpen = this.metaOpen.has(b.sourceId);
+    const problemsOpen = this.problemsOpen.has(b.sourceId);
+    const sig = JSON.stringify([
+      b.sourceLabel,
+      b.hasData,
+      b.chips,
+      b.factsLine,
+      b.meta,
+      b.statuses.map((s) => [s.id, s.text, s.tone, s.title]),
+      open.map((s) => s.id),
+      b.problems,
+      b.facts.length,
+      b.alerts,
+      b.notDeployed,
+      shown,
+      metaOpen,
+      problemsOpen,
+    ]);
     if (sig === refs.sig) return;
     refs.sig = sig;
     refs.source.textContent = b.sourceLabel;
     refs.chips.textContent = "";
     for (const c of b.chips) refs.chips.appendChild(chipEl(c));
+    const meta = metaText(b.meta);
+    refs.meta.hidden = meta === "";
+    refs.metaText.textContent = meta;
+    refs.metaText.title = meta;
+    const long = meta.length > META_FOLD_CHARS;
+    refs.meta.classList.toggle("open", long && metaOpen);
+    refs.metaToggle.hidden = !long;
+    refs.metaToggle.textContent = metaOpen ? "less" : "details";
+    refs.metaToggle.setAttribute("aria-expanded", String(metaOpen));
     refs.facts.textContent = "";
+    for (const s of b.statuses) refs.facts.appendChild(this.statusEl(b.sourceId, s, open.includes(s)));
     for (const f of b.factsLine) {
       const pair = el("span", "chappa-env-fact");
+      if (f.tone) pair.dataset.tone = f.tone;
       const label = document.createElement("b");
       label.textContent = `${f.label}:`;
       pair.append(label, f.value);
@@ -462,10 +588,77 @@ export class EnvironmentView {
       refs.facts.appendChild(more);
     }
     refs.wait.textContent = b.hasData ? "" : `Waiting for the first answer from ${b.sourceLabel}.`;
-    paintAlerts(refs.alerts, b.alerts);
+    this.paintProblems(refs.problems, b, problemsOpen);
+    paintAlerts(
+      refs.alerts,
+      b.alerts.filter((a) => !a.state),
+    );
     refs.toggle.hidden = b.notDeployed === 0;
     refs.toggle.textContent = notDeployedToggleText(b.notDeployed);
     refs.toggle.setAttribute("aria-pressed", String(shown));
+  }
+
+  private statusKey(sourceId: string, s: EnvStatus): string {
+    return `${sourceId}\u001f${s.id}\u001f${s.tone}`;
+  }
+
+  /** Whether a status section shows its rows: as the user left it, else
+   *  open exactly when something is not ok. */
+  private statusShown(sourceId: string, s: EnvStatus): boolean {
+    return this.statusOpen.get(this.statusKey(sourceId, s)) ?? s.tone !== "ok";
+  }
+
+  private statusEl(sourceId: string, s: EnvStatus, open: boolean): HTMLButtonElement {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chappa-env-status";
+    b.dataset.status = s.id;
+    b.dataset.tone = s.tone;
+    b.textContent = s.text;
+    b.title = `${s.title}: ${open ? "hide" : "show"} the details`;
+    b.setAttribute("aria-expanded", String(open));
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", () => {
+      this.statusOpen.set(this.statusKey(sourceId, s), !open);
+      this.paint();
+    });
+    return b;
+  }
+
+  /** One short banner for every component in a red state: "<label>:
+   *  <state>" each, a link to its row; the first few, then "and N more". */
+  private paintProblems(parent: HTMLElement, b: EnvBlock, all: boolean): void {
+    parent.textContent = "";
+    parent.hidden = b.problems.length === 0;
+    const shown = all ? b.problems : b.problems.slice(0, PROBLEMS_SHOWN);
+    shown.forEach((p, i) => {
+      if (i > 0) {
+        const sep = el("span", "chappa-env-problem-sep");
+        sep.textContent = "·";
+        parent.appendChild(sep);
+      }
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "chappa-env-problem";
+      link.dataset.id = p.id;
+      link.textContent = p.text;
+      link.title = `${p.title}\nShow its row`;
+      link.addEventListener("click", () => this.focus(p.id, b.sourceId));
+      parent.appendChild(link);
+    });
+    const more = b.problems.length - shown.length;
+    if (more > 0) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chappa-env-problems-more";
+      btn.textContent = `and ${more} more`;
+      btn.title = "List every component that needs attention";
+      btn.addEventListener("click", () => {
+        this.problemsOpen.add(b.sourceId);
+        this.paint();
+      });
+      parent.appendChild(btn);
+    }
   }
 
   private groupRefs(key: string, sourceId: string, id: string): GroupRefs {

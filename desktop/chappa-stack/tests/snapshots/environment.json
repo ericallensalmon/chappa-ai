@@ -152,21 +152,25 @@
   "alerts": [
     {
       "componentId": "search",
+      "kind": "state",
       "severity": "bad",
       "text": "search is unhealthy: http://dev.example.test:15002/health: HTTP 503 fails the health rule"
     },
     {
       "componentId": "worker",
+      "kind": "state",
       "severity": "bad",
       "text": "worker is in a crash loop: restarted 4 times; its logs say why"
     },
     {
       "componentId": "mailer",
+      "kind": "state",
       "severity": "bad",
       "text": "mailer is deployed but not running: wanted running, but it exited with code 137; start it, or stop it through the stack"
     },
     {
       "componentId": "seed",
+      "kind": "state",
       "severity": "bad",
       "text": "seed failed: exited with code 2"
     },
@@ -793,6 +797,7 @@
   "facts": [
     {
       "id": "stack",
+      "kind": "meta",
       "rows": [
         {
           "label": "Instance",
@@ -826,6 +831,7 @@
       "rows": [
         {
           "label": "docker",
+          "tone": "ok",
           "value": "v29.0.0 · linux containers · 16.0 GB total"
         }
       ],
@@ -855,6 +861,11 @@
           "value": "not checked · keeps data; no check declared"
         }
       ],
+      "status": {
+        "label": "Data",
+        "text": "not checked",
+        "tone": "warn"
+      },
       "title": "Data safety"
     }
   ],

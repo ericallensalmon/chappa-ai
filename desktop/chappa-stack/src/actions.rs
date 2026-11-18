@@ -33,6 +33,11 @@
 //! business; a verb drawn on a group or with the stack is sent back as
 //! `<script>:<verb>` ([`script_action_id`]).
 //!
+//! A plan whose scripts cannot be resolved now (an argv naming `{item}`
+//! with no work item bound, a `{worktree:<repo>}` the item lacks) is still
+//! offered, disabled with why, so the button explains itself instead of a
+//! confirm that ends in a refusal; the call is refused the same way.
+//!
 //! A plan that runs scripts says so per script: "Run the `stop` script for
 //! stack" and what its `plan` script printed (else the resolved argv). Its
 //! fingerprint also covers that text, so a plan preview that changed (or
@@ -46,9 +51,10 @@ use std::path::{Path, PathBuf};
 use stack_core::cli::engine_argv;
 use stack_core::definition::{DriverKind, Mode};
 use stack_core::driver::ResolvedInstance;
+use stack_core::placeholders::PlaceholderError;
 use stack_core::planner::{Change, Plan, Selection, Step, Verb};
-use stack_core::runner::{Observation, ScriptConfirm, StackRunner};
-use stack_core::script::{self, ScriptVerb};
+use stack_core::runner::{Observation, RunnerError, ScriptConfirm, StackRunner};
+use stack_core::script::{self, ScriptError, ScriptVerb};
 
 use crate::records::JobWork;
 
@@ -190,6 +196,40 @@ fn pending_reason(scripts: &[ScriptConfirm]) -> Option<String> {
         .then(|| script::PLAN_PENDING.to_string())
 }
 
+/// Why `plan` cannot be accepted now, judged the way a call to it is
+/// ([`StackRunner::check_scripts`]): a script it runs cannot be resolved,
+/// else a plan preview it would show has not arrived.
+fn disabled_reason(
+    runner: &StackRunner<'_>,
+    inst: &ResolvedInstance,
+    obs: &Observation,
+    plan: &Plan,
+    scripts: &[ScriptConfirm],
+) -> Option<String> {
+    match runner.check_scripts(inst, obs, plan) {
+        Err(e) => Some(cannot_run_reason(&e)),
+        Ok(()) => pending_reason(scripts),
+    }
+}
+
+/// What the disabled button says when a script cannot be resolved: what to
+/// do first when there is something to do, else the error itself.
+pub fn cannot_run_reason(e: &RunnerError) -> String {
+    match e {
+        RunnerError::Script(ScriptError::Placeholder { source, .. })
+        | RunnerError::Placeholder { source, .. } => match source {
+            PlaceholderError::NoItem { what } => {
+                format!("Bind a work item first: the script needs it for `{what}`")
+            }
+            PlaceholderError::NoWorktree { repo, .. } => {
+                format!("The bound work item has no worktree of `{repo}` yet")
+            }
+            other => capitalize(&other.to_string()),
+        },
+        other => capitalize(&other.to_string()),
+    }
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -223,7 +263,7 @@ fn planned(
         return None;
     }
     let scripts = script_lines(runner, inst, obs, &plan);
-    let disabled = pending_reason(&scripts);
+    let disabled = disabled_reason(runner, inst, obs, &plan, &scripts);
     Some(Offered {
         id: id.to_string(),
         key: key.map(str::to_string),
@@ -491,7 +531,7 @@ fn script_actions(
             continue;
         };
         let scripts = script_lines(runner, inst, obs, &plan);
-        let disabled = pending_reason(&scripts);
+        let disabled = disabled_reason(runner, inst, obs, &plan, &scripts);
         let mut confirm = scripts
             .into_iter()
             .map(|s| s.text)
@@ -549,6 +589,7 @@ fn row_actions(
         let Ok(plan) = runner.plan(obs, &change) else {
             continue;
         };
+        let disabled = disabled_reason(runner, inst, obs, &plan, &[]);
         out.push(Offered {
             id: verb.as_str().to_string(),
             key: Some(row.id.clone()),
@@ -560,7 +601,7 @@ fn row_actions(
                 save: None,
                 remove_volumes: false,
             },
-            disabled: None,
+            disabled,
         });
     }
     out

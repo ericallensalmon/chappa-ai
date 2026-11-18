@@ -267,10 +267,14 @@ export interface EnvironmentResponse {
   /** Stack-wide actions, drawn once in the view's header; judged and
    *  called with `target.key` = null, like the view's banners'. */
   actions?: Action[];
-  /** Runtimes, memory, dirty clones and the like. */
+  /** Runtimes, memory, dirty clones and the like. A section with
+   *  `kind: "meta"` describes the runner instead (shown apart, muted); one
+   *  with a `status` is drawn as that one badge, its rows the details. */
   facts?: Section[];
-  /** Drives the view's alert dot. */
-  alerts?: { text: string; severity: "warn" | "bad"; componentId?: string }[];
+  /** Drives the view's alert dot. `kind: "state"`: the alert only restates
+   *  the component's red state, which the view already lists in its problem
+   *  banner, so it is not drawn again as a line. */
+  alerts?: { text: string; severity: "warn" | "bad"; componentId?: string; kind?: "state" }[];
   banners?: Banner[];
 }
 
@@ -318,12 +322,21 @@ export type Action =
   /** Opens a drill-in page served by the source's endpoint. */
   | { kind: "panel"; id: string; label: string; endpoint: string };
 
+export type SectionTone = "ok" | "warn" | "bad" | "muted";
+
 /** A titled block of label/value rows. */
 export interface Section {
   id: string;
   title: string;
   collapsed?: boolean;
-  rows: { label: string; value?: string; links?: Link[]; badges?: Badge[] }[];
+  /** Where the Environment header shows it: "meta" = about the runner
+   *  (instance, slot, bound item), not the stack's health. */
+  kind?: "meta";
+  /** Set: the Environment header shows the section as one badge
+   *  ("Data: clean ✓") opening its rows. */
+  status?: { label: string; text: string; tone: SectionTone };
+  /** `tone` colours the row's chip in the Environment facts line. */
+  rows: { label: string; value?: string; links?: Link[]; badges?: Badge[]; tone?: SectionTone }[];
   /** Rows folded behind a toggle labelled `label`. */
   more?: { label: string; rows: Section["rows"] };
   actions?: Action[];

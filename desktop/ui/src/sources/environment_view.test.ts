@@ -2,7 +2,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ipc from "../ipc";
 import { buildEnvironmentModel } from "./environment_model";
-import { ENV_COLUMNS, EnvironmentView, environmentEmptyText, groupFoldKey, notDeployedKey, type EnvironmentViewInput } from "./environment_view";
+import {
+  ENV_COLUMNS,
+  EnvironmentView,
+  META_FOLD_CHARS,
+  environmentEmptyText,
+  groupFoldKey,
+  metaText,
+  notDeployedKey,
+  type EnvironmentViewInput,
+} from "./environment_view";
 import { fixture, payload } from "./test-utils";
 import type { SourceViewDeps } from "./view_common";
 
@@ -443,6 +452,157 @@ describe("EnvironmentView", () => {
     v.update(input([fx(null)]));
     expect(v.host.querySelector(".chappa-sv-empty")?.textContent).toBe("Waiting for the first answer from Fixture.");
     expect(v.host.querySelector(".chappa-env-wait")?.textContent).toBe("Waiting for the first answer from Fixture.");
+    v.dispose();
+  });
+});
+
+describe("EnvironmentView header", () => {
+  const meta = (rows: { label: string; value: string }[]) => ({ id: "stack", kind: "meta", title: "Stack env · slot 0", rows });
+  const RUNNER = [
+    { label: "Instance", value: "env-0" },
+    { label: "Slot", value: "0 of 2 · ports 15000–15005 (block 15000–15049)" },
+    { label: "Hostname", value: "dev.example.test" },
+    { label: "Bound item", value: "none" },
+    { label: "Channel", value: "main" },
+    { label: "Definition", value: "chappa.yml" },
+    { label: "Scripts", value: "App reports 56 components; their actions run App's scripts" },
+  ];
+  const status = (id: string, label: string, text: string, tone: string) => ({
+    id,
+    title: id === "data-safety" ? "Data safety" : "Secret scan",
+    status: { label, text, tone },
+    rows: [{ label: "State", value: text }],
+  });
+  const header = (extra: Record<string, unknown>): Body => ({ ...body(), ...extra }) as Body;
+
+  it("runner metadata is one muted line under the name, folded with a details toggle when long", () => {
+    const v = new EnvironmentView(deps());
+    v.update(input([fx(header({ facts: [meta(RUNNER), ...(body().facts as unknown[])] }))]));
+    const line = v.host.querySelector<HTMLElement>(".chappa-env-meta")!;
+    expect(line.hidden).toBe(false);
+    // Right under the title line, before the facts.
+    expect(line.previousElementSibling?.classList.contains("chappa-env-titleline")).toBe(true);
+    const text = line.querySelector(".chappa-env-meta-text")!.textContent!;
+    expect(text.startsWith("Instance env-0 · Slot 0 of 2")).toBe(true);
+    expect(text).toContain("Scripts App reports 56 components; their actions run App's scripts");
+    // Not among the facts, which keep what the stack reports.
+    expect([...v.host.querySelectorAll(".chappa-env-fact")].map((f) => f.textContent)).toEqual(["Node:22", "Memory:6.1 GiB free"]);
+    const more = line.querySelector<HTMLButtonElement>(".chappa-env-meta-toggle")!;
+    expect(text.length).toBeGreaterThan(META_FOLD_CHARS);
+    expect([more.hidden, more.textContent, line.classList.contains("open")]).toEqual([false, "details", false]);
+    more.click();
+    expect([more.textContent, line.classList.contains("open"), more.getAttribute("aria-expanded")]).toEqual(["less", true, "true"]);
+    v.dispose();
+
+    const short = new EnvironmentView(deps());
+    short.update(input([fx(header({ facts: [meta([{ label: "Instance", value: "env-0" }])] }))]));
+    expect(short.host.querySelector<HTMLButtonElement>(".chappa-env-meta-toggle")!.hidden).toBe(true);
+    short.dispose();
+    // Nothing marked: no line at all.
+    const plain = new EnvironmentView(deps());
+    plain.update(input());
+    expect(plain.host.querySelector<HTMLElement>(".chappa-env-meta")!.hidden).toBe(true);
+    plain.dispose();
+    expect(
+      metaText([
+        { label: "Bound item", value: "none", section: "s", tone: null },
+        { label: "Flag", value: "", section: "s", tone: null },
+      ]),
+    ).toBe("Bound item none · Flag");
+  });
+
+  it("facts are chips coloured by their tone", () => {
+    const v = new EnvironmentView(deps());
+    const rows = [
+      { label: "docker", value: "v29", tone: "ok" },
+      { label: "podman", value: "not reachable", tone: "bad" },
+      { label: "Disk", value: "40 GiB" },
+    ];
+    v.update(input([fx(header({ facts: [{ id: "engines", title: "Engines", rows }] }))]));
+    const chips = [...v.host.querySelectorAll<HTMLElement>(".chappa-env-fact")].map((f) => `${f.dataset.tone ?? "-"}:${f.textContent}`);
+    expect(chips).toEqual(["ok:docker:v29", "bad:podman:not reachable", "-:Disk:40 GiB"]);
+    v.dispose();
+  });
+
+  it("data safety and the secret scan are one badge each; clean ones open on click, others open by themselves", () => {
+    const v = new EnvironmentView(deps());
+    const at = (data: string, dataTone: string, scan: string, scanTone: string) =>
+      input([fx(header({ facts: [status("data-safety", "Data", data, dataTone), status("secret-scan", "Scan", scan, scanTone)] }))]);
+    v.update(at("clean", "ok", "clean", "ok"));
+    const badges = () => [...v.host.querySelectorAll<HTMLButtonElement>(".chappa-env-status")];
+    const opened = () => v.host.querySelectorAll(".chappa-env-status-details .chappa-sec").length;
+    expect(badges().map((b) => `${b.dataset.tone}:${b.textContent}:${b.getAttribute("aria-expanded")}`)).toEqual([
+      "ok:Data: clean ✓:false",
+      "ok:Scan: clean ✓:false",
+    ]);
+    // Their rows are not facts of the line.
+    expect(v.host.querySelectorAll(".chappa-env-fact").length).toBe(0);
+    expect(opened()).toBe(0);
+    badges()[0].click();
+    expect(badges()[0].getAttribute("aria-expanded")).toBe("true");
+    expect(opened()).toBe(1);
+    expect(v.host.querySelector(".chappa-env-status-details .chappa-sec-value")?.textContent).toBe("clean");
+    badges()[0].click();
+    expect(opened()).toBe(0);
+    // Something not clean: red, and its details are shown without a click.
+    v.update(at("clean", "ok", "possible secrets", "bad"));
+    expect(badges()[1].dataset.tone).toBe("bad");
+    expect(badges()[1].textContent).toBe("Scan: possible secrets ✗");
+    expect(opened()).toBe(1);
+    // ...until the user folds it.
+    badges()[1].click();
+    expect(opened()).toBe(0);
+    v.update(at("not checked", "warn", "possible secrets", "bad"));
+    expect(badges()[0].textContent).toBe("Data: not checked !");
+    expect(opened()).toBe(1);
+    v.dispose();
+  });
+
+  it("problem rows collapse into one short banner whose entries lead to the row", () => {
+    const comps = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ id: `c${i}`, group: "app", state: i === 0 ? "up" : "stopped-problem", hint: `the long detail of c${i}` }));
+    const make = (n: number) =>
+      header({
+        components: comps(n),
+        alerts: comps(n)
+          .filter((c) => c.state !== "up")
+          .map((c) => ({ text: `${c.id} is deployed but not running: ${c.hint}`, severity: "bad", componentId: c.id, kind: "state" })),
+        banners: [],
+      });
+    const v = new EnvironmentView(deps());
+    v.update(input([fx(make(3))]));
+    const banner = () => v.host.querySelector<HTMLElement>(".chappa-env-problems")!;
+    const entries = () => [...banner().querySelectorAll<HTMLButtonElement>(".chappa-env-problem")].map((b) => b.textContent);
+    expect(banner().hidden).toBe(false);
+    expect(entries()).toEqual(["c1: deployed but not running", "c2: deployed but not running"]);
+    // The detail stays on the row, not in the banner; state alerts are not repeated.
+    expect(banner().textContent).not.toContain("long detail");
+    expect(v.host.querySelectorAll(".chappa-env-alert").length).toBe(0);
+    // An entry leads to its row.
+    banner().querySelector<HTMLButtonElement>('.chappa-env-problem[data-id="c2"]')!.click();
+    expect(row(v, "fx|c2")!.classList.contains("focused")).toBe(true);
+
+    v.update(input([fx(make(10))]));
+    expect(entries()).toEqual(["c1: deployed but not running", "c2: deployed but not running", "c3: deployed but not running"]);
+    const more = banner().querySelector<HTMLButtonElement>(".chappa-env-problems-more")!;
+    expect(more.textContent).toBe("and 6 more");
+    more.click();
+    expect(entries().length).toBe(9);
+    expect(banner().querySelector(".chappa-env-problems-more")).toBeNull();
+    // Nothing red: no banner.
+    v.update(input([fx(make(1))]));
+    expect(banner().hidden).toBe(true);
+    v.dispose();
+  });
+
+  it("alerts that say more than the state still show as lines", () => {
+    const v = new EnvironmentView(deps());
+    const alerts = [
+      { text: "db is unhealthy", severity: "bad", componentId: "db", kind: "state" },
+      { text: "db: data not clean", severity: "bad", componentId: "db" },
+    ];
+    v.update(input([fx(header({ alerts }))]));
+    expect([...v.host.querySelectorAll(".chappa-env-alert")].map((a) => a.textContent)).toEqual(["db: data not clean"]);
     v.dispose();
   });
 });

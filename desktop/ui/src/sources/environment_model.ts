@@ -136,6 +136,32 @@ export interface FactPair {
   value: string;
   /** The section it comes from, for the tooltip. */
   section: string;
+  /** The chip's colour: the row's `tone`, else that of a `bad` / `warn`
+   *  badge on it; null reads neutral. */
+  tone: Tone | null;
+}
+
+/** A section the source marked with a `status`: one badge in the header
+ *  ("Data: clean ✓") that opens the section's rows. */
+export interface EnvStatus {
+  /** The section's id (its open state is kept per id). */
+  id: string;
+  /** "Data: clean ✓". */
+  text: string;
+  tone: Tone;
+  /** The section's title, for the tooltip. */
+  title: string;
+  section: Section;
+}
+
+/** A component in a red state, as the one problem banner lists it. */
+export interface EnvProblem {
+  id: string;
+  key: string;
+  /** "core: deployed but not running". */
+  text: string;
+  /** The row's hint, else what its state means. */
+  title: string;
 }
 
 export interface EnvLink {
@@ -149,6 +175,9 @@ export interface EnvAlert {
   text: string;
   severity: "warn" | "bad";
   componentId: string | null;
+  /** It only restates a component's red state (`kind: "state"`): the
+   *  problem banner says it, so the header does not draw it again. */
+  state: boolean;
 }
 
 export interface EnvRow {
@@ -211,8 +240,15 @@ export interface EnvBlock {
   chips: Chip[];
   /** The ids of the stack-wide actions (`actions` of the answer). */
   actionIds: string[];
-  /** The facts as one compact line of label/value pairs. */
+  /** The facts as label/value chips (the meta and status sections are
+   *  not among them). */
   factsLine: FactPair[];
+  /** The runner's metadata (`kind: "meta"` sections): one muted line. */
+  meta: FactPair[];
+  /** The `status` sections, one badge each. */
+  statuses: EnvStatus[];
+  /** The components in a red state, in table order. */
+  problems: EnvProblem[];
   groups: EnvGroup[];
   /** How many components are `not-deployed` (hidden behind the toggle). */
   notDeployed: number;
@@ -294,6 +330,7 @@ function readAlerts(v: unknown): EnvAlert[] {
       // An unreadable severity is the milder one.
       severity: a.severity === "bad" ? ("bad" as const) : ("warn" as const),
       componentId: text(a.componentId) || null,
+      state: a.kind === "state",
     }));
 }
 
@@ -410,12 +447,52 @@ function actionIdsOf(v: unknown): string[] {
     .filter((a): a is string => !!a);
 }
 
-/** The facts as one line of label/value pairs, section by section (a
- *  section the source sent folded, and `more` rows, stay in the details). */
+/** A fact row's tone: its own, else that of its loudest badge. */
+function factTone(r: Section["rows"][number]): Tone | null {
+  if (r.tone) return r.tone;
+  const badges = r.badges ?? [];
+  if (badges.some((b) => b.tone === "bad")) return "bad";
+  if (badges.some((b) => b.tone === "warn")) return "warn";
+  return null;
+}
+
+const pairs = (s: Section): FactPair[] =>
+  s.rows.map((r) => ({ label: oneLine(r.label), value: oneLine(r.value ?? ""), section: s.title, tone: factTone(r) }));
+
+/** The facts as label/value pairs, section by section (a section the
+ *  source sent folded, `more` rows, and the meta and status sections stay
+ *  out: they are drawn apart, and everything is in the details). */
 export function factsLine(facts: Section[]): FactPair[] {
+  return facts.filter((s) => !s.collapsed && s.kind !== "meta" && !s.status).flatMap(pairs);
+}
+
+/** The runner's metadata, every `kind: "meta"` section's rows. */
+export function metaLine(facts: Section[]): FactPair[] {
+  return facts.filter((s) => s.kind === "meta").flatMap(pairs);
+}
+
+const STATUS_MARK: Record<Tone, string> = { ok: "✓", info: "", muted: "", warn: "!", bad: "✗" };
+
+/** The `status` sections as header badges ("Data: clean ✓"). */
+export function statusBadges(facts: Section[]): EnvStatus[] {
   return facts
-    .filter((s) => !s.collapsed)
-    .flatMap((s) => s.rows.map((r) => ({ label: oneLine(r.label), value: oneLine(r.value ?? ""), section: s.title })));
+    .filter((s) => s.status && s.kind !== "meta")
+    .map((s) => {
+      const st = s.status!;
+      const mark = STATUS_MARK[st.tone];
+      return { id: s.id, text: `${st.label}: ${st.text}${mark ? ` ${mark}` : ""}`, tone: st.tone, title: s.title, section: s };
+    });
+}
+
+/** How many problem rows the banner names before "and N more". */
+export const PROBLEMS_SHOWN = 3;
+
+/** The problem banner's text: the first few, then how many more. */
+export function problemsText(problems: EnvProblem[]): string {
+  if (problems.length === 0) return "";
+  const shown = problems.slice(0, PROBLEMS_SHOWN).map((p) => p.text).join(" · ");
+  const more = problems.length - PROBLEMS_SHOWN;
+  return more > 0 ? `${shown} and ${more} more` : shown;
 }
 
 /** A group's "(2/4 up)": components up out of those deployed. With none
@@ -438,6 +515,9 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
         chips: [],
         actionIds: [],
         factsLine: [],
+        meta: [],
+        statuses: [],
+        problems: [],
         groups: [],
         notDeployed: 0,
         alerts: [],
@@ -475,6 +555,11 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
   const other: EnvGroup = { id: "\u0000other", label: "Other", rows: [], actionIds: [] };
   for (const r of rows) (byId.get(r.group) ?? other).rows.push(r);
   if (other.rows.length) groups.push(other);
+  const facts = readSections(body.facts);
+  const problems: EnvProblem[] = groups
+    .flatMap((g) => g.rows)
+    .filter((r) => r.red)
+    .map((r) => ({ id: r.id, key: r.key, text: `${r.label}: ${r.stateText}`, title: r.hint || r.stateTitle }));
   return {
     block: {
       sourceId: p.sourceId,
@@ -483,11 +568,14 @@ function block(p: ViewPayload): { block: EnvBlock; skipped: number } {
       header: headerCounts(body.summary, rows),
       chips: headerChips(body.summary, rows),
       actionIds: actionIdsOf(body.actions),
-      factsLine: factsLine(readSections(body.facts)),
+      factsLine: factsLine(facts),
+      meta: metaLine(facts),
+      statuses: statusBadges(facts),
+      problems,
       groups: groups.filter((g) => g.rows.length > 0),
       notDeployed: rows.filter((r) => r.notDeployed).length,
       alerts,
-      facts: readSections(body.facts),
+      facts,
       banners: readBanners(body.banners),
     },
     skipped,

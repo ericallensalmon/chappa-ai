@@ -358,6 +358,11 @@ fn opening_an_item_finds_an_ignored_env_file_in_its_worktree() {
         .unwrap()
         .iter()
         .any(|r| r["label"] == "api worktree" && r["value"] == "1 possible secret"));
+    // The header's one badge for the scan, red while agents are blocked.
+    assert_eq!(
+        facts["status"],
+        json!({ "label": "Scan", "text": "possible secrets", "tone": "bad" })
+    );
     // The stored results hold places only.
     let stored = fs::read_to_string(secret_scan::store_path(&s.p.work(), "app-0")).unwrap();
     assert!(
