@@ -29,6 +29,8 @@ query ($q: String!) {
         body              # scanned for issue mentions (workKeys)
         isDraft           # state "draft" and the draft bucket
         state             # OPEN / MERGED / CLOSED
+        createdAt         # created: the age of a PR that never moved
+        updatedAt         # lastTouchedUtc: the age column
         closedAt          # closedUtc, and the 14-day "recent" window
         mergedAt          # closedUtc for merged PRs (merged wins over closed)
         headRefName       # sourceBranch, also scanned for issue mentions

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ipc from "../ipc";
 import { buildPrsModel, prId } from "./prs_model";
 import { fixture, overlayFixture, payload, source } from "./test-utils";
-import { WorkView, workMeta, type WorkViewDeps, type WorkViewInput } from "./work_view";
+import { WORK_COLUMNS, WorkView, workMeta, type WorkViewDeps, type WorkViewInput } from "./work_view";
 import { buildWorkModel } from "./work_model";
 
 const FLUSH = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
@@ -45,10 +45,10 @@ function input(over: Partial<WorkViewInput> = {}): WorkViewInput {
   };
 }
 
-const groups = (v: WorkView) => [...v.host.querySelectorAll<HTMLElement>(".chappa-work-list > .chappa-sv-group")].map((g) => g.dataset.group!);
+const groups = (v: WorkView) => [...v.host.querySelectorAll<HTMLElement>(".chappa-dt-body > .chappa-dt-group")].map((g) => g.dataset.group!);
 const visibleKeys = (v: WorkView) =>
-  [...v.host.querySelectorAll<HTMLElement>(".chappa-work-list > .chappa-sv-group")]
-    .filter((g) => !g.querySelector(".chappa-sv-rows")!.classList.contains("folded"))
+  [...v.host.querySelectorAll<HTMLElement>(".chappa-dt-body > .chappa-dt-group")]
+    .filter((g) => !g.querySelector(".chappa-dt-rows")!.classList.contains("folded"))
     .flatMap((g) => [...g.querySelectorAll<HTMLElement>(".chappa-work-row")].map((r) => r.dataset.key!));
 const row = (v: WorkView, key: string) => v.host.querySelector<HTMLElement>(`.chappa-work-row[data-key="${key}"]`)!;
 const detail = (v: WorkView) => v.host.querySelector<HTMLElement>(".chappa-work-detail")!;
@@ -56,9 +56,16 @@ const field = (v: WorkView, name: string) => detail(v).querySelector<HTMLElement
 const assigned = (v: WorkView) => v.host.querySelector<HTMLButtonElement>(".chappa-work-assigned")!;
 const search = (v: WorkView) => v.host.querySelector<HTMLInputElement>(".chappa-work-search")!;
 const key = (el: HTMLElement, k: string) => el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+/** Open a row's "⋯" menu and wait for Rust's answers. */
+const menuOf = async (v: WorkView, k: string): Promise<HTMLElement> => {
+  row(v, k).querySelector<HTMLButtonElement>(".chappa-dt-more")!.click();
+  await FLUSH();
+  return v.host.querySelector<HTMLElement>(".chappa-dt-menu")!;
+};
 
 afterEach(() => {
   document.body.textContent = "";
+  localStorage.clear();
 });
 
 describe("WorkView", () => {
@@ -77,23 +84,49 @@ describe("WorkView", () => {
     v.dispose();
   });
 
-  it("a row: key, title, status chip, meta, labels, badges, PR chips, its own actions only", async () => {
+  it("a row is aligned cells: key with its active chip, title over its meta and chips, status, workflow, branches and PRs, reporter and age", async () => {
     const d = deps();
     const v = new WorkView(d);
     v.update(input());
     await FLUSH();
+    expect([...v.host.querySelectorAll(".chappa-dt-cols > *")].map((c) => c.textContent)).toEqual(WORK_COLUMNS);
     const r = row(v, "ABC-1");
+    expect(r.querySelectorAll(":scope > .chappa-dt-cell").length).toBe(WORK_COLUMNS.length);
     expect(r.querySelector(".chappa-work-key")?.textContent).toBe("ABC-1");
+    expect(r.querySelector<HTMLElement>(".chappa-work-active")!.hidden).toBe(false);
+    expect(r.dataset.accent).toBe("active");
     expect(r.querySelector(".chappa-sv-title")?.textContent).toBe("Add a health route to api");
     expect(r.querySelector(".chappa-work-status .chappa-sv-chip")?.textContent).toBe("In progress");
     expect(r.querySelector(".chappa-sv-meta")?.textContent).toBe("task · high priority · in ABC-100 · from Sam · touched 33 min ago");
-    expect([...r.querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["backend", "ops", "blocked", "owner/repo#1 open"]);
+    expect([...r.querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["backend", "ops", "blocked"]);
+    expect([...r.querySelectorAll(".chappa-work-c-branch .chappa-work-pr")].map((c) => c.textContent)).toEqual(["owner/repo#1 open"]);
+    expect(r.querySelector(".chappa-work-c-flow .chappa-sv-chip")?.textContent).toBe("In review");
+    expect(r.querySelector<HTMLElement>(".chappa-work-c-flow .chappa-sv-chip")?.dataset.tone).toBe("warn");
+    expect(r.querySelector(".chappa-work-from-name")?.textContent).toBe("Sam");
+    expect(r.querySelector(".chappa-work-c-from .chappa-dt-sub")?.textContent).toBe("33 min");
+    // Nothing is asked of Rust until the menu opens; inline is only Open.
+    expect(d.actions).not.toHaveBeenCalled();
+    expect([...r.querySelectorAll(".chappa-dt-acts button")].map((b) => b.textContent)).toEqual(["Open", "⋯"]);
+    const menu = await menuOf(v, "ABC-1");
     expect(d.actions).toHaveBeenCalledWith("fx", "work", "ABC-1");
     // The section's open-docs is not the item's own action, and `approve`
     // is a move of its local status: the status block in the panel draws
-    // it, so the row does not repeat it.
-    expect([...r.querySelectorAll<HTMLButtonElement>(".chappa-sv-action")].map((b) => b.dataset.action)).toEqual(["terminal-here", "ping", "validate"]);
-    expect(r.querySelector<HTMLButtonElement>('[data-action="terminal-here"]')?.title).toBe("/srv/example/abc-1 is not inside an open project");
+    // it, so the menu does not repeat it.
+    expect([...menu.querySelectorAll<HTMLButtonElement>(".chappa-sv-action[data-action]")].map((b) => b.dataset.action)).toEqual(["terminal-here", "ping", "validate"]);
+    expect(menu.querySelector<HTMLButtonElement>('[data-action="terminal-here"]')?.title).toBe("/srv/example/abc-1 is not inside an open project");
+    expect(menu.querySelector(".chappa-dt-menu-entry")?.textContent).toBe("Open details");
+    v.dispose();
+  });
+
+  it("Open opens the item's link through the checked opener; a click elsewhere on the row opens its page", () => {
+    const d = deps();
+    const v = new WorkView(d);
+    v.update(input());
+    row(v, "ABC-1").querySelector<HTMLButtonElement>(".chappa-dt-open")!.click();
+    expect(d.openLink).toHaveBeenCalledWith("fx", "https://registry.example/tracker/ABC-1");
+    expect(v.selectedId).toBeNull();
+    row(v, "ABC-1").querySelector<HTMLElement>(".chappa-work-c-status")!.click();
+    expect(v.selectedId).toBe("fx|ABC-1");
     v.dispose();
   });
 
@@ -127,15 +160,22 @@ describe("WorkView", () => {
     w.dispose();
   });
 
-  it("the Done group unfolds on its head; the choice survives a poll", () => {
+  it("the Done group unfolds on its compact head; the choice survives a poll and a new page", () => {
     const v = new WorkView(deps());
     v.update(input());
     assigned(v).click();
-    v.host.querySelector<HTMLButtonElement>('.chappa-sv-group[data-group="done"] .chappa-sv-group-head')!.click();
+    const head = () => v.host.querySelector<HTMLButtonElement>('.chappa-dt-group[data-group="done"] .chappa-dt-group-head')!;
+    expect(head().textContent).toBe("▸ Done1");
+    head().click();
     expect(visibleKeys(v)).toContain("ABC-3");
     v.update(input({ versions: { fx: 2 } }));
     expect(visibleKeys(v)).toContain("ABC-3");
     v.dispose();
+    const w = new WorkView(deps());
+    w.update(input());
+    assigned(w).click();
+    expect(visibleKeys(w)).toContain("ABC-3");
+    w.dispose();
   });
 
   it("empty states: no source, no data yet, nothing assigned", () => {
@@ -296,9 +336,11 @@ describe("WorkView", () => {
     v.setActive(true);
     v.update(input());
     await FLUSH();
-    row(v, "ABC-1").querySelector<HTMLButtonElement>('[data-action="validate"]')!.click();
+    (await menuOf(v, "ABC-1")).querySelector<HTMLButtonElement>('[data-action="validate"]')!.click();
     await FLUSH();
     expect(run).toHaveBeenCalledWith("fx", "work", "ABC-1", "validate", false, null);
+    // An action chosen from the menu closes it.
+    expect(v.host.querySelector(".chappa-dt-menu")).toBeNull();
     const page = v.openPanelPage!;
     expect(page.origin).toEqual({ sourceId: "fx", sourceLabel: "Fixture", label: "Validate", endpoint: "/api/panel/validate" });
     // The page covers the view: one header, the page's, starting with the arrow.
@@ -414,15 +456,22 @@ describe("WorkView with an item fed by two sources", () => {
     expect(row(v, "ABC-3").querySelector<HTMLElement>(".chappa-work-dot")!.hidden).toBe(true);
     // The overlay's badges join the tracker's row; owner-missing rows say why.
     expect([...row(v, "ABC-2").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["1 unpushed"]);
+    expect(row(v, "ABC-2").querySelector(".chappa-work-branches")?.textContent).toBe("owner/repo: task/ABC-2-web");
     expect([...row(v, "ABC-9").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["not listed by Fixture"]);
     expect([...row(v, "XYZ-1").querySelectorAll(".chappa-sv-chips > *")].map((c) => c.textContent)).toEqual(["tracker unavailable"]);
     await FLUSH();
+    const menuButtons = async (k: string) => {
+      const m = await menuOf(v, k);
+      const out = buttons(m.querySelector(".chappa-dt-menu > .chappa-sv-actions:not(.chappa-dt-menu-own)"));
+      v.host.querySelector<HTMLButtonElement>('.chappa-dt-more[aria-expanded="true"]')?.click();
+      return out;
+    };
     // `ship` is a move of the status the overlay set: its status block in
-    // the panel draws it, so the row does not.
-    expect(buttons(row(v, "ABC-2"))).toEqual([["ws", "archive", null]]);
+    // the panel draws it, so the menu does not.
+    expect(await menuButtons("ABC-2")).toEqual([["ws", "archive", null]]);
     // Another source's offer, asked for under the owner, only where it does not add to the row yet.
-    expect(buttons(row(v, "ABC-3"))).toEqual([["ws", "start-work", "fx"]]);
-    expect(buttons(row(v, "ABC-9"))).toEqual([]);
+    expect(await menuButtons("ABC-3")).toEqual([["ws", "start-work", "fx"]]);
+    expect(await menuButtons("ABC-9")).toEqual([]);
     v.dispose();
   });
 

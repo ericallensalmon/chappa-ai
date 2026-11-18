@@ -4561,7 +4561,7 @@ describe("App agents", () => {
     panelDispose(app);
   });
 
-  it("data safety: an agent whose deliveries are held says how many on its row, and Needs you lists the block and the agent", async () => {
+  it("data safety: an agent whose deliveries are held says how many on its row; the block stays out of Needs you", async () => {
     const { api } = stubApi();
     const store = new AgentToolsStore(agentApi([dockerTool(3)]));
     await store.load();
@@ -4609,7 +4609,8 @@ describe("App agents", () => {
     const held = agentRow().querySelector<HTMLElement>(".chappa-rail-held")!;
     expect(held.textContent).toBe("held: 2 messages");
     expect(held.title).toMatch(/held/);
-    expect(badge()).toBe("2");
+    // The block is Environment's to show; Needs you counts no stack state.
+    expect(badge()).toBe("");
     // The block lifts: the marker and the rows go.
     push!({ blocks: [], agents: [], held: [] });
     await FLUSH();
@@ -7631,7 +7632,7 @@ describe("App source views", () => {
     root.remove();
   });
 
-  it("a Needs you PR row opens the PRs view at the PR; an Environment row focuses its own source's component", async () => {
+  it("a Needs you PR row opens the PRs view at the PR; the stacks' red components are not Needs you rows", async () => {
     const { root, app } = await mountedWithSources(
       { sources: [sourceRow("fx", ALL), sourceRow("two", ["environment"])], hiddenViews: [] },
       { ...fixtureAnswers(), "fx/environment": sourceFixture("environment"), "two/environment": sourceFixture("environment") },
@@ -7645,11 +7646,9 @@ describe("App source views", () => {
     expect(prs.querySelector<HTMLElement>(".chappa-pr-row.focused")?.dataset.id).toBe("github/owner/repo/#7");
     prs.querySelector<HTMLButtonElement>(":scope > .chappa-sv-header > .chappa-back-arrow")!.click();
     expect(needs.classList.contains("active")).toBe(true);
-    // Both stacks have a `db`: the row of the second one focuses the second's.
-    needs.querySelector<HTMLButtonElement>('.chappa-needs-row[data-id="env:two|db"] .chappa-sv-title')!.click();
-    const env = page(root, "environment")!;
-    expect(env.classList.contains("active")).toBe(true);
-    expect(env.querySelector<HTMLElement>(".chappa-env-row.focused")?.dataset.key).toBe("two|db");
+    // Both stacks have broken components; they stay in Environment.
+    expect(needs.querySelectorAll('.chappa-needs-row[data-id^="env:"]').length).toBe(0);
+    expect(needs.querySelector('[data-section="environment"]')).toBeNull();
     panelDispose(app);
     root.remove();
   });
@@ -7702,7 +7701,7 @@ describe("App source views", () => {
     entry(root, "attention").click();
     const rows = [...page(root, "attention")!.querySelectorAll<HTMLElement>(".chappa-needs-row")];
     expect(rows.map((r) => r.dataset.id)).toEqual([`term:term:${second}`, `term:term:${first}`]);
-    expect(rows[1].querySelector(".chappa-sv-detail")?.textContent).toBe("needs attention");
+    expect(rows[1].querySelector(".chappa-needs-badge")?.textContent).toBe("needs attention");
     rows[1].querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
     expect(vd(app).activeId).toBe(first);
     expect(page(root, "attention")?.classList.contains("active")).toBe(false);
@@ -7812,8 +7811,8 @@ describe("App source views", () => {
     expect(dot()).toBe("bad");
     expect(entry(root, "environment").querySelector(".chappa-nav-badge")?.textContent).toBe("");
     expect(entry(root, "environment").title).toBe("Environment from fx: something is broken (Ctrl+Shift+4)");
-    // The four red components join Needs you: 10 + 4.
-    expect(badge(root)).toBe("14");
+    // The four red components are the dot's, not Needs you's count.
+    expect(badge(root)).toBe("10");
     const env = sourceFixture("environment");
     answers["fx/environment"] = { ...env, components: [{ id: "api", group: "app", state: "starting" }], alerts: [{ text: "Disk is 85 percent full", severity: "warn" }] };
     sources.emit({ event: "view", source_id: "fx", view: "environment" });
@@ -7831,18 +7830,15 @@ describe("App source views", () => {
     root.remove();
   });
 
-  it("a red component's Needs you row opens the Environment view on its row", async () => {
+  it("Needs you lists only what waits on the person: no stack rows, its sections each say when nothing waits", async () => {
     const answers: Record<string, unknown> = { ...fixtureAnswers(), "fx/environment": sourceFixture("environment") };
     const { root, app } = await mountedWithSources({ sources: [sourceRow("fx", ALL)], hiddenViews: [] }, answers);
     entry(root, "attention").click();
     const needs = page(root, "attention")!;
-    const envRow = needs.querySelector<HTMLElement>('.chappa-needs-row[data-id="env:fx|db"]')!;
-    expect(envRow.querySelector(".chappa-sv-title")?.textContent).toBe("Database");
-    envRow.querySelector<HTMLButtonElement>(".chappa-sv-title")!.click();
-    const envPage = page(root, "environment")!;
-    expect(envPage.classList.contains("active")).toBe(true);
-    expect(needs.classList.contains("active")).toBe(false);
-    expect(envPage.querySelector('.chappa-env-row[data-key="fx|db"]')?.classList.contains("focused")).toBe(true);
+    const ids = [...needs.querySelectorAll<HTMLElement>(".chappa-needs-section")].map((s) => s.dataset.section);
+    expect(ids).toEqual(["work", "terminals", "prs", "group:Builds", "group:Incidents"]);
+    expect(needs.querySelector('[data-section="terminals"] .chappa-dt-empty')?.textContent).toBe("No terminal or agent is waiting for you.");
+    expect(needs.querySelectorAll('.chappa-needs-row[data-id^="env:"]').length).toBe(0);
     panelDispose(app);
     root.remove();
   });
@@ -8007,6 +8003,34 @@ describe("App source views", () => {
     // Work has one source: no selector.
     entry(root, "work").click();
     expect(page(root, "work")?.querySelector<HTMLElement>(".chappa-source-picker")?.hidden).toBe(true);
+    panelDispose(app);
+    root.remove();
+  });
+
+  it("a selector lists only the sources with rows in its view; one that empties drops out and the pick falls back to All", async () => {
+    const answers: Record<string, unknown> = {
+      ...fixtureAnswers(),
+      "two/prs": { freshness: { asOf: "2026-01-15T10:00:00Z" }, items: [] },
+      "three/prs": { freshness: { asOf: "2026-01-15T10:00:00Z" }, items: [prItem("#98", { repo: "third/repo" })] },
+    };
+    const { root, app, sources } = await mountedWithSources(
+      { sources: [sourceRow("fx", ALL), sourceRow("two", ["prs"]), sourceRow("three", ["prs"])], hiddenViews: [] },
+      answers,
+    );
+    entry(root, "prs").click();
+    const prs = page(root, "prs")!;
+    const picks = (): string[] => [...prs.querySelectorAll<HTMLButtonElement>(".chappa-source-pick")].map((b) => b.textContent ?? "");
+    // `two` serves PRs but has none: it is no choice.
+    expect(picks()).toEqual(["All", "fx", "three"]);
+    prs.querySelector<HTMLButtonElement>('.chappa-source-pick[data-source="three"]')!.click();
+    expect(readViewSource("prs")).toBe("three");
+    answers["three/prs"] = { freshness: { asOf: "2026-01-15T10:05:00Z" }, items: [] };
+    sources.emit({ event: "view", source_id: "three", view: "prs" });
+    await FLUSH();
+    await FLUSH();
+    // With one source left that has rows, the selector hides; the page shows them all.
+    expect(prs.querySelector<HTMLElement>(".chappa-source-picker")?.hidden).toBe(true);
+    expect([...prs.querySelectorAll<HTMLElement>(".chappa-pr-row")].map((r) => r.dataset.id)).toContain("github/owner/repo/#1");
     panelDispose(app);
     root.remove();
   });

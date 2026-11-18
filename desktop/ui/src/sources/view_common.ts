@@ -11,7 +11,9 @@
 import type * as ipc from "../ipc";
 import { isBackKey, mountPageHeader, type PageHeader } from "../page_header";
 import { formatAgo } from "../record_pane";
-import { actionButtonState, outcomeText, runAction } from "../source_actions";
+import { fieldsDialog } from "../dialog";
+import { readCollapsed, writeCollapsed } from "../sidebar_sections";
+import { actionButtonState, outcomeText, runAction, type ActionButtonState } from "../source_actions";
 import type { ActionTarget } from "./needs_you";
 import type { Chip, FreshnessSummary, NeedsUpdate } from "./prs_model";
 
@@ -94,6 +96,46 @@ button.chappa-sv-group-head:hover{color:#e6e8ec;}
 .chappa-sv-action{border:1px solid #262a31;border-radius:4px;background:#16181d;color:#d6d8dc;font:11px system-ui,sans-serif;cursor:pointer;padding:1px 7px;}
 .chappa-sv-action:hover:not(:disabled){background:#1d232b;}
 .chappa-sv-action:disabled{color:#6b7280;cursor:default;}
+.chappa-dt{min-width:0;}
+.chappa-dt-cols,.chappa-dt-row{display:grid;grid-template-columns:var(--dt-cols);column-gap:12px;}
+.chappa-dt-cols{position:sticky;top:-10px;z-index:2;background:#0d0e10;padding:6px 8px;border-bottom:1px solid #22252a;font:600 10px ui-monospace,monospace;letter-spacing:.06em;color:#8b949e;}
+.chappa-dt-group{margin-top:4px;}
+.chappa-dt-group-head{display:flex;align-items:baseline;gap:6px;width:100%;margin:0;padding:8px 8px 4px;border:0;border-bottom:1px solid #22252a;background:none;text-align:left;font:600 12px system-ui,sans-serif;color:#adb3bd;cursor:pointer;}
+.chappa-dt-group-head:hover{color:#e6e8ec;}
+div.chappa-dt-group-head{cursor:default;}
+.chappa-dt-group-count{font:400 11px ui-monospace,monospace;color:#6b7280;}
+.chappa-dt-rows.folded{display:none;}
+.chappa-dt-empty{padding:6px 8px;font:12px system-ui,sans-serif;color:#6b7280;}
+.chappa-dt-empty:empty{display:none;}
+.chappa-dt-row{position:relative;align-items:start;padding:7px 8px;border-bottom:1px solid #1a1d22;cursor:pointer;}
+.chappa-dt-row:hover{background:#14171c;}
+.chappa-dt-row.selected{background:#161a20;}
+.chappa-dt-row.focused{outline:1px solid #5ea6ff;outline-offset:-1px;}
+.chappa-dt-row[data-accent="active"]{box-shadow:inset 3px 0 0 #3fb950;}
+.chappa-dt-row[data-accent="bad"]{box-shadow:inset 3px 0 0 #f85149;}
+.chappa-dt-row[data-accent="warn"]{box-shadow:inset 3px 0 0 #f0b429;}
+.chappa-dt-row[data-accent="info"]{box-shadow:inset 3px 0 0 #5ea6ff;}
+.chappa-dt-cell{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px;overflow-wrap:anywhere;font:12px system-ui,sans-serif;color:#d6d8dc;}
+.chappa-dt-chips{display:flex;flex-wrap:wrap;gap:3px;}
+.chappa-dt-chips:empty{display:none;}
+.chappa-dt-main{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;border:0;background:none;padding:0;color:#e6e8ec;font:600 13px system-ui,sans-serif;text-align:left;cursor:pointer;}
+.chappa-dt-main:hover{text-decoration:underline;}
+.chappa-dt-sub{font:11px system-ui,sans-serif;color:#8b949e;}
+.chappa-dt-sub:empty{display:none;}
+.chappa-dt-mono{font:11px ui-monospace,monospace;color:#adb3bd;}
+.chappa-dt-num{font:600 12px ui-monospace,monospace;color:#5ea6ff;}
+.chappa-dt-acts{flex-direction:row;align-items:center;justify-content:flex-end;gap:4px;}
+.chappa-dt-open{visibility:hidden;}
+.chappa-dt-row:hover .chappa-dt-open,.chappa-dt-row:focus-within .chappa-dt-open{visibility:visible;}
+.chappa-dt-more{border:1px solid transparent;border-radius:4px;background:none;color:#8b949e;font:14px system-ui,sans-serif;line-height:1;padding:1px 5px;cursor:pointer;}
+.chappa-dt-more:hover,.chappa-dt-more:focus-visible,.chappa-dt-more[aria-expanded="true"]{border-color:#2a2e35;color:#e6e8ec;}
+.chappa-dt-menu{position:fixed;z-index:50;min-width:170px;max-width:320px;padding:6px;background:#16181d;border:1px solid #2a2e35;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:4px;}
+.chappa-dt-menu .chappa-sv-actions{flex-direction:column;align-items:stretch;}
+.chappa-dt-menu .chappa-sv-action{text-align:left;}
+.chappa-dt-page-grid{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0 0 10px;font:12px system-ui,sans-serif;color:#d6d8dc;}
+.chappa-dt-page-grid dt{color:#8b949e;}
+.chappa-dt-page-grid dd{margin:0;min-width:0;overflow-wrap:anywhere;display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
+.chappa-dt-page-gone{font:12px system-ui,sans-serif;color:#f0b429;}
 `;
 
 let stylesInjected = false;
@@ -344,6 +386,13 @@ export class ViewFrame {
   };
 }
 
+/** One action as a row draws it: whose it is, Rust's verdict, the button. */
+interface Offer {
+  t: ActionTarget;
+  entry: ipc.SourceActionDto;
+  state: ActionButtonState;
+}
+
 /** The action buttons of one row, filled from Rust's verdicts. The row
  *  calls {@link ActionsCell.load} with its targets and a version; the same
  *  pair twice costs nothing, and a slow answer never paints over a newer
@@ -383,6 +432,11 @@ export class ActionsCell {
       const links = new Set<string>();
       const ids = new Set<string>();
       const many = targets.length > 1;
+      // An action several sources offer on this row (each stack its own
+      // "Review with environment") is one button; which source runs it is
+      // asked when it is clicked.
+      const offers = new Map<string, Offer[]>();
+      const order: (Offer | Offer[])[] = [];
       for (const { t, entry } of lists.flat()) {
         const allowed = t.only ?? only;
         if (allowed && !allowed.includes(entry.action.id)) continue;
@@ -398,6 +452,25 @@ export class ActionsCell {
         }
         const state = actionButtonState(entry);
         if (state.hidden) continue;
+        if (!t.owner) {
+          order.push({ t, entry, state });
+          continue;
+        }
+        const k = `${t.owner}\u001f${entry.action.id}`;
+        const group = offers.get(k);
+        if (group) group.push({ t, entry, state });
+        else {
+          const fresh = [{ t, entry, state }];
+          offers.set(k, fresh);
+          order.push(fresh);
+        }
+      }
+      for (const item of order) {
+        if (Array.isArray(item) && item.length > 1) {
+          this.el.appendChild(this.offerButton(item));
+          continue;
+        }
+        const { t, entry, state } = Array.isArray(item) ? item[0] : item;
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "chappa-sv-action";
@@ -412,6 +485,44 @@ export class ActionsCell {
         this.el.appendChild(btn);
       }
     });
+  }
+
+  /** One button for the same action offered by several sources: a click
+   *  asks which source runs it (only those whose verdict allows it), then
+   *  runs that one as usual, with its own confirm. */
+  private offerButton(variants: Offer[]): HTMLButtonElement {
+    const first = variants[0];
+    const live = variants.filter((v) => !v.state.disabled);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chappa-sv-action";
+    btn.dataset.action = first.entry.action.id;
+    btn.dataset.offers = variants.map((v) => v.t.sourceId).join(" ");
+    if (first.t.owner) btn.dataset.owner = first.t.owner;
+    btn.textContent = `${first.state.label}…`;
+    btn.title = live.length
+      ? `Offered by ${variants.map((v) => v.t.sourceLabel).join(", ")}; asks which one`
+      : variants.map((v) => `${v.t.sourceLabel}: ${v.state.title}`).join("\n");
+    btn.disabled = live.length === 0;
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", () => void this.pickOffer(first.state.label, live));
+    return btn;
+  }
+
+  private async pickOffer(label: string, live: Offer[]): Promise<void> {
+    if (live.length === 0) return;
+    let chosen = live[0];
+    if (live.length > 1) {
+      const answer = await fieldsDialog(
+        `${label}: which one?`,
+        [{ name: "via", label: "With", kind: "choice", required: true, value: "0", options: live.map((v, i) => ({ value: String(i), label: v.t.sourceLabel })) }],
+        { okLabel: "Next" },
+      );
+      const at = answer ? Number(answer.values.via) : NaN;
+      if (!Number.isInteger(at) || !live[at]) return;
+      chosen = live[at];
+    }
+    await this.click(chosen.t, chosen.entry);
   }
 
   /** One call at a time per button: it is disabled from the click until
@@ -440,4 +551,215 @@ export class ActionsCell {
  *  another machine) is said. */
 export function openChecked(deps: SourceViewDeps, sourceId: string, url: string): void {
   void deps.openLink(sourceId, url).catch((e) => deps.say(e instanceof Error ? e.message : String(e), "error"));
+}
+
+/** A group's fold, remembered in the same store the Environment view and
+ *  the sidebar use. Only a choice away from the default is stored, so a
+ *  group that starts folded (Done, Waiting on reviewers, a team) and one
+ *  that starts open each leave no key until the user turns them. */
+export function readFold(key: string, byDefault: boolean): boolean {
+  return byDefault ? !readCollapsed(`${key}:open`) : readCollapsed(key);
+}
+
+export function writeFold(key: string, byDefault: boolean, folded: boolean): void {
+  if (byDefault) writeCollapsed(`${key}:open`, !folded);
+  else writeCollapsed(key, folded);
+}
+
+/** The table's column header row. */
+export function columnsHead(labels: readonly string[]): HTMLElement {
+  const head = document.createElement("div");
+  head.className = "chappa-dt-cols";
+  head.setAttribute("role", "row");
+  for (const l of labels) {
+    const c = document.createElement("div");
+    c.setAttribute("role", "columnheader");
+    c.textContent = l;
+    head.appendChild(c);
+  }
+  return head;
+}
+
+/** One entry of a row's menu drawn by the app (not a source's action). */
+export interface MenuEntry {
+  label: string;
+  run(): void;
+  title?: string;
+}
+
+type MenuTarget = ActionTarget & { only?: readonly string[] };
+
+/**
+ * The one "⋯" menu of a table, moved to whichever row opened it: the app's
+ * own entries (open the row's page, open its link), then the row's actions
+ * as Rust judged them. The actions are only asked for when the menu opens,
+ * so a list of fifty rows asks nothing until one is reached. Escape closes
+ * it back to its button without leaving the view; a click outside closes it.
+ */
+export class RowMenu {
+  private cur: { el: HTMLElement; cell: ActionsCell; key: string; opener: HTMLButtonElement } | null = null;
+
+  constructor(
+    private readonly host: HTMLElement,
+    private readonly deps: SourceViewDeps,
+  ) {
+    host.addEventListener("keydown", this.onKey, true);
+    document.addEventListener("mousedown", this.onOutside, true);
+  }
+
+  /** The row whose menu is open. */
+  get key(): string | null {
+    return this.cur?.key ?? null;
+  }
+
+  get el(): HTMLElement | null {
+    return this.cur?.el ?? null;
+  }
+
+  /** A row's "⋯" button; `onClick` gets the button. */
+  static button(onClick: (btn: HTMLButtonElement) => void): HTMLButtonElement {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "chappa-dt-more";
+    more.textContent = "⋯";
+    more.title = "Actions";
+    more.setAttribute("aria-label", "Actions");
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onClick(more);
+    });
+    return more;
+  }
+
+  toggle(key: string, opener: HTMLButtonElement, entries: MenuEntry[], targets: MenuTarget[], version: string, only?: readonly string[]): void {
+    if (this.cur?.key === key) {
+      this.close();
+      return;
+    }
+    this.close();
+    const menu = document.createElement("div");
+    menu.className = "chappa-dt-menu";
+    menu.setAttribute("role", "menu");
+    menu.dataset.key = key;
+    const own = document.createElement("div");
+    own.className = "chappa-sv-actions chappa-dt-menu-own";
+    for (const e of entries) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chappa-sv-action chappa-dt-menu-entry";
+      b.textContent = e.label;
+      if (e.title) b.title = e.title;
+      b.addEventListener("click", () => {
+        this.close();
+        e.run();
+      });
+      own.appendChild(b);
+    }
+    const cell = new ActionsCell(this.deps);
+    // An action chosen from the menu closes it (its button ran first).
+    cell.el.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest("button:not(:disabled)")) this.close();
+    });
+    menu.append(own, cell.el);
+    menu.addEventListener("click", (e) => e.stopPropagation());
+    const box = opener.getBoundingClientRect();
+    menu.style.top = `${Math.round(box.bottom + 2)}px`;
+    menu.style.right = `${Math.max(8, Math.round((window.innerWidth || 0) - box.right))}px`;
+    this.host.appendChild(menu);
+    this.cur = { el: menu, cell, key, opener };
+    opener.setAttribute("aria-expanded", "true");
+    cell.load(targets, version, only);
+    (own.firstElementChild as HTMLElement | null)?.focus();
+  }
+
+  /** Keep an open menu's actions current with a poll. */
+  refresh(key: string, targets: MenuTarget[], version: string, only?: readonly string[]): void {
+    if (this.cur?.key === key) this.cur.cell.load(targets, version, only);
+  }
+
+  close(): void {
+    if (!this.cur) return;
+    this.cur.opener.setAttribute("aria-expanded", "false");
+    this.cur.el.remove();
+    this.cur = null;
+  }
+
+  dispose(): void {
+    this.close();
+    this.host.removeEventListener("keydown", this.onKey, true);
+    document.removeEventListener("mousedown", this.onOutside, true);
+  }
+
+  private onKey = (e: KeyboardEvent): void => {
+    if (!this.cur || !isBackKey(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const opener = this.cur.opener;
+    this.close();
+    opener.focus();
+  };
+
+  private onOutside = (e: MouseEvent): void => {
+    if (!this.cur) return;
+    const t = e.target as Node;
+    if (this.cur.el.contains(t) || this.cur.opener.contains(t)) return;
+    this.close();
+  };
+}
+
+/** A row's inline "Open" (shown on hover and focus): its link. */
+export function openButton(title: string, run: () => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "chappa-sv-action chappa-dt-open";
+  b.textContent = "Open";
+  b.title = title;
+  b.addEventListener("mousedown", (e) => e.preventDefault());
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    run();
+  });
+  return b;
+}
+
+/** Whether a click on a row opens its page: anywhere but on one of its
+ *  own controls (a chip, a link, a button other than its title). */
+export function rowClickOpens(e: MouseEvent, title: HTMLElement): boolean {
+  const control = (e.target as HTMLElement).closest("button,a,input");
+  return !control || control === title;
+}
+
+/** A compact group header: a fold toggle with the label and its count
+ *  (or, unfoldable, a plain heading). */
+export function groupHead(foldable: boolean, onToggle: () => void): { el: HTMLElement; paint(label: string, count: number, folded: boolean): void } {
+  const el = document.createElement(foldable ? "button" : "div");
+  el.className = "chappa-dt-group-head";
+  if (el instanceof HTMLButtonElement) {
+    el.type = "button";
+    el.addEventListener("click", onToggle);
+  }
+  const label = document.createElement("span");
+  label.className = "chappa-dt-group-label";
+  const count = document.createElement("span");
+  count.className = "chappa-dt-group-count";
+  el.append(label, count);
+  return {
+    el,
+    paint(text, n, folded) {
+      label.textContent = foldable ? `${folded ? "▸" : "▾"} ${text}` : text;
+      count.textContent = String(n);
+      if (foldable) el.setAttribute("aria-expanded", String(!folded));
+    },
+  };
+}
+
+/** A compact age for a table cell ("3 h", "2 d", "now"); null when the
+ *  timestamp cannot be read. */
+export function shortAge(utc: string | null | undefined, now: number): string | null {
+  const ms = utc ? Date.parse(utc) : NaN;
+  if (!Number.isFinite(ms)) return null;
+  const text = formatAgo(ms, now);
+  return text === "just now" ? "now" : text.replace(/ ago$/, "");
 }

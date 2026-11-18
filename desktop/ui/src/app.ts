@@ -6834,16 +6834,41 @@ export class App {
   }
 
   /** The sources a view's selector offers: every trusted source serving
-   *  it (for Needs you, serving anything Needs you reads). */
+   *  it (for Needs you, serving anything Needs you reads) that has rows in
+   *  it now; a source with nothing to show is no choice. Environment lists
+   *  every stack: each is its own environment even while it reports
+   *  nothing. */
   private pickerOptions(view: RailView): PickerOption[] {
     const listing = this.viewsData.current;
-    const names = view === "attention" ? ["work", "prs", "attention", "environment"].filter((v) => !this.viewsData.hidden(v)) : [view];
+    const names = view === "attention" ? ["work", "prs", "attention"].filter((v) => !this.viewsData.hidden(v)) : [view];
+    const withRows = view === "environment" ? null : this.sourcesWithRows(view);
     const seen = new Set<string>();
     const out: PickerOption[] = [];
     for (const s of listing.sources) {
       if (!s.trusted || seen.has(s.id) || !s.views.some((v) => names.includes(v.name))) continue;
+      if (withRows && !withRows.has(s.id)) continue;
       seen.add(s.id);
       out.push({ id: s.id, label: s.label });
+    }
+    return out;
+  }
+
+  /** The sources that put at least one row into a view: Work's merged rows
+   *  (an overlay source counts on the rows it adds to), the PRs' origins,
+   *  Needs you's rows and the actions on them. */
+  private sourcesWithRows(view: RailView): Set<string> {
+    const out = new Set<string>();
+    if (view === "work") {
+      for (const r of this.currentWorkJoins().all) for (const c of r.contributions) out.add(c.sourceId);
+    } else if (view === "prs") {
+      for (const r of this.currentPrRows()) for (const o of r.origins) out.add(o.sourceId);
+    } else if (view === "attention") {
+      for (const s of this.needsYouModel?.sections ?? []) {
+        for (const r of s.rows) {
+          if (r.sourceId) out.add(r.sourceId);
+          for (const t of r.actions) out.add(t.sourceId);
+        }
+      }
     }
     return out;
   }
@@ -7169,9 +7194,7 @@ export class App {
       work: data.hidden("work") ? [] : data.payloadsFor("work"),
       prs: data.hidden("prs") ? null : this.currentPrsModel(),
       attention: data.payloadsFor("attention"),
-      environment: data.hidden("environment") ? [] : data.payloadsFor("environment"),
       needsUpdate: data.needsUpdate(),
-      dataSafety: this.dataSafety,
       agentSettings: [...this.agentSettings.values()],
     });
     this.needsYouModel = model;
@@ -7180,14 +7203,15 @@ export class App {
     // The badge counts every source; the page shows the picked one (with no
     // terminals or app-level rows, which belong to no source).
     const pick = this.viewPick("attention");
+    const pickedPrs = data.hidden("prs") ? [] : filterPayloads(data.payloadsFor("prs"), pick);
     const shown = isAll(pick)
       ? model
       : buildNeedsYou({
           terminals: [],
+          terminalsSection: false,
           work: data.hidden("work") ? [] : filterPayloads(data.payloadsFor("work"), pick),
-          prs: data.hidden("prs") ? null : buildPrsModel(filterPayloads(data.payloadsFor("prs"), pick), data.needsUpdate()),
+          prs: pickedPrs.length ? buildPrsModel(pickedPrs, data.needsUpdate()) : null,
           attention: filterPayloads(data.payloadsFor("attention"), pick),
-          environment: data.hidden("environment") ? [] : filterPayloads(data.payloadsFor("environment"), pick),
           needsUpdate: data.needsUpdate().filter((n) => n.sourceId === pick),
         });
     this.needsYouView.update({ model: shown, versions: data.versions() });

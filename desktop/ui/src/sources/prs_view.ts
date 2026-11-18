@@ -1,15 +1,26 @@
 // The PRs page: the merged pull requests of every trusted source serving
 // the view, in three tabs: My PRs and Reviewing grouped by bucket, All
-// grouped by how I am on each review (team groups start folded). Built like
-// the dashboard: the app hands it a plain model on every change and the
-// page repaints only the rows whose content changed (a poll that changed
-// one PR touches one row, and focus inside the page survives). The
-// sources' view-level banners sit above the tabs; a PR's sections are
-// folded inside its row; a `panel` action opens the source's drill-in page
-// over the view. A PR joined to work items carries a chip per item key
-// that opens the item in Work, and the actions other sources offer on PR
-// rows sit with the PR's own.
+// grouped by how I am on each review (team groups start folded). Each PR is
+// one row of an aligned table (repo, number, title with author and branch,
+// status chips, votes, comments, the work items it joined, age); cells wrap
+// to a few lines rather than truncate, and rows are separated by rules, not
+// boxed. A group's header is one compact line whose fold is remembered.
+//
+// A row is kept light: its only inline control is "Open" (its link, shown
+// on hover and focus) and a "⋯" menu holding its page, its link and every
+// action Rust judged for it, asked for only when the menu opens. Clicking
+// the row opens the PR's page (everything about it, its sections and all
+// its actions), which leaves through the shared back arrow.
+//
+// Built like the dashboard: the app hands it a plain model on every change
+// and the page repaints only the rows whose content changed (a poll that
+// changed one PR touches one row, and focus inside the page survives). The
+// sources' view-level banners sit above the tabs; a `panel` action opens
+// the source's drill-in page over the view. A PR joined to work items
+// carries a chip per item key that opens the item in Work, and the actions
+// other sources offer on PR rows sit with the PR's own.
 
+import { mountPageHeader, type PageHeader } from "../page_header";
 import type { ActionTarget } from "./needs_you";
 import { withPanels } from "./panel_view";
 import { prId, type PrGroup, type PrRow, type PrsModel, type PrsTab } from "./prs_model";
@@ -17,14 +28,22 @@ import { SectionsBlock, paintBanners } from "./sections";
 import { prItemActionTargets, type JoinHow, type MergeSource } from "./work_merge";
 import {
   ActionsCell,
+  RowMenu,
   ViewFrame,
   chipEl,
-  fillLines,
+  columnsHead,
+  groupHead,
+  openButton,
   openChecked,
   paintEmpty,
   placeAt,
+  readFold,
+  rowClickOpens,
+  shortAge,
   truncate,
+  writeFold,
   type SourceViewDeps,
+  type Subpage,
 } from "./view_common";
 
 export type { PrsTab } from "./prs_model";
@@ -35,6 +54,10 @@ export const PRS_TABS: { id: PrsTab; label: string }[] = [
   { id: "reviewing", label: "Reviewing" },
   { id: "all", label: "All" },
 ];
+
+/** The table's columns, in order (the last, unlabelled, holds the row's
+ *  Open and its "⋯"). */
+export const PR_COLUMNS = ["REPO", "#", "TITLE", "STATUS", "VOTES", "COMMENTS", "ITEMS", "AGE", ""];
 
 /** What the page paints: the model plus what the app knows around it. */
 export interface PrsViewInput {
@@ -48,10 +71,12 @@ export interface PrsViewInput {
    *  actions are read again after a poll. */
   versions: Record<string, number>;
   /** Per PR id: the work items it joined (the row's item-key chips). */
-  workItems?: ReadonlyMap<string, readonly { rowId: string; key: string; title: string; how: JoinHow }[]>;
+  workItems?: ReadonlyMap<string, readonly WorkItemLink[]>;
   /** The listed sources: the item actions they offer on PR rows. */
   sources?: readonly MergeSource[];
 }
+
+type WorkItemLink = { rowId: string; key: string; title: string; how: JoinHow };
 
 /** What the PRs page needs beyond any view: opening an item in Work. */
 export interface PrsViewDeps extends SourceViewDeps {
@@ -66,23 +91,40 @@ export function itemChipTitle(item: { key: string; title: string; how: JoinHow }
   return `${item.title === item.key ? item.key : `${item.key} ${item.title}`} (${how}); show it in Work`;
 }
 
+/** The muted second line of the REPO cell: the forge, and the project
+ *  above the repo where the forge has one. */
+export function prForgeLine(row: PrRow): string {
+  return row.project ? `${row.forge} | ${row.project}` : row.forge;
+}
+
+/** The muted line under a PR's title: who opened it and its branches. */
+export function prByLine(row: PrRow): string {
+  return [row.author, row.branch].filter(Boolean).join(" | ");
+}
+
 interface GroupRefs {
   el: HTMLElement;
-  head: HTMLButtonElement;
-  label: HTMLElement;
-  count: HTMLElement;
+  head: ReturnType<typeof groupHead>;
   rows: HTMLElement;
   sig: string;
 }
 
 interface RowRefs {
   el: HTMLElement;
+  repo: HTMLElement;
+  forge: HTMLElement;
+  number: HTMLElement;
   title: HTMLButtonElement;
-  meta: HTMLElement;
-  reasons: HTMLElement;
-  chips: HTMLElement;
-  sections: SectionsBlock;
-  actions: ActionsCell;
+  by: HTMLElement;
+  why: HTMLElement;
+  status: HTMLElement;
+  votes: HTMLElement;
+  me: HTMLElement;
+  comments: HTMLElement;
+  items: HTMLElement;
+  age: HTMLElement;
+  open: HTMLButtonElement;
+  more: HTMLButtonElement;
   sig: string;
   row: PrRow | null;
 }
@@ -105,6 +147,21 @@ export function prTargets(row: PrRow): ActionTarget[] {
     .map((o) => ({ sourceId: o.sourceId, sourceLabel: o.sourceLabel, view: "prs", key: o.key }));
 }
 
+/** Every target of a PR's actions: its origins' own (without the actions
+ *  its sections draw, when it has sections with actions and `withSections`
+ *  is off), then what other sources offer on it. */
+export function prAllTargets(row: PrRow, sources: readonly MergeSource[] | undefined, withSections: boolean): (ActionTarget & { only?: readonly string[] })[] {
+  const own = !withSections && row.sections.some((s) => (s.actions ?? []).length > 0) ? [...new Set(row.origins.flatMap((o) => o.actionIds))] : undefined;
+  const offered = sources ? prItemActionTargets(row, sources) : [];
+  return [...(own?.length === 0 ? [] : prTargets(row).map((t) => (own ? { ...t, only: own } : t))), ...offered];
+}
+
+/** The version a PR's actions are cached under: every source asked. */
+function versionOf(targets: (ActionTarget & { owner?: string })[], versions: Record<string, number>): string {
+  const asked = [...new Set(targets.flatMap((t) => (t.owner ? [t.sourceId, t.owner] : [t.sourceId])))];
+  return asked.map((id) => `${id}:${versions[id] ?? 0}`).join(",");
+}
+
 /** Whether `row` is the PR a `forge:repo:number` key names: one of its
  *  sources' keys exactly, or the same PR as forges compare them (forge and
  *  repo case folded). */
@@ -119,14 +176,21 @@ export function prMatchesKey(row: PrRow, key: string): boolean {
 /** Which tab shows a PR, looked for in this order. */
 const FOCUS_TABS: PrsTab[] = ["reviewing", "mine", "all"];
 
+/** Where a group's fold is remembered. */
+export const prGroupFoldKey = (tab: PrsTab, groupId: string): string => `prs-group:${tab}:${groupId}`;
+
 const CSS = `
 .chappa-pr-banners:empty{display:none;}
-.chappa-pr-row.focused{box-shadow:0 0 0 1px #5ea6ff;}
-.chappa-pr-row .chappa-secs:empty{display:none;}
-.chappa-pr-row .chappa-sec{margin:2px 0 0;}
+.chappa-source-view[data-view="prs"] .chappa-dt{--dt-cols:minmax(100px,1.1fr) 52px minmax(180px,3fr) minmax(100px,1.2fr) minmax(96px,1fr) 92px minmax(56px,.7fr) 44px 74px;}
 .chappa-pr-item{cursor:pointer;background:none;}
 .chappa-pr-item:hover{border-color:#5ea6ff;}
 .chappa-pr-item:disabled{cursor:default;}
+.chappa-pr-why{font:11px system-ui,sans-serif;color:#c9a35a;}
+.chappa-pr-why:empty{display:none;}
+.chappa-pr-votes[data-tone="ok"]{color:#3fb950;}
+.chappa-pr-votes[data-tone="bad"]{color:#f85149;}
+.chappa-pr-votes[data-tone="info"]{color:#5ea6ff;}
+.chappa-pr-comments[data-for-me]{color:#f0b429;}
 `;
 
 let stylesInjected = false;
@@ -139,27 +203,36 @@ function injectStyles(): void {
   document.head.appendChild(el);
 }
 
+const div = (cls: string): HTMLElement => {
+  const e = document.createElement("div");
+  e.className = cls;
+  return e;
+};
+
 export class PrsView {
   private readonly frame: ViewFrame;
   private readonly tabs: Record<PrsTab, HTMLButtonElement>;
   private tab: PrsTab = "mine";
-  /** Groups the user unfolded or folded, per tab; others keep their
-   *  default. Kept for as long as the page lives (the session), not saved. */
-  private readonly foldChoice = new Map<string, boolean>();
   private readonly groups = new Map<string, GroupRefs>();
   private readonly rows = new Map<string, RowRefs>();
   private readonly bannersEl: HTMLElement;
+  private readonly table: HTMLElement;
+  private readonly body: HTMLElement;
+  private readonly menu: RowMenu;
   private input: PrsViewInput | null = null;
   /** The deps every part of the page uses: panels stack over this view. */
-  private readonly ui: SourceViewDeps;
+  private readonly ui: PrsViewDeps;
   private focused: string | null = null;
   /** A focus asked for before the data arrived. */
   private pendingFocus: string | null = null;
+  /** The PR page open over the view, if any. */
+  private page: PrPage | null = null;
 
   constructor(private readonly deps: PrsViewDeps) {
     injectStyles();
     this.frame = new ViewFrame("PRs", "prs", () => deps.onClose());
     this.ui = withPanels(() => this.frame, deps);
+    this.menu = new RowMenu(this.frame.host, this.ui);
     this.bannersEl = document.createElement("div");
     this.bannersEl.className = "chappa-pr-banners";
     this.frame.banners.after(this.bannersEl);
@@ -178,6 +251,11 @@ export class PrsView {
     };
     this.tabs = { mine: mk("mine"), reviewing: mk("reviewing"), all: mk("all") };
     this.frame.headerSlot.appendChild(tabs);
+    this.table = div("chappa-dt");
+    this.table.setAttribute("role", "table");
+    this.body = div("chappa-dt-body");
+    this.table.append(columnsHead(PR_COLUMNS), this.body);
+    this.frame.content.appendChild(this.table);
   }
 
   get host(): HTMLElement {
@@ -209,6 +287,7 @@ export class PrsView {
   }
 
   setActive(active: boolean): void {
+    if (!active) this.menu.close();
     this.frame.setActive(active);
   }
 
@@ -235,7 +314,7 @@ export class PrsView {
       if (!group) continue;
       const row = group.rows.find((r) => prMatchesKey(r, key))!;
       this.frame.clearSubpages();
-      this.foldChoice.set(`${tab}\u001f${group.id}`, false);
+      writeFold(prGroupFoldKey(tab, group.id), group.folded, false);
       this.tab = tab;
       this.focused = row.id;
       this.paint();
@@ -248,12 +327,14 @@ export class PrsView {
   selectTab(tab: PrsTab): void {
     if (tab === this.tab) return;
     this.tab = tab;
+    this.menu.close();
     this.paint();
   }
 
   update(input: PrsViewInput): void {
     this.input = input;
     this.paint();
+    this.repaintPage();
     if (this.pendingFocus !== null && input.model.hasData) {
       const key = this.pendingFocus;
       if (!this.focus(key)) this.deps.say(`${key} is not in the PRs list.`, "error");
@@ -261,6 +342,7 @@ export class PrsView {
   }
 
   dispose(): void {
+    this.menu.dispose();
     this.frame.dispose();
   }
 
@@ -284,20 +366,19 @@ export class PrsView {
       this.tabs[id].setAttribute("aria-selected", String(id === this.tab));
     }
     const groups = model[this.tab];
-    const live = new Set<string>();
     groups.forEach((g, i) => {
       const refs = this.groupRefs(this.tab, g);
       this.paintGroup(refs, g);
-      placeAt(this.frame.content, refs.el, i);
+      placeAt(this.body, refs.el, i);
       g.rows.forEach((row, j) => {
-        live.add(row.id);
         const r = this.rowRefs(row.id);
         this.paintRow(r, row, input);
         placeAt(refs.rows, r.el, j);
       });
       truncate(refs.rows, g.rows.length);
     });
-    truncate(this.frame.content, groups.length);
+    truncate(this.body, groups.length);
+    this.table.hidden = groups.length === 0;
     // Rows of the other tabs stay cached; only rows gone from every tab are dropped.
     const all = new Set([...model.mine, ...model.reviewing, ...model.all].flatMap((g) => g.rows.map((r) => r.id)));
     for (const id of [...this.rows.keys()]) if (!all.has(id)) this.rows.delete(id);
@@ -305,6 +386,7 @@ export class PrsView {
       const [tab, id] = key.split("\u001f");
       if (!model[tab as PrsTab].some((g) => g.id === id)) this.groups.delete(key);
     }
+    if (this.menu.key !== null && !groups.some((g) => g.rows.some((r) => r.id === this.menu.key))) this.menu.close();
     if (this.focused !== null && !all.has(this.focused)) this.focused = null;
     for (const [id, r] of this.rows) r.el.classList.toggle("focused", id === this.focused);
     paintEmpty(
@@ -315,7 +397,7 @@ export class PrsView {
   }
 
   private folded(tab: PrsTab, g: PrGroup): boolean {
-    return this.foldChoice.get(`${tab}\u001f${g.id}`) ?? g.folded;
+    return readFold(prGroupFoldKey(tab, g.id), g.folded);
   }
 
   private groupRefs(tab: PrsTab, g: PrGroup): GroupRefs {
@@ -323,26 +405,18 @@ export class PrsView {
     let refs = this.groups.get(key);
     if (refs) return refs;
     const el = document.createElement("section");
-    el.className = "chappa-sv-group";
+    el.className = "chappa-dt-group";
     el.dataset.group = g.id;
     if (g.bucket) el.dataset.bucket = g.bucket;
-    const head = document.createElement("button");
-    head.type = "button";
-    head.className = "chappa-sv-group-head";
-    const label = document.createElement("span");
-    label.className = "chappa-sv-group-label";
-    const count = document.createElement("span");
-    count.className = "chappa-sv-count";
-    head.append(label, count);
-    const rows = document.createElement("div");
-    rows.className = "chappa-sv-rows";
-    el.append(head, rows);
-    head.addEventListener("click", () => {
-      const now = this.folded(tab, this.currentGroup(tab, g.id) ?? g);
-      this.foldChoice.set(key, !now);
+    const head = groupHead(true, () => {
+      const now = this.currentGroup(tab, g.id) ?? g;
+      writeFold(prGroupFoldKey(tab, g.id), now.folded, !this.folded(tab, now));
       this.paint();
     });
-    refs = { el, head, label, count, rows, sig: "" };
+    const rows = div("chappa-dt-rows");
+    rows.setAttribute("role", "rowgroup");
+    el.append(head.el, rows);
+    refs = { el, head, rows, sig: "" };
     this.groups.set(key, refs);
     return refs;
   }
@@ -356,9 +430,7 @@ export class PrsView {
     const sig = `${g.label}\u001f${g.rows.length}\u001f${folded}`;
     if (sig === refs.sig) return;
     refs.sig = sig;
-    refs.label.textContent = `${folded ? "▸" : "▾"} ${g.label}`;
-    refs.count.textContent = String(g.rows.length);
-    refs.head.setAttribute("aria-expanded", String(!folded));
+    refs.head.paint(g.label, g.rows.length, folded);
     refs.rows.classList.toggle("folded", folded);
     refs.el.classList.toggle("folded", folded);
   }
@@ -366,67 +438,107 @@ export class PrsView {
   private rowRefs(id: string): RowRefs {
     let refs = this.rows.get(id);
     if (refs) return refs;
-    const el = document.createElement("div");
-    el.className = "chappa-sv-row chappa-pr-row";
+    const el = div("chappa-dt-row chappa-pr-row");
     el.dataset.id = id;
-    const top = document.createElement("div");
-    top.className = "chappa-sv-top";
+    el.setAttribute("role", "row");
+    const cell = (cls: string): HTMLElement => {
+      const c = div(`chappa-dt-cell ${cls}`);
+      c.setAttribute("role", "cell");
+      el.appendChild(c);
+      return c;
+    };
+    const repoCell = cell("chappa-pr-c-repo");
+    const repo = div("chappa-pr-repo");
+    const forge = div("chappa-dt-sub");
+    repoCell.append(repo, forge);
+    const number = div("chappa-dt-num");
+    cell("chappa-pr-c-number").appendChild(number);
+    const titleCell = cell("chappa-pr-c-title");
     const title = document.createElement("button");
     title.type = "button";
-    title.className = "chappa-sv-title";
-    top.appendChild(title);
-    const meta = document.createElement("div");
-    meta.className = "chappa-sv-meta";
-    const reasons = document.createElement("div");
-    reasons.className = "chappa-sv-reasons";
-    const chips = document.createElement("div");
-    chips.className = "chappa-sv-chips";
-    const sections = new SectionsBlock(this.ui, { collapsedByDefault: true });
-    const actions = new ActionsCell(this.ui);
-    el.append(top, meta, reasons, chips, sections.el, actions.el);
-    const r: RowRefs = { el, title, meta, reasons, chips, sections, actions, sig: "", row: null };
-    title.addEventListener("mousedown", (e) => e.preventDefault());
-    title.addEventListener("click", () => {
-      const row = r.row;
-      if (row?.url) openChecked(this.deps, row.primary.sourceId, row.url);
+    title.className = "chappa-dt-main chappa-sv-title";
+    const by = div("chappa-dt-sub chappa-pr-by");
+    const why = div("chappa-pr-why");
+    titleCell.append(title, by, why);
+    const status = div("chappa-dt-chips chappa-sv-chips");
+    cell("chappa-pr-c-status").appendChild(status);
+    const votesCell = cell("chappa-pr-c-votes");
+    const votes = div("chappa-pr-votes");
+    const me = div("chappa-dt-sub");
+    votesCell.append(votes, me);
+    const comments = div("chappa-pr-comments");
+    cell("chappa-pr-c-comments").appendChild(comments);
+    const items = div("chappa-dt-chips");
+    cell("chappa-pr-c-items").appendChild(items);
+    const age = div("chappa-dt-sub");
+    cell("chappa-pr-c-age").appendChild(age);
+    const acts = cell("chappa-dt-acts");
+    const r = {} as RowRefs;
+    const open = openButton("", () => {
+      if (r.row?.url) openChecked(this.deps, r.row.primary.sourceId, r.row.url);
+    });
+    const more = RowMenu.button((btn) => this.toggleMenu(r, btn));
+    acts.append(open, more);
+    Object.assign(r, { el, repo, forge, number, title, by, why, status, votes, me, comments, items, age, open, more, sig: "", row: null });
+    el.addEventListener("click", (e) => {
+      if (r.row && rowClickOpens(e, title)) this.openPage(r.row.id);
     });
     this.rows.set(id, r);
     return r;
   }
 
+  private toggleMenu(r: RowRefs, btn: HTMLButtonElement): void {
+    const row = r.row;
+    const input = this.input;
+    if (!row || !input) return;
+    const targets = prAllTargets(row, input.sources, false);
+    const entries = [{ label: "Open details", run: () => this.openPage(row.id) }];
+    this.menu.toggle(row.id, btn, entries, targets, versionOf(targets, input.versions));
+  }
+
   private paintRow(r: RowRefs, row: PrRow, input: PrsViewInput): void {
-    const versions = input.versions;
     r.row = row;
-    // The sections draw their own actions; the row's cell draws the rest,
-    // then what other sources offer on the PR.
-    const own = row.sections.some((s) => (s.actions ?? []).length > 0) ? [...new Set(row.origins.flatMap((o) => o.actionIds))] : undefined;
-    const offered = input.sources ? prItemActionTargets(row, input.sources) : [];
-    const targets = [...(own?.length === 0 ? [] : prTargets(row).map((t) => (own ? { ...t, only: own } : t))), ...offered];
-    const asked = [...new Set([...targets.map((t) => t.sourceId), ...offered.map((t) => t.owner)])];
-    r.actions.load(targets, asked.map((id) => `${id}:${versions[id] ?? 0}`).join(","));
-    const p = row.primary;
-    r.sections.update(row.sections, {
-      sourceId: p.sourceId,
-      target: { sourceId: p.sourceId, sourceLabel: p.sourceLabel, view: "prs", key: p.key },
-      version: `${p.sourceId}:${versions[p.sourceId] ?? 0}`,
-    });
+    if (this.menu.key === row.id) {
+      const targets = prAllTargets(row, input.sources, false);
+      this.menu.refresh(row.id, targets, versionOf(targets, input.versions));
+    }
     const items = input.workItems?.get(row.id) ?? [];
-    const sig = JSON.stringify([row.title, row.url, row.repo, row.number, row.author, row.branch, row.reasons, row.chips, row.bucket, row.primary.sourceLabel, items]);
+    const age = shortAge(row.ageUtc, this.deps.now());
+    const sig = JSON.stringify([row.title, row.url, row.repo, row.forge, row.project, row.number, row.author, row.branch, row.why, row.status, row.votes, row.comments, row.bucket, items, age]);
     if (sig === r.sig) return;
     r.sig = sig;
     r.el.dataset.bucket = row.bucket;
+    r.repo.textContent = row.repo;
+    r.forge.textContent = prForgeLine(row);
+    r.number.textContent = row.number;
     r.title.textContent = row.title;
-    r.title.title = row.url ? `Open ${row.url}` : row.title;
-    r.title.disabled = !row.url;
-    r.meta.textContent = [`${row.repo}${row.number}`, row.author, row.branch].filter(Boolean).join(" · ");
-    fillLines(r.reasons, "chappa-sv-reason", row.reasons);
-    r.chips.textContent = "";
-    for (const chip of row.chips) r.chips.appendChild(chipEl(chip));
-    for (const item of items) r.chips.appendChild(this.itemChip(item));
+    r.title.title = `Show ${row.repo}${row.number}`;
+    r.by.textContent = prByLine(row);
+    r.why.textContent = row.why.join(" · ");
+    r.status.textContent = "";
+    for (const c of row.status) r.status.appendChild(chipEl(c));
+    r.votes.textContent = row.votes.summary;
+    r.votes.dataset.tone = row.votes.tone;
+    r.votes.title = row.votes.title;
+    r.me.textContent = row.votes.me ?? "";
+    r.comments.textContent = row.comments ? row.comments.text : "";
+    if (row.comments?.forMe) {
+      r.comments.dataset.forMe = String(row.comments.forMe);
+      r.comments.title = `${row.comments.forMe} waiting for your reply`;
+    } else {
+      delete r.comments.dataset.forMe;
+      r.comments.title = "";
+    }
+    r.items.textContent = "";
+    for (const item of items) r.items.appendChild(this.itemChip(item));
+    r.age.textContent = age ?? "";
+    r.age.title = row.ageUtc ? new Date(row.ageUtc).toLocaleString() : "";
+    r.open.hidden = !row.url;
+    r.open.title = row.url ? `Open ${row.url}` : "";
   }
 
   /** A work item the PR joined: its key, opening the item in Work. */
-  private itemChip(item: { rowId: string; key: string; title: string; how: JoinHow }): HTMLButtonElement {
+  itemChip(item: WorkItemLink): HTMLButtonElement {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "chappa-sv-chip chappa-pr-item";
@@ -437,9 +549,167 @@ export class PrsView {
     btn.title = itemChipTitle(item);
     btn.disabled = !this.deps.openView;
     btn.addEventListener("mousedown", (e) => e.preventDefault());
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
       if (this.deps.openView && !this.deps.openView("work", item.rowId)) this.deps.say("Work is not available.", "error");
     });
     return btn;
+  }
+
+  // ---- the PR's page ------------------------------------------------
+
+  private findRow(id: string): PrRow | null {
+    const model = this.input?.model;
+    if (!model) return null;
+    for (const g of [...model.mine, ...model.reviewing, ...model.all]) {
+      const row = g.rows.find((r) => r.id === id);
+      if (row) return row;
+    }
+    return null;
+  }
+
+  /** The PR page on screen, or null. */
+  get openPrPage(): PrPage | null {
+    return this.page && this.frame.subpages.includes(this.page) ? this.page : null;
+  }
+
+  openPage(id: string): void {
+    const row = this.findRow(id);
+    if (!row) return;
+    this.menu.close();
+    this.frame.clearSubpages();
+    const page = new PrPage(this.ui, this, row, () => this.frame.popSubpage());
+    this.page = page;
+    this.frame.pushSubpage(page);
+    this.repaintPage();
+  }
+
+  private repaintPage(): void {
+    const page = this.openPrPage;
+    if (!page) {
+      this.page = null;
+      return;
+    }
+    const input = this.input;
+    if (!input) return;
+    page.update(this.findRow(page.id), input);
+  }
+
+  /** A PR link or the PR's page link, through the checked opener. */
+  open(sourceId: string, url: string): void {
+    openChecked(this.deps, sourceId, url);
+  }
+}
+
+/** A PR's page: every fact about it, its sections unfolded, all its
+ *  actions (its own, its sections', and what other sources offer). */
+class PrPage implements Subpage {
+  readonly el: HTMLElement;
+  readonly id: string;
+  readonly sourceId: string;
+  private readonly header: PageHeader;
+  private readonly info: HTMLElement;
+  private readonly actions: ActionsCell;
+  private readonly sections: SectionsBlock;
+  private sig = "";
+
+  constructor(
+    deps: SourceViewDeps,
+    private readonly view: PrsView,
+    row: PrRow,
+    onBack: () => void,
+  ) {
+    this.id = row.id;
+    this.sourceId = row.primary.sourceId;
+    this.el = div("chappa-pr-page");
+    this.el.dataset.id = row.id;
+    const head = div("chappa-sv-header");
+    this.header = mountPageHeader(head, { title: `${row.number} ${row.title}`, backTo: "PRs", onBack });
+    const body = div("chappa-sv-body chappa-pr-page-body");
+    this.info = div("chappa-pr-page-info");
+    this.actions = new ActionsCell(deps);
+    this.actions.el.classList.add("chappa-pr-page-actions");
+    this.sections = new SectionsBlock(deps);
+    body.append(this.info, this.actions.el, this.sections.el);
+    this.el.append(head, body);
+  }
+
+  get title(): string {
+    return this.header.title.textContent ?? "";
+  }
+
+  setBackTo(where: string): void {
+    this.header.setBackTo(where);
+  }
+
+  dispose(): void {
+    this.el.remove();
+  }
+
+  gone(): boolean {
+    return this.sig === "gone";
+  }
+
+  update(row: PrRow | null, input: PrsViewInput): void {
+    const version = (id: string): string => `${id}:${input.versions[id] ?? 0}`;
+    if (!row) {
+      if (this.sig === "gone") return;
+      this.sig = "gone";
+      this.info.textContent = "";
+      const gone = div("chappa-dt-page-gone");
+      gone.textContent = "This pull request is no longer listed.";
+      this.info.appendChild(gone);
+      this.actions.load([], version(this.sourceId));
+      this.sections.update([], { sourceId: this.sourceId, target: null, version: version(this.sourceId) });
+      return;
+    }
+    const targets = prAllTargets(row, input.sources, false);
+    this.actions.load(targets, versionOf(targets, input.versions));
+    const p = row.primary;
+    this.sections.update(row.sections, {
+      sourceId: p.sourceId,
+      target: { sourceId: p.sourceId, sourceLabel: p.sourceLabel, view: "prs", key: p.key },
+      version: version(p.sourceId),
+    });
+    const items = input.workItems?.get(row.id) ?? [];
+    const sig = JSON.stringify([row, items]);
+    if (sig === this.sig) return;
+    this.sig = sig;
+    this.header.setTitle(`${row.number} ${row.title}`);
+    this.info.textContent = "";
+    const grid = document.createElement("dl");
+    grid.className = "chappa-dt-page-grid";
+    const add = (label: string, value: string | HTMLElement[]): void => {
+      if (value === "" || (Array.isArray(value) && value.length === 0)) return;
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.dataset.field = label;
+      if (typeof value === "string") dd.textContent = value;
+      else dd.append(...value);
+      grid.append(dt, dd);
+    };
+    add("Repo", `${row.repo} (${prForgeLine(row)})`);
+    add("Number", row.number);
+    add("Author", row.author);
+    add("Branch", row.branch ?? "");
+    add("Status", row.status.map(chipEl));
+    add("Why", row.why.join("\n"));
+    add("Votes", [row.votes.summary, row.votes.me].filter(Boolean).join("; "));
+    add("Reviewers", row.reviewers.map((r) => `${r.name}${r.isGroup ? " (team)" : ""}: ${r.vote === "none" ? "no vote" : r.vote}${r.required ? ", required" : ""}`).join("\n"));
+    add("Comments", row.comments ? `${row.comments.text}${row.comments.forMe ? `, ${row.comments.forMe} for me` : ""}` : "");
+    add("Work items", items.map((i) => this.view.itemChip(i)));
+    add("Updated", row.ageUtc ? new Date(row.ageUtc).toLocaleString() : "");
+    if (row.url) {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "chappa-sec-link";
+      link.textContent = row.url;
+      link.title = `Open ${row.url}`;
+      link.addEventListener("click", () => this.view.open(row.primary.sourceId, row.url));
+      add("Link", [link]);
+    }
+    add("Source", row.origins.map((o) => o.sourceLabel).join(", "));
+    this.info.appendChild(grid);
   }
 }

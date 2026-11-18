@@ -153,6 +153,10 @@ export interface Pr {
   targetBranch?: string;
   state: "open" | "draft" | "merged" | "closed";
   closedUtc?: Utc | null;
+  /** When it was opened. */
+  created?: Utc | null;
+  /** When anything on it last moved (a push, a comment, a vote). */
+  lastTouchedUtc?: Utc | null;
   role: "mine" | "reviewing";
   /** Computed by the source. */
   bucket: Bucket;

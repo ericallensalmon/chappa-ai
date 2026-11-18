@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type * as ipc from "../ipc";
 import {
-  ackTargets,
   BLOCKED_BADGE_TEXT,
   blockForRow,
   blockedBanner,
-  dataSafetySection,
   folderInside,
   heldCount,
   heldText,
@@ -61,23 +59,6 @@ describe("a secret-scan block in the views", () => {
     expect(plain[0].badges.map((b) => b.text)).toEqual([BLOCKED_BADGE_TEXT]);
   });
 
-  it("raises a Needs you row with its acknowledge while not clean or unfinished, and names the agents inside", () => {
-    expect(ackTargets(secret())).toEqual([{ sourceId: "st", sourceLabel: "Stack", view: "environment", key: null, only: ["secret-scan-ack"] }]);
-    expect(ackTargets(secret({ state: "error" }))).toHaveLength(1);
-    expect(ackTargets(block({ state: "error" }))).toEqual([]);
-    expect(ackTargets(secret({ current: false }))).toEqual([]);
-    const section = dataSafetySection({
-      blocks: [secret()],
-      agents: [{ kind: "secretScan", termId: 7, name: "worker", sourceId: "st", instance: "app/0", reason: "r", cwd: "/srv/example/.work/ABC-1" }],
-      held: [{ termId: 7, count: 2 }],
-    })!;
-    expect(section.title).toBe("Secret scan");
-    expect(section.rows.map((r) => r.title)).toEqual(["Agents blocked on app/0: secret scan", "worker"]);
-    expect(section.rows[1].detail).toBe("working where possible secrets were found in app/0 · held: 2 messages");
-    const both = dataSafetySection({ blocks: [block(), secret()], agents: [], held: [] })!;
-    expect(both.title).toBe("Data safety and secret scan");
-    expect(new Set(both.rows.map((r) => r.id)).size).toBe(2);
-  });
 });
 
 describe("data safety in the views", () => {
@@ -120,40 +101,6 @@ describe("data safety in the views", () => {
     expect((rows[1] as { dataSafety?: unknown }).dataSafety).toBeNull();
     expect(blockedBanner(block()).title).toBe("Agents are blocked here: the data on app/0 may be real");
     expect(blockedBanner(block()).lines[0]).toBe(block().reason);
-  });
-
-  it("Needs you: one bad, counted row per block opening Environment on its component, one per agent inside it with what is held", () => {
-    const state: ipc.DataSafetyStateDto = {
-      blocks: [block(), block({ sourceId: "st2", instance: "app/1", component: null, current: false, reason: "last known: x — see Environment, source unavailable" })],
-      agents: [{ termId: 7, name: "fixer", sourceId: "st", instance: "app/0", reason: block().reason, cwd: "/srv/example/.work/ABC-1" }],
-      held: [{ termId: 7, count: 2 }],
-    };
-    const s = dataSafetySection(state)!;
-    expect(s.title).toBe("Data safety");
-    expect(s.rows.map((r) => [r.id, r.kind, r.title, r.tone, r.counted])).toEqual([
-      ["ds:st|app/0", "environment", "Agents blocked on app/0", "bad", true],
-      ["ds:st2|app/1", "environment", "Agents blocked on app/1", "bad", true],
-      ["ds-agent:7", "terminal", "fixer", "bad", true],
-    ]);
-    expect(s.rows[0].detail).toBe(block().reason);
-    expect(s.rows[0].opens).toEqual({ view: "environment", key: "db" });
-    expect(s.rows[1].detail).toMatch(/^last known: /);
-    expect(s.rows[2].detail).toBe("working next to unscanned/real data in app/0 · held: 2 messages");
-    expect(s.rows[2].terminalKey).toBe("term:7");
-    // The block row carries the source's acknowledge action; the last-known
-    // one (the source is not answering) and the agent rows do not.
-    expect(s.rows[0].actions).toEqual([{ sourceId: "st", sourceLabel: "Stack", view: "environment", key: null, only: ["data-safety-ack"] }]);
-    expect(s.rows[1].actions).toEqual([]);
-    expect(s.rows[2].actions).toEqual([]);
-    expect(dataSafetySection({ blocks: [], agents: [], held: [] })).toBeNull();
-  });
-
-  it("the acknowledge action is offered only while the source answers and its data is not clean", () => {
-    expect(ackTargets(block())).toHaveLength(1);
-    expect(ackTargets(block({ current: false }))).toEqual([]);
-    expect(ackTargets(block({ state: "error" }))).toEqual([]);
-    expect(ackTargets(block({ state: "unknown" }))).toEqual([]);
-    expect(ackTargets(block({ ackActionId: null }))).toEqual([]);
   });
 
   it("the held marker counts messages", () => {

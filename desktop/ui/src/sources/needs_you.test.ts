@@ -12,7 +12,7 @@ import {
 } from "./needs_you";
 import { fixture, payload, pr, prsBody } from "./test-utils";
 
-const empty: NeedsYouInput = { terminals: [], work: [], prs: null, attention: [] };
+const empty: NeedsYouInput = { terminals: [], work: [], prs: null, attention: [], terminalsSection: false };
 const term = (key: string, over: Partial<TerminalAttention> = {}): TerminalAttention => ({
   key,
   name: key,
@@ -23,36 +23,16 @@ const term = (key: string, over: Partial<TerminalAttention> = {}): TerminalAtten
 });
 
 describe("buildNeedsYou", () => {
-  it("data safety leads: a block and an agent inside it are bad, counted rows; nothing blocked adds nothing", () => {
-    const m = buildNeedsYou({
-      ...empty,
-      terminals: [term("term:2", { name: "claude", attention: "agent-waiting" })],
-      dataSafety: {
-        blocks: [
-          {
-            sourceId: "st",
-            sourceLabel: "Stack",
-            instance: "app/0",
-            state: "error",
-            current: false,
-            reason: "last known: the data-safety check could not be judged — see Environment, source unavailable",
-            folders: ["/srv/example"],
-            bound: null,
-            component: null,
-            ackActionId: null,
-          },
-        ],
-        agents: [{ termId: 4, name: "fixer", sourceId: "st", instance: "app/0", reason: "x", cwd: "/srv/example" }],
-        held: [],
-      },
-    });
-    expect(m.sections.map((s) => s.id)).toEqual(["data-safety", "terminals"]);
-    expect(m.sections[0].rows.map((r) => [r.title, r.detail])).toEqual([
-      ["Agents blocked on app/0", "last known: the data-safety check could not be judged — see Environment, source unavailable"],
-      ["fixer", "working next to unscanned/real data in app/0"],
+  it("work, terminals and pull requests keep a section that says nothing waits, while their view is in play", () => {
+    const m = buildNeedsYou({ terminals: [], work: [payload("w", { freshness: { asOf: null }, items: [] })], prs: buildPrsModel([]), attention: [] });
+    expect(m.sections.map((s) => [s.id, s.title, s.rows.length, s.empty])).toEqual([
+      ["work", "Work items", 0, "No work item is waiting on you."],
+      ["terminals", "Terminals and agents", 0, "No terminal or agent is waiting for you."],
+      ["prs", "Pull requests", 0, "No pull request is waiting on you."],
     ]);
-    expect(m.count).toBe(3);
-    expect(buildNeedsYou({ ...empty, dataSafety: { blocks: [], agents: [], held: [] } }).sections).toEqual([]);
+    expect(m.count).toBe(0);
+    // No Work source and no PRs view: only the terminals keep theirs.
+    expect(buildNeedsYou({ terminals: [], work: [], prs: null, attention: [] }).sections.map((s) => s.id)).toEqual(["terminals"]);
   });
 
   it("nothing in, nothing to show, a zero badge", () => {
@@ -71,11 +51,12 @@ describe("buildNeedsYou", () => {
     });
     expect(m.sections.map((s) => s.id)).toEqual(["terminals"]);
     const rows = m.sections[0].rows;
-    expect(rows.map((r) => [r.title, r.detail])).toEqual([
-      ["claude", "waiting for your input · api"],
-      ["tests", "blocked, waiting for you"],
-      ["build", "reported failed"],
-      ["shell", "needs attention"],
+    // The reason is the badge; the line under the name is its project.
+    expect(rows.map((r) => [r.title, r.detail, r.badge?.text])).toEqual([
+      ["claude", "api", "waiting for your input"],
+      ["tests", "", "blocked, waiting for you"],
+      ["build", "", "reported failed"],
+      ["shell", "", "needs attention"],
     ]);
     expect(rows.map((r) => r.terminalKey)).toEqual(["term:2", "cmd:1:tests", "term:1", "term:3"]);
     // All four are listed; only the waiting and blocked ones count.
@@ -128,16 +109,18 @@ describe("buildNeedsYou", () => {
       work: [payload("fx", fixture("work"), { sourceLabel: "Fixture" })],
       prs,
       attention: [payload("fx", fixture("attention"), { sourceLabel: "Fixture" })],
+      terminalsSection: false,
     });
     expect(m.sections.map((s) => [s.id, s.title])).toEqual([
-      ["work", "Work"],
+      ["work", "Work items"],
       ["prs", "Pull requests"],
       ["group:Builds", "Builds"],
       ["group:Incidents", "Incidents"],
     ]);
     const work = m.sections[0].rows;
-    expect(work.map((r) => [r.id, r.title, r.detail])).toEqual([
-      ["work:fx|ABC-1", "ABC-1 Add a health route to api", "approve the move to done, asked by Alex: Looks complete"],
+    // The key leads, the reason is the badge, the line says the rest once.
+    expect(work.map((r) => [r.id, r.lead, r.title, r.detail, r.badge?.text])).toEqual([
+      ["work:fx|ABC-1", "ABC-1", "Add a health route to api", "In review → done, asked by Alex: Looks complete", "approval asked"],
     ]);
     expect(work[0].actions).toEqual([{ sourceId: "fx", sourceLabel: "Fixture", view: "work", key: "ABC-1" }]);
     expect(work[0].opens).toEqual({ url: "https://registry.example/tracker/ABC-1" });
@@ -150,7 +133,11 @@ describe("buildNeedsYou", () => {
       ["Change 7", false],
       ["Change 4", true],
     ]);
-    expect(prRows[0].detail).toBe("owner/repo#1 · Checks are failing: lint");
+    expect(prRows[0].lead).toBe("#1");
+    expect(prRows[0].badge).toMatchObject({ text: "blocked on me", tone: "bad" });
+    expect(prRows[0].detail).toBe("owner/repo | Checks are failing: lint");
+    // A reason that only restates the badge is not repeated under it.
+    expect(prRows[1]).toMatchObject({ badge: { text: "draft" }, detail: "owner/repo" });
     expect(prRows[0].actions).toEqual([{ sourceId: "fx", sourceLabel: "fx", view: "prs", key: "github:owner/repo:#1" }]);
     expect(prRows[1].actions).toEqual([{ sourceId: "fx", sourceLabel: "fx", view: "prs", key: "github:owner/repo:#2" }]);
     expect(prRows[2].actions).toEqual([]);
@@ -172,7 +159,7 @@ describe("buildNeedsYou", () => {
 
   it("a human-exit gate without a pending approval still needs a person", () => {
     const w = workAttention({ key: "ABC-9", title: null, localStatus: { id: "qa", label: "In QA", gate: "human-exit", allowed: [] } });
-    expect(w).toEqual({ key: "ABC-9", title: "ABC-9", detail: "In QA: only a person can move it out", url: null });
+    expect(w).toMatchObject({ key: "ABC-9", title: "ABC-9", detail: "In QA: only a person can move it out", line: "In QA", badge: { text: "needs a person" }, url: null });
     expect(workAttention({ key: "ABC-8", localStatus: { id: "x", label: "X", gate: "human", allowed: [] } })).toBeNull();
     expect(workAttention({ key: "ABC-7", localStatus: null })).toBeNull();
     expect(workAttention({ title: "no key", localStatus: { gate: "human-exit" } })).toBeNull();

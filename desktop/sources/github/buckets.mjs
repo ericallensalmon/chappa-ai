@@ -287,6 +287,8 @@ export function toPr(node, ctx) {
     targetBranch: node.baseRefName,
     state,
     closedUtc,
+    created: node.createdAt ?? null,
+    lastTouchedUtc: node.updatedAt ?? null,
     role: ctx.role,
     bucket: placed.bucket,
     reasons: placed.reasons,

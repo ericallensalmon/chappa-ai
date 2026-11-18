@@ -1139,13 +1139,13 @@ fn the_manifest_offers_start_work_on_every_work_row_or_the_listed_sources() {
                 "label": "Review with environment",
                 "mutates": true,
                 "confirm": "Check out {key} at its head into a review worktree",
-                "on": { "view": "prs", "sources": ["*"] },
-            }, {
-                "kind": "endpoint",
-                "id": "review-env-up",
-                "label": "Review with environment in slot 0",
-                "mutates": true,
-                "confirm": "Check out {key} at its head into a review worktree and bring up slot 0 from it",
+                "inputs": [{
+                    "name": "then", "label": "Then", "kind": "choice", "required": true, "default": "checkout",
+                    "options": [
+                        { "value": "checkout", "label": "Only check it out" },
+                        { "value": "up", "label": "Bring up slot 0 from it" },
+                    ],
+                }],
                 "on": { "view": "prs", "sources": ["*"] },
             }],
             "ownerUpdates": "/api/work/owner",

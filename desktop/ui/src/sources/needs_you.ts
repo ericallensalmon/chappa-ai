@@ -12,31 +12,32 @@
 //    action / draft / ready, reviews the author answered, and required
 //    reviews not yet voted; my PRs waiting on reviewers are shown folded,
 //    not counted; optional and team-only reviews never appear);
-//  - Environment components in a red state (unhealthy, crash loop, deployed
-//    but not running, a failed one-shot): something the user brought up is
-//    broken;
-//  - the attention items sources serve, grouped under their own headings;
-//  - data safety, first: each stack whose data-safety block keeps agents out
-//    (it opens Environment, where the block is dealt with), and each running
-//    agent working inside a blocked folder (its deliveries are held).
+//  - the attention items sources serve, grouped under their own headings.
+// The stack's own state (components in a red state, data-safety blocks, the
+// relay's firewall findings, its banners) is not listed here: it lives in
+// Environment, whose tab carries the alert dot, so this page holds only
+// what waits on a decision of the person.
+// Work items, terminals and pull requests always have their section (with
+// a line saying nothing waits) while their view is in play, so an empty
+// section reads as "checked, nothing", not as "missing".
 // The rail badge counts the rows that wait on a decision: agents waiting
-// and programs blocked, Work approvals, PRs, red components and source
-// attention. A
+// and programs blocked, Work approvals, PRs and source attention. A
 // terminal at bell rank (a bell, or a program that reported done / failed)
 // is listed but not counted: a stray `\a` should not keep a number on the
 // rail.
 
 import { attentionText, type CardAttention } from "../dashboard";
 import type * as ipc from "../ipc";
-import { dataSafetySection } from "./data_safety";
-import { buildEnvironmentModel, environmentNews } from "./environment_model";
+import { environmentNews } from "./environment_model";
 import {
   itemsOf,
   oneLine,
   prsNeedingYou,
   readFreshness,
+  restatesChips,
   summarizeFreshness,
   wrongContract,
+  type Chip,
   type FreshnessSummary,
   type NeedsUpdate,
   type PrRow,
@@ -78,7 +79,12 @@ export interface NeedsYouRow {
   kind: "terminal" | "work" | "pr" | "environment" | "attention";
   /** Leads with the item or process name; markdown links stripped. */
   title: string;
+  /** Before the title in its own column: a PR's number, an item's key. */
+  lead?: string;
   detail: string;
+  /** Why it is here, as one small chip at the row's end (the detail line
+   *  never says it again). */
+  badge?: Chip;
   tone: Tone;
   /** A folded row: listed under its section's fold, not counted. */
   folded: boolean;
@@ -103,6 +109,8 @@ export interface NeedsYouSection {
   id: string;
   title: string;
   rows: NeedsYouRow[];
+  /** Shown when the section has no rows (a standing section). */
+  empty?: string;
 }
 
 export interface NeedsYouModel {
@@ -121,12 +129,10 @@ export interface NeedsYouInput {
   prs: PrsModel | null;
   /** The `attention` payloads of the trusted sources serving it. */
   attention: ViewPayload[];
-  /** The `environment` payloads of the trusted sources serving it (absent
-   *  or empty when the view is not in play). */
-  environment?: ViewPayload[];
   needsUpdate?: NeedsUpdate[];
-  /** What Rust enforces for data safety (absent: nothing is blocked). */
-  dataSafety?: ipc.DataSafetyStateDto;
+  /** Terminals and agents have their section (empty or not); false for a
+   *  page narrowed to one source. Default true. */
+  terminalsSection?: boolean;
   /** Agent settings files git would commit, with the app's own action. */
   agentSettings?: AgentSettingsWarning[];
 }
@@ -193,8 +199,10 @@ const obj = (v: unknown): Record<string, unknown> | null =>
 
 const SEVERITY_TONE: Record<string, Tone> = { info: "info", warn: "warn", bad: "bad" };
 
-/** A Work item's reason to need the user, or null when it has none. */
-export function workAttention(raw: unknown): { key: string; title: string; detail: string; url: string | null } | null {
+/** A Work item's reason to need the user, or null when it has none.
+ *  `detail` is the notification's sentence; the row shows `badge` and the
+ *  rest of what it knows (`line`), so the reason is not said twice. */
+export function workAttention(raw: unknown): { key: string; name: string; title: string; detail: string; line: string; badge: Chip; url: string | null } | null {
   const item = obj(raw);
   const key = str(item?.key);
   const ls = obj(item?.localStatus);
@@ -202,24 +210,41 @@ export function workAttention(raw: unknown): { key: string; title: string; detai
   const name = oneLine(str(item.title) ?? "");
   const title = name ? `${key} ${name}` : key;
   const url = str(item.url);
+  const label = oneLine(str(ls.label) ?? str(ls.id) ?? "") || "this status";
   const pending = obj(ls.pendingApproval);
   if (pending && str(pending.to)) {
     const by = str(pending.by);
     const note = str(pending.note);
-    const detail = `approve the move to ${pending.to as string}${by ? `, asked by ${by}` : ""}${note ? `: ${oneLine(note)}` : ""}`;
-    return { key, title, detail, url };
+    const to = oneLine(pending.to as string);
+    const detail = `approve the move to ${to}${by ? `, asked by ${by}` : ""}${note ? `: ${oneLine(note)}` : ""}`;
+    const line = `${label} → ${to}${by ? `, asked by ${by}` : ""}${note ? `: ${oneLine(note)}` : ""}`;
+    return { key, name, title, detail, line, badge: { text: "approval asked", tone: "warn", title: "A move waits for your approval" }, url };
   }
   if (ls.gate === "human-exit") {
-    const label = str(ls.label) ?? str(ls.id) ?? "this status";
-    return { key, title, detail: `${oneLine(label)}: only a person can move it out`, url };
+    return {
+      key,
+      name,
+      title,
+      detail: `${label}: only a person can move it out`,
+      line: label,
+      badge: { text: "needs a person", tone: "warn", title: "Only a person can move it out of this status" },
+      url,
+    };
   }
   return null;
 }
 
-/** The detail line of a PR row: where it is and the first reason. */
+/** The detail line of a PR notification: where it is and the first reason. */
 function prDetail(row: PrRow): string {
   const where = `${row.repo}${row.number}`;
   return row.reasons.length ? `${where} · ${row.reasons[0]}` : where;
+}
+
+/** A PR row's muted line: its repo, and the first reason its badge does
+ *  not already say. */
+function prLine(row: PrRow, badge: Chip | undefined): string {
+  const reason = row.reasons.find((r) => !badge || !restatesChips(r, [badge]));
+  return [row.repo, reason].filter(Boolean).join(" | ");
 }
 
 function readOpens(v: unknown): Opens {
@@ -247,38 +272,8 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
     return true;
   };
 
-  // Data safety leads: agents are being kept from data that may be real.
-  const safety = input.dataSafety ? dataSafetySection(input.dataSafety) : null;
-  if (safety) sections.push(safety);
   const settingsFiles = agentSettingsSection(input.agentSettings ?? []);
   if (settingsFiles) sections.push(settingsFiles);
-
-  // Terminals and agents: waiting / blocked first, then bell rank, each in
-  // the rail's own order.
-  const terms = [
-    ...input.terminals.filter((t) => t.attention === "agent-waiting"),
-    ...input.terminals.filter((t) => t.attention === "badge"),
-  ];
-  if (terms.length) {
-    sections.push({
-      id: "terminals",
-      title: "Terminals and agents",
-      rows: terms.map((t) => ({
-        id: `term:${t.key}`,
-        kind: "terminal",
-        title: t.name,
-        detail: [attentionText({ attention: t.attention, programStatus: t.programStatus }), t.project].filter(Boolean).join(" · "),
-        tone: t.attention === "agent-waiting" ? "info" : "warn",
-        folded: false,
-        counted: t.attention === "agent-waiting",
-        sourceId: null,
-        sourceLabel: null,
-        actions: [],
-        terminalKey: t.key,
-        opens: null,
-      })),
-    });
-  }
 
   const workRows: NeedsYouRow[] = [];
   const workUsable = input.work.filter((p) => !addStale(p));
@@ -289,8 +284,10 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
       workRows.push({
         id: `work:${p.sourceId}|${w.key}`,
         kind: "work",
-        title: w.title,
-        detail: w.detail,
+        title: w.name || w.key,
+        lead: w.key,
+        detail: w.line,
+        badge: w.badge,
         tone: "warn",
         folded: false,
         counted: true,
@@ -303,7 +300,36 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
       });
     }
   }
-  if (workRows.length) sections.push({ id: "work", title: "Work", rows: workRows });
+  if (workUsable.length || workRows.length) sections.push({ id: "work", title: "Work items", rows: workRows, empty: "No work item is waiting on you." });
+
+  // Terminals and agents: waiting / blocked first, then bell rank, each in
+  // the rail's own order.
+  const terms = [
+    ...input.terminals.filter((t) => t.attention === "agent-waiting"),
+    ...input.terminals.filter((t) => t.attention === "badge"),
+  ];
+  if (terms.length || input.terminalsSection !== false) {
+    sections.push({
+      id: "terminals",
+      title: "Terminals and agents",
+      empty: "No terminal or agent is waiting for you.",
+      rows: terms.map((t) => ({
+        id: `term:${t.key}`,
+        kind: "terminal",
+        title: t.name,
+        detail: t.project ?? "",
+        badge: { text: attentionText({ attention: t.attention, programStatus: t.programStatus }), tone: t.attention === "agent-waiting" ? "info" : "warn" },
+        tone: t.attention === "agent-waiting" ? "info" : "warn",
+        folded: false,
+        counted: t.attention === "agent-waiting",
+        sourceId: null,
+        sourceLabel: null,
+        actions: [],
+        terminalKey: t.key,
+        opens: null,
+      })),
+    });
+  }
 
   if (input.prs) {
     const { yes, folded } = prsNeedingYou(input.prs);
@@ -311,7 +337,9 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
       id: `pr:${r.id}`,
       kind: "pr",
       title: r.title,
-      detail: prDetail(r),
+      lead: r.number,
+      detail: prLine(r, r.status[0]),
+      ...(r.status[0] ? { badge: r.status[0] } : {}),
       tone: r.bucket === "action" ? "bad" : isFolded ? "muted" : "warn",
       folded: isFolded,
       counted: !isFolded,
@@ -325,25 +353,8 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
       opens: { view: "prs", key: r.primary.key },
     });
     const rows = [...yes.map((r) => prRow(r, false)), ...folded.map((r) => prRow(r, true))];
-    if (rows.length) sections.push({ id: "prs", title: "Pull requests", rows });
+    sections.push({ id: "prs", title: "Pull requests", rows, empty: "No pull request is waiting on you." });
   }
-
-  // Red Environment components: each opens the Environment view on its row.
-  const envUsable = (input.environment ?? []).filter((p) => !addStale(p));
-  const envRows: NeedsYouRow[] = buildEnvironmentModel(envUsable).red.map((r) => ({
-    id: `env:${r.key}`,
-    kind: "environment",
-    title: r.label,
-    detail: [r.stateText, r.hint || r.details.join(", "), envUsable.length > 1 ? r.sourceLabel : ""].filter(Boolean).join(" · "),
-    tone: "bad",
-    folded: false,
-    counted: true,
-    sourceId: r.sourceId,
-    sourceLabel: r.sourceLabel,
-    actions: r.hasActions ? [{ sourceId: r.sourceId, sourceLabel: r.sourceLabel, view: "environment", key: r.id }] : [],
-    opens: { view: "environment", key: r.id },
-  }));
-  if (envRows.length) sections.push({ id: "environment", title: "Environment", rows: envRows });
 
   // Source attention, under each item's own group, groups in first-seen order.
   const attentionUsable = input.attention.filter((p) => !addStale(p));
@@ -378,7 +389,7 @@ export function buildNeedsYou(input: NeedsYouInput): NeedsYouModel {
   }
   for (const [group, rows] of groups) sections.push({ id: `group:${group}`, title: group, rows });
 
-  const fed = [...workUsable, ...envUsable, ...attentionUsable];
+  const fed = [...workUsable, ...attentionUsable];
   const freshness = summarizeFreshness(fed);
   if (input.prs) {
     freshness.errors.push(...input.prs.freshness.errors);

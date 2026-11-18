@@ -10,8 +10,8 @@
 //!
 //! | action | where | does |
 //! |---|---|---|
-//! | `review-env` | manifest `itemActions`, on PR rows (`view: "prs"`) | a job: fetch the PR's head (`refs/pull/<n>/head` on github, the PR's `sourceBranch` elsewhere) and check it out into the review worktree (again: move it to the new head when clean) |
-//! | `review-env-up` | the same, second variant | the same, then bring slot N up from it: every component whose repo is that clone builds (source) or runs (dev) from the review worktree |
+//! | `review-env` | manifest `itemActions`, on PR rows (`view: "prs"`) | a job: fetch the PR's head (`refs/pull/<n>/head` on github, the PR's `sourceBranch` elsewhere) and check it out into the review worktree (again: move it to the new head when clean); with the input `then: "up"`, then bring slot N up from it: every component whose repo is that clone builds (source) or runs (dev) from the review worktree |
+//! | `review-env-up` | not offered; still accepted | `review-env` with `then: "up"` (the id the second entry had before the choice moved into one action's confirm) |
 //! | `review-up:<name>` | the Review workspaces panel and Environment section | bring the slot up from an existing review worktree (planned, so the confirm is the plan) |
 //! | `review-terminal:<name>` / `review-agent:<name>` | the same | a terminal, or an agent, with the review worktree as cwd |
 //! | `review-remove:<name>` | the same | a job: `git worktree remove` (refused while it has uncommitted changes) and the record |
@@ -55,6 +55,10 @@ pub const REVIEWS_DIR: &str = "reviews";
 pub const REVIEWS_PATH: &str = "/api/work/reviews";
 pub const REVIEW_ENV_ID: &str = "review-env";
 pub const REVIEW_ENV_UP_ID: &str = "review-env-up";
+/// The input of `review-env` that says what happens after the checkout.
+pub const THEN_INPUT: &str = "then";
+const THEN_CHECKOUT: &str = "checkout";
+const THEN_UP: &str = "up";
 pub const UP_PREFIX: &str = "review-up:";
 pub const REMOVE_PREFIX: &str = "review-remove:";
 pub const TERMINAL_PREFIX: &str = "review-terminal:";
@@ -625,15 +629,20 @@ pub fn item_actions(loaded: Option<&Loaded>) -> Vec<Value> {
     if l.stack.repos().is_empty() {
         return Vec::new();
     }
-    vec![
-        json!({ "kind": "endpoint", "id": REVIEW_ENV_ID, "label": "Review with environment",
-                "mutates": true, "confirm": "Check out {key} at its head into a review worktree",
-                "on": { "view": "prs", "sources": ["*"] } }),
-        json!({ "kind": "endpoint", "id": REVIEW_ENV_UP_ID,
-                "label": format!("Review with environment in slot {}", l.slot), "mutates": true,
-                "confirm": format!("Check out {{key}} at its head into a review worktree and bring up slot {} from it", l.slot),
-                "on": { "view": "prs", "sources": ["*"] } }),
-    ]
+    // One entry per PR row: bringing the slot up is a choice in its
+    // confirm, not a second menu entry.
+    vec![json!({
+        "kind": "endpoint", "id": REVIEW_ENV_ID, "label": "Review with environment",
+        "mutates": true, "confirm": "Check out {key} at its head into a review worktree",
+        "inputs": [{
+            "name": THEN_INPUT, "label": "Then", "kind": "choice", "required": true, "default": THEN_CHECKOUT,
+            "options": [
+                { "value": THEN_CHECKOUT, "label": "Only check it out" },
+                { "value": THEN_UP, "label": format!("Bring up slot {} from it", l.slot) },
+            ],
+        }],
+        "on": { "view": "prs", "sources": ["*"] },
+    })]
 }
 
 /// Whether `id` is one of this module's actions.
@@ -729,7 +738,12 @@ pub fn accept(
             Ok(f) => f,
             Err(e) => return refused(409, "not-offered", e),
         };
-        let up = id == REVIEW_ENV_UP_ID;
+        let then = params.get(THEN_INPUT).and_then(Value::as_str);
+        if let Some(other) = then.filter(|t| ![THEN_CHECKOUT, THEN_UP].contains(t)) {
+            let why = format!("`{THEN_INPUT}` is `{THEN_CHECKOUT}` or `{THEN_UP}`, not `{other}`");
+            return refused(400, "bad-input", why);
+        }
+        let up = id == REVIEW_ENV_UP_ID || then == Some(THEN_UP);
         let mut record = ReviewRecord {
             name: name.clone(),
             forge: pr.forge.clone(),

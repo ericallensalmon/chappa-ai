@@ -1,6 +1,5 @@
 // Data safety in the views: which Work rows a stack's data-safety block
-// covers, the Needs you rows it raises, and the "held" marker of an agent
-// whose deliveries wait. Pure (no DOM, no ipc).
+// covers, and the "held" marker of an agent whose deliveries wait. Pure (no DOM, no ipc).
 //
 // Rust enforces the block (no agent starts in a covered folder, deliveries to
 // running agents there are held) and sends what is in force through
@@ -8,16 +7,13 @@
 //  - the Work row of the bound item (or any row whose folder is covered) gets
 //    a `bad` badge "agents blocked — data safety", and its detail a banner
 //    that leads to Environment, where the block is acknowledged;
-//  - Needs you gets one row per block (it opens Environment on the component
-//    the reason is about, and carries the source's acknowledge action while
-//    the source answers and its data is not clean) and one per running agent
-//    inside a covered folder;
+//  - the block itself is shown and acknowledged in Environment (its tab
+//    carries the alert dot); Needs you does not list it;
 //  - an agent row with held deliveries says how many ("held: 2 messages").
 // The agent buttons themselves are disabled by Rust's verdict, with the
 // reason as their tooltip, like any other disabled action.
 
 import type * as ipc from "../ipc";
-import type { NeedsYouRow, NeedsYouSection } from "./needs_you";
 import type { Chip } from "./prs_model";
 
 export const EMPTY_DATA_SAFETY: ipc.DataSafetyStateDto = { blocks: [], agents: [], held: [] };
@@ -115,63 +111,4 @@ export function heldText(count: number): string {
 /** How many deliveries are held for a pane. */
 export function heldCount(state: ipc.DataSafetyStateDto, termId: number): number {
   return state.held.find((h) => h.termId === termId)?.count ?? 0;
-}
-
-/** The acknowledge action of a block, as the Environment view offers it:
- *  the source's own view-level action, so it asks the same confirm (every
- *  finding listed) and the same required note, and Rust sends the person as
- *  `X-Chappa-Actor`. Only while the source answers and says `not-clean`. */
-export function ackTargets(b: ipc.DataSafetyBlockDto): NeedsYouRow["actions"] {
-  // A secret scan that did not finish is acknowledged too ("let agents start
-  // without a complete scan"); a data-safety error is not.
-  const acknowledgeable = b.state === "not-clean" || (isSecretBlock(b) && b.state === "error");
-  if (!b.ackActionId || !b.current || !acknowledgeable) return [];
-  return [{ sourceId: b.sourceId, sourceLabel: b.sourceLabel, view: "environment", key: null, only: [b.ackActionId] }];
-}
-
-/** The Needs you section: one row per block, then one per running agent
- *  inside a covered folder. Null when nothing is blocked. */
-export function dataSafetySection(state: ipc.DataSafetyStateDto): NeedsYouSection | null {
-  const rows: NeedsYouRow[] = [];
-  for (const b of state.blocks) {
-    rows.push({
-      id: `${isSecretBlock(b) ? "ss" : "ds"}:${b.sourceId}|${b.instance}`,
-      kind: "environment",
-      title: isSecretBlock(b) ? `Agents blocked on ${b.instance}: secret scan` : `Agents blocked on ${b.instance}`,
-      detail: b.reason,
-      tone: "bad",
-      folded: false,
-      counted: true,
-      sourceId: b.sourceId,
-      sourceLabel: b.sourceLabel,
-      actions: ackTargets(b),
-      opens: { view: "environment", key: b.component ?? "" },
-    });
-  }
-  for (const a of state.agents) {
-    const held = heldCount(state, a.termId);
-    rows.push({
-      id: `ds-agent:${a.termId}`,
-      kind: "terminal",
-      title: a.name,
-      detail: [
-        isSecretBlock(a) ? `working where possible secrets were found in ${a.instance}` : `working next to unscanned/real data in ${a.instance}`,
-        held ? heldText(held) : "",
-      ]
-        .filter(Boolean)
-        .join(" · "),
-      tone: "bad",
-      folded: false,
-      counted: true,
-      sourceId: null,
-      sourceLabel: null,
-      actions: [],
-      terminalKey: `term:${a.termId}`,
-      opens: null,
-    });
-  }
-  const secrets = state.blocks.some(isSecretBlock);
-  const data = state.blocks.some((b) => !isSecretBlock(b));
-  const title = secrets && !data ? "Secret scan" : secrets ? "Data safety and secret scan" : "Data safety";
-  return rows.length ? { id: "data-safety", title, rows } : null;
 }

@@ -1,7 +1,13 @@
 // The Work page: the items of every trusted source serving `work`, the
 // active one pinned on top, the rest grouped by status (Done folded), with
-// an "Assigned to me" switch and a text filter. Selecting a row opens its
-// detail beside the list on a wide window, or in place of the list on a
+// an "Assigned to me" switch and a text filter. Each item is one row of an
+// aligned table (key, title, tracker status, the local workflow's status,
+// branches and PRs, reporter and age); cells wrap rather than truncate, a
+// group's header is one compact line whose fold is remembered, and a row's
+// only inline control is "Open" (its link) beside a "⋯" menu with every
+// action Rust judged for it, asked for when the menu opens. Clicking a row
+// opens its detail beside the list on a wide window (the table keeps its
+// key, title and status columns), or in place of the list on a
 // narrow one: every field, the item's actions, its local workflow block and
 // its sections. The detail's header starts with the shared back arrow; on a
 // narrow window it is the page's only header (the view's own is hidden), so
@@ -32,16 +38,24 @@ import { formatAgo } from "../record_pane";
 import { LocalStatusBlock } from "./local_status";
 import type { ActionTarget } from "./needs_you";
 import { withPanels, type PanelPage } from "./panel_view";
-import type { NeedsUpdate, PrRow, ViewPayload } from "./prs_model";
+import type { Chip, NeedsUpdate, PrRow, ViewPayload } from "./prs_model";
 import { SectionsBlock, paintBanners, type SectionsContext } from "./sections";
 import {
   ActionsCell,
+  RowMenu,
   ViewFrame,
   chipEl,
+  columnsHead,
+  groupHead,
+  openButton,
   openChecked,
   paintEmpty,
   placeAt,
+  readFold,
+  rowClickOpens,
+  shortAge,
   truncate,
+  writeFold,
   type SourceViewDeps,
 } from "./view_common";
 import { workItemActionTargets, type ItemActionTarget, type KeyMatchRule, type MergeSource } from "./work_merge";
@@ -89,7 +103,7 @@ export const WORK_VIEW_CSS = `
 .chappa-work-search{width:200px;border:1px solid #262a31;border-radius:6px;background:#0f1114;color:#d6d8dc;font:12px system-ui,sans-serif;padding:3px 8px;}
 .chappa-work-split{display:flex;gap:16px;min-height:0;}
 .chappa-work-list{flex:1 1 auto;min-width:0;}
-.chappa-work-detail{display:none;flex:0 0 46%;min-width:0;border-left:1px solid #1c1f24;padding-left:16px;}
+.chappa-work-detail{display:none;flex:0 0 42%;min-width:0;border-left:1px solid #1c1f24;padding-left:16px;}
 .chappa-work-split.has-detail .chappa-work-detail{display:block;}
 @media (max-width: 900px){
   .chappa-work-split.has-detail .chappa-work-list{display:none;}
@@ -98,10 +112,14 @@ export const WORK_VIEW_CSS = `
   .chappa-source-view.detail-open .chappa-sv-banners,.chappa-source-view.detail-open .chappa-sv-errors,
   .chappa-source-view.detail-open .chappa-sv-notices,.chappa-source-view.detail-open .chappa-work-banners{display:none;}
 }
-.chappa-work-row{cursor:default;}
-.chappa-work-row.selected{border-color:#353a43;background:#161a20;}
-.chappa-work-row.focused{box-shadow:0 0 0 1px #5ea6ff;}
-.chappa-work-key{flex:none;font:11px ui-monospace,monospace;color:#8b949e;}
+.chappa-source-view[data-view="work"] .chappa-dt{--dt-cols:minmax(78px,.8fr) minmax(200px,3fr) minmax(80px,.9fr) minmax(90px,1fr) minmax(120px,1.6fr) minmax(64px,.7fr) 74px;}
+.chappa-work-split.has-detail .chappa-dt{--dt-cols:minmax(70px,.8fr) minmax(160px,3fr) minmax(76px,.9fr) 74px;}
+.chappa-work-split.has-detail .chappa-work-c-flow,.chappa-work-split.has-detail .chappa-work-c-branch,.chappa-work-split.has-detail .chappa-work-c-from{display:none;}
+.chappa-work-keyline{display:flex;align-items:center;gap:5px;}
+.chappa-work-key{font:600 11px ui-monospace,monospace;color:#adb3bd;}
+.chappa-work-active{text-transform:uppercase;}
+.chappa-work-active[hidden]{display:none;}
+.chappa-work-branches:empty{display:none;}
 .chappa-work-pr{cursor:pointer;background:none;}
 .chappa-work-pr:hover{border-color:#5ea6ff;}
 .chappa-work-detail-head{display:flex;align-items:center;gap:8px;margin:2px 0 10px 0;}
@@ -203,7 +221,7 @@ function versionOf(sourceIds: readonly string[], versions: Record<string, number
 
 interface GroupRefs {
   el: HTMLElement;
-  head: HTMLButtonElement;
+  head: ReturnType<typeof groupHead>;
   rows: HTMLElement;
   sig: string;
 }
@@ -212,14 +230,29 @@ interface RowRefs {
   el: HTMLElement;
   dot: HTMLElement;
   key: HTMLElement;
+  active: HTMLElement;
   title: HTMLButtonElement;
-  status: HTMLElement;
   meta: HTMLElement;
   chips: HTMLElement;
-  actions: ActionsCell;
+  status: HTMLElement;
+  flow: HTMLElement;
+  flowFrom: HTMLElement;
+  branches: HTMLElement;
+  prs: HTMLElement;
+  from: HTMLElement;
+  age: HTMLElement;
+  open: HTMLButtonElement;
+  more: HTMLButtonElement;
   sig: string;
   row: WorkRow | null;
 }
+
+/** The table's columns, in order (the last, unlabelled, holds the row's
+ *  Open and its "⋯"). */
+export const WORK_COLUMNS = ["KEY", "TITLE", "STATUS", "WORKFLOW", "BRANCH / REPOS", "FROM", ""];
+
+/** Where a group's fold is remembered. */
+export const workGroupFoldKey = (groupId: string): string => `work-group:${groupId}`;
 
 export class WorkView {
   private readonly frame: ViewFrame;
@@ -233,8 +266,9 @@ export class WorkView {
   private readonly ui: WorkViewDeps;
   private readonly groups = new Map<WorkGroupId, GroupRefs>();
   private readonly rows = new Map<string, RowRefs>();
-  /** Fold choices per group, for as long as the page lives (the session). */
-  private readonly foldChoice = new Map<WorkGroupId, boolean>();
+  private readonly table: HTMLElement;
+  private readonly body: HTMLElement;
+  private readonly menu: RowMenu;
   /** The filters, kept for the session: null = the default. */
   private readonly filter: WorkFilter = { assignedOnly: null, text: "" };
   private selected: string | null = null;
@@ -290,6 +324,14 @@ export class WorkView {
     this.split.className = "chappa-work-split";
     this.list = document.createElement("div");
     this.list.className = "chappa-work-list";
+    this.table = document.createElement("div");
+    this.table.className = "chappa-dt";
+    this.table.setAttribute("role", "table");
+    this.body = document.createElement("div");
+    this.body.className = "chappa-dt-body";
+    this.table.append(columnsHead(WORK_COLUMNS), this.body);
+    this.list.appendChild(this.table);
+    this.menu = new RowMenu(this.frame.host, this.ui);
     this.detail = new WorkDetail(this.ui, () => this.select(null));
     this.split.append(this.list, this.detail.el);
     this.frame.content.append(this.bannersEl, this.split);
@@ -332,6 +374,7 @@ export class WorkView {
   }
 
   setActive(active: boolean): void {
+    if (!active) this.menu.close();
     this.frame.setActive(active);
   }
 
@@ -372,8 +415,9 @@ export class WorkView {
       this.search.value = "";
       if (model.assignedOnly && !row.assignedToMe) this.filter.assignedOnly = false;
     }
-    const group: WorkGroupId = row.active ? "active" : (row.status?.category ?? "other");
-    this.foldChoice.set(group, false);
+    const groupId: WorkGroupId = row.active ? "active" : (row.status?.category ?? "other");
+    const group = model.groups.find((g) => g.id === groupId);
+    writeFold(workGroupFoldKey(groupId), group?.folded ?? groupId === "done", false);
     this.focused = row.id;
     this.select(row.id);
     const el = this.rows.get(row.id)?.el;
@@ -382,10 +426,12 @@ export class WorkView {
   }
 
   dispose(): void {
+    this.menu.dispose();
     this.frame.dispose();
   }
 
   private select(id: string | null): void {
+    this.menu.close();
     this.selected = id;
     if (id === null) this.focused = null;
     this.paint();
@@ -422,7 +468,7 @@ export class WorkView {
     model.groups.forEach((g, i) => {
       const refs = this.groupRefs(g);
       this.paintGroup(refs, g);
-      placeAt(this.list, refs.el, i);
+      placeAt(this.body, refs.el, i);
       g.rows.forEach((row, j) => {
         const r = this.rowRefs(row.id);
         this.paintRow(r, row, input);
@@ -430,7 +476,9 @@ export class WorkView {
       });
       truncate(refs.rows, g.rows.length);
     });
-    truncate(this.list, model.groups.length);
+    truncate(this.body, model.groups.length);
+    this.table.hidden = model.groups.length === 0;
+    if (this.menu.key !== null && !model.groups.some((g) => g.rows.some((r) => r.id === this.menu.key))) this.menu.close();
     const live = new Set(model.all.map((r) => r.id));
     for (const id of [...this.rows.keys()]) if (!live.has(id)) this.rows.delete(id);
     for (const id of [...this.groups.keys()]) if (!model.groups.some((g) => g.id === id)) this.groups.delete(id);
@@ -457,26 +505,24 @@ export class WorkView {
   }
 
   private folded(g: WorkGroup): boolean {
-    return this.foldChoice.get(g.id) ?? g.folded;
+    return readFold(workGroupFoldKey(g.id), g.folded);
   }
 
   private groupRefs(g: WorkGroup): GroupRefs {
     let refs = this.groups.get(g.id);
     if (refs) return refs;
     const el = document.createElement("section");
-    el.className = "chappa-sv-group";
+    el.className = "chappa-dt-group";
     el.dataset.group = g.id;
-    const head = document.createElement("button");
-    head.type = "button";
-    head.className = "chappa-sv-group-head";
-    const rows = document.createElement("div");
-    rows.className = "chappa-sv-rows";
-    el.append(head, rows);
-    head.addEventListener("click", () => {
+    const head = groupHead(true, () => {
       const now = this.model?.groups.find((x) => x.id === g.id) ?? g;
-      this.foldChoice.set(g.id, !this.folded(now));
+      writeFold(workGroupFoldKey(g.id), now.folded, !this.folded(now));
       this.paint();
     });
+    const rows = document.createElement("div");
+    rows.className = "chappa-dt-rows";
+    rows.setAttribute("role", "rowgroup");
+    el.append(head.el, rows);
     refs = { el, head, rows, sig: "" };
     this.groups.set(g.id, refs);
     return refs;
@@ -487,82 +533,153 @@ export class WorkView {
     const sig = `${g.label}\u001f${g.rows.length}\u001f${folded}`;
     if (sig === refs.sig) return;
     refs.sig = sig;
-    refs.head.textContent = "";
-    const label = document.createElement("span");
-    label.className = "chappa-sv-group-label";
-    label.textContent = `${folded ? "▸" : "▾"} ${g.label}`;
-    const count = document.createElement("span");
-    count.className = "chappa-sv-count";
-    count.textContent = String(g.rows.length);
-    refs.head.append(label, count);
-    refs.head.setAttribute("aria-expanded", String(!folded));
+    refs.head.paint(g.label, g.rows.length, folded);
     refs.rows.classList.toggle("folded", folded);
+    refs.el.classList.toggle("folded", folded);
   }
 
   private rowRefs(id: string): RowRefs {
     let refs = this.rows.get(id);
     if (refs) return refs;
     const el = document.createElement("div");
-    el.className = "chappa-sv-row chappa-work-row";
+    el.className = "chappa-dt-row chappa-work-row";
     el.dataset.id = id;
-    const top = document.createElement("div");
-    top.className = "chappa-sv-top";
+    el.setAttribute("role", "row");
+    const cell = (cls: string): HTMLElement => {
+      const c = document.createElement("div");
+      c.className = `chappa-dt-cell ${cls}`;
+      c.setAttribute("role", "cell");
+      el.appendChild(c);
+      return c;
+    };
+    const keyCell = cell("chappa-work-c-key");
+    const keyLine = document.createElement("div");
+    keyLine.className = "chappa-work-keyline";
     const dot = document.createElement("span");
     dot.className = "chappa-work-dot";
     dot.hidden = true;
     const key = document.createElement("span");
     key.className = "chappa-work-key";
+    keyLine.append(key, dot);
+    const active = chipEl({ text: "active", tone: "ok", title: "The environment is set up for this item" });
+    active.classList.add("chappa-work-active");
+    keyCell.append(keyLine, active);
+    const titleCell = cell("chappa-work-c-title");
     const title = document.createElement("button");
     title.type = "button";
-    title.className = "chappa-sv-title";
-    const status = document.createElement("span");
-    status.className = "chappa-work-status";
-    top.append(dot, key, title, status);
+    title.className = "chappa-dt-main chappa-sv-title";
     const meta = document.createElement("div");
-    meta.className = "chappa-sv-meta";
+    meta.className = "chappa-dt-sub chappa-sv-meta";
     const chips = document.createElement("div");
-    chips.className = "chappa-sv-chips";
-    const actions = new ActionsCell(this.ui);
-    el.append(top, meta, chips, actions.el);
-    const r: RowRefs = { el, dot, key, title, status, meta, chips, actions, sig: "", row: null };
-    title.addEventListener("click", () => {
-      if (r.row) this.select(this.selected === r.row.id ? null : r.row.id);
+    chips.className = "chappa-dt-chips chappa-sv-chips";
+    titleCell.append(title, meta, chips);
+    const status = cell("chappa-work-c-status chappa-work-status");
+    const flowCell = cell("chappa-work-c-flow");
+    const flow = document.createElement("div");
+    flow.className = "chappa-work-flow";
+    const flowFrom = document.createElement("div");
+    flowFrom.className = "chappa-dt-sub";
+    flowCell.append(flow, flowFrom);
+    const branchCell = cell("chappa-work-c-branch");
+    const branches = document.createElement("div");
+    branches.className = "chappa-dt-mono chappa-work-branches";
+    const prs = document.createElement("div");
+    prs.className = "chappa-dt-chips";
+    branchCell.append(branches, prs);
+    const fromCell = cell("chappa-work-c-from");
+    const from = document.createElement("div");
+    from.className = "chappa-work-from-name";
+    const age = document.createElement("div");
+    age.className = "chappa-dt-sub";
+    fromCell.append(from, age);
+    const acts = cell("chappa-dt-acts");
+    const r = {} as RowRefs;
+    const open = openButton("", () => {
+      if (r.row?.url) openChecked(this.deps, r.row.sourceId, r.row.url);
+    });
+    const more = RowMenu.button((btn) => this.toggleMenu(r, btn));
+    acts.append(open, more);
+    Object.assign(r, { el, dot, key, active, title, meta, chips, status, flow, flowFrom, branches, prs, from, age, open, more, sig: "", row: null });
+    el.addEventListener("click", (e) => {
+      if (r.row && rowClickOpens(e, title)) this.select(this.selected === r.row.id ? null : r.row.id);
     });
     this.rows.set(id, r);
     return r;
   }
 
+  private toggleMenu(r: RowRefs, btn: HTMLButtonElement): void {
+    const row = r.row;
+    const input = this.input;
+    if (!row || !input) return;
+    const targets = rowTargets(row, input.sources);
+    const entries = [{ label: "Open details", run: () => this.select(row.id) }];
+    this.menu.toggle(row.id, btn, entries, targets, versionOf(targets.flatMap(asked), input.versions));
+  }
+
   private paintRow(r: RowRefs, row: WorkRow, input: WorkViewInput): void {
     r.row = row;
-    const targets = rowTargets(row, input.sources);
-    r.actions.load(targets, versionOf(targets.map((t) => t.sourceId), input.versions));
+    if (this.menu.key === row.id) {
+      const targets = rowTargets(row, input.sources);
+      this.menu.refresh(row.id, targets, versionOf(targets.flatMap(asked), input.versions));
+    }
     const now = this.deps.now();
     const meta = workMeta(row, now);
-    const sig = JSON.stringify([row.key, row.title, row.statusChip, meta, row.labels, row.badges, row.prs, row.active, row.sourceLabel, row.banners]);
+    const age = shortAge(row.lastTouchedUtc ?? row.created, now);
+    const flow = workFlow(row);
+    const sig = JSON.stringify([row.key, row.title, row.statusChip, meta, row.labels, row.badges, row.prs, row.active, row.sourceLabel, row.banners, row.branches, row.reporter, age, flow, row.url]);
     if (sig === r.sig) return;
     r.sig = sig;
     r.dot.hidden = row.bannerTone === null;
     r.dot.dataset.tone = row.bannerTone ?? "";
     r.dot.title = row.banners.map((b) => b.banner.title).join("\n");
     r.el.dataset.key = row.key;
-    r.el.dataset.tone = row.active ? "info" : "";
+    if (row.active) r.el.dataset.accent = "active";
+    else if (row.bannerTone) r.el.dataset.accent = row.bannerTone;
+    else delete r.el.dataset.accent;
+    r.active.hidden = !row.active;
     r.key.textContent = row.key;
     r.title.textContent = row.hasTitle ? row.title : "(no title)";
     r.title.title = `Show ${row.key}`;
-    r.status.textContent = "";
-    if (row.statusChip) r.status.appendChild(chipEl(row.statusChip));
     r.meta.textContent = meta;
     r.meta.title = meta;
-    fillChips(r.chips, row, this.ui);
+    r.chips.textContent = "";
+    for (const l of row.labels) r.chips.appendChild(chipEl({ text: l, tone: "muted" }));
+    for (const b of row.badges) r.chips.appendChild(chipEl(b));
+    r.status.textContent = "";
+    if (row.statusChip) r.status.appendChild(chipEl(row.statusChip));
+    r.flow.textContent = "";
+    if (flow) r.flow.appendChild(chipEl(flow.chip));
+    r.flowFrom.textContent = flow?.from ?? "";
+    r.branches.textContent = "";
+    for (const b of row.branches) {
+      const line = document.createElement("div");
+      line.textContent = `${b.repo}: ${b.branch}`;
+      line.title = `${b.forge} ${b.repo}: ${b.branch}`;
+      r.branches.appendChild(line);
+    }
+    r.prs.textContent = "";
+    for (const p of row.prs) r.prs.appendChild(prChipEl(p, row.sourceId, this.ui));
+    r.from.textContent = row.reporter ? (row.reporter.isMe ? "me" : row.reporter.name) : "";
+    r.age.textContent = age ?? "";
+    r.age.title = row.lastTouchedUtc ? `touched ${new Date(row.lastTouchedUtc).toLocaleString()}` : row.created ? `created ${new Date(row.created).toLocaleString()}` : "";
+    r.open.hidden = !row.url;
+    r.open.title = row.url ? `Open ${row.url}` : "";
   }
 }
 
-/** Labels (muted), the source's badges, then the linked PRs as buttons. */
-function fillChips(parent: HTMLElement, row: WorkRow, deps: WorkViewDeps): void {
-  parent.textContent = "";
-  for (const l of row.labels) parent.appendChild(chipEl({ text: l, tone: "muted" }));
-  for (const b of row.badges) parent.appendChild(chipEl(b));
-  for (const p of row.prs) parent.appendChild(prChipEl(p, row.sourceId, deps));
+/** Every source a target's actions are asked of. */
+const asked = (t: ActionTarget & { owner?: string }): string[] => (t.owner ? [t.sourceId, t.owner] : [t.sourceId]);
+
+/** The WORKFLOW cell: the item's local status as a chip (warn while it
+ *  waits on a person), and whose workflow it is when another source than
+ *  the tracker keeps it. Null when the item has none. */
+export function workFlow(row: WorkRow): { chip: Chip; from: string | null } | null {
+  const ls = row.localStatus;
+  if (!ls) return null;
+  const waits = !!ls.pendingApproval || ls.gate === "human-exit";
+  const title = ls.pendingApproval ? `waiting for approval of the move to ${ls.pendingApproval.to}` : ls.gate === "human-exit" ? "only a person can move it out" : ls.label;
+  const from = row.localStatusFrom && row.localStatusFrom.sourceLabel !== row.sourceLabel ? row.localStatusFrom.sourceLabel : null;
+  return { chip: { text: ls.label, tone: waits ? "warn" : "info", title }, from };
 }
 
 /** A linked PR: opens in the PRs view when that view lists it, else its

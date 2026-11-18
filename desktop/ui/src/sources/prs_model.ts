@@ -88,12 +88,41 @@ export interface PrRow {
   teams: string[];
   /** Whether it needs the user: {@link attentionOf}. */
   attention: "yes" | "folded" | "no";
+  /** A grouping above the repo (forges that have one), or null. */
+  project: string | null;
+  /** The STATUS column: the bucket chip, then the PR's state, checks,
+   *  conflicts and the source's own badges (votes and threads have their
+   *  own columns). */
+  status: Chip[];
+  /** The VOTES column. */
+  votes: PrVotes;
+  /** The COMMENTS column, or null when the source sent no thread counts. */
+  comments: { text: string; forMe: number } | null;
+  /** The reasons that say something no chip already says: a reason that
+   *  only restates a badge ("still a draft", "conflicts with main") is
+   *  left to the badge. */
+  why: string[];
+  /** When the PR last moved (else was opened, else closed): its age. */
+  ageUtc: string | null;
+  /** The reviewers, people and teams, with their votes. */
+  reviewers: { name: string; vote: string; required: boolean; isGroup: boolean }[];
   /** The primary source's sections; their actions are the primary's. */
   sections: Section[];
   /** The source whose payload supplied the fields (the fresher one). */
   primary: PrOrigin;
   /** Every source that served the row, the primary first. */
   origins: PrOrigin[];
+}
+
+/** What the VOTES column says. */
+export interface PrVotes {
+  /** "2 approved · 1 rejected", or "0 approved". */
+  summary: string;
+  /** My own vote on a review ("me: no vote (required)"); null on mine. */
+  me: string | null;
+  tone: Tone;
+  /** Who voted what, one per line. */
+  title: string;
 }
 
 export interface PrGroup {
@@ -313,6 +342,8 @@ export function readPr(raw: unknown): Pr | null {
     ...(str(p.targetBranch) !== null ? { targetBranch: str(p.targetBranch)! } : {}),
     state: (state && STATES.has(state) ? state : "open") as Pr["state"],
     closedUtc: str(p.closedUtc),
+    created: str(p.created),
+    lastTouchedUtc: str(p.lastTouchedUtc),
     role: role as Pr["role"],
     bucket: (str(p.bucket) ?? "") as Bucket,
     reasons: list(p.reasons).filter((r): r is string => typeof r === "string"),
@@ -370,7 +401,20 @@ const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n =
  *  threads, mergeability, votes, the state when not open, then the source's
  *  own badges (a badge repeating a chip's text is dropped). */
 export function chipsFor(pr: Pr): Chip[] {
-  const chips: Chip[] = [];
+  const { facts, threads, conflicts, votes, badges } = chipParts(pr);
+  return [...facts, ...threads, ...conflicts, ...votes, ...badges];
+}
+
+/** The row's chips by where the table shows them: the STATUS column
+ *  (state, checks, conflicts, the source's badges), COMMENTS (threads)
+ *  and VOTES. A badge repeating a chip's text is dropped. */
+export function chipParts(pr: Pr): { facts: Chip[]; threads: Chip[]; conflicts: Chip[]; votes: Chip[]; badges: Chip[] } {
+  const facts: Chip[] = [];
+  const threads: Chip[] = [];
+  const conflicts: Chip[] = [];
+  const votes: Chip[] = [];
+  const badges: Chip[] = [];
+  const chips = facts;
   if (pr.state !== "open") chips.push({ text: pr.state, tone: "muted" });
   const c = pr.checks;
   if (c?.state === "failing") {
@@ -383,30 +427,84 @@ export function chipsFor(pr: Pr): Chip[] {
     chips.push({ text: "checks passing", tone: "ok" });
   }
   const t = pr.threads;
-  if (t && t.needsMe > 0) chips.push({ text: `${plural(t.needsMe, "thread")} for me`, tone: "warn", title: `${t.active} open, ${t.resolved} resolved` });
-  else if (t && t.active > 0) chips.push({ text: `${plural(t.active, "open thread")}`, tone: "muted", title: `${t.resolved} resolved` });
-  if (pr.mergeable === "conflicts") chips.push({ text: "conflicts", tone: "bad" });
+  if (t && t.needsMe > 0) threads.push({ text: `${plural(t.needsMe, "thread")} for me`, tone: "warn", title: `${t.active} open, ${t.resolved} resolved` });
+  else if (t && t.active > 0) threads.push({ text: `${plural(t.active, "open thread")}`, tone: "muted", title: `${t.resolved} resolved` });
+  if (pr.mergeable === "conflicts") conflicts.push({ text: "conflicts", tone: "bad" });
   const vote = pr.me?.vote;
-  if (pr.role === "reviewing" && pr.me?.required && (vote === "none" || vote === undefined)) chips.push({ text: "required", tone: "info", title: "your review is required" });
-  if (vote === "approved") chips.push({ text: "you approved", tone: "ok" });
-  else if (vote === "approved-with-suggestions") chips.push({ text: "you approved with suggestions", tone: "ok" });
-  else if (vote === "waiting") chips.push({ text: "you voted: wait for author", tone: "warn" });
-  else if (vote === "rejected") chips.push({ text: "you rejected", tone: "bad" });
+  if (pr.role === "reviewing" && pr.me?.required && (vote === "none" || vote === undefined)) votes.push({ text: "required", tone: "info", title: "your review is required" });
+  if (vote === "approved") votes.push({ text: "you approved", tone: "ok" });
+  else if (vote === "approved-with-suggestions") votes.push({ text: "you approved with suggestions", tone: "ok" });
+  else if (vote === "waiting") votes.push({ text: "you voted: wait for author", tone: "warn" });
+  else if (vote === "rejected") votes.push({ text: "you rejected", tone: "bad" });
   const others = (pr.reviewers ?? []).filter((r) => !r.isGroup);
   const count = (v: string): string[] => others.filter((r) => r.vote === v).map((r) => r.name);
   const approved = [...count("approved"), ...count("approved-with-suggestions")];
   const rejected = count("rejected");
   const waiting = count("waiting");
-  if (approved.length) chips.push({ text: `${approved.length} approved`, tone: "ok", title: approved.join(", ") });
-  if (rejected.length) chips.push({ text: `${rejected.length} rejected`, tone: "bad", title: rejected.join(", ") });
-  if (waiting.length) chips.push({ text: `${waiting.length} waiting for author`, tone: "warn", title: waiting.join(", ") });
-  const seen = new Set(chips.map((x) => x.text.toLowerCase()));
+  if (approved.length) votes.push({ text: `${approved.length} approved`, tone: "ok", title: approved.join(", ") });
+  if (rejected.length) votes.push({ text: `${rejected.length} rejected`, tone: "bad", title: rejected.join(", ") });
+  if (waiting.length) votes.push({ text: `${waiting.length} waiting for author`, tone: "warn", title: waiting.join(", ") });
+  const seen = new Set([...facts, ...threads, ...conflicts, ...votes].map((x) => x.text.toLowerCase()));
   for (const b of pr.badges ?? []) {
     if (seen.has(b.text.toLowerCase())) continue;
     seen.add(b.text.toLowerCase());
-    chips.push({ text: b.text, tone: (b.tone ?? "info") as Tone, ...(b.title ? { title: b.title } : {}) });
+    badges.push({ text: b.text, tone: (b.tone ?? "info") as Tone, ...(b.title ? { title: b.title } : {}) });
   }
-  return chips;
+  return { facts, threads, conflicts, votes, badges };
+}
+
+/** The facts a line of text speaks of, as words a chip would use too. */
+const FACT_WORDS: [RegExp, string][] = [
+  [/\bdraft\b/i, "draft"],
+  [/conflict/i, "conflicts"],
+  [/\bchecks?\b|\bpolic(y|ies)\b|\bbuilds?\b/i, "checks"],
+  [/thread|repl(y|ied|ies)|answer|comment/i, "threads"],
+  [/approv/i, "approved"],
+  [/reject|changes requested|requested changes/i, "rejected"],
+  [/\bvot(e|ed|es)\b|required/i, "vote"],
+  [/\bmerged\b|\bclosed\b|abandon/i, "closed"],
+  [/\bteams?\b|\bvia\b|\bthrough\b/i, "team"],
+  [/\bwait(s|ing)?\b/i, "waiting"],
+];
+
+export function factsOf(text: string): Set<string> {
+  return new Set(FACT_WORDS.filter(([re]) => re.test(text)).map(([, f]) => f));
+}
+
+/** Whether a reason only restates what the chips already show: every fact
+ *  it speaks of is one of theirs (a reason with nothing recognisable, or
+ *  with a fact no chip has, is kept). */
+export function restatesChips(reason: string, chips: readonly Chip[]): boolean {
+  const said = factsOf(reason);
+  if (said.size === 0) return false;
+  const shown = factsOf(chips.map((c) => c.text).join(" · "));
+  return [...said].every((f) => shown.has(f));
+}
+
+const VOTE_TEXT: Record<string, string> = {
+  approved: "approved",
+  "approved-with-suggestions": "approved with suggestions",
+  waiting: "waiting for author",
+  rejected: "rejected",
+  none: "no vote",
+};
+
+/** The VOTES column of a PR. */
+export function votesOf(pr: Pr): PrVotes {
+  const people = (pr.reviewers ?? []).filter((r) => !r.isGroup);
+  const by = (v: string): number => people.filter((r) => r.vote === v).length;
+  const approved = by("approved") + by("approved-with-suggestions");
+  const parts = [`${approved} approved`];
+  if (by("rejected")) parts.push(`${by("rejected")} rejected`);
+  if (by("waiting")) parts.push(`${by("waiting")} waiting`);
+  const required = people.filter((r) => r.required).length;
+  if (required) parts.push(`${required} required`);
+  const mine = pr.role === "reviewing" && pr.me ? pr.me : null;
+  const myVote = mine?.vote ?? "none";
+  const me = mine ? `me: ${VOTE_TEXT[myVote] ?? myVote}${mine.required ? " (required)" : ""}` : null;
+  const tone: Tone = by("rejected") || myVote === "rejected" ? "bad" : mine?.required && myVote === "none" ? "info" : approved ? "ok" : "muted";
+  const title = (pr.reviewers ?? []).map((r) => `${r.name}${r.isGroup ? " (team)" : ""}: ${VOTE_TEXT[r.vote ?? "none"] ?? r.vote}${r.required ? ", required" : ""}`).join("\n");
+  return { summary: parts.join(" · "), me, tone, title };
 }
 
 // ---- merging ------------------------------------------------------------
@@ -534,7 +632,13 @@ function toRow(id: string, pr: Pr, primary: PrOrigin, origins: PrOrigin[]): PrRo
   const lead: Chip[] = info ? [{ ...info.chip, title: info.label }] : oneLine(pr.bucket) ? [{ text: oneLine(pr.bucket), tone: "muted" }] : [];
   if (bucket === "group" && !required) for (const t of teams.slice(1)) lead.push({ text: `also via ${t}`, tone: "muted" });
   const seen = new Set(lead.map((c) => c.text.toLowerCase()));
-  const chips = [...lead, ...chipsFor(pr).filter((c) => !seen.has(c.text.toLowerCase()))];
+  const fresh = (c: Chip): boolean => !seen.has(c.text.toLowerCase());
+  const chips = [...lead, ...chipsFor(pr).filter(fresh)];
+  const parts = chipParts(pr);
+  const status = [...lead, ...[...parts.facts, ...parts.conflicts, ...parts.badges].filter(fresh)];
+  const t = pr.threads;
+  const comments = t ? { text: `${t.active} active / ${t.resolved} resolved`, forMe: t.needsMe } : null;
+  const reasons = pr.reasons.map(oneLine).filter(Boolean);
   return {
     id,
     forge: pr.forge,
@@ -548,11 +652,18 @@ function toRow(id: string, pr: Pr, primary: PrOrigin, origins: PrOrigin[]): PrRo
     state: pr.state,
     role: pr.role,
     bucket,
-    reasons: pr.reasons.map(oneLine).filter(Boolean),
+    reasons,
     chips,
     required,
     teams,
     attention: attentionOf({ role: pr.role, bucket, required, state: pr.state }),
+    project: pr.project ? oneLine(pr.project) || null : null,
+    status,
+    votes: votesOf(pr),
+    comments,
+    why: reasons.filter((r) => !restatesChips(r, chips)),
+    ageUtc: pr.lastTouchedUtc ?? pr.created ?? pr.closedUtc ?? null,
+    reviewers: (pr.reviewers ?? []).map((r) => ({ name: oneLine(r.name), vote: r.vote ?? "none", required: r.required === true, isGroup: r.isGroup === true })),
     sections: pr.sections ?? [],
     primary,
     origins,

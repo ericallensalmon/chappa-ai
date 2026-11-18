@@ -10,7 +10,9 @@ import {
   prId,
   prsNeedingYou,
   readPr,
+  restatesChips,
   stripMarkdownLinks,
+  votesOf,
   summarizeFreshness,
   type PrsModel,
   type PrsTab,
@@ -354,5 +356,75 @@ describe("text", () => {
     const row = m.mine[0].rows[0];
     expect(row.title).toBe("Fix ABC-1");
     expect(row.reasons).toEqual(["blocked by Sam see thread"]);
+  });
+});
+
+describe("the table's columns of a PR", () => {
+  const one = (over: Record<string, unknown>) => buildPrsModel([payload("a", prsBody([pr("#1", over)]))]);
+  const rowOf = (m: PrsModel) => [...m.mine, ...m.reviewing, ...m.all].flatMap((g) => g.rows)[0];
+
+  it("status holds the bucket, the state, checks, conflicts and the source's badges; threads and votes have their own columns", () => {
+    const row = rowOf(
+      one({
+        state: "draft",
+        bucket: "draft",
+        checks: { state: "failing", failing: ["lint"] },
+        mergeable: "conflicts",
+        threads: { active: 3, resolved: 2, needsMe: 1 },
+        reviewers: [{ name: "Sam", vote: "approved" }],
+        badges: [{ text: "hotfix", tone: "warn" }],
+      }),
+    );
+    expect(row.status.map((c) => c.text)).toEqual(["draft", "1 check failing", "conflicts", "hotfix"]);
+    expect(row.comments).toEqual({ text: "3 active / 2 resolved", forMe: 1 });
+    expect(row.votes.summary).toBe("1 approved");
+    expect(row.votes.me).toBeNull();
+    // The flat chip list the other consumers read is unchanged.
+    expect(row.chips.map((c) => c.text)).toEqual(["draft", "1 check failing", "1 thread for me", "conflicts", "1 approved", "hotfix"]);
+  });
+
+  it("votes: a summary of the others, my own vote on a review, who voted what as the tooltip", () => {
+    const v = votesOf(
+      readPr(
+        pr("#1", {
+          role: "reviewing",
+          bucket: "vote",
+          me: { required: true, vote: "none" },
+          reviewers: [
+            { name: "Alex", vote: "approved" },
+            { name: "Sam", vote: "rejected", required: true },
+            { name: "web-team", isGroup: true },
+          ],
+        }),
+      )!,
+    );
+    expect(v).toEqual({
+      summary: "1 approved · 1 rejected · 1 required",
+      me: "me: no vote (required)",
+      tone: "bad",
+      title: "Alex: approved\nSam: rejected, required\nweb-team (team): no vote",
+    });
+    expect(votesOf(readPr(pr("#2"))!)).toMatchObject({ summary: "0 approved", me: null, tone: "muted" });
+  });
+
+  it("a reason is left to the chips when every fact it names is one of theirs", () => {
+    const chips = [{ text: "draft", tone: "warn" as const }, { text: "conflicts", tone: "bad" as const }, { text: "1 check failing", tone: "bad" as const }];
+    expect(restatesChips("still a draft", chips)).toBe(true);
+    expect(restatesChips("conflicts with main", chips)).toBe(true);
+    expect(restatesChips("Checks are failing: lint", chips)).toBe(true);
+    // A fact no chip has, or nothing recognisable, keeps the sentence.
+    expect(restatesChips("draft, waiting on Sam", chips)).toBe(false);
+    expect(restatesChips("the release branch is frozen", chips)).toBe(false);
+    const row = rowOf(one({ state: "draft", bucket: "draft", reasons: ["still a draft", "the release branch is frozen"] }));
+    expect(row.why).toEqual(["the release branch is frozen"]);
+    expect(row.reasons).toEqual(["still a draft", "the release branch is frozen"]);
+  });
+
+  it("the age is the last move, else the opening, else the close; the project only where the forge has one", () => {
+    expect(rowOf(one({ created: "2026-01-01T00:00:00Z", lastTouchedUtc: "2026-01-10T00:00:00Z" })).ageUtc).toBe("2026-01-10T00:00:00Z");
+    expect(rowOf(one({ created: "2026-01-01T00:00:00Z" })).ageUtc).toBe("2026-01-01T00:00:00Z");
+    expect(rowOf(one({ created: 7 })).ageUtc).toBeNull();
+    expect(rowOf(one({ project: "platform" })).project).toBe("platform");
+    expect(rowOf(one({ project: null })).project).toBeNull();
   });
 });

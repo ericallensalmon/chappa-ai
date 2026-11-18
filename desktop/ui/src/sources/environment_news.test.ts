@@ -1,11 +1,10 @@
-// The Environment's share of Needs you (red components as attention rows)
-// and of the notification rules (a component entering a red state, a new bad
-// alert).
+// The Environment's share of the notification rules (a component entering a
+// red state, a new bad alert). Its red components are not Needs you rows:
+// they stay in Environment, whose tab carries the alert dot.
 import { describe, expect, it } from "vitest";
-import { SeenBaselines, buildNeedsYou, pollResult, type NeedsYouInput } from "./needs_you";
+import { SeenBaselines, pollResult } from "./needs_you";
 import { fixture, payload } from "./test-utils";
 
-const empty: NeedsYouInput = { terminals: [], work: [], prs: null, attention: [] };
 const body = (components: unknown[], extra: Record<string, unknown> = {}) => ({
   freshness: { asOf: "2026-01-15T10:00:00Z" },
   groups: [{ id: "app", label: "Application" }],
@@ -17,48 +16,6 @@ const ids = (p: ReturnType<typeof payload>): string[] => {
   const r = pollResult("environment", p);
   return r.ok ? r.items.map((i) => i.id) : [];
 };
-
-describe("Needs you: Environment rows", () => {
-  it("red components are counted rows under Environment that open the view on the component", () => {
-    const m = buildNeedsYou({ ...empty, environment: [payload("fx", fixture("environment"), { sourceLabel: "Fixture" })] });
-    const s = m.sections.find((x) => x.id === "environment")!;
-    expect(s.title).toBe("Environment");
-    expect(s.rows.map((r) => [r.id, r.title, r.detail, r.tone, r.counted])).toEqual([
-      ["env:fx|worker", "Worker", "deployed but not running · Was running; no stop was requested", "bad", true],
-      ["env:fx|db", "Database", "unhealthy · Healthcheck failing for 4 minutes", "bad", true],
-      ["env:fx|queue", "Queue", "crash loop · Restarting every few seconds", "bad", true],
-      ["env:fx|seed", "Seed", "failed · exit 2", "bad", true],
-    ]);
-    expect(s.rows[1].opens).toEqual({ view: "environment", key: "db" });
-    // Only the seed job carries actions.
-    expect(s.rows.map((r) => r.actions.length)).toEqual([0, 0, 0, 1]);
-    expect(s.rows[3].actions[0]).toEqual({ sourceId: "fx", sourceLabel: "Fixture", view: "environment", key: "seed" });
-    expect(m.count).toBe(4);
-  });
-
-  it("starting, idle, ok one-shots and not-deployed components are not rows; another contract is a banner", () => {
-    const m = buildNeedsYou({
-      ...empty,
-      environment: [
-        payload("a", body([api("starting"), { id: "b", group: "app", state: "stopped-idle" }, { id: "c", group: "app", state: "oneshot-ok" }, { id: "d", group: "app", state: "not-deployed" }])),
-        payload("old", { contract: 7, components: [api("unhealthy")] }, { sourceLabel: "Old" }),
-      ],
-    });
-    expect(m.sections).toEqual([]);
-    expect(m.needsUpdate).toEqual([{ sourceId: "old", sourceLabel: "Old" }]);
-  });
-
-  it("with two sources each row names its source", () => {
-    const m = buildNeedsYou({
-      ...empty,
-      environment: [payload("a", body([api("unhealthy")]), { sourceLabel: "A" }), payload("b", body([api("crashloop")]), { sourceLabel: "B" })],
-    });
-    expect(m.sections[0].rows.map((r) => [r.id, r.detail])).toEqual([
-      ["env:a|api", "unhealthy · A"],
-      ["env:b|api", "crash loop · B"],
-    ]);
-  });
-});
 
 describe("Environment notifications", () => {
   it("tracks red components by id and state, and bad alerts by component and text; warnings never", () => {

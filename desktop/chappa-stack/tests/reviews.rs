@@ -205,6 +205,11 @@ fn a_github_pr_is_checked_out_at_its_pull_head_and_shown_in_the_panel() {
         (status, body["kind"].as_str()),
         (409, Some("confirmation-required"))
     );
+    // What follows the checkout is one of the offered choices.
+    let mut call = review_call("review-env", item.clone(), true);
+    call["params"] = json!({ "then": "sideways" });
+    let (status, body) = post(&rv.src, "/api/actions", &call, true);
+    assert_eq!((status, body["kind"].as_str()), (400, Some("bad-input")));
     let (code, pane) = rv.create(item.clone());
     assert_eq!(code, EXIT_DONE, "{pane}");
     let wt = rv.reviews().join("github-owner-api-12");
