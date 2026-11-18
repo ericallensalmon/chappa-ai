@@ -262,6 +262,11 @@ pub fn compose_argv(
 // -------------------------------------------------------------- real runner
 
 /// Spawns processes with a deadline and bounded output.
+///
+/// Each process starts outside the terminal's Ctrl+C (its own process
+/// group on Unix, a new console process group on Windows): a terminal's
+/// Ctrl+C is for the program that runs these commands to handle, not for
+/// a quick engine or git command to die of half-way.
 #[derive(Debug, Clone, Default)]
 pub struct CliRunner;
 
@@ -297,6 +302,17 @@ impl EngineCli for CliRunner {
         }
         if let Some(cwd) = &inv.cwd {
             cmd.current_dir(cwd);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
         }
         let mut child = cmd.spawn().map_err(|e| CliError::Spawn {
             program: inv.program.clone(),

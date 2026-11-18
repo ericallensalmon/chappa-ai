@@ -35,8 +35,9 @@ serde_json = "1.0"
 # (the address's on-link prefix) from the operating system's own table.
 [target.'cfg(windows)'.dependencies]
 # A job's step commands each run in a job object, so a timeout or a cancel
-# ends the whole tree (children whose parent already exited included).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# ends the whole tree (children whose parent already exited included); a
+# job's runner takes Ctrl+C in its terminal as a cancel.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

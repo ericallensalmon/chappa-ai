@@ -264,7 +264,7 @@ fn a_cancel_stops_the_running_step_ends_the_job_cancelled_and_frees_the_instance
         rec.error
     );
     let log = std::fs::read_to_string(&rec.log).unwrap();
-    assert!(log.contains("job cancelled after"), "{log}");
+    assert!(log.contains("✗ cancelled after"), "{log}");
     // The intent is still recorded, as after a failure.
     assert!(IntentRecord::load(&p.work(), "local-0").unwrap().is_some());
     // GET says failed, with the outcome.

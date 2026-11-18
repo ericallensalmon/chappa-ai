@@ -38,7 +38,8 @@
 //!    the planner, its volume kept, and the job fails;
 //! 7. `<id>.result.json`, then the record's final status; the exit code is
 //!    0 done, 1 a step failed (or data safety stopped something), 2
-//!    refused before running anything, 3 cancelled.
+//!    refused before running anything, 3 cancelled (130 when a third
+//!    Ctrl+C ended the runner while it was cancelling).
 //!
 //! **Cancel.** A cancel request (`<id>.cancel`, written by the source) is
 //! picked up within a fraction of a second: the step running then is
@@ -47,7 +48,8 @@
 //! is still written), and the job ends `cancelled`. The lease is let go
 //! only after that, so the next change never starts beside the remains of
 //! this one. Work that is not a command (a snapshot hook, a git change)
-//! finishes first; the cancel takes effect at the next step.
+//! finishes first; the cancel takes effect at the next step. Ctrl+C in the
+//! job's terminal asks for the same cancel (see [`crate::interrupt`]).
 //!
 //! **The intent record** is written as the plan's last step by reading the
 //! record as it is then and applying only this plan's change to it, so a
@@ -93,6 +95,7 @@ use stack_core::states::{DataSnapshot, RecipeRecord, SavedState, SeedChoice};
 use stack_core::workspace::{c8, ItemRecord};
 
 use crate::data_safety::{self, CheckEntry, SafetyState, Trigger, AFTER_UP_ATTEMPTS};
+use crate::interrupt::{self, Interrupts};
 use crate::lease;
 use crate::procs::{log_path, ProcessEntry, ProcessTable};
 use crate::project::Loaded;
@@ -130,6 +133,9 @@ struct Out<'a> {
     work_dir: PathBuf,
     /// Set once someone cancels the job; every step command watches it.
     cancel: Cancel,
+    /// Ctrl+C in the job's terminal, when this runner handles it: told
+    /// which step runs, so a press can say what it stops.
+    interrupts: Option<&'a Interrupts>,
 }
 
 impl Out<'_> {
@@ -137,7 +143,14 @@ impl Out<'_> {
         let shown = stack_core::instance_secrets::existing(&self.work_dir).hide(text);
         crate::world::line(self.pane, &shown);
         if let Some(f) = &mut self.log {
-            let _ = writeln!(f, "{shown}");
+            // One write per line: a Ctrl+C notice shares the file.
+            let _ = f.write_all(format!("{shown}\n").as_bytes());
+        }
+    }
+
+    fn step(&self, now: Option<(usize, usize, &str)>) {
+        if let Some(i) = self.interrupts {
+            i.step(now);
         }
     }
 }
@@ -162,6 +175,32 @@ pub fn find_record(project_dir: &Path, id: &str) -> Result<(PathBuf, JobRecord),
 
 /// Run job `id` of the project in `project_dir`; the exit code.
 pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write) -> i32 {
+    run_job_with(world, project_dir, id, pane, None)
+}
+
+/// [`run_job`] in a terminal whose Ctrl+C `interrupts` handles: a press
+/// cancels the job (see [`crate::interrupt`]).
+pub fn run_job_with(
+    world: &World,
+    project_dir: &Path,
+    id: &str,
+    pane: &mut dyn Write,
+    interrupts: Option<&Interrupts>,
+) -> i32 {
+    let code = run_job_inner(world, project_dir, id, pane, interrupts);
+    if let Some(i) = interrupts {
+        i.end();
+    }
+    code
+}
+
+fn run_job_inner(
+    world: &World,
+    project_dir: &Path,
+    id: &str,
+    pane: &mut dyn Write,
+    interrupts: Option<&Interrupts>,
+) -> i32 {
     let (work_dir, _) = match find_record(project_dir, id) {
         Ok(found) => found,
         Err(e) => {
@@ -212,7 +251,17 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
         log,
         work_dir: work_dir.clone(),
         cancel: Cancel::new(),
+        interrupts,
     };
+    if let Some(i) = interrupts {
+        i.begin(interrupt::Job {
+            work_dir: work_dir.clone(),
+            id: id.to_string(),
+            label: rec.label.clone(),
+            cancel: out.cancel.clone(),
+            log: out.log.as_ref().and_then(|f| f.try_clone().ok()),
+        });
+    }
     if let Some(req) = lease::cancel_requested(&work_dir, id) {
         let why = format!("{} before it started", lease::cancelled_text(Some(&req)));
         out.say(&format!("✗ {why}"));
@@ -290,7 +339,8 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
     match code {
         EXIT_DONE => out.say(&format!("✓ done in {secs:.1} s")),
         EXIT_CANCELLED => out.say(&format!(
-            "job cancelled after {secs:.1} s; the steps after the one stopped did not run"
+            "✗ cancelled after {secs:.1} s ({})",
+            cancelled_steps(&result.steps)
         )),
         _ => out.say(&format!("job ended with code {code} after {secs:.1} s")),
     }
@@ -306,6 +356,19 @@ pub fn run_job(world: &World, project_dir: &Path, id: &str, pane: &mut dyn Write
     end_record(&work_dir, id, status, code, result.error.clone());
     let _ = std::fs::remove_file(lease::cancel_path(&work_dir, id));
     code
+}
+
+/// How far a cancelled job's steps got, for its last line: "step 2/3
+/// stopped, 1 skipped".
+fn cancelled_steps(steps: &[StepOutcome]) -> String {
+    let n = steps.len();
+    let skipped = steps.iter().filter(|s| s.status == "skipped").count();
+    match steps.iter().position(|s| s.status == "failed") {
+        Some(i) => format!("step {}/{n} stopped, {skipped} skipped", i + 1),
+        None if skipped > 0 => format!("{skipped} of {n} steps skipped"),
+        None if n == 0 => "before its first step".to_string(),
+        None => "after its last step".to_string(),
+    }
 }
 
 /// The record's end: status, exit code, end time, the error.
@@ -1461,7 +1524,7 @@ fn run_steps(
     gate: &mut dyn FnMut(&JobStep, &mut Out<'_>) -> Option<String>,
 ) -> Result<(), Failure> {
     let mut failure: Option<String> = None;
-    for step in steps {
+    for (at, step) in steps.iter().enumerate() {
         if failure.is_none() && out.cancel.is_set() {
             failure = Some("cancelled before this step".to_string());
         }
@@ -1476,6 +1539,8 @@ fn run_steps(
             continue;
         }
         let t = Instant::now();
+        let what = step.describe();
+        out.step(Some((at + 1, steps.len(), &what)));
         let outcome = run_step(
             world,
             work_dir,
@@ -1485,6 +1550,7 @@ fn run_steps(
             merge,
             out,
         );
+        out.step(None);
         let seconds = (t.elapsed().as_secs_f64() * 10.0).round() / 10.0;
         match outcome {
             Ok(code) => {
@@ -1806,6 +1872,7 @@ mod tests {
             log: Some(File::create(&log_path).unwrap()),
             work_dir: work.clone(),
             cancel: Cancel::new(),
+            interrupts: None,
         };
         out.say("before any value exists");
         // Generated while the job runs (as an instance resolution does).

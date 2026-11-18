@@ -23,6 +23,7 @@
 //! | [`records`] | job records under `.work/jobs/`, exit reports, retention |
 //! | [`lease`] | one changing job per instance at a time, a job's runner alive or not, cancel requests, settling jobs whose runner is gone |
 //! | [`runjob`] | `run-job`: one stored job, start to finish |
+//! | [`interrupt`] | Ctrl+C in a job's terminal: the cancel, the second-press notice, the runner's end |
 //! | [`procs`] | the process table of process components |
 //! | [`background`] | registry digests, engine facts and script components' status and plan output, refreshed off the status path |
 //! | [`relay`] | the gateway-only TCP relay and its peer check |
@@ -44,6 +45,7 @@ pub mod data_safety;
 pub mod env_view;
 pub mod hidden_output;
 pub mod identity;
+pub mod interrupt;
 pub mod lease;
 pub mod local_status;
 pub mod procs;

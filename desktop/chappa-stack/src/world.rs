@@ -617,13 +617,17 @@ pub const ENGINE_WORK_MAY_CONTINUE: &str =
     "work it handed to a container engine (a build, containers starting) may still be running there";
 
 /// Run one command with both pipes streamed to `out`, under `limit`. With
-/// `tree`, the command leads its own process group (Unix) and a timeout or
-/// a cancel stops all of its descendants. On Windows every command runs in
-/// a job object of its own: a timeout or a cancel ends the whole tree,
-/// children whose parent already exited included, and when the runner
-/// itself dies mid-step (its pane closed) the job object takes the tree
-/// with it. A command that ends normally may leave processes it meant to
-/// leave (a script starting a daemon): they are let go.
+/// `tree`, a timeout or a cancel stops all of its descendants (Unix: its
+/// process group). On Windows every command runs in a job object of its
+/// own: a timeout or a cancel ends the whole tree, children whose parent
+/// already exited included, and when the runner itself dies mid-step (its
+/// pane closed) the job object takes the tree with it. A command that ends
+/// normally may leave processes it meant to leave (a script starting a
+/// daemon): they are let go.
+///
+/// Every command starts out of reach of the terminal's Ctrl+C, which only
+/// the runner handles (see [`crate::interrupt`]): in its own process group
+/// on Unix, in a new console process group on Windows.
 fn run_child(
     run: &RunBlock,
     limit: Duration,
@@ -638,20 +642,30 @@ fn run_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    if tree {
+    {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
     #[cfg(windows)]
     let job = job_object::Tree::new();
     #[cfg(windows)]
-    if job.is_some() {
+    {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(job_object::CREATE_SUSPENDED);
+        let suspended = if job.is_some() {
+            job_object::CREATE_SUSPENDED
+        } else {
+            0
+        };
+        // A new console process group: Ctrl+C is ignored in it and in
+        // everything it starts.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | suspended);
     }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start `{}`: {e}", run.argv[0]))?;
+    // Until this returns, a hangup ends this command's process group.
+    let _group = crate::interrupt::StepGroup::started(child.id());
     // Adopted while still suspended, so nothing it starts escapes; a job
     // object that cannot take it (an outer job forbids nesting) leaves the
     // `taskkill /T` stop.

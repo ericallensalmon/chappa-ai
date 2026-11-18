@@ -340,8 +340,11 @@ fn run_job(args: &mut Args) -> Result<u8, String> {
     let world = World::real()
         .with_gitleaks_config(gitleaks_config)
         .with_project_scan_config(project_scan);
+    // Ctrl+C in the job's terminal cancels the job instead of ending this
+    // process.
+    let interrupts = chappa_stack::interrupt::install();
     let mut stdout = std::io::stdout();
-    let code = chappa_stack::runjob::run_job(&world, &dir, &id, &mut stdout);
+    let code = chappa_stack::runjob::run_job_with(&world, &dir, &id, &mut stdout, interrupts);
     Ok(code.clamp(0, 255) as u8)
 }
 
