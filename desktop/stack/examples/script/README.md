@@ -94,6 +94,7 @@ stacks:
         plan:    [powershell, -NoProfile, -File, scripts/Up-Stack.ps1, -Slot, "{slot}", -WhatIf, -Verb]
         repos:   [../api, ../web]          # so a work item gets worktrees of these clones
         timeouts: { up: 45m, status: 30s }
+    statusSlowAfter: 1m                  # rows say "status is slow" past this (default 30s)
 ```
 
 What the script has to provide:

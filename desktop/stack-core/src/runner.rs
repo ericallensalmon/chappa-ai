@@ -370,7 +370,10 @@ impl<'a> StackRunner<'a> {
         let report = if has_status {
             match self.script_run(inst, cache, component, ScriptVerb::Status, &[]) {
                 Ok(run) => {
-                    slow = self.scripts.slow(&run);
+                    // Only past the stack's own threshold: a run a little
+                    // over one refresh turn is not worth a warning.
+                    let after = self.stack.status_slow_after();
+                    slow = self.scripts.slow(&run).filter(|took| *took >= after);
                     self.scripts.status(&run)
                 }
                 Err(e) => Some(ScriptReport::Failed {

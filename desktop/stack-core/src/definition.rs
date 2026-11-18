@@ -146,6 +146,10 @@ pub struct StackDef {
     pub ttl_hours: Option<u32>,
     #[serde(default)]
     pub auto_destroy: bool,
+    /// How long a script stack's status may run before its rows say
+    /// "status is slow" (`30s`, `2m`); see [`StackDef::status_slow_after`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_slow_after: Option<String>,
     /// How long job records under `.work/jobs/` are kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<JobsDef>,
@@ -467,6 +471,7 @@ impl Default for StackDef {
             stop: None,
             ttl_hours: None,
             auto_destroy: false,
+            status_slow_after: None,
             jobs: None,
             work: None,
             workflow: None,
@@ -1326,7 +1331,22 @@ pub struct EngineRef {
     pub context: Option<String>,
 }
 
+/// How long a status script may run before the note shows, unless the
+/// stack sets `statusSlowAfter`: three refresh turns, so one run that is a
+/// little slower than usual does not raise it.
+pub const DEFAULT_STATUS_SLOW_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl StackDef {
+    /// `statusSlowAfter`, else [`DEFAULT_STATUS_SLOW_AFTER`]. An unreadable
+    /// or zero value (a validation error) falls back to the default.
+    pub fn status_slow_after(&self) -> std::time::Duration {
+        self.status_slow_after
+            .as_deref()
+            .and_then(parse_interval)
+            .filter(|d| !d.is_zero())
+            .unwrap_or(DEFAULT_STATUS_SLOW_AFTER)
+    }
+
     /// The `work:` block, or its defaults when the stack has none.
     pub fn work_def(&self) -> WorkDef {
         self.work.clone().unwrap_or_default()
@@ -1864,6 +1884,15 @@ fn validate_stack(
             base.clone(),
             format!("stack name `{stack_name}` must match [A-Za-z0-9._-] and be at most {KEY_MAX_LEN} chars"),
         );
+    }
+    if let Some(v) = &stack.status_slow_after {
+        if parse_interval(v).filter(|d| !d.is_zero()).is_none() {
+            err(
+                Rule::InvalidKey,
+                format!("{base}.statusSlowAfter"),
+                format!("`statusSlowAfter: {v}` is not a duration such as 30s or 2m"),
+            );
+        }
     }
     let mut warnings = Vec::new();
     let mut warn = |rule: Rule, path: String, message: String| {
@@ -3751,6 +3780,32 @@ stacks:
             15.0
         );
         assert!(errors(&doc).is_empty());
+    }
+
+    #[test]
+    fn status_slow_after_defaults_to_three_turns_and_reads_a_duration() {
+        let mut stack = StackDef::default();
+        assert_eq!(stack.status_slow_after(), DEFAULT_STATUS_SLOW_AFTER);
+        stack.status_slow_after = Some("2m".into());
+        assert_eq!(
+            stack.status_slow_after(),
+            std::time::Duration::from_secs(120)
+        );
+        // Unreadable or zero: the default (and a validation error).
+        stack.status_slow_after = Some("soon".into());
+        assert_eq!(stack.status_slow_after(), DEFAULT_STATUS_SLOW_AFTER);
+        stack.status_slow_after = Some("0s".into());
+        assert_eq!(stack.status_slow_after(), DEFAULT_STATUS_SLOW_AFTER);
+        let doc: StacksDocument =
+            serde_yaml::from_str("stacks:\n  s:\n    statusSlowAfter: soon\n    components: {}\n")
+                .unwrap();
+        let diags = validate(&doc, &ValidationContext::default());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path == "stacks.s.statusSlowAfter" && d.severity == Severity::Error),
+            "{diags:?}"
+        );
     }
 
     #[test]

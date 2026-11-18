@@ -238,7 +238,7 @@ fn a_turn_that_comes_while_its_instance_is_busy_is_skipped_not_queued() {
     assert!(bg.next_script(at(next)).is_none());
 }
 
-const ONE: &str = "stacks:\n  app:\n    components:\n      app:\n        driver: script\n        up: [node, up.js]\n        status: [node, status.js]\n";
+const ONE: &str = "stacks:\n  app:\n    statusSlowAfter: 1s\n    components:\n      app:\n        driver: script\n        up: [node, up.js]\n        status: [node, status.js]\n";
 
 fn badge_texts(row: &Value) -> Vec<String> {
     row["badges"]
@@ -252,7 +252,7 @@ fn badge_texts(row: &Value) -> Vec<String> {
 }
 
 #[test]
-fn a_run_longer_than_the_status_interval_marks_the_rows_slow_and_keeps_their_state() {
+fn a_run_longer_than_the_stacks_slow_threshold_marks_the_rows_slow_and_keeps_their_state() {
     let p = Project::with(ONE, &[]);
     let f = fakes(
         FakeCli::new().on(&["node", "status.js"], UP),
@@ -278,10 +278,17 @@ fn a_run_longer_than_the_status_interval_marks_the_rows_slow_and_keeps_their_sta
     let e = env();
     assert_eq!(e["components"][0]["state"], "up");
     assert!(badge_texts(&e["components"][0]).is_empty());
-    // Asked again, and the run takes its time (held here, past the interval).
+    // Asked again, and the run takes its time (held here). Past the refresh
+    // interval but short of the stack's `statusSlowAfter`: no note yet.
     bg.invalidate_facts();
     let job = bg.next_script(Instant::now()).unwrap();
     std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        badge_texts(&env()["components"][0]).is_empty(),
+        "not slow yet"
+    );
+    // Past the threshold: the note shows.
+    std::thread::sleep(Duration::from_millis(900));
     let e = env();
     let row = &e["components"][0];
     assert_eq!(row["state"], "up", "the last known state stays");
