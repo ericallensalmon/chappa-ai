@@ -277,13 +277,20 @@ pub const UNTRUSTED_START: &str = "not trusted";
 /// route would still run those definitions: none of them shows the command
 /// first. So: no start of any command while the content is not trusted.
 fn content_trusted(inner: &Inner, id: u32) -> bool {
-    let Some(runtime) = inner.runtimes.get(&id) else {
-        return false;
-    };
-    inner
-        .store
-        .as_ref()
-        .is_some_and(|s| s.is_trusted(id, &runtime.yml_hash))
+    loaded_content_trusted(
+        inner.store.as_ref(),
+        id,
+        inner.runtimes.get(&id).map(|r| r.yml_hash.as_str()),
+    )
+}
+
+/// [`content_trusted`] on its parts: `loaded` is the open project's
+/// loaded content hash (`None`: not open, nothing to start).
+fn loaded_content_trusted(store: Option<&ProjectStore>, id: u32, loaded: Option<&str>) -> bool {
+    match (store, loaded) {
+        (Some(store), Some(hash)) => store.is_trusted(id, hash),
+        _ => false,
+    }
 }
 
 impl std::fmt::Display for ControlError {
@@ -4290,17 +4297,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, pid, root) = stack_project(dir.path());
         let trusted = crate::stack_trust::trust_hash_on_disk(&root).unwrap();
-        let mut inner = Inner {
-            store: Some(store),
-            ..Inner::default()
-        };
-        assert!(!content_trusted(&inner, pid), "not open: nothing to start");
-        let mut rt = runtime_of(&root);
-        rt.yml_hash = "content nobody trusted".into();
-        inner.runtimes.insert(pid, rt);
-        assert!(!content_trusted(&inner, pid));
-        inner.runtimes.get_mut(&pid).unwrap().yml_hash = trusted;
-        assert!(content_trusted(&inner, pid));
+        // The parts, not a whole `Inner`: building one here would link the
+        // app's window runtime into this test binary.
+        assert!(
+            !loaded_content_trusted(Some(&store), pid, None),
+            "not open: nothing to start"
+        );
+        assert!(!loaded_content_trusted(
+            Some(&store),
+            pid,
+            Some("content nobody trusted")
+        ));
+        assert!(loaded_content_trusted(Some(&store), pid, Some(&trusted)));
+        assert!(!loaded_content_trusted(None, pid, Some(&trusted)));
         let err = ControlError::untrusted("web");
         assert!(matches!(err, ControlError::Untrusted(_)));
         assert!(err.to_string().starts_with(UNTRUSTED_START), "{err}");
