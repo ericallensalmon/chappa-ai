@@ -542,9 +542,11 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:5055/chappa/v1/manifest
 GitHub account the `gh` CLI is logged in to. It asks `gh api graphql` for the
 data, so neither the app nor the source ever holds a GitHub token.
 
-Requirements: `gh` on `PATH` (or named by `GH_BIN`) and logged in
-(`gh auth login`). Without either it answers an empty list with one
-clear error instead of failing.
+Requirements: `gh` on `PATH` (or named by `GH_BIN`, an absolute path) and
+logged in (`gh auth login`). Without either it answers an empty list with
+one clear error instead of failing. `gh` is looked up in the absolute
+`PATH` entries only and runs from the source's own folder, so a `gh` (or
+`gh.exe`) inside the project folder is never the one that runs.
 
 ```yaml
 processes:

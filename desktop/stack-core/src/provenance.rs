@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::definition::{LabelMapDef, Mode};
 
@@ -124,6 +123,10 @@ pub enum GitError {
     NotUtf8 { args: Vec<String> },
     #[error("git {} printed `{output}`, not a commit sha", args.join(" "))]
     NotASha { args: Vec<String>, output: String },
+    /// git was not run: the folder's git folder is not one the caller knows
+    /// (see [`crate::git::KnownRepos`]).
+    #[error("{0}")]
+    Refused(String),
 }
 
 /// The handful of git facts staleness needs. One trait so tests can fake
@@ -151,7 +154,7 @@ pub struct GitCli {
 impl Default for GitCli {
     fn default() -> Self {
         Self {
-            program: PathBuf::from("git"),
+            program: PathBuf::from(crate::git::PROGRAM),
         }
     }
 }
@@ -164,9 +167,7 @@ struct Output {
 
 impl GitCli {
     fn run(&self, repo: &Path, args: &[&str]) -> Result<Output, GitError> {
-        let out = crate::child_env::scrub(&mut Command::new(&self.program))
-            .arg("-C")
-            .arg(repo)
+        let out = crate::git::command(&self.program, repo)
             .args(args)
             .output()
             .map_err(|source| GitError::Spawn {
@@ -228,7 +229,7 @@ impl GitFacts for GitCli {
 
     fn count_between(&self, repo: &Path, from: &str, to: &str) -> Result<u32, GitError> {
         let range = format!("{from}..{to}");
-        let args = ["rev-list", "--count", range.as_str()];
+        let args = ["rev-list", "--count", "--end-of-options", range.as_str()];
         let out = self.run_ok(repo, &args)?;
         out.trim().parse().map_err(|_| GitError::NotASha {
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -243,7 +244,15 @@ impl GitFacts for GitCli {
         }
         let diff = self.run_ok(
             repo,
-            &["diff", "HEAD", "--no-color", "--no-ext-diff", "--binary"],
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                "HEAD",
+                "--",
+            ],
         )?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(status.as_bytes());
@@ -254,7 +263,16 @@ impl GitFacts for GitCli {
 
     fn commit_exists(&self, repo: &Path, sha: &str) -> Result<bool, GitError> {
         let spec = format!("{sha}^{{commit}}");
-        let out = self.run(repo, &["rev-parse", "--verify", "--quiet", spec.as_str()])?;
+        let out = self.run(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                spec.as_str(),
+            ],
+        )?;
         match out.status {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
@@ -332,7 +350,13 @@ pub fn worktree_staleness(
     if !prov.mode.uses_repo() {
         return Ok(out);
     }
-    if let Some(commit) = &prov.commit {
+    // The commit can come from an image label, which whoever built the
+    // image wrote: only a commit id is ever handed to git.
+    if let Some(commit) = prov
+        .commit
+        .as_deref()
+        .filter(|c| crate::git::is_commit_shaped(c))
+    {
         if git.commit_exists(repo, commit)? {
             let count = git.count_between(repo, commit, "HEAD")?;
             if count > 0 {
@@ -490,6 +514,7 @@ pub fn provenance_from_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     /// A source-built image tag with a dirty-tree hash, built here so no
     /// source line holds a component name beside a varied hex string (a
@@ -982,6 +1007,63 @@ mod tests {
             0,
             "first is behind head, not ahead"
         );
+    }
+
+    #[test]
+    fn dirty_hash_never_runs_what_the_repository_configures() {
+        let Some((dir, repo)) = temp_repo() else {
+            return;
+        };
+        let marker = dir.path().join("marker");
+        crate::git::tests::fsmonitor_trap(&repo, &marker);
+        // A textconv driver that would also leave the marker.
+        let shown = marker.display().to_string().replace('\\', "/");
+        git(
+            &repo,
+            &[
+                "config",
+                "diff.trap.textconv",
+                &format!("echo x > '{shown}'; cat"),
+            ],
+        );
+        fs::write(repo.join(".gitattributes"), "*.txt diff=trap\n").unwrap();
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let cli = GitCli::default();
+        assert!(cli.dirty_hash(&repo).unwrap().is_some());
+        assert!(
+            !marker.exists(),
+            "git ran a command the repository configured"
+        );
+    }
+
+    #[test]
+    fn a_label_commit_that_is_not_a_commit_id_never_reaches_git() {
+        struct Refuses;
+        impl GitFacts for Refuses {
+            fn head_commit(&self, _: &Path) -> Result<String, GitError> {
+                Ok(SHA.into())
+            }
+            fn current_branch(&self, _: &Path) -> Result<Option<String>, GitError> {
+                Ok(None)
+            }
+            fn count_between(&self, _: &Path, from: &str, _: &str) -> Result<u32, GitError> {
+                panic!("count_between({from})")
+            }
+            fn dirty_hash(&self, _: &Path) -> Result<Option<String>, GitError> {
+                Ok(None)
+            }
+            fn commit_exists(&self, _: &Path, sha: &str) -> Result<bool, GitError> {
+                panic!("commit_exists({sha})")
+            }
+        }
+        for commit in ["--all", "HEAD~3", "main", "0123"] {
+            let mut p = Provenance::new(Mode::Source);
+            p.commit = Some(commit.into());
+            assert_eq!(
+                worktree_staleness(&p, Path::new("/r"), &Refuses).unwrap(),
+                []
+            );
+        }
     }
 
     #[test]

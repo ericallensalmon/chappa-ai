@@ -1209,3 +1209,86 @@ fn building_from_a_shared_clone_is_refused_unless_it_is_allowed() {
     let (status, body) = post(&src, "/api/actions", &call, true);
     assert_eq!(status, 202, "{body}");
 }
+
+#[test]
+fn a_worktree_pointed_at_a_git_folder_of_its_own_runs_nothing_and_shows_an_error() {
+    let Some(ws) = setup() else { return };
+    let dir = started(&ws);
+    let rec = ItemRecord::load(&dir).unwrap().unwrap();
+    let wt = dir.join(&rec.repos["api"].path);
+    ws.refresh();
+    let before = ws.row("ABC-1").to_string();
+    assert!(!before.contains("git failed"), "{before}");
+
+    // A git folder made inside the item folder, whose config runs a
+    // command on every `git status`.
+    let fake = dir.join("fake");
+    fs::create_dir_all(&fake).unwrap();
+    git(&fake, &["init", "-q"]);
+    let marker = ws.p.dir.parent().unwrap().join("marker");
+    let shown = marker.display().to_string().replace('\\', "/");
+    git(
+        &fake,
+        &[
+            "config",
+            "core.fsmonitor",
+            &format!("echo x > '{shown}'; false"),
+        ],
+    );
+    fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}\n", fake.join(".git").display()),
+    )
+    .unwrap();
+    // The control: a plain git in the worktree runs it.
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["status", "--porcelain"])
+        .output();
+    assert!(marker.exists(), "the trap works");
+    fs::remove_file(&marker).unwrap();
+
+    ws.refresh();
+    let after = ws.row("ABC-1").to_string();
+    assert!(after.contains("git failed"), "{after}");
+    assert!(after.contains("not a worktree of a known clone"), "{after}");
+    assert!(!marker.exists(), "the Work refresh ran the fsmonitor");
+
+    // What the runner asks of a bound worktree is refused the same way,
+    // and listing its files for a secret scan never runs it either.
+    let loaded = chappa_stack::project::Loaded::load(&ws.p.dir, None, 0).unwrap();
+    let err = stack_core::provenance::GitFacts::dirty_hash(loaded.checked_git(&ws.f.world), &wt);
+    assert!(err.is_err(), "{err:?}");
+    let _ = stack_core::provenance::GitFacts::dirty_hash(&GitCli::default(), &wt);
+    let _ = stack_core::safety::secrets::list_target(
+        &stack_core::safety::secrets::ScanTarget::WorkingTree {
+            root: wt.clone(),
+            excludes: vec![],
+        },
+        &stack_core::safety::secrets::ListLimits::default(),
+    );
+    assert!(
+        !marker.exists(),
+        "provenance or the file listing ran the fsmonitor"
+    );
+
+    // Put back, the worktree reports its facts again.
+    let common = ws.clone_of("api").join(".git").join("worktrees");
+    let name = fs::read_dir(&common)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            fs::read_to_string(p.join("gitdir")).is_ok_and(|g| {
+                Path::new(g.trim())
+                    .parent()
+                    .is_some_and(|w| fs::canonicalize(w).ok() == fs::canonicalize(&wt).ok())
+            })
+        })
+        .expect("the clone lists the worktree");
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", name.display())).unwrap();
+    ws.refresh();
+    let again = ws.row("ABC-1").to_string();
+    assert!(!again.contains("git failed"), "{again}");
+}

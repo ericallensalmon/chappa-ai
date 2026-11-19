@@ -32,6 +32,7 @@
 //! | [`states`] | saved stack states: the format, listing, pruning without deleting a snapshot another state keeps, the job ids they refer to, the snapshots in a volume, the differences from what runs now |
 //! | [`trust`] | the hash over everything a stack definition can run, which the app trusts and the runner checks, and the prompt's list of it |
 //! | [`credentials`] | credential-shaped argv words and env values written inline in a committed file, and how rows and logs mask them |
+//! | [`git`] | the one way git is run: config overrides that keep a repository from running commands, the worktree link check, commit-id shapes |
 //! | [`child_env`] | the variables no child process may inherit (a source's token and address, gitleaks' config overrides) |
 //! | [`owner_only`] | files and folders only the current user can open: mode bits on Unix, a single access entry on Windows |
 //! | [`workdir`] | the work folder's own `.gitignore` and the sweep of stale scanner scratch |
@@ -40,8 +41,8 @@
 //! Engines are CLIs run argv-only through [`cli::EngineCli`]; a verb hands
 //! a long step (a build, a pull, an `up`, a dev server) back as a run block
 //! for the host to run as a job, and asks only quick questions in place.
-//! Besides those, the processes this crate runs are `git` (see
-//! [`provenance::GitCli`]) and, for secret scanning, the configured scanner
+//! Besides those, the processes this crate runs are `git` (always through
+//! [`git`]) and, for secret scanning, the configured scanner
 //! (gitleaks or a hook), argv only and only when asked.
 //!
 //! # Where the definition lives
@@ -69,6 +70,7 @@ pub mod compose;
 pub mod credentials;
 pub mod definition;
 pub mod driver;
+pub mod git;
 pub mod hosts;
 pub mod images;
 pub mod instance_secrets;

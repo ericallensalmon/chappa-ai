@@ -12,7 +12,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The local settings files agent CLIs keep, relative to the folder they
 /// run in. One list, so another CLI's file is one line here.
@@ -57,10 +57,7 @@ impl AgentSettingsFile {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<std::process::ExitStatus> {
-    let mut cmd = Command::new("git");
-    crate::child_env::scrub(&mut cmd);
-    cmd.arg("-C")
-        .arg(dir)
+    crate::git::command(crate::git::PROGRAM, dir)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

@@ -15,13 +15,20 @@
 //! (a link can point outside the root), and each file is size-checked. The
 //! result is sorted by path, so two runs over the same tree list the same
 //! files in the same order and a total-size cap always drops the same ones.
+//!
+//! An image build context is listed differently ([`list_build_context`]):
+//! what matters there is what the engine sends, so it is always a walk,
+//! nothing is skipped for its directory, and only the engine's own ignore
+//! files leave anything out. The one exception is a `.git` folder the
+//! ignore files do not leave out: its packs are compressed and say nothing
+//! to a scanner, so it is not read but named in [`FileList::git_dirs`] (the
+//! repository's history goes into the image).
 
 use super::pattern::PatternSet;
 use crate::safety::SafetyError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 /// Largest single file scanned by default.
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -51,7 +58,7 @@ impl Default for ListLimits {
         Self {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
-            git: PathBuf::from("git"),
+            git: PathBuf::from(crate::git::PROGRAM),
             use_git: true,
         }
     }
@@ -106,6 +113,9 @@ pub struct FileList {
     /// Given paths that were outside the root (incremental rescan only).
     pub outside_root: usize,
     pub source: ListSource,
+    /// Build contexts: the `.git` folders the build sends, not read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_dirs: Vec<String>,
 }
 
 impl FileList {
@@ -117,6 +127,35 @@ impl FileList {
 /// True when any segment of `rel` is one of [`ALWAYS_SKIPPED`].
 pub fn always_skipped(rel: &str) -> bool {
     rel.split('/').any(|s| ALWAYS_SKIPPED.contains(&s))
+}
+
+/// What a listing leaves out: a path is excluded when EVERY set in `sets`
+/// excludes it (no sets: nothing is), and, with `skip_always`, anything in
+/// an [`ALWAYS_SKIPPED`] directory.
+struct Rules<'a> {
+    sets: Vec<&'a PatternSet>,
+    skip_always: bool,
+    /// Build contexts: `.git` folders not left out, noted here and not
+    /// walked.
+    git_dirs: std::cell::RefCell<Vec<String>>,
+}
+
+impl Rules<'_> {
+    fn excluded(&self, rel: &str) -> bool {
+        (self.skip_always && always_skipped(rel))
+            || (!self.sets.is_empty() && self.sets.iter().all(|s| s.is_excluded(rel)))
+    }
+
+    /// Whether a directory can be left unwalked: excluded, and no set could
+    /// re-include something below it.
+    fn prunes(&self, name: &str, rel: &str) -> bool {
+        (self.skip_always && ALWAYS_SKIPPED.contains(&name))
+            || (!self.sets.is_empty()
+                && self
+                    .sets
+                    .iter()
+                    .all(|s| !s.has_negations() && s.is_excluded(rel)))
+    }
 }
 
 /// List every file under `root` that a scan should read.
@@ -131,20 +170,25 @@ pub fn list_files(
             root.display()
         )));
     }
+    let rules = Rules {
+        sets: vec![excludes],
+        skip_always: true,
+        git_dirs: Default::default(),
+    };
     let mut not_utf8 = 0usize;
     let (candidates, source) = match limits
         .use_git
-        .then(|| git_candidates(root, &limits.git, excludes, &mut not_utf8))
+        .then(|| git_candidates(root, &limits.git, &rules, &mut not_utf8))
         .flatten()
     {
         Some(c) => (c, ListSource::Git),
         None => {
             let mut out = Vec::new();
-            walk(root, "", excludes, &mut out)?;
+            walk(root, "", &rules, &mut out)?;
             (out, ListSource::Walk)
         }
     };
-    let mut list = finish(root, candidates, excludes, limits);
+    let mut list = finish(root, candidates, &rules, limits);
     list.source = source;
     for i in 0..not_utf8 {
         list.skipped.push(SkippedFile {
@@ -152,6 +196,38 @@ pub fn list_files(
             reason: SkipReason::NotUtf8,
         });
     }
+    Ok(list)
+}
+
+/// Every file an image build would send from the context `root`: a plain
+/// walk (an engine does not ask git), with nothing skipped for its
+/// directory (`.git`, `node_modules`, `target` are sent like anything
+/// else). `ignores` are the ignore files the engine might read; a file is
+/// left out only when every one of them leaves it out, so whichever one the
+/// engine picks, nothing it sends goes unscanned.
+pub fn list_build_context(
+    root: &Path,
+    ignores: &[PatternSet],
+    limits: &ListLimits,
+) -> Result<FileList, SafetyError> {
+    if !root.is_dir() {
+        return Err(SafetyError::InvalidTarget(format!(
+            "{} is not a directory",
+            root.display()
+        )));
+    }
+    let rules = Rules {
+        sets: ignores.iter().collect(),
+        skip_always: false,
+        git_dirs: Default::default(),
+    };
+    let mut out = Vec::new();
+    walk(root, "", &rules, &mut out)?;
+    let mut list = finish(root, out, &rules, limits);
+    list.source = ListSource::Walk;
+    let mut git_dirs = rules.git_dirs.take();
+    git_dirs.sort();
+    list.git_dirs = git_dirs;
     Ok(list)
 }
 
@@ -179,7 +255,12 @@ pub fn select_files(
             _ => outside += 1,
         }
     }
-    let mut list = finish(root, candidates, excludes, limits);
+    let rules = Rules {
+        sets: vec![excludes],
+        skip_always: true,
+        git_dirs: Default::default(),
+    };
+    let mut list = finish(root, candidates, &rules, limits);
     list.outside_root = outside;
     list.source = ListSource::Given;
     list
@@ -218,14 +299,11 @@ fn rel_string(p: &Path) -> Option<String> {
 fn git_candidates(
     root: &Path,
     git: &Path,
-    excludes: &PatternSet,
+    rules: &Rules<'_>,
     not_utf8: &mut usize,
 ) -> Option<Vec<String>> {
-    let mut cmd = Command::new(git);
-    crate::child_env::scrub(&mut cmd);
-    cmd.arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z", "--cached", "--others"]);
+    let mut cmd = crate::git::command(git, root);
+    cmd.args(["ls-files", "-z", "--cached", "--others"]);
     // Prune the always-skipped directories from the untracked walk; tracked
     // files inside them are dropped later with everything else.
     for d in ALWAYS_SKIPPED {
@@ -245,7 +323,7 @@ fn git_candidates(
             // An untracked nested repository is listed as one directory
             // entry; its files are just as readable, so walk it.
             if !always_skipped(dir) {
-                let _ = walk(&root.join(dir), dir, excludes, &mut candidates);
+                let _ = walk(&root.join(dir), dir, rules, &mut candidates);
             }
         } else {
             candidates.push(name.to_string());
@@ -257,14 +335,13 @@ fn git_candidates(
 fn walk(
     dir: &Path,
     rel: &str,
-    excludes: &PatternSet,
+    rules: &Rules<'_>,
     out: &mut Vec<String>,
 ) -> Result<(), SafetyError> {
     let entries = fs::read_dir(dir).map_err(|e| SafetyError::Io {
         path: dir.to_path_buf(),
         message: e.to_string(),
     })?;
-    let prune_excluded = !excludes.has_negations();
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
@@ -278,14 +355,18 @@ fn walk(
             continue;
         };
         if kind.is_dir() {
-            if ALWAYS_SKIPPED.contains(&name.as_str())
-                || (prune_excluded && excludes.is_excluded(&child))
-            {
+            if rules.prunes(&name, &child) {
+                continue;
+            }
+            if name == ".git" {
+                // Only reached for a build context (the other listings
+                // always skip it).
+                rules.git_dirs.borrow_mut().push(child);
                 continue;
             }
             // A directory we cannot read is left out rather than failing
             // the whole listing.
-            let _ = walk(&entry.path(), &child, excludes, out);
+            let _ = walk(&entry.path(), &child, rules, out);
         } else {
             out.push(child);
         }
@@ -296,7 +377,7 @@ fn walk(
 fn finish(
     root: &Path,
     mut candidates: Vec<String>,
-    excludes: &PatternSet,
+    rules: &Rules<'_>,
     limits: &ListLimits,
 ) -> FileList {
     for c in candidates.iter_mut() {
@@ -308,7 +389,7 @@ fn finish(
     candidates.dedup();
     let mut list = FileList::default();
     for rel in candidates {
-        if always_skipped(&rel) || excludes.is_excluded(&rel) {
+        if rules.excluded(&rel) {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(root.join(&rel)) else {
@@ -540,5 +621,73 @@ mod tests {
         assert_eq!(paths(&list), ["a.txt"]);
         let skipped: Vec<_> = list.skipped.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(skipped, ["link.txt", "linkdir"]);
+    }
+
+    #[test]
+    fn listing_through_git_never_runs_the_repository_fsmonitor() {
+        if !git_available() {
+            eprintln!("git not on PATH; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        write(&root, "a.txt", "a\n");
+        git(&root, &["add", "a.txt"]);
+        let marker = dir.path().join("marker");
+        crate::git::tests::fsmonitor_trap(&root, &marker);
+        let list = list_files(&root, &PatternSet::default(), &ListLimits::default()).unwrap();
+        assert_eq!(list.source, ListSource::Git);
+        assert_eq!(paths(&list), ["a.txt"]);
+        assert!(!marker.exists(), "listing ran the repository's fsmonitor");
+    }
+
+    #[test]
+    fn a_build_context_skips_no_directory_and_keeps_what_any_ignore_file_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "Dockerfile", "FROM scratch\n");
+        write(root, "secret.env", "x\n");
+        write(root, "node_modules/pkg/index.js", "x\n");
+        write(root, ".git/config", "x\n");
+        write(root, "target/out", "x\n");
+        write(root, ".work/report.json", "x\n");
+        write(root, "logs/a.log", "x\n");
+        let all = PatternSet::dockerignore("*\n");
+        let logs = PatternSet::dockerignore("logs/\n");
+        let limits = ListLimits {
+            use_git: false,
+            ..ListLimits::default()
+        };
+        let none = list_build_context(root, &[], &limits).unwrap();
+        assert_eq!(
+            paths(&none),
+            [
+                ".work/report.json",
+                "Dockerfile",
+                "logs/a.log",
+                "node_modules/pkg/index.js",
+                "secret.env",
+                "target/out"
+            ]
+        );
+        // `.git` is sent but not read: its packs say nothing to a scanner.
+        assert_eq!(none.git_dirs, [".git"]);
+        let ignored = list_build_context(root, std::slice::from_ref(&all), &limits).unwrap();
+        assert!(ignored.files.is_empty());
+        assert!(ignored.git_dirs.is_empty(), "an ignored .git is not noted");
+        let git_only = PatternSet::dockerignore(".git\n");
+        let no_git = list_build_context(root, std::slice::from_ref(&git_only), &limits).unwrap();
+        assert!(no_git.git_dirs.is_empty());
+        assert_eq!(paths(&no_git), paths(&none));
+        // `*` in one ignore file and nothing in another: the engine may read
+        // the other one, so everything is scanned.
+        let either = list_build_context(root, &[all.clone(), PatternSet::default()], &limits);
+        assert_eq!(paths(&either.unwrap()), paths(&none));
+        // Left out only where every ignore file agrees.
+        let both = list_build_context(root, &[all, logs], &limits).unwrap();
+        assert_eq!(paths(&both).len(), paths(&none).len() - 1);
+        assert!(!paths(&both).contains(&"logs/a.log"));
     }
 }

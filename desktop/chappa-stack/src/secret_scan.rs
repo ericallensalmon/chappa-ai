@@ -109,6 +109,7 @@ use stack_core::driver::ResolvedInstance;
 use stack_core::instance_secrets::Secrets;
 use stack_core::jobs::write_atomic;
 use stack_core::planner::{Plan, Step};
+use stack_core::provenance::GitFacts;
 use stack_core::runner::StackRunner;
 use stack_core::safety::secrets::config::{choose, ProjectScanConfig};
 use stack_core::safety::secrets::generated::{find_in_commits, find_in_tracked};
@@ -271,6 +272,10 @@ pub struct TargetEntry {
     /// Commit scans: the HEAD scanned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Problems the scan found that are not possible secrets (a build
+    /// context that sends `.git`): shown, never blocking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl TargetEntry {
@@ -286,6 +291,7 @@ impl TargetEntry {
             skipped: 0,
             stamps: IndexMap::new(),
             head: None,
+            warnings: Vec::new(),
         }
     }
 }
@@ -682,12 +688,22 @@ pub fn scan_commits(
     e
 }
 
-/// A source build's context, as the build would send it.
+/// The warning for a `.git` folder a build context sends.
+pub fn git_in_context(dir: &str) -> String {
+    format!("the build context includes {dir} — the repository history goes into the image")
+}
+
+/// A source build's context, as the build would send it (`dockerfile`:
+/// the build's own, when it is not the context's `Dockerfile`).
+///
+/// A file the scan skipped for its size is sent with the rest, so here it
+/// leaves the scan unfinished rather than warned about.
 pub fn scan_build(
     scanner: &dyn SecretScanner,
     project: &Path,
     component: &str,
     context: &Path,
+    dockerfile: Option<&Path>,
     now: &str,
 ) -> TargetEntry {
     let label = format!("{component} build context");
@@ -696,11 +712,26 @@ pub fn scan_build(
     let target = ScanTarget::BuildContext {
         root: context.to_path_buf(),
         dockerignore: true,
+        dockerfile: dockerfile.map(Path::to_path_buf),
     };
     match scan(scanner, &target, &limits(), &Baseline::default()) {
         Ok(r) => {
             e.findings = rebased(project, context, r.findings);
             judge_skips(&mut e, &r.skipped);
+            e.warnings = r.git_dirs.iter().map(|g| git_in_context(g)).collect();
+            let too_large = r
+                .skipped
+                .iter()
+                .filter(|s| matches!(s.reason, SkipReason::TooLarge { .. }))
+                .count();
+            if too_large > 0 && e.error.is_none() {
+                e.error = Some(format!(
+                    "{too_large} file{} over the size limit {} not read, and the build sends {}",
+                    if too_large == 1 { "" } else { "s" },
+                    if too_large == 1 { "was" } else { "were" },
+                    if too_large == 1 { "it" } else { "them" },
+                ));
+            }
         }
         Err(err) => e.error = Some(failure(&err)),
     }
@@ -855,6 +886,30 @@ pub fn trees_of(loaded: &Loaded, binding: &Binding) -> Vec<Tree> {
         .collect()
 }
 
+/// The entries of a worktree that is not scanned because git may not run
+/// in it (its `.git` names a git folder that is not its clone's): both
+/// scans failed, with the reason, so the gate treats them as unfinished.
+fn refused_tree(loaded: &Loaded, t: &Tree, why: &str, now: &str) -> [(String, TargetEntry); 2] {
+    let mut tree = TargetEntry::new(
+        TargetKind::WorkingTree,
+        &format!("{} worktree", t.repo),
+        Some(&t.root),
+        now,
+    );
+    tree.error = Some(why.to_string());
+    let mut commits = TargetEntry::new(
+        TargetKind::CommitsAhead,
+        &format!("{} commits ahead of {}", t.repo, t.base),
+        Some(&t.root),
+        now,
+    );
+    commits.error = Some(why.to_string());
+    [
+        (tree_key(&loaded.dir, &t.root), tree),
+        (commits_key(&loaded.dir, &t.root), commits),
+    ]
+}
+
 fn scratch_of(loaded: &Loaded) -> PathBuf {
     loaded.dir.join(BASELINE_DIR)
 }
@@ -877,7 +932,15 @@ fn scan_trees(
     let now = world.clock.now_utc();
     let ex = excludes(loaded);
     let generated = generated_of(loaded);
+    let known = loaded.known_repos();
     for t in trees {
+        if let Err(why) = known.check(&t.root) {
+            for (k, e) in refused_tree(loaded, t, &why, &now) {
+                say(&outcome_line(&e));
+                store.put(&k, e);
+            }
+            continue;
+        }
         let entry = scan_tree(
             scanner,
             &loaded.dir,
@@ -889,7 +952,7 @@ fn scan_trees(
         );
         say(&outcome_line(&entry));
         store.put(&tree_key(&loaded.dir, &t.root), entry);
-        let head = world.git.head_commit(&t.root).ok();
+        let head = loaded.checked_git(world).head_commit(&t.root).ok();
         let entry = scan_commits(
             scanner,
             &loaded.dir,
@@ -910,6 +973,11 @@ fn scan_trees(
 pub fn outcome_line(e: &TargetEntry) -> String {
     match (&e.error, e.findings.is_empty()) {
         (Some(err), _) => format!("✗ secret scan: {} did not finish: {err}", e.label),
+        (None, true) if !e.warnings.is_empty() => format!(
+            "⚠ secret scan: {}: no secrets found, but {}",
+            e.label,
+            e.warnings.join("; ")
+        ),
         (None, true) => format!("✓ secret scan: {} clean", e.label),
         (None, false) => format!(
             "✗ secret scan: {}: {}",
@@ -984,6 +1052,19 @@ pub fn build_context(
     })
 }
 
+/// The Dockerfile a component's source build names (relative to its repo),
+/// absolute; `None` when it names none (the context's own is used).
+pub fn build_dockerfile(
+    loaded: &Loaded,
+    runner: &StackRunner<'_>,
+    component: &str,
+) -> Option<PathBuf> {
+    let mode = loaded.stack.components.get(component)?.mode(Mode::Source)?;
+    let dockerfile = mode.dockerfile.as_ref()?;
+    let repo = runner.repo_path(component, Mode::Source).ok()?;
+    Some(repo.join(dockerfile))
+}
+
 /// Before the steps of a plan: scan the context of every source build in
 /// it. Under `block-build`, a finding no acknowledgement covers, or a
 /// context that could not be scanned, fails the job before anything is
@@ -1028,7 +1109,15 @@ pub fn gate_builds(
         let Some(context) = build_context(loaded, runner, c) else {
             continue;
         };
-        let entry = scan_build(&*scanner, &loaded.dir, c, &context, &now);
+        let dockerfile = build_dockerfile(loaded, runner, c);
+        let entry = scan_build(
+            &*scanner,
+            &loaded.dir,
+            c,
+            &context,
+            dockerfile.as_deref(),
+            &now,
+        );
         say(&outcome_line(&entry));
         let live: Vec<String> = entry
             .findings
@@ -1162,8 +1251,16 @@ pub fn rescan(
         .is_none_or(|t| now_secs >= t.saturating_add(FULL_RESCAN_SECS));
     let ex = excludes(loaded);
     let generated = generated_of(loaded);
+    let known = loaded.known_repos();
     let mut scanned = false;
     for t in trees_of(loaded, &loaded.binding) {
+        if let Err(why) = known.check(&t.root) {
+            for (k, e) in refused_tree(loaded, &t, &why, &now) {
+                store.put(&k, e);
+            }
+            scanned = true;
+            continue;
+        }
         let tk = tree_key(&loaded.dir, &t.root);
         let label = format!("{} worktree", t.repo);
         let entry = match store.targets.get(&tk).filter(|_| !full) {
@@ -1183,7 +1280,7 @@ pub fn rescan(
             scanned = true;
         }
         let ck = commits_key(&loaded.dir, &t.root);
-        let head = world.git.head_commit(&t.root).ok();
+        let head = loaded.checked_git(world).head_commit(&t.root).ok();
         let moved = store
             .targets
             .get(&ck)
@@ -1216,7 +1313,18 @@ pub fn rescan(
             };
             let root = build_context(loaded, runner, c).unwrap_or_else(|| root.to_path_buf());
             if root.is_dir() {
-                store.put(&k, scan_build(&*scanner, &loaded.dir, c, &root, &now));
+                let dockerfile = build_dockerfile(loaded, runner, c);
+                store.put(
+                    &k,
+                    scan_build(
+                        &*scanner,
+                        &loaded.dir,
+                        c,
+                        &root,
+                        dockerfile.as_deref(),
+                        &now,
+                    ),
+                );
                 scanned = true;
             }
         }
@@ -1497,6 +1605,15 @@ impl SecretsView {
                         named.join(", ")
                     ),
                     findings_block,
+                ));
+            }
+        }
+        for t in &self.targets {
+            for w in &t.entry.warnings {
+                out.push((
+                    t.entry.component.clone(),
+                    format!("{}: {w}", t.entry.label),
+                    false,
                 ));
             }
         }

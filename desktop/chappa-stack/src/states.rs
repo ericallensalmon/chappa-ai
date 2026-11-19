@@ -343,7 +343,7 @@ fn recipe_record(
     d: &DataDef,
     saved: Option<&StateComponent>,
 ) -> RecipeRecord {
-    let git = Git::new(&*cx.world.git_cli);
+    let git = Git::new(&*cx.world.git_cli, cx.loaded);
     let mut scripts = Vec::new();
     if let Some(a) = &d.scrub {
         scripts.push(script_record(&git, &cx.loaded.dir, "scrub", a));
@@ -1008,7 +1008,7 @@ pub fn replay_recipe(
     let Some(d) = def.data.as_ref() else {
         return Err(format!("{component} no longer declares a recipe"));
     };
-    let git = Git::new(&*cx.world.git_cli);
+    let git = Git::new(&*cx.world.git_cli, cx.loaded);
     let changed = |hook: &str, argv: &[String]| {
         let now = script_record(&git, &cx.loaded.dir, hook, argv);
         record
@@ -1259,7 +1259,7 @@ pub fn resume_proposal(
     let (inst, _) = runner
         .instance(loaded.slot)
         .map_err(|e| (409, "definition", e.to_string()))?;
-    let git = Git::new(&*world.git_cli);
+    let git = Git::new(&*world.git_cli, loaded);
     let mut blocked: IndexMap<String, String> = if live { IndexMap::new() } else { known.clone() };
     let mut targets: IndexMap<String, ResumeTarget> = IndexMap::new();
     let mut checkouts = Vec::new();

@@ -48,10 +48,7 @@ fn finding(file: &str, line: u32, commit: Option<&str>, count: u32) -> Finding {
 }
 
 fn git(git: &Path, root: &Path) -> Command {
-    let mut cmd = Command::new(git);
-    crate::child_env::scrub(&mut cmd);
-    cmd.arg("-C").arg(root);
-    cmd
+    crate::git::command(git, root)
 }
 
 /// The lines (1-based) of `text` holding a value, with how many values
@@ -161,6 +158,9 @@ pub fn find_in_commits(
             "log",
             "-p",
             "--no-color",
+            // A `-diff` attribute (which the repository sets) would print
+            // "Binary files differ" in place of the lines.
+            "--text",
             "--no-ext-diff",
             "--no-textconv",
             "--no-renames",
@@ -295,6 +295,9 @@ mod tests {
                 .is_empty()
         );
 
+        // The repository's own attributes call every file binary: the
+        // lines are read all the same.
+        write(&repo.join(".git"), "info/attributes", "* -diff\n");
         let commits = find_in_commits(Path::new("git"), &repo, "main..HEAD", &secrets).unwrap();
         assert_eq!(commits.len(), 1, "{commits:?}");
         match &commits[0].location {

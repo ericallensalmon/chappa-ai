@@ -397,7 +397,7 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
             && e.contains("db: 3 findings")
             && e.contains("acknowledge in Environment")
     };
-    let roots = projects.cwd_roots(Some(project_id));
+    let roots = projects.cwd_roots(Some(project_id), Some(sid.as_str()));
     let listed = sources
         .actions(&sid, "work", Some("ABC-1"), &tools.list(), &roots)
         .unwrap();

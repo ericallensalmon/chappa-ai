@@ -13,9 +13,11 @@
 //! root, which reports the same relative path. Findings for files outside
 //! the list are discarded, so the scan never widens past what was listed.
 //!
-//! **Git mode.** `gitleaks git --log-opts=<base>..HEAD` from the repository
-//! root scans the added lines of every commit in the range, so a secret
-//! committed and then deleted is still found.
+//! **Git mode.** `gitleaks git` with `--log-opts=… <base>..HEAD` (see
+//! [`commit_log_opts`]) scans the added lines of every commit in the
+//! range, so a secret committed and then deleted is still found. The git
+//! gitleaks starts gets the same config overrides as every other git
+//! ([`crate::git::harden_child_env`]).
 //!
 //! **Every run** passes `--redact`, writes a JSON report into a fresh
 //! directory under the work directory (never the project), and uses its
@@ -43,7 +45,8 @@
 //! from the scratch directory rather than the working tree, refusing a git
 //! folder that holds a `.gitleaksignore`. Nested `.gitleaksignore` files are
 //! not read by gitleaks (measured). A gitleaks baseline is passed as
-//! `--baseline-path` only when the caller names one.
+//! `--baseline-path` only when the caller names one. In-file
+//! `gitleaks:allow` comments are ignored (`--ignore-gitleaks-allow`).
 
 use super::process;
 use super::report;
@@ -144,8 +147,12 @@ impl GitleaksScanner {
 
     /// The flags every run shares. `scratch` holds the config written for
     /// this run and the empty ignore directory.
+    ///
+    /// `--ignore-gitleaks-allow`: a `gitleaks:allow` comment is written by
+    /// whoever writes the scanned file, so it suppresses nothing here.
     fn common_args(&self, cmd: &mut Command, scratch: &Scratch, report: &Path) {
         cmd.args(["--redact", "--no-banner", "--no-color"])
+            .arg("--ignore-gitleaks-allow")
             .args(["--log-level", "error"])
             .args(["--report-format", "json", "--report-path"])
             .arg(report)
@@ -309,17 +316,19 @@ impl SecretScanner for GitleaksScanner {
         if staged > 0 {
             let report = scratch.dir.path.join("report.json");
             let mut cmd = Command::new(&self.program);
-            cmd.current_dir(&stage).args(["dir", "."]);
+            cmd.current_dir(&stage).arg("dir");
             self.common_args(&mut cmd, &scratch, &report);
+            cmd.args(["--", "."]);
             hits.extend(self.run(cmd, &report, &stage)?);
         }
         for (i, f) in alone.into_iter().enumerate() {
             let report = scratch.dir.path.join(format!("report-{i}.json"));
             let mut cmd = Command::new(&self.program);
-            cmd.current_dir(root)
-                .arg("dir")
-                .arg(f.to_string_lossy().replace('\\', "/"));
+            cmd.current_dir(root).arg("dir");
             self.common_args(&mut cmd, &scratch, &report);
+            // The name is the scanned tree's: after `--`, a name that
+            // starts with `-` is still a name.
+            cmd.arg("--").arg(f.to_string_lossy().replace('\\', "/"));
             hits.extend(self.run(cmd, &report, root)?);
         }
         Ok(report::findings(hits))
@@ -337,24 +346,35 @@ impl SecretScanner for GitleaksScanner {
         }
         // Scanned through the git folder, from the empty scratch directory,
         // so no ignore file in the working tree is read.
+        //
+        // gitleaks runs `git log -p` itself, so the git overrides go in
+        // through the environment, and the log options keep the
+        // repository's attributes and diff drivers from changing what the
+        // patches show: `--text` because a `-diff` attribute would print
+        // "Binary files differ" in place of the lines.
         let mut cmd = Command::new(&self.program);
         cmd.current_dir(&scratch.ignore_dir)
             .arg("git")
             .arg(&git_dir)
-            .arg(format!("--log-opts={range}"));
+            .arg(commit_log_opts(range));
         self.common_args(&mut cmd, &scratch, &report);
+        crate::git::harden_child_env(&mut cmd);
         Ok(report::findings(self.run(cmd, &report, repo)?))
     }
+}
+
+/// The `--log-opts` value of a commit scan of `range` (one revision range,
+/// checked by the caller: gitleaks splits the value on spaces).
+pub fn commit_log_opts(range: &str) -> String {
+    let [textconv, ext_diff] = crate::git::NO_DIFF_HELPERS;
+    format!("--log-opts=--text {textconv} {ext_diff} --end-of-options {range}")
 }
 
 /// The repository's git folder, absolute (a worktree's own one under the
 /// main repository's `.git/worktrees/`).
 fn git_dir_of(repo: &Path) -> Result<PathBuf, SafetyError> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--absolute-git-dir"]);
-    crate::child_env::scrub(&mut cmd);
+    let mut cmd = crate::git::command(crate::git::PROGRAM, repo);
+    cmd.args(["rev-parse", "--absolute-git-dir"]);
     let ran = process::run(
         &mut cmd,
         "git rev-parse",

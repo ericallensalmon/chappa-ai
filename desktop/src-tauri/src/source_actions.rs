@@ -138,9 +138,10 @@ pub fn cap_output(lines: &[String], cap: usize) -> String {
 }
 
 /// The roots an action of `info`'s source may use: its project's (every
-/// open project's for an attached source) plus trusted source roots.
+/// open project's for an attached source) plus the roots it was trusted
+/// with itself.
 fn roots_for(deps: &ActionDeps, info: &SourceInfo) -> Vec<Root> {
-    deps.projects.cwd_roots(info.project_id)
+    deps.projects.cwd_roots(info.project_id, Some(&info.id))
 }
 
 /// Why a call of `info`'s source is refused because it is a stack runner
@@ -1004,7 +1005,7 @@ pub fn source_actions(
 ) -> Result<Vec<ActionDto>, String> {
     main_window_only(&window)?;
     let info = sources.info(&source_id)?;
-    let roots = projects.cwd_roots(info.project_id);
+    let roots = projects.cwd_roots(info.project_id, Some(&info.id));
     match (owner, key) {
         (Some(owner), Some(key)) => {
             sources.item_actions(&source_id, &view, &owner, &key, &tools.list(), &roots)

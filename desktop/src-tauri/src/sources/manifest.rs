@@ -286,6 +286,11 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
         validate_link_host(host)
             .map_err(|why| ManifestError::Invalid(format!("linkHosts `{host}`: {why}")))?;
     }
+    let roots = strings("roots")?;
+    for root in &roots {
+        validate_root(root)
+            .map_err(|why| ManifestError::Invalid(format!("roots `{root}`: {why}")))?;
+    }
     Ok(Manifest {
         id,
         label,
@@ -295,10 +300,27 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
         actions: optional("actions")?,
         jobs: optional("jobs")?,
         link_hosts,
-        roots: strings("roots")?,
+        roots,
         item_actions: parse_item_actions(obj.get("itemActions"))?,
         owner_updates: optional("ownerUpdates")?,
     })
+}
+
+/// A root must name one folder whatever the app's working directory is:
+/// rooted (`/srv/x`, `C:\x`, and on Windows `\x`), never relative
+/// (`x`, `./x`, `~/x`, `C:x`), and free of `..`.
+fn validate_root(root: &str) -> Result<(), &'static str> {
+    let path = std::path::Path::new(root);
+    if !path.has_root() {
+        return Err("must be an absolute folder");
+    }
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err("must not climb with `..`");
+    }
+    Ok(())
 }
 
 /// `itemActions`: a list of endpoint actions, each with `on: {view, sources}`.
@@ -728,6 +750,25 @@ mod tests {
         assert_eq!(m.jobs.as_ref().unwrap().path(), "/api/jobs/{id}");
         assert_eq!(m.link_hosts, ["registry.example", "dev.example.test"]);
         assert_eq!(m.roots, ["/srv/example"]);
+    }
+
+    #[test]
+    fn a_relative_root_refuses_the_manifest() {
+        let with = |root: &str| {
+            let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+            v["roots"] = serde_json::json!([root]);
+            parse_manifest(&v)
+        };
+        for bad in ["srv/example", "./x", "~/code", "..", "/srv/../etc", "C:x"] {
+            match with(bad) {
+                Err(ManifestError::Invalid(why)) => assert!(why.contains("roots"), "{why}"),
+                other => panic!("{bad}: {other:?}"),
+            }
+        }
+        assert_eq!(with("/srv/example").unwrap().roots, ["/srv/example"]);
+        if cfg!(windows) {
+            assert!(with(r"C:\srv\example").is_ok());
+        }
     }
 
     #[test]

@@ -576,11 +576,14 @@ impl Projects {
 
     /// The cwd roots a working directory may fall under (see [`crate::roots`]):
     /// for `Some(id)` that project's directory plus its git worktrees, for
-    /// `None` every OPEN project's; plus the extra roots of every trusted
-    /// source. Worktree listings are cached per open project and refreshed
-    /// after [`WORKTREE_CACHE_TTL`] or a project-file reload; git runs off
-    /// the lock.
-    pub fn cwd_roots(&self, project_id: Option<u32>) -> Vec<Root> {
+    /// `None` every OPEN project's; plus, for `source: Some(id)`, the extra
+    /// roots that source asked for when it was trusted. A source's roots
+    /// were approved for that source alone: never for another source's
+    /// actions, nor for a spawn through the control API (`source: None`).
+    /// Worktree listings are cached per open project and refreshed after
+    /// [`WORKTREE_CACHE_TTL`] or a project-file reload; git runs off the
+    /// lock.
+    pub fn cwd_roots(&self, project_id: Option<u32>, source: Option<&str>) -> Vec<Root> {
         // Pass 1, under the lock: the directories and which caches are stale.
         let (mut roots, stale, sources): (Vec<Root>, Vec<(u32, PathBuf)>, Sources) = {
             let Ok(inner) = self.inner.lock() else {
@@ -644,8 +647,12 @@ impl Projects {
             }
         }
         // Lock order projects → sources: the projects lock is released here.
-        for (source_id, path) in sources.trusted_roots() {
-            roots.push(Root::new(path, RootKind::Source { source_id }));
+        if let Some(source) = source {
+            for (source_id, path) in sources.trusted_roots() {
+                if source_id == source {
+                    roots.push(Root::new(path, RootKind::Source { source_id }));
+                }
+            }
         }
         roots
     }
