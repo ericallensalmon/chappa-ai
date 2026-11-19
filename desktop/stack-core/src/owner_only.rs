@@ -439,7 +439,9 @@ mod tests {
         // from another toolset on PATH out of it.
         let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set");
         let out = std::process::Command::new(
-            std::path::Path::new(&system_root).join("System32").join("whoami.exe"),
+            std::path::Path::new(&system_root)
+                .join("System32")
+                .join("whoami.exe"),
         )
         .args(["/user", "/fo", "csv", "/nh"])
         .output()
