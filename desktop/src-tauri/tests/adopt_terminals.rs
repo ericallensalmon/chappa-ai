@@ -200,8 +200,6 @@ fn attach_swaps_sink_delivers_subsequent_events_and_triggers_a_full() {
             .any(|b| b.windows(4).any(|w| w == [0x61, 0, 0, 0]))
             .then_some(())
     });
-    let a_count = sink_a.binary.lock().unwrap().len();
-
     // Swap sink_b in; the answer carries the terminal's row facts.
     let row = registry
         .attach_terminal(id, sink_b.clone())
@@ -217,6 +215,10 @@ fn attach_swaps_sink_delivers_subsequent_events_and_triggers_a_full() {
         0,
         "replacement sink starts from a FULL frame"
     );
+    // Counted once the new sink has its first frame, which proves the swap
+    // took effect: a frame already on its way to the old sink when the swap
+    // was asked for may still land there before that.
+    let a_count = sink_a.binary.lock().unwrap().len();
     registry
         .handle(id)
         .expect("handle")
