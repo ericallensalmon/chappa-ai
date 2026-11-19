@@ -544,6 +544,61 @@ fn an_agent_token_cannot_claim_another_actor() {
     w.registry.close(id as u32);
 }
 
+/// An agent may pause, resume and cancel only the timers it set itself:
+/// not the person's, not another agent's, whatever row they deliver to.
+/// The person may manage every timer.
+#[test]
+fn an_agent_token_can_only_cancel_or_pause_its_own_timers() {
+    let w = World::new();
+    let (a, token_a) = w.agent();
+    let (b, token_b) = w.agent();
+    let timer = |token: &str, to: u64| {
+        let (status, body) = w.call(
+            "POST",
+            "/timers",
+            token,
+            json!({"delay_ms": 600_000, "body": "later", "delivery_process_id": to}),
+        );
+        assert_eq!(status, 200, "{body}");
+        body["timer_id"].as_i64().unwrap()
+    };
+    let persons = timer(PERSON, a);
+    let bs = timer(&token_b, b);
+    let as_own = timer(&token_a, a);
+    for op in ["pause", "resume", "cancel"] {
+        for other in [persons, bs] {
+            let (status, body) = w.call(
+                "POST",
+                &format!("/timers/{other}/{op}"),
+                &token_a,
+                json!({}),
+            );
+            assert_ne!(status, 200, "{op} on timer {other}: {body}");
+        }
+    }
+    for op in ["pause", "resume", "cancel"] {
+        let (status, body) = w.call(
+            "POST",
+            &format!("/timers/{as_own}/{op}"),
+            &token_a,
+            json!({}),
+        );
+        assert_eq!(status, 200, "{op} on its own timer: {body}");
+    }
+    for other in [persons, bs] {
+        let (status, body) = w.call(
+            "POST",
+            &format!("/timers/{other}/cancel"),
+            PERSON,
+            json!({}),
+        );
+        assert_eq!(status, 200, "the person cancels timer {other}: {body}");
+    }
+    for row in [a, b] {
+        w.registry.close(row as u32);
+    }
+}
+
 /// An agent's text to another agent starts with a sender line it cannot
 /// forge, and a bare choice key from an agent is refused.
 #[test]
