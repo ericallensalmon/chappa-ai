@@ -985,7 +985,7 @@ fn spawn_process(
         .ok_or_else(|| format!("process `{name}` has no frames channel"))?;
     // Project terminals get the same spawn-time settings as
     // interactive ones (both are also live-settable afterwards).
-    let cfg = actor_config(spec, None, Some(settings));
+    let cfg = actor_config(spec, None, settings);
     proc.generation += 1;
     proc.spawned_at = Instant::now();
     proc.lifecycle.on(ProcessEvent::Spawned, now_ms());

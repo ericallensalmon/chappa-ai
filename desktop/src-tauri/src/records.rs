@@ -159,7 +159,7 @@ impl From<RecordError> for String {
 // ---- the ledger -----------------------------------------------------------
 
 /// The `runs` table in coordination.db. Shares the coordination store's one
-/// connection; an uninitialized store (tests, the harness) answers `Err`,
+/// connection; an uninitialized store (tests) answers `Err`,
 /// which callers log — the record head in the JSON store is what the rail
 /// reads, the ledger is history.
 #[derive(Clone, Default)]
@@ -360,8 +360,8 @@ struct Parts {
 }
 
 /// Managed state: the record service over the project store, the workspace
-/// store and the run ledger. `Default` is inert (no stores) so tests and
-/// the harness can construct a `ControlState` without one; every store op
+/// store and the run ledger. `Default` is inert (no stores) so tests
+/// can construct a `ControlState` without one; every store op
 /// then answers a clear error and spawns proceed without a record.
 #[derive(Clone, Default)]
 pub struct Records {
@@ -1781,7 +1781,7 @@ last 200 screen lines (`text`), or for a json-transport agent the last 200 typed
 and the row stays as `exited` / `failed`. Closing the row (×, `close_terminal`, project stop, app \
 quit) leaves the record `stopped`; a run still `running` at launch was cut off by a crash and \
 reconciles to `exited` with no exit code. Rows spawned with `close_on_exit` or `ephemeral: true` \
-(and `spawn_terminal` / debug-harness terminals) have no record and vanish on close as before.\n\n\
+(and `spawn_terminal` terminals) have no record and vanish on close as before.\n\n\
 The ledger (`runs` in coordination.db, schema version 4) keeps the last 20 runs per record. Every \
 late fact about a run (its exit, its tail, later a summary or session id) carries the run uuid it \
 was captured under and is dropped when the record has moved on to a newer run, so a respawn into \

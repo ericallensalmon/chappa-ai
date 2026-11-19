@@ -1888,7 +1888,7 @@ pub struct SpawnAgentRequest {
     #[serde(default)]
     pub close_on_exit: bool,
     /// Spawn WITHOUT a durable record: the row vanishes on close and leaves
-    /// no history, like a debug-harness terminal. Default false — an agent
+    /// no history, like a `spawn_terminal` row. Default false — an agent
     /// normally outlives its terminal as a stopped row that can be started
     /// again. `close_on_exit` implies this.
     #[serde(default)]
@@ -1959,7 +1959,7 @@ pub struct SpawnContext<'a> {
     pub projects: &'a Projects,
     /// The record service the spawn writes its durable half to. An inert
     /// (uninitialized) one makes every spawn ephemeral, which is what tests
-    /// and the harness want.
+    /// want.
     pub records: &'a Records,
     /// The SPAWNING actor's process id (the control route parses the
     /// `X-Chappa-Actor` header; `None` for the Tauri command route / a
@@ -2490,7 +2490,7 @@ pub fn spawn_agent_with(
     // The webview adopts every backend-spawned agent into the rail
     // off this broadcast (project-bound agents to their project's AGENTS
     // subsection, unbound ones to the workspace list). `on_notify` is the
-    // app handle (None in tests/harness → a silent no-op).
+    // app handle (None in tests with no Tauri runtime → a silent no-op).
     if let Some(app) = created_app.as_ref() {
         emit_created(
             &AppCreatedBroadcast(app.clone()),
@@ -2768,7 +2768,7 @@ pub async fn send_agent_input(
 }
 
 /// The event ring since a cursor (the transcript view's catch-up after a
-/// reveal, and the debug surface).
+/// reveal).
 #[tauri::command]
 pub fn get_agent_events(
     registry: State<'_, Registry>,

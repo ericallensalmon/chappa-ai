@@ -13,8 +13,6 @@ pub mod coordination;
 pub mod coordination_http;
 pub mod crash;
 pub mod data_safety;
-#[cfg(debug_assertions)]
-pub mod debug_http;
 pub mod delivery_hold;
 pub mod event_ring;
 pub mod login_path;
@@ -302,8 +300,6 @@ pub fn run() {
                         ])
                         .build(),
                 )?;
-                // Test-harness surface over HTTP; opt-in, see debug_http.
-                debug_http::start(app.state::<Registry>().inner().clone());
             }
             Ok(())
         });

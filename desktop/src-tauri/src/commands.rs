@@ -311,7 +311,7 @@ fn handle_for(registry: &Registry, id: TermId) -> Result<term_core::actor::TermH
 /// profile and cwd are enough to open the same shell again). It is filed
 /// under `project_id` when the webview opened it from a project's terminals
 /// section, else in the workspace bucket. A terminal running an explicit
-/// command (the harness, a one-off) has no record: its restart recipe is
+/// command (a one-off) has no record: its restart recipe is
 /// not a shell's.
 // Tauri injects each managed state and each IPC field as its own argument;
 // grouping the fields would change what the webview sends.
@@ -374,7 +374,7 @@ fn spawn_plain_terminal(
     frames: Channel<InvokeResponseBody>,
 ) -> Result<TermId, String> {
     let name = spec.command.clone();
-    let cfg = actor_config(to_pty_spec(spec, settings), scrollback, Some(settings));
+    let cfg = actor_config(to_pty_spec(spec, settings), scrollback, settings);
     let id = registry.create_terminal(
         cfg,
         Arc::new(ChannelSink::new(frames, app.clone())),
@@ -455,7 +455,7 @@ fn spawn_terminal_record_with(
         },
         settings,
     );
-    let cfg = actor_config(spec, scrollback, Some(settings));
+    let cfg = actor_config(spec, scrollback, settings);
     let binding = RecordBinding {
         record_id: record.record_id.clone(),
         run_uuid: run_uuid.clone(),

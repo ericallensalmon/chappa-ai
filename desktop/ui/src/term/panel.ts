@@ -373,8 +373,8 @@ export function gridForSize(width: number, height: number, cellW: number, cellH:
 /** Terminal line-height multiplier: 1.2, with letter spacing 1.0 (the bare
  *  advance).
  *  Cell height is fontSize × this, deterministic, rather than the font's own
- *  line box — fonts disagree wildly about their line boxes and reference
- *  parity wants the same grid density. */
+ *  line box — fonts disagree wildly about their line boxes, and the grid
+ *  should keep the same density whichever font is picked. */
 export const LINE_HEIGHT = 1.2;
 
 /** DOM-probe cell metrics. Width is the measured advance of "M" QUANTIZED so

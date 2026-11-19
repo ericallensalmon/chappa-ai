@@ -6,10 +6,7 @@
 //! not build a full activity-monitor view.
 //!
 //! Shape mirrors `term://activity`, the low-rate JSON-event
-//! precedent: emit-only through the app-wide event name, rate limited, and
-//! deliberately NOT pushed into the per-terminal debug event ring (it would
-//! evict the title/notify/exited events the parity harness asserts
-//! on).
+//! precedent: emit-only through the app-wide event name, rate limited.
 //!
 //! **Refresh policy — "never a full system scan per tick".** A tick does two
 //! refreshes, and only ONE of them reads per-process counters:
@@ -429,8 +426,7 @@ fn row(pid: Pid, proc_: &sysinfo::Process) -> ProcInfo {
     }
 }
 
-/// Emit-only, exactly like `term://activity`: the app-wide event name, never
-/// the per-terminal debug ring.
+/// Emit-only, exactly like `term://activity`: the app-wide event name.
 ///
 /// The payload carries the same `term_id` key every other `term://*` event
 /// does, so the frontend decodes it with the one `TerminalEventDto` shape

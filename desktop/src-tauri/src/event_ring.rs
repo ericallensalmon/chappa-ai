@@ -1,8 +1,7 @@
-//! The ONE bounded, seq-cursored event ring: the
-//! registry's per-terminal `JsonEvent` ring (debug `/events`) and the json
-//! agent's `AgentEvent` ring (`get_agent_events`) are the same structure —
-//! keep the last `cap` items, answer `since(seq)`, and keep `seq` counting
-//! past evictions so a cursor stays valid.
+//! The bounded, seq-cursored event ring behind the json agent's
+//! `AgentEvent` ring (`get_agent_events`): keep the last `cap` items, answer
+//! `since(seq)`, and keep `seq` counting past evictions so a cursor stays
+//! valid.
 
 use std::collections::VecDeque;
 

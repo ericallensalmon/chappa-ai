@@ -627,8 +627,8 @@ impl TermHandle {
 
     /// Synchronous: serialize the current viewport plus the last `lines`
     /// scrollback rows, oldest first, trailing whitespace trimmed. Same
-    /// control-channel round trip as `copy_selection`; backs the debug HTTP
-    /// `/text` route. Keeps answering after the child exits (the actor
+    /// control-channel round trip as `copy_selection`; backs the control
+    /// surface's `/output` route and the run tails. Keeps answering after the child exits (the actor
     /// outlives its child until shutdown). Falls back to an empty dump if the
     /// actor thread is gone or wedged — `recv_timeout` turns a reply that
     /// never comes into a fast empty result instead of a hang.
@@ -647,10 +647,9 @@ impl TermHandle {
         rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default()
     }
 
-    /// Current terminal modes (alt screen, kitty flags, bracketed paste) —
-    /// the debug surface, and typed deliveries that wrap their text as a
-    /// paste when the program asked for that. Same round-trip shape as [`TermHandle::dump_text`]; `None` when the
-    /// actor is gone or slow.
+    /// Current terminal modes, for typed deliveries that wrap their text as a
+    /// paste when the program asked for that. Same round-trip shape as
+    /// [`TermHandle::dump_text`]; `None` when the actor is gone or slow.
     pub fn modes(&self) -> Option<ModeDump> {
         let (tx, rx) = channel();
         if self.tx.send(Control::GetModes(ModesReply(tx))).is_err() {
@@ -789,14 +788,10 @@ struct SyncReply(Sender<Option<String>>);
 /// One-shot reply channel for `dump_text`.
 struct TextReply(Sender<Vec<String>>);
 
-/// Point-in-time terminal-mode dump for the debug surface (marks
-/// forensics): which screen is active and what kitty flags are set — the two
-/// mode bits that gate/alter input-side behavior an HTTP probe can't
-/// otherwise see.
+/// Point-in-time terminal modes that shape what a delivery to the program
+/// must look like.
 #[derive(Debug, Clone, Copy)]
 pub struct ModeDump {
-    pub alt_screen: bool,
-    pub kitty_flags: u32,
     /// DEC 2004: the program asked for pastes to be bracketed.
     pub bracketed_paste: bool,
 }
@@ -1454,11 +1449,8 @@ impl Actor {
             Control::SetSyntheticMarks(on) => self.synthetic_prompt_marks = on,
             Control::SetWheelSpeed(speed) => self.wheel_speed = speed,
             Control::GetModes(reply) => {
-                let snapshot = self.mode_snapshot();
                 let _ = reply.0.send(ModeDump {
-                    alt_screen: snapshot.alt_screen,
-                    kitty_flags: self.kitty_flags,
-                    bracketed_paste: snapshot.bracketed_paste,
+                    bracketed_paste: self.mode_snapshot().bracketed_paste,
                 });
             }
             Control::Ack(seq) => apply_ack(
@@ -1673,7 +1665,7 @@ impl Actor {
     /// Serialize a bottom-anchored slice of the grid: `lines` scrollback rows
     /// plus the full current viewport, oldest first, trailing whitespace
     /// trimmed. Must run on the actor thread (reads `Term` directly). Empty
-    /// rows are kept as empty strings so the harness sees the exact screen
+    /// rows are kept as empty strings so a reader sees the exact screen
     /// height.
     fn dump_text(&self, lines: usize) -> Vec<String> {
         let grid = self.term.grid();
@@ -2083,7 +2075,7 @@ fn build_row(
 }
 
 /// One grid row flattened to text with trailing whitespace removed. Terminal
-/// rows are always padded to the full column count; the harness wants the
+/// rows are always padded to the full column count; a reader wants the
 /// visible content only, so the trailing pad cells are trimmed.
 fn row_to_text(row: &Row<alacritty_terminal::term::cell::Cell>) -> String {
     let mut text = String::with_capacity(row.len());

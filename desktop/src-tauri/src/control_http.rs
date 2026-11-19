@@ -1,11 +1,9 @@
-//! Control surface: the debug subset graduated to ALL
-//! builds on `127.0.0.1:8324`, bearer-token authenticated, plus the
+//! Control surface: the app's HTTP API on `127.0.0.1:8324` in every build,
+//! bearer-token authenticated — terminals and processes plus the
 //! orchestrator additions (receipts, input journal, byte-stream
 //! liveness, unsplit argv, whole-screen output, raw-bytes door). The
 //! `chappa-ai-mcp` stdio server (desktop/chappa-ai-mcp) is its main client;
-//! it doubles as the curl-from-Claude-Code interface. Debug-only routes
-//! (raw write, resize, events, modes, key) stay on 8323, tokenless, in
-//! `debug_http.rs` — untouched, so the parity harness keeps working.
+//! it doubles as the curl-from-Claude-Code interface.
 //!
 //! ## Auth
 //! A random 32-byte token is generated at first launch into
@@ -39,10 +37,7 @@
 //! tiny_http with a small FIXED pool of request threads (see [`WORKERS`]) and
 //! a hard cap on request bodies ([`MAX_BODY_BYTES`]): the clients are local
 //! agents, not the internet, but a bounded server cannot be made to spawn
-//! threads or allocate without limit by whatever else is on localhost. The
-//! JSON/body/query plumbing here is shared with `debug_http` (which imports
-//! [`json`], [`read_body`] and [`query_u64`]) — one implementation, two
-//! servers.
+//! threads or allocate without limit by whatever else is on localhost.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -119,7 +114,7 @@ pub struct ControlState {
     pub settings: SettingsState,
     /// Tauri's app-config dir, reported by `GET /` so an integrator can tell
     /// WHICH chappa-ai instance answered (and where its token lives). Empty in
-    /// tests/harnesses with no Tauri runtime.
+    /// tests with no Tauri runtime.
     pub config_dir: PathBuf,
     /// The agent-tool registry behind `list_agent_tools` /
     /// `spawn_agent`.
@@ -127,13 +122,13 @@ pub struct ControlState {
     /// Scratchpads + todos over `<app-config>/coordination.db`.
     pub coordination: Coordination,
     /// The timer scheduler (same database, own tables). The default
-    /// is INERT — no threads, no store — so tests and the parity harness
+    /// is INERT — no threads, no store — so tests with no Tauri runtime
     /// construct a `ControlState` without one and the timer routes answer a
     /// clear 500 instead of pretending.
     pub timers: TimerService,
     /// The app handle the control surface broadcasts `term://created`
     /// on, so the webview can adopt a backend-spawned terminal into the rail.
-    /// `None` in tests/harness with no Tauri runtime (a silent no-op).
+    /// `None` in tests with no Tauri runtime (a silent no-op).
     pub app: Option<AppHandle>,
     /// What `GET /identity` proves. [`serve`] fills it from the bound
     /// address when left `None`.
@@ -1573,10 +1568,10 @@ fn spawn_terminal(state: &ControlState, params: &Params, _: &str, body: &str) ->
             rows,
         },
         None,
-        Some(&settings),
+        &settings,
     );
     // No webview channel behind an agent-spawned terminal: agents read text
-    // back through /output (same as the parity harness). The row still
+    // back through /output. The row still
     // shows up in /processes and list_terminals. It also emits
     // `term://created` so an app with an OPEN webview can adopt it into the
     // rail (the NullSink invisibility fix).
@@ -1636,8 +1631,7 @@ fn get_process(state: &ControlState, params: &Params, _: &str, _: &str) -> Resp 
 }
 
 /// `key=<u64>` out of a raw query string (`None` when absent or unparsable).
-/// Shared with `debug_http`.
-pub fn query_u64(query: &str, key: &str) -> Option<u64> {
+fn query_u64(query: &str, key: &str) -> Option<u64> {
     query
         .split('&')
         .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
@@ -2133,8 +2127,8 @@ fn close_terminal(state: &ControlState, params: &Params, _: &str, body: &str) ->
     }
     // A terminal a project process owns is stopped through its lifecycle
     // (status → stopped, term_id cleared, auto_restart cancelled) — a bare
-    // registry close would leave the runtime pointing at a dead id (review).
-    // A store that is not initialized (parity harness, tests) owns nothing.
+    // registry close would leave the runtime pointing at a dead id.
+    // A store that is not initialized (tests) owns nothing.
     if let Ok(true) = state.projects.stop_owner_of_terminal(&state.registry, id) {
         return json(200, json!({"ok": true, "id": id, "stopped_process": true}));
     }
@@ -2369,8 +2363,8 @@ pub fn percent_decode(s: &str) -> String {
 /// are small JSON payloads; the cap stops a bad Content-Length (or a client
 /// that never stops writing) from growing this buffer without limit. A body
 /// over the cap is simply truncated, which then fails to parse as JSON — a
-/// clean 400 rather than an OOM. Shared with `debug_http`.
-pub fn read_body(reader: &mut dyn std::io::Read) -> String {
+/// clean 400 rather than an OOM.
+fn read_body(reader: &mut dyn std::io::Read) -> String {
     let mut buf = Vec::new();
     let _ = reader.take(MAX_BODY_BYTES).read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
@@ -2381,7 +2375,7 @@ pub fn read_body(reader: &mut dyn std::io::Read) -> String {
 pub const MAX_BODY_BYTES: u64 = 1 << 20;
 
 /// A JSON response with an explicit status code and content-type header.
-/// Shared with `debug_http`.
+/// Shared with the route modules that answer under this server.
 pub fn json(status: u16, value: Value) -> Resp {
     let mut response =
         tiny_http::Response::from_data(serde_json::to_vec(&value).unwrap_or_default())
@@ -2503,7 +2497,7 @@ pub fn render_api_doc() -> String {
         "`output_bytes` / `last_output_at` (unix ms) come from the pty reader, so they move even while\n\
          the parser is busy. `has_output=false` = still booting (distinguishable from dead);\n\
          `child_alive=false` = the child's exit has been observed. `seq` is the frame sequence the\n\
-         debug listing also reports. Process stats (cpu/mem/subprocess counts) are not in\n\
+         rail listing also reports. Process stats (cpu/mem/subprocess counts) are not in\n\
          these rows; they arrive on the `term://stats` channel.\n\n",
     );
     out.push_str("## Agents\n\n");

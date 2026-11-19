@@ -2,9 +2,9 @@
 //! app-config dir, the same missing-file / unknown-field / out-of-range
 //! tolerance as settings.json, atomic writes.
 //!
-//! Chappa-side only — agent tools live in chappa-ai's own store; there is
-//! no shared file, so the only parity constraint is the tool NAMES on the
-//! MCP surface (`list_agent_tools`, `spawn_agent`).
+//! Agent tools live in chappa-ai's own store; there is no shared file, so
+//! the only outside contract is the tool NAMES on the MCP surface
+//! (`list_agent_tools`, `spawn_agent`).
 //!
 //! Model, in one sentence: an [`AgentTool`] is structured fields (program,
 //! verbatim argv, model, runtime, env) and the command line is DERIVED from
@@ -512,7 +512,7 @@ impl AgentTool {
         }))
     }
 
-    /// The parity `command` string: `docker exec -u U -it -w W [-e K=V…]
+    /// The tool listing's `command` string: `docker exec -u U -it -w W [-e K=V…]
     /// CONTAINER program args…`, or `program args…` for Host. Display only.
     pub fn command_line(&self) -> String {
         self.command_line_as(EnvFlags::WithValues)

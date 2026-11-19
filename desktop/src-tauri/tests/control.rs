@@ -1,10 +1,10 @@
 //! Control-surface tests: token
 //! file created once with restrictive permissions, control routes reject a
-//! bad/missing token, debug routes stay tokenless, `GET /` matches the
+//! bad/missing token, `GET /` matches the
 //! registered handlers (walking the shared const), argv survives unsplit,
 //! submit is one atomic write, receipts + journal + confirm-gated close.
 //!
-//! Servers bind ephemeral ports (never 8323/8324) so a running app on the
+//! Servers bind ephemeral ports (never the app's 8324) so a running app on the
 //! host can't collide with the suite. Real terminals: `cmd` on Windows, `sh`
 //! elsewhere — same split as tests/pump.rs.
 
@@ -445,7 +445,7 @@ fn the_route_table_identifies_the_instance() {
 /// conversion instead of two hand-copied structs). The WIRE SHAPE is the
 /// contract — `CONTROL_API.md`, the MCP tool descriptions and any curl script
 /// read these exact keys — so pin the whole key set and the shared values
-/// against the debug listing's row for the same terminal.
+/// against the rail listing's row for the same terminal.
 #[test]
 fn the_control_row_keeps_its_exact_wire_shape() {
     let registry = Registry::default();
@@ -500,7 +500,7 @@ fn the_control_row_keeps_its_exact_wire_shape() {
             "status",
             "uuid",
         ],
-        "the flattened base must contribute exactly the debug row's fields"
+        "the flattened base must contribute exactly the rail row's fields"
     );
     // The stable identity is a 32-hex uuid, and a bare
     // terminal belongs to no project.
@@ -635,67 +635,6 @@ fn project_routes_degrade_cleanly_without_a_store() {
         "",
     );
     assert_eq!(status, 500);
-}
-
-/// The debug surface is UNTOUCHED: same routes, no token, on its own server.
-#[cfg(debug_assertions)]
-#[test]
-fn debug_routes_stay_tokenless() {
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-    let addr = server.server_addr().to_string();
-    let registry = Registry::default();
-    std::thread::spawn(move || app_lib::debug_http::serve(server, registry));
-    let (status, body) = http(&addr, "GET", "/debug/terminals", None, "");
-    assert_eq!(status, 200);
-    assert_eq!(body, json!([]));
-    // And the control routes are NOT served there.
-    let (status, _) = http(&addr, "GET", "/processes", None, "");
-    assert_eq!(status, 404);
-}
-
-/// A web page must not reach the debug surface: no-cors POSTs carry
-/// `Origin`/`Sec-Fetch-*`, and DNS rebinding carries a foreign `Host`.
-#[cfg(debug_assertions)]
-#[test]
-fn debug_routes_refuse_browser_requests() {
-    use tiny_http::Header;
-    let h = |s: &str| s.parse::<Header>().unwrap();
-    let refused = [
-        vec![h("Host: 127.0.0.1:8323"), h("Origin: https://evil.example")],
-        vec![h("Host: 127.0.0.1:8323"), h("Sec-Fetch-Site: cross-site")],
-        vec![h("Host: rebind.example:8323")],
-        vec![h("Host: 127.0.0.1.evil.example")],
-    ];
-    for headers in refused {
-        assert!(app_lib::debug_http::from_browser(&headers), "{headers:?}");
-    }
-    let allowed = [
-        vec![h("Host: 127.0.0.1:8323")],
-        vec![h("Host: localhost")],
-        vec![h("Host: [::1]:8323")],
-        vec![],
-    ];
-    for headers in allowed {
-        assert!(!app_lib::debug_http::from_browser(&headers), "{headers:?}");
-    }
-
-    // End to end: the server answers 403 before routing.
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-    let addr = server.server_addr().to_string();
-    std::thread::spawn(move || app_lib::debug_http::serve(server, Registry::default()));
-    let mut stream = TcpStream::connect(&addr).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(20)))
-        .unwrap();
-    let body = r#"{"command":"definitely-not-run"}"#;
-    let req = format!(
-        "POST /debug/terminals HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(req.as_bytes()).unwrap();
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).unwrap();
-    assert!(raw.starts_with("HTTP/1.1 403"), "{raw}");
 }
 
 /// The checked-in doc is the emitter's output. `CONTROL_API_WRITE=1`

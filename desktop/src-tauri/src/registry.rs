@@ -5,7 +5,7 @@
 //! Shape: `State<Registry>` = a mutex-protected `HashMap<TermId, Entry>`.
 //! `TermId` is a monotonic u32. Each `Entry` holds the `TermHandle` (the only
 //! way to drive the actor), the pump's join handle, and the metadata the
-//! debug HTTP surface reads back out (status/cols/rows/seq/event ring).
+//! rail and the control surface read back out (status/cols/rows/seq).
 //!
 //! The pump is the only piece that touches the outside world per terminal.
 //! It sits between the actor's `TermEvent` channel and an [`EventSink`] — the
@@ -38,7 +38,6 @@ use term_core::status::ProgramStatus;
 use crate::agent_json::JsonAgent;
 use crate::caller::{AgentTokens, Caller};
 use crate::delivery_hold::{DeliveryHolds, HoldGate};
-use crate::event_ring::{EventRing, Sequenced};
 use crate::spawn_gate::{GatePass, GateRequest, SpawnGate, SpawnKind};
 use term_core::frame::encode_frame;
 use term_core::pty::PtySpec;
@@ -61,26 +60,19 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
 /// The ONE place an [`ActorConfig`] is assembled. Every spawn path — the
 /// interactive `create_terminal` command, project processes, the control
-/// surface's `POST /processes`, the debug parity harness — must agree on the
-/// scrollback size and on the per-actor controls seeded at spawn time (both
-/// live-settable actor controls are also seeded at SPAWN).
-///
-/// `settings: None` means the built-in defaults, which is what the
-/// parity harness needs: it asserts behavior at the defaults and
-/// must never read the user's settings.json.
+/// surface's `POST /processes`, source actions, workspace commands — must
+/// agree on the scrollback size and on the per-actor controls seeded at spawn
+/// time (both live-settable actor controls are also seeded at SPAWN).
 pub fn actor_config(
     spec: PtySpec,
     scrollback_lines: Option<usize>,
-    settings: Option<&Settings>,
+    settings: &Settings,
 ) -> ActorConfig {
-    let defaults = ActorConfig::default();
     ActorConfig {
         spec,
         scrollback_lines: scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK_LINES),
-        synthetic_prompt_marks: settings.map_or(defaults.synthetic_prompt_marks, |s| {
-            s.synthetic_prompt_marks
-        }),
-        wheel_speed: settings.map_or(defaults.wheel_speed, |s| s.scroll_wheel_speed),
+        synthetic_prompt_marks: settings.synthetic_prompt_marks,
+        wheel_speed: settings.scroll_wheel_speed,
         session_matcher: None,
     }
 }
@@ -107,8 +99,8 @@ pub type ExitHandler = Arc<dyn Fn(TermId, Option<i32>, bool) + Send + Sync>;
 
 /// One outbound JSON event. `event` is the wire kind (`term://title`, …) and
 /// also the Tauri global event name the frontend listens on; `seq` is the
-/// per-terminal monotonic stream position (frames included), so the debug
-/// `/events` `since` filter is a stable cursor.
+/// per-terminal monotonic stream position (frames included), so a listener
+/// can order an event against the frames around it.
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonEvent {
     pub event: &'static str,
@@ -151,19 +143,14 @@ impl EventSink for ChannelSink {
     }
 }
 
-/// Sink for harness-created terminals (debug HTTP): no webview channels, the
-/// harness reads text via `TermHandle::dump_text` instead.
+/// Sink for a terminal no webview channel is attached to (agent and
+/// control-surface spawns, tests): frames and events go nowhere, and readers
+/// take the screen text through `TermHandle::dump_text` instead.
 pub struct NullSink;
 
 impl EventSink for NullSink {
     fn send_binary(&self, _bytes: Vec<u8>) {}
     fn emit_json(&self, _event: JsonEvent) {}
-}
-
-impl Sequenced for JsonEvent {
-    fn seq(&self) -> u64 {
-        self.seq
-    }
 }
 
 /// One `send_input` / `send_bytes` delivery record: the
@@ -192,7 +179,7 @@ pub struct InputRecord {
 /// Bound on the per-process input journal ("last 100").
 pub const INPUT_JOURNAL_CAP: usize = 100;
 
-/// One process row for the control surface: the debug
+/// One process row for the control surface: the rail
 /// snapshot fields plus byte-stream liveness straight off the actor's
 /// `IoCounters`. `has_output == false` = still booting; `child_alive == false`
 /// = the child is gone (exit observed) even if the row still says running
@@ -205,13 +192,13 @@ pub const INPUT_JOURNAL_CAP: usize = 100;
 /// implemented.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlSnapshot {
-    /// The rail/debug row (`id, name, status, exit_code, cols, rows, seq`),
+    /// The rail row (`id, name, status, exit_code, cols, rows, seq`),
     /// built by the SAME `Entry` → [`TerminalSnapshot`] helper `Registry::list`
     /// uses, and flattened so the two listings can never disagree about a
     /// shared field. The wire shape is byte-identical to the hand-copied
     /// struct it replaced — same keys, same order (flatten emits the base
     /// fields where the field is declared), same lowercase status strings —
-    /// which `CONTROL_API.md` and the parity harness depend on.
+    /// the wire shape `CONTROL_API.md` documents.
     #[serde(flatten)]
     pub base: TerminalSnapshot,
     /// Monotonic count of pty bytes the reader delivered (byte flow, not
@@ -323,9 +310,8 @@ pub struct LiveRow {
 
 /// The app-wide `term://created` broadcast. Emitted by every
 /// successful spawn PATH (never from inside `Registry::create_terminal*`
-/// itself — the parity harness and the debug 8323 surface create via
-/// the registry and are EXCLUDED by design: they are test scaffolding). The
-/// webview adopts an id it does not know into a rail row from this.
+/// itself — tests create through the registry directly and stay out of the
+/// rail). The webview adopts an id it does not know into a rail row from this.
 pub const TERM_CREATED: &str = "term://created";
 
 /// One `term://created` payload. `kind` is `terminal | agent | process`; the
@@ -385,9 +371,7 @@ pub fn emit_created(broadcast: &dyn CreatedBroadcast, event: CreatedEvent) {
 /// `term://created`, emitted by [`Registry::close`] for EVERY close (the
 /// frontend's ×, control/MCP `close_terminal`, project stop, `close_on_exit`).
 /// This is the gap that lets an MCP-side `close_terminal` leave a STALE rail
-/// row today; the frontend drops the row off this event. Debug-harness (8323)
-/// closes go through [`Registry::close_silent`] and are EXCLUDED, as with
-/// created.
+/// row today; the frontend drops the row off this event.
 pub const TERM_CLOSED: &str = "term://closed";
 
 /// The `reason` vocabulary for a [`ClosedEvent`].
@@ -432,8 +416,8 @@ impl ClosedBroadcast for AppClosedBroadcast {
     }
 }
 
-/// A no-op `term://closed` seam, used where nothing may see a close (the
-/// debug-harness route and the default registry).
+/// A no-op `term://closed` seam: the default registry's, until the app
+/// installs the real one (tests with no Tauri runtime keep it).
 pub struct NullClosedBroadcast;
 
 impl ClosedBroadcast for NullClosedBroadcast {
@@ -510,12 +494,11 @@ struct Entry {
     exit_code: Option<i32>,
     cols: u16,
     rows: u16,
-    /// Sequence number of the last binary frame pushed (debug listing).
+    /// Sequence number of the last binary frame pushed (listed as `seq`).
     seq: u32,
     /// OS pid of the pty child — the root of the stats tree walk. `None`
     /// for a no-pty actor (the headless test path).
     pid: Option<u32>,
-    events: EventRing<JsonEvent>,
     /// Fired by the pump on child exit (auto_restart hook).
     on_exit: Option<ExitHandler>,
     /// The bounded delivery audit for `send_input` / `send_bytes`.
@@ -549,8 +532,8 @@ struct Entry {
     /// `/processes` row.
     close_on_exit: bool,
     /// The durable record this entry runs for (`uuid` is then the run's
-    /// uuid). `None` for an ephemeral row: the debug harness, a control
-    /// `spawn_terminal`, or a spawn that opted out.
+    /// uuid). `None` for an ephemeral row: a control `spawn_terminal`, or a
+    /// spawn that opted out.
     record: Option<String>,
     /// The run's timeline for the live row's `last_run` head.
     started_at_ms: u64,
@@ -588,7 +571,7 @@ impl Default for Inner {
 }
 
 /// Clonable app state (managed by Tauri). Commands borrow it via `State`; the
-/// debug HTTP server thread keeps its own clone.
+/// control server and the background threads keep their own clones.
 #[derive(Clone)]
 pub struct Registry {
     inner: Arc<Mutex<Inner>>,
@@ -615,11 +598,11 @@ pub struct Registry {
     /// the real app handle (so EVERY close — including the backend-initiated
     /// `close_on_exit` and MCP `close_terminal` — reaches the webview). Tests
     /// swap in a recording fake; the default ([`NullClosedBroadcast`]) stays
-    /// silent so harness/test closes emit nothing.
+    /// silent so test closes emit nothing.
     closed_broadcast: Arc<Mutex<Arc<dyn ClosedBroadcast>>>,
     /// Where record-bound entries report their runs' ends (set once at app
     /// setup to the records service). `None` = nothing is recorded, which is
-    /// what the harness and most tests want.
+    /// what most tests want.
     run_recorder: Arc<Mutex<Option<Arc<dyn RunRecorder>>>>,
     /// Deliveries from the control surface and timers held back from an
     /// agent until it is safe to make them ([`crate::delivery_hold`]).
@@ -1235,7 +1218,7 @@ impl Registry {
                 .is_some_and(|agent| agent.awaiting_input());
     }
     /// Spawn a terminal actor plus its event pump and register it. `name` is
-    /// the display/debug label. Errors propagate from the pty spawn and leave
+    /// the display label. Errors propagate from the pty spawn and leave
     /// the registry untouched. Plain shells pass no exit handler.
     pub fn create_terminal(
         &self,
@@ -1447,7 +1430,6 @@ impl Registry {
             rows: cfg.spec.rows,
             seq: 0,
             pid,
-            events: EventRing::new(100),
             on_exit,
             input_journal: VecDeque::with_capacity(INPUT_JOURNAL_CAP),
             agent,
@@ -1618,7 +1600,7 @@ impl Registry {
     /// through the async `close_terminal` command, which `spawn_blocking`s
     /// this.
     pub fn close(&self, id: TermId) -> Option<CloseOutcome> {
-        self.close_inner(id, CloseReason::Closed, true)
+        self.close_inner(id, CloseReason::Closed)
     }
 
     /// Close an entry because its child EXITED with the spawn's
@@ -1628,22 +1610,10 @@ impl Registry {
     /// reason is `close_on_exit` so the rail/observers can tell a self-reap
     /// from a manual close.
     pub fn close_on_exit(&self, id: TermId) -> Option<CloseOutcome> {
-        self.close_inner(id, CloseReason::CloseOnExit, true)
+        self.close_inner(id, CloseReason::CloseOnExit)
     }
 
-    /// A close that broadcasts NO `term://closed` — the debug-harness (8323)
-    /// surface, whose terminals are test scaffolding by design (they never
-    /// emitted `term://created` either; the exclusion, mirrored here).
-    pub fn close_silent(&self, id: TermId) -> Option<CloseOutcome> {
-        self.close_inner(id, CloseReason::Closed, false)
-    }
-
-    fn close_inner(
-        &self,
-        id: TermId,
-        reason: CloseReason,
-        broadcast: bool,
-    ) -> Option<CloseOutcome> {
+    fn close_inner(&self, id: TermId, reason: CloseReason) -> Option<CloseOutcome> {
         let entry = self.inner.lock().unwrap().entries.remove(&id)?;
         self.tokens.revoke(id);
         // The json agent is marked closing (no more events) but its
@@ -1681,22 +1651,20 @@ impl Registry {
         // the teardown done, so a webview dropping the row on this event sees
         // a fully-reaped terminal. This is the seam that stops an MCP/control
         // `close_terminal` from leaving a stale rail row.
-        if broadcast {
-            // Clone the Arc out from under the lock so the broadcast itself
-            // (which may re-enter the app handle) never runs while holding it.
-            let broadcast = self
-                .closed_broadcast
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            emit_closed(
-                broadcast.as_ref(),
-                ClosedEvent {
-                    term_id: id,
-                    reason: reason.as_str(),
-                },
-            );
-        }
+        // Clone the Arc out from under the lock so the broadcast itself
+        // (which may re-enter the app handle) never runs while holding it.
+        let broadcast = self
+            .closed_broadcast
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        emit_closed(
+            broadcast.as_ref(),
+            ClosedEvent {
+                term_id: id,
+                reason: reason.as_str(),
+            },
+        );
         Some(CloseOutcome { verification })
     }
 
@@ -1905,7 +1873,7 @@ impl Registry {
             .unwrap_or_default()
     }
 
-    /// The debug listing / rail snapshot: one entry per live terminal.
+    /// The rail snapshot: one entry per live terminal.
     pub fn list(&self) -> Vec<TerminalSnapshot> {
         self.inner
             .lock()
@@ -1918,8 +1886,8 @@ impl Registry {
 
     /// The RICH rail listing the frontend reconciler adopts from —
     /// the `list` rows plus the kind/binding facts. Unlike [`Registry::list`]
-    /// and the control listing (whose wire shapes the harness and
-    /// CONTROL_API.md pin), this is the FRONTEND's own contract, so it can
+    /// and the control listing (whose wire shapes CONTROL_API.md
+    /// pins), this is the FRONTEND's own contract, so it can
     /// carry the placement facts without disturbing either pinned surface.
     pub fn list_rows(&self) -> Vec<RailRow> {
         self.inner
@@ -2065,8 +2033,8 @@ impl Registry {
     /// What the stats poller needs per tick: one row per live
     /// terminal, with the tree root and whether it is still alive. Kept
     /// separate from [`Registry::list`] deliberately — the pid is an internal
-    /// fact, not part of the rail/debug snapshot the frontend and the parity
-    /// harness read.
+    /// fact, not part of the rail snapshot the frontend and the control
+    /// listing read.
     pub fn stats_targets(&self) -> Vec<StatsTarget> {
         self.inner
             .lock()
@@ -2093,18 +2061,7 @@ impl Registry {
         self.waker.clone()
     }
 
-    /// JSON events for one terminal with `seq > since` (debug `/events`).
-    pub fn events_since(&self, id: TermId, since: u64) -> Vec<JsonEvent> {
-        self.inner
-            .lock()
-            .unwrap()
-            .entries
-            .get(&id)
-            .map(|entry| entry.events.since(since))
-            .unwrap_or_default()
-    }
-
-    /// Keep the debug listing's size honest after a resize.
+    /// Keep the listed size honest after a resize.
     pub fn set_size(&self, id: TermId, cols: u16, rows: u16) {
         if let Ok(mut inner) = self.inner.lock() {
             if let Some(entry) = inner.entries.get_mut(&id) {
@@ -2121,7 +2078,7 @@ impl Registry {
 pub const OSC52_MAX_BYTES: usize = 100 * 1024;
 
 /// The per-terminal event pump: forward frames as binary, everything else as a
-/// `term://*` JSON event, and keep the entry's debug ring + metadata current.
+/// `term://*` JSON event, and keep the entry's metadata current.
 /// Runs until the actor's `TermEvent` sender drops (terminal closed or child
 /// exited). `seq` is a per-terminal monotonic counter over every event the
 /// actor emitted.
@@ -2201,10 +2158,7 @@ fn spawn_pump(
                         &registry,
                     );
                     // Activity is emit-only and rate-limited: the rail shows a
-                    // subtle dot for hidden terminals that produced output. It
-                    // is deliberately NOT pushed into the per-terminal debug
-                    // event ring (it would evict title/notify/exited events the
-                    // parity harness asserts on).
+                    // subtle dot for hidden terminals that produced output.
                     if activity.due(started_at.elapsed().as_millis() as u64) {
                         sink.emit_json(JsonEvent {
                             event: "term://activity",
@@ -2219,12 +2173,9 @@ fn spawn_pump(
                     seq,
                     "term://title",
                     &sink,
-                    &registry,
                     json_map(&[("title", json!(title))]),
                 ),
-                TermEvent::Bell => {
-                    push(term_id, seq, "term://bell", &sink, &registry, json_map(&[]))
-                }
+                TermEvent::Bell => push(term_id, seq, "term://bell", &sink, json_map(&[])),
                 // Removed the unconditional OS notification that used
                 // to fire here: "pump keeps emitting raw events — filtering
                 // happens at the decision function, so levels change with zero
@@ -2237,7 +2188,6 @@ fn spawn_pump(
                     seq,
                     "term://notify",
                     &sink,
-                    &registry,
                     json_map(&[("title", json!(title)), ("body", json!(body))]),
                 ),
                 TermEvent::PromptMark { kind, row } => {
@@ -2252,7 +2202,6 @@ fn spawn_pump(
                         seq,
                         "term://prompt_mark",
                         &sink,
-                        &registry,
                         json_map(&[("kind", json!(kind)), ("row", json!(row))]),
                     );
                 }
@@ -2266,7 +2215,6 @@ fn spawn_pump(
                         seq,
                         "term://links",
                         &sink,
-                        &registry,
                         json_map(&[("links", json!(links))]),
                     );
                 }
@@ -2279,7 +2227,6 @@ fn spawn_pump(
                         seq,
                         "term://search",
                         &sink,
-                        &registry,
                         json_map(&[("total", json!(total))]),
                     );
                 }
@@ -2309,7 +2256,6 @@ fn spawn_pump(
                         seq,
                         "term://clipboard",
                         &sink,
-                        &registry,
                         json_map(&[("text", json!(text))]),
                     );
                 }
@@ -2332,7 +2278,6 @@ fn spawn_pump(
                                 seq,
                                 TERM_SESSION,
                                 &sink,
-                                &registry,
                                 session_map(binding.as_ref(), &session),
                             );
                         }
@@ -2352,7 +2297,6 @@ fn spawn_pump(
                             seq,
                             TERM_SUMMARY,
                             &sink,
-                            &registry,
                             summary_map(binding.as_ref(), &text, SummarySource::Osc),
                         );
                     }
@@ -2366,7 +2310,6 @@ fn spawn_pump(
                             seq,
                             TERM_PROGRAM_STATUS,
                             &sink,
-                            &registry,
                             json_map(&[("status", json!(state))]),
                         );
                     }
@@ -2446,7 +2389,6 @@ fn spawn_pump(
                                         seq,
                                         TERM_SESSION,
                                         &sink,
-                                        &registry,
                                         session_map(binding.as_ref(), &session),
                                     );
                                 }
@@ -2479,7 +2421,6 @@ fn spawn_pump(
                         seq,
                         "term://exited",
                         &sink,
-                        &registry,
                         json_map(&[
                             ("code", json!(status.code)),
                             ("success", json!(status.success)),
@@ -2612,8 +2553,7 @@ fn agent_binding(meta: &AgentMeta, record: Option<String>) -> Option<RecordBindi
 }
 
 /// Apply a status event to the entry; when the status actually changed, emit a
-/// `term://status` event (recorded in the debug ring like any other JSON
-/// event) carrying the status string and the current exit code.
+/// `term://status` event carrying the status string and the current exit code.
 fn apply_status(
     term_id: TermId,
     seq: u64,
@@ -2642,47 +2582,24 @@ fn apply_status(
             ("status", json!(status.as_str())),
             ("exit_code", json!(exit_code)),
         ]);
-        push(term_id, seq, "term://status", sink, registry, data);
+        push(term_id, seq, "term://status", sink, data);
     }
 }
 
-/// Build and forward one JSON event, also keeping the debug ring current.
+/// Build and forward one JSON event.
 fn push(
     term_id: TermId,
     seq: u64,
     kind: &'static str,
     sink: &Arc<dyn EventSink>,
-    registry: &Arc<Mutex<Inner>>,
     data: serde_json::Map<String, serde_json::Value>,
 ) {
-    let event = JsonEvent {
+    sink.emit_json(JsonEvent {
         event: kind,
         term_id,
         seq,
         data,
-    };
-    let recorded = ring_copy(&event);
-    sink.emit_json(event);
-    if let Ok(mut inner) = registry.lock() {
-        if let Some(entry) = inner.entries.get_mut(&term_id) {
-            entry.events.push(recorded);
-        }
-    }
-}
-
-/// The copy of `event` the debug ring keeps. An OSC 52 store carries
-/// whatever a program put on the clipboard (often a password or token), and
-/// the ring is readable over the debug server, so it records the size only;
-/// the frontend still gets the full text.
-fn ring_copy(event: &JsonEvent) -> JsonEvent {
-    let mut recorded = event.clone();
-    if event.event == "term://clipboard" {
-        if let Some(text) = recorded.data.remove("text") {
-            let bytes = text.as_str().map_or(0, str::len);
-            recorded.data.insert("bytes".into(), json!(bytes));
-        }
-    }
-    recorded
+    });
 }
 
 /// The ONE `Entry` → rail-row conversion, shared by [`Registry::list`] and the
@@ -2810,42 +2727,6 @@ fn json_map(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serd
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn event(kind: &'static str, data: serde_json::Map<String, serde_json::Value>) -> JsonEvent {
-        JsonEvent {
-            event: kind,
-            term_id: 1,
-            seq: 7,
-            data,
-        }
-    }
-
-    #[test]
-    fn debug_ring_keeps_only_the_size_of_a_clipboard_store() {
-        let store = event(
-            "term://clipboard",
-            json_map(&[("text", json!("copied words"))]),
-        );
-        let recorded = ring_copy(&store);
-        assert_eq!(recorded.event, "term://clipboard");
-        assert_eq!((recorded.term_id, recorded.seq), (1, 7));
-        assert!(
-            recorded.data.get("text").is_none(),
-            "clipboard text stays out of the ring"
-        );
-        assert_eq!(recorded.data.get("bytes"), Some(&json!(12)));
-        assert_eq!(
-            store.data.get("text"),
-            Some(&json!("copied words")),
-            "the sink's copy keeps the text"
-        );
-    }
-
-    #[test]
-    fn debug_ring_keeps_other_events_whole() {
-        let title = event("term://title", json_map(&[("title", json!("build"))]));
-        assert_eq!(ring_copy(&title).data, title.data);
-    }
 
     /// The text tail drops the blank screen rows below the cursor, keeps
     /// blank lines INSIDE the output, and caps at the tail length from the

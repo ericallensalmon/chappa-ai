@@ -119,8 +119,7 @@ fn pump_forwards_encoded_frames_and_exit_event() {
     assert_eq!(frame[0], FRAME_MAGIC, "encoded frame magic");
 
     // The child exits 0; the pump reports it as a JSON event carrying the
-    // term_id and a monotonic seq, and the same event lands in the debug
-    // event ring the /events route reads from.
+    // term_id and a monotonic seq.
     let exited = wait_until(|| {
         let events = sink.events.lock().unwrap().clone();
         events
@@ -135,19 +134,6 @@ fn pump_forwards_encoded_frames_and_exit_event() {
         "the print-x child exits 0"
     );
     assert!(exited.seq > 0, "events carry a monotonic seq");
-
-    let ring = wait_until(|| {
-        let events = registry.events_since(id, 0);
-        (!events.is_empty()).then_some(events)
-    });
-    assert!(
-        ring.iter().any(|event| event.event == "term://exited"),
-        "ring holds the exited event for /events?since=0"
-    );
-    assert!(
-        registry.events_since(id, exited.seq).is_empty(),
-        "since cursor past the exit drops it"
-    );
 
     registry.close(id);
 }

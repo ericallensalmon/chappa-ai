@@ -331,7 +331,7 @@ fn spawn_proc(
         .channel
         .clone()
         .ok_or_else(|| format!("command `{name}` has no frames channel"))?;
-    let cfg = actor_config(spec, None, Some(settings));
+    let cfg = actor_config(spec, None, settings);
     proc.generation += 1;
     proc.spawned_at = Instant::now();
     proc.lifecycle.on(ProcessEvent::Spawned, now_ms());

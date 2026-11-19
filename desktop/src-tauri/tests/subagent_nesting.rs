@@ -3,8 +3,7 @@
 //!    `term://created` (Part A wire facts);
 //!  - `close_on_exit` closes the entry through the ORDINARY close path after
 //!    the child exits, broadcasting `term://closed {reason: "close_on_exit"}`;
-//!  - an ordinary close broadcasts `reason: "closed"` exactly once;
-//!  - the debug-harness (8323) close (`close_silent`) emits neither.
+//!  - an ordinary close broadcasts `reason: "closed"` exactly once.
 //!
 //! Any fixture touching OS process semantics is cfg-gated (`sh` on unix,
 //! `cmd` on Windows).
@@ -277,24 +276,6 @@ fn ordinary_close_broadcasts_closed_exactly_once() {
     );
     assert_eq!(events[0].term_id, id);
     assert_eq!(events[0].reason, "closed");
-}
-
-/// The debug-harness (8323) close is SILENT — a
-/// terminal created through the harness path emits neither created nor
-/// closed, mirroring the created exclusion.
-#[test]
-fn debug_harness_close_emits_neither() {
-    let registry = Registry::default();
-    let closed = Arc::new(FakeClosed::default());
-    registry.set_closed_broadcast(closed.clone());
-    // A debug-harness terminal: created via the plain registry path (never
-    // broadcast `term://created`) and closed through `close_silent`.
-    let id = parent_entry(&registry);
-    assert!(registry.close_silent(id).is_some());
-    assert!(
-        closed.events.lock().unwrap().is_empty(),
-        "debug-harness close must not broadcast term://closed"
-    );
 }
 
 /// Part A, end to end: `spawn_agent` (the control/MCP headless path)

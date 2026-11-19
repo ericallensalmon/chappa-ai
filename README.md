@@ -366,11 +366,10 @@ keeps the last block in force: it fails closed.
 
 ### Opt-in switches
 
-Both are off unless set when the app starts.
+Off unless set when the app starts.
 
 | variable | what it does | what it exposes |
 |---|---|---|
-| `CHAPPA_DEBUG_HTTP=1` | debug builds only: a test-harness HTTP server on `127.0.0.1:8323` | it has no token: any local process can list, start, type into, read and close terminals. Requests that look like they come from a web page are refused |
 | `CHAPPA_RICH_CRASH_DUMPS=1` | native crash dumps (Windows) include heap memory and global data | whatever was in memory, secrets included: treat those dumps as secret |
 
 ## Profiles

@@ -1736,8 +1736,8 @@ struct Job {
 }
 
 /// The managed timer state: the scheduler, its store, and the two threads.
-/// `Default` builds an INERT service (no threads, no store) so `ControlState`
-/// and the parity harness work without a Tauri runtime; every route on an
+/// `Default` builds an INERT service (no threads, no store) so a `ControlState`
+/// in tests works without a Tauri runtime; every route on an
 /// inert service answers a clear 500.
 #[derive(Clone)]
 pub struct TimerService {

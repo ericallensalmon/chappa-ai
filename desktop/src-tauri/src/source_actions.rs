@@ -636,7 +636,7 @@ fn spawn_terminal_row(
             rows: 24,
         }
     };
-    let cfg = actor_config(spec.clone(), None, Some(&settings));
+    let cfg = actor_config(spec.clone(), None, &settings);
     let (binding, record_kind) = match record {
         Some(r) => (Some(r.binding), Some(r.kind)),
         None => (None, None),

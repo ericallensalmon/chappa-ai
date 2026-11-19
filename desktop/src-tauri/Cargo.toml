@@ -44,8 +44,7 @@ indexmap = { version = "2", features = ["serde"] }
 # The per-tool session-id capture pattern (`session_capture: regex`).
 regex = "1"
 
-# The debug-only HTTP server AND the all-builds control surface
-# (control_http.rs on 8324) share this one server crate.
+# The control surface's HTTP server (control_http.rs on 8324).
 tiny_http = "0.12"
 # The control bearer token (32 random bytes at first launch).
 # Already in the dependency tree via tauri; a direct dep so the OS CSPRNG

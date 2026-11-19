@@ -782,8 +782,8 @@ export interface TerminalInfoDto {
    *  under it; null for a root. */
   parent_process_id?: number | null;
   /** The durable record this row runs for, and its current run minus the
-   *  tail. Both null for an ephemeral row (debug harness, control
-   *  spawn_terminal, an opted-out agent). */
+   *  tail. Both null for an ephemeral row (control spawn_terminal, an
+   *  opted-out agent). */
   record_id?: string | null;
   last_run?: RunHeadDto | null;
   /** What the running program last reported about itself

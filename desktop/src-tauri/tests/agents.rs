@@ -378,7 +378,7 @@ fn spawn_agent_passes_extra_args_verbatim_and_delivers_the_prompt_when_ready() {
 
 /// Busy guard end-to-end through the control surface: per-tool limit refuses
 /// naming the busy process, `force` spawns it; unknown/disabled tools answer
-/// 404/409; the tool listing carries the parity `command` plus the fields.
+/// 404/409; the tool listing carries the display `command` plus the fields.
 #[test]
 fn control_routes_list_tools_and_guard_spawns() {
     let dir = tempfile::tempdir().unwrap();
