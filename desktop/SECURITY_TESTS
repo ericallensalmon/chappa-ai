@@ -1,0 +1,126 @@
+# Tests that must exist and pass on every CI run: the negative controls of
+# the app's security boundaries. `scripts/check-security-tests.mjs` reads
+# this list against the test output and fails the build when an entry did
+# not run (deleted, renamed, skipped, filtered out) or did not pass.
+# Removing an entry is a reviewed change.
+#
+# Format: [rust], [ui] and [node] sections, one test name per line. A Rust
+# name may carry its module path; `@unix` / `@windows` / `@linux` / `@macos`
+# limit an entry to those builds.
+
+[rust]
+# Trust prompts show what will run, exactly, and the rows mask secrets.
+a_mask_never_hides_shell_or_structure_characters
+the_prompt_shows_executable_text_exactly_whatever_it_looks_like
+visible_turns_controls_and_invisible_formatting_into_glyphs
+inline_credentials_are_shown_exactly_in_the_prompt_with_a_warning_and_hashed
+code_shaped_like_a_credential_is_shown_in_the_prompt_and_the_rows
+the_trust_prompt_shows_secrets_exactly_and_the_rows_mask_them
+the_prompt_lists_the_stack_commands_exactly_and_the_launch_carries_the_hash
+the_trust_gate_lists_every_command_whenever_something_would_run_unasked
+a_trust_entry_shows_line_breaks_in_values_as_glyphs
+no_command_starts_while_the_loaded_content_is_not_trusted
+control_errors_map_to_statuses_by_variant
+
+# Git runs nothing a repository configures; worktrees and roots stay put.
+a_repository_fsmonitor_runs_under_plain_git_and_never_under_the_helper
+a_repository_hook_never_runs_under_the_helper
+a_worktree_must_name_its_own_git_folder_in_a_known_clone
+known_repos_judge_the_git_folder_git_would_find
+commit_shapes
+every_override_is_on_the_command_line_before_the_subcommand
+the_ssh_command_is_the_persons_own_never_the_repositorys
+listing_through_git_never_runs_the_repository_fsmonitor
+dirty_hash_never_runs_what_the_repository_configures
+a_worktree_pointed_at_a_git_folder_of_its_own_runs_nothing_and_shows_an_error
+a_label_commit_that_is_not_a_commit_id_never_reaches_git
+no_crate_spawns_git_outside_the_helper
+porcelain_drops_prunable_entries
+worktrees_of_a_real_repository_include_the_main_one
+a_relative_root_refuses_the_manifest
+
+# The secret scan reads what the engine would send and cannot be silenced
+# from inside the scanned tree.
+build_context_reads_every_ignore_file_the_engine_might_use
+real_gitleaks_reports_what_the_scanned_tree_marks_allowed_or_binary
+the_commit_scan_log_options_turn_off_what_the_repository_configures
+a_build_context_skips_no_directory_and_keeps_what_any_ignore_file_keeps
+a_build_context_file_too_large_to_scan_leaves_the_scan_unfinished
+a_build_context_that_sends_git_warns_without_reading_it_or_failing
+real_gitleaks_uses_a_trusted_project_config_and_falls_back_when_it_changes
+
+# Session ids, prompts and terminal input cannot smuggle options or keys.
+session_id_shape_is_one_plain_word
+a_matched_id_of_the_wrong_shape_is_dropped
+a_session_id_of_the_wrong_shape_is_not_taken
+osc_777_session_announces_an_id
+resume_distinguishes_no_session_rejection_and_acceptance
+session_and_resume_routes_answer_typed_outcomes
+a_prompt_with_a_control_character_does_not_parse
+the_launch_digest_covers_prompt_folder_tool_and_env
+shown_prompts_are_capped_and_keep_the_newest
+the_review_prompt_keeps_the_pull_request_text_in_its_block
+prompt_argv_templates_substitution_and_backfill
+a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing
+typed_prompts_with_line_breaks_go_as_a_bracketed_paste
+resume_words_are_placed_per_transport
+timer_routes_default_the_delivery_target_to_the_caller
+the_fixture_actions_are_judged_called_run_and_journaled
+
+# Opening files, relays, data shown to token holders, token files.
+default_handler_opens_only_passive_files
+default_handler_refuses_executables_and_launchers @unix
+plans_refuse_public_gateways_and_the_apps_own_ports
+the_relay_listens_only_for_a_trusted_definition_and_never_on_the_apps_port
+launch_env_carries_the_address_token_and_reserved_ports
+control_routes_list_tools_and_guard_spawns
+credentials_in_a_tail_or_a_summary_are_masked_before_they_are_stored
+the_check_sees_the_spawns_it_is_for
+a_plain_file_is_not_owner_only_until_restricted
+a_new_file_cannot_be_opened_by_anyone_else_while_it_is_written @windows
+the_grant_names_the_process_token_user_by_sid @windows
+a_token_file_readable_by_others_is_replaced
+token_file_is_created_once_with_restrictive_permissions
+a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_persons_acknowledgement
+
+# The agent boundary: agents hold their own tokens and reach only what they
+# spawned, their own project and the launch checks.
+an_agent_token_maps_to_its_row_until_revoked_and_a_row_holds_one
+a_spawned_agent_gets_its_own_token_by_env_and_never_the_persons
+an_agents_control_token_reaches_a_container_by_name_only
+an_agent_token_cannot_spawn_a_terminal_in_a_folder_the_secret_scan_blocks
+an_agent_token_cannot_type_into_a_row_outside_its_subtree
+an_agent_timer_answering_a_numbered_choice_is_held
+an_agent_token_cannot_pass_a_permission_bypass_flag
+an_agent_passes_only_allowed_extra_args
+an_agent_token_cannot_claim_another_actor
+an_agent_message_to_another_agent_names_its_sender_and_a_bare_choice_key_is_refused
+an_agent_token_is_revoked_when_its_row_exits
+a_body_that_is_only_a_choice_key_is_recognised
+the_sender_line_cannot_be_forged_by_the_body_or_the_name
+confirmation_shapes_are_recognised_on_the_last_rows
+a_screen_hold_waits_for_the_question_and_the_person_can_release_one
+gate_refusals_map_to_statuses
+
+[ui]
+a start refused for untrusted content asks the trust prompt, and starts once the person chose Run
+ask: names the terminal by its row's name, never the title its program set
+shows the start and the end, and says how much lies between
+makes whitespace and control characters visible
+Allow once applies that store only; the next one asks again
+asks again for text with a line break even from an allowed terminal
+a Deny on the multi-line ask denies the terminal
+offers Allow once beside Allow, each answering its own value
+Enter answers the focused allow button, Escape denies
+focuses Cancel and a stray Enter cancels
+shows control characters and stray line breaks inside a line as glyphs
+keeps Run disabled until the list has been scrolled to its end
+arguments from agents: empty and off by default, saved one per line, the toggle lifts the list, and the hint says how far it reaches
+lists a pane's held deliveries and says why they wait
+shows the sender, the text and the reason before a release
+
+[node]
+gh missing gives an empty list and one clear error
+a relative GH_BIN is refused, not looked up
+a gh in the folder the source was started in never runs
+the checker passes only when every listed test ran and passed

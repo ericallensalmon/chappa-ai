@@ -254,6 +254,8 @@ impl World {
                 prompt_argv: Vec::new(),
                 session_capture: capture,
                 hooks_opt_out: false,
+                agent_args_allowed: Vec::new(),
+                agent_args_any: false,
             })
             .unwrap()
     }
@@ -266,6 +268,7 @@ impl World {
             projects: &self.projects,
             records: &self.records,
             actor: None,
+            caller: Default::default(),
         }
     }
 
@@ -275,6 +278,7 @@ impl World {
             tools: &self.tools,
             settings: &self.settings,
             app: None,
+            caller: Default::default(),
         }
     }
 
@@ -553,6 +557,8 @@ fn a_json_agent_copies_its_session_from_the_event_stream() {
             prompt_argv: Vec::new(),
             session_capture: SessionCapture::Json,
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap();
     let spawned = spawn_agent_headless(

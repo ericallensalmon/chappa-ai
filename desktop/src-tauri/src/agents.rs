@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,15 +36,17 @@ use crate::agent_tools::{
     docker_exec_prefix, prompt_args, resume_args, AgentTool, AgentToolsState, EnvFlags, Runtime,
     ToolType, Transport,
 };
+use crate::caller::{AgentGrant, Caller};
 use crate::open_path::{parse_mounts, Mount};
 use crate::projects::Projects;
 use crate::records::{Records, Scope};
+use crate::registry::Origin;
 use crate::registry::{
     emit_created, emit_session, AgentRow, AppCreatedBroadcast, ChannelSink, CreatedEvent,
     EventSink, JsonEvent, NullSink, Registry, RunRecorder, TermId,
 };
-use crate::roots::check_cwd;
 use crate::settings::SettingsState;
+use crate::spawn_gate::{GateRequest, SpawnKind};
 use crate::startup_questions::StartupQuestion;
 use project_model::records::{
     new_record_id, AgentRecord, RecordKind, Run, Session, SessionSource, TailKind,
@@ -110,6 +112,7 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "set_session",
     "resume_agent",
     "set_summary",
+    "whoami",
 ];
 
 // ---- docker CLI seam ---------------------------------------------------------
@@ -682,15 +685,25 @@ pub struct DeliveryPolicy {
     /// How long the gate may be waited on ([`PROMPT_WAIT_CAP`] for a queued
     /// spawn prompt, `timer_delivery_timeout_ms` for a timer firing).
     pub cap: Duration,
+    /// The body comes from an agent: any confirmation-shaped state on
+    /// screen holds it, not only the known startup questions.
+    pub from_agent: bool,
 }
 
 impl DeliveryPolicy {
+    /// The same policy for a body an agent sent.
+    pub fn for_agent(mut self) -> Self {
+        self.from_agent = true;
+        self
+    }
+
     /// The queued spawn prompt: quiet, or ready-by-timeout.
     pub fn spawn_prompt(quiet_ms: u64, max_wait_ms: u64) -> Self {
         Self {
             quiet_ms,
             max_wait_ms: Some(max_wait_ms),
             cap: PROMPT_WAIT_CAP,
+            from_agent: false,
         }
     }
 
@@ -700,6 +713,7 @@ impl DeliveryPolicy {
             quiet_ms,
             max_wait_ms: None,
             cap,
+            from_agent: false,
         }
     }
 }
@@ -834,7 +848,12 @@ pub fn deliver_prompt_when_ready(
         }
         if view.has_output && screen_checked_at.is_none_or(|t| t.elapsed() >= SCREEN_CHECK_EVERY) {
             screen_checked_at = Some(Instant::now());
-            question = crate::startup_questions::detect_startup_question(&handle.dump_text(0));
+            let screen = handle.dump_text(0);
+            question = if policy.from_agent {
+                crate::startup_questions::detect_confirmation(&screen)
+            } else {
+                crate::startup_questions::detect_startup_question(&screen)
+            };
         }
         let hold = if registry.program_status(id) == Some(ProgramStatus::Blocked) {
             Hold::Blocked
@@ -1947,6 +1966,25 @@ pub struct SpawnContext<'a> {
     /// `user` / unparsable actor). This is the default parent candidate when
     /// the request carries no explicit `parent_process_id`.
     pub actor: Option<TermId>,
+    /// Who asked for the spawn: the person (the app, a click, the person
+    /// token) or an agent token, whose authority the spawn stays within.
+    pub caller: Caller,
+}
+
+/// Undoes a minted agent token when the spawn it was minted for fails
+/// before its row exists.
+struct TokenGuard<'a> {
+    registry: &'a Registry,
+    id: TermId,
+    armed: bool,
+}
+
+impl Drop for TokenGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.registry.tokens().revoke(self.id);
+        }
+    }
 }
 
 /// The one spawn path (Tauri command, control route and MCP tool all land
@@ -1954,7 +1992,7 @@ pub struct SpawnContext<'a> {
 /// agents).
 pub fn spawn_agent_with(
     ctx: SpawnContext<'_>,
-    req: SpawnAgentRequest,
+    mut req: SpawnAgentRequest,
     sink: Arc<dyn EventSink>,
     on_notify: Option<AppHandle>,
 ) -> Result<SpawnAgentResponse, String> {
@@ -1968,6 +2006,30 @@ pub fn spawn_agent_with(
             tool.name, tool.id
         ));
     }
+    let caller = ctx.caller.clone();
+    if let Some(grant) = caller.grant() {
+        // What an agent may add to another agent's command line is the
+        // tool's allowlist, unless the person opened it up for this tool.
+        if let Some(why) = tool.agent_args_refusal(&req.extra_args) {
+            return Err(why);
+        }
+        match req.project_id {
+            Some(asked) if Some(asked) != grant.project_id => {
+                return Err(crate::spawn_gate::other_project_refusal(
+                    asked,
+                    grant.project_id,
+                ))
+            }
+            _ => req.project_id = grant.project_id,
+        }
+        if req
+            .prompt
+            .as_deref()
+            .is_some_and(|p| crate::agent_delivery::is_choice_key(p.as_bytes()))
+        {
+            return Err(crate::agent_delivery::CHOICE_KEY_REFUSAL.to_owned());
+        }
+    }
     let settings = ctx.settings.snapshot();
     let project = match req.project_id {
         Some(id) => Some(
@@ -1977,61 +2039,36 @@ pub fn spawn_agent_with(
         ),
         None => None,
     };
-    // The working directory: the project root, or a folder inside a cwd
-    // root when the request names one.
-    let working_dir = req
-        .working_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|w| !w.is_empty());
-    let cwd: Option<PathBuf> = match working_dir {
-        Some(dir) => {
-            Some(check_cwd(&ctx.projects.cwd_roots(req.project_id, None), dir).into_result()?)
-        }
-        None => project.as_ref().map(|(_, root)| root.clone()),
-    };
     crate::sources::actions::validate_env(
         &req.env
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     )?;
-    // No new agent next to data that may be real: a stack source's
-    // data-safety block covering the folder refuses every launch here (a
-    // source's agent action, the app's own spawn, the control surface and
-    // MCP, starting a stopped record, a resume), until the check is clean
-    // or acknowledged. Terminals are not agents and never come here.
-    if let Some(dir) = &cwd {
-        crate::data_safety::check_launch(&ctx.projects.sources(), dir)?;
-    }
-    // Secrets in the folder the agent is about to read are looked for
-    // BEFORE anything is spawned; a blocking finding is the error here.
-    let scan_notice = match &cwd {
-        Some(dir) if tool.runtime.container().is_none() => {
-            let project_root = project
-                .as_ref()
-                .map(|(_, root)| root.as_path())
-                .unwrap_or(dir.as_path());
-            let pref = req
-                .project_id
-                .and_then(|id| ctx.projects.secret_scan_pref(id));
-            // The project's own gitleaks config while it is the trusted one,
-            // and the open folders a Settings config must lie outside of.
-            let configs = crate::secret_scan::ScanConfigs {
-                project: ctx.projects.scan_config_for(req.project_id),
-                open_roots: ctx.projects.open_roots(),
-            };
-            crate::secret_scan::gate_launch_with(
-                &settings,
-                pref,
-                project_root,
-                dir,
-                req.launch_anyway.as_deref(),
-                &configs,
-            )?
-        }
-        _ => None,
+    // The launch gate, keyed on the folder and the caller: the folder
+    // check, then no new agent next to data that may be real (a stack
+    // source's data-safety or secret-scan block covering the folder), then
+    // the secret scan of the folder it is about to read, BEFORE anything is
+    // spawned. A source's agent action, the app's own spawn, the control
+    // surface and MCP, starting a stopped record and a resume all come here,
+    // and the registry takes the spawn only with the pass this hands back.
+    let gate = crate::spawn_gate::AppSpawnGate {
+        projects: ctx.projects.clone(),
+        settings: ctx.settings.clone(),
     };
+    let (pass, scan_notice) = ctx.registry.gate_spawn(
+        &gate,
+        &GateRequest {
+            caller: &caller,
+            kind: SpawnKind::Agent {
+                container: tool.runtime.container().is_some(),
+            },
+            project_id: req.project_id,
+            working_dir: req.working_dir.as_deref(),
+            launch_anyway: req.launch_anyway.as_deref(),
+        },
+    )?;
+    let cwd: Option<PathBuf> = pass.cwd().map(Path::to_path_buf);
     let uuid = new_uuid()?;
     // The guard check and the entry that makes the NEXT check see this
     // spawn happen under one lock: two concurrent spawns can otherwise both
@@ -2051,10 +2088,35 @@ pub fn spawn_agent_with(
     let id = ctx.registry.reserve_id();
     // Resolve + validate the parent the rail will nest this agent
     // under (see [`resolve_parent_process_id`] — pure and unit-tested).
-    let parent_process_id = resolve_parent_process_id(req.parent_process_id, ctx.actor, id, |p| {
-        ctx.registry.handle(p).is_some()
-    });
-    let identity = identity_env(id, req.project_id, tool.id, &uuid);
+    // An agent's spawn nests under the agent itself, or a row of its own
+    // subtree it names; the header is not consulted for it.
+    let parent_process_id = match caller.grant() {
+        Some(grant) => Some(
+            req.parent_process_id
+                .filter(|p| *p != id && ctx.registry.in_subtree(grant.process_id, *p))
+                .unwrap_or(grant.process_id),
+        ),
+        None => resolve_parent_process_id(req.parent_process_id, ctx.actor, id, |p| {
+            ctx.registry.handle(p).is_some()
+        }),
+    };
+    // The row's own control token, by env only (docker passes it by name):
+    // the agent's MCP server speaks with this row's authority, never with
+    // the person's token.
+    let token = ctx.registry.tokens().mint(AgentGrant {
+        process_id: id,
+        project_id: req.project_id,
+        parent_process_id: caller.grant().map(|g| g.process_id),
+        tool: Some(tool.id),
+        created_ms: now,
+    })?;
+    let mut token_guard = TokenGuard {
+        registry: ctx.registry,
+        id,
+        armed: true,
+    };
+    let mut identity = identity_env(id, req.project_id, tool.id, &uuid);
+    identity.push((crate::caller::TOKEN_ENV.to_owned(), token));
     // inherited < tool.env < the request's env < identity.
     let mut tool_env = tool.env.clone();
     for (k, v) in &req.env {
@@ -2088,7 +2150,21 @@ pub fn spawn_agent_with(
             planned
         }
     };
-    let prompt = req.prompt.as_deref().filter(|p| !p.is_empty());
+    // A first prompt from an agent starts with the sender line, so the new
+    // agent can tell it from the person.
+    let sent_prompt: Option<String> =
+        req.prompt
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(|p| match caller.grant() {
+                Some(grant) => crate::agent_delivery::wrap(
+                    &ctx.registry.name_of(grant.process_id).unwrap_or_default(),
+                    grant.process_id,
+                    p,
+                ),
+                None => p.to_owned(),
+            });
+    let prompt = sent_prompt.as_deref();
     // A tty tool with a `prompt_argv` gets its first prompt on the command
     // line, LAST (after the tool's args and the extra args, so a flag among
     // them never swallows it), and nothing is typed: an argv prompt cannot
@@ -2216,10 +2292,11 @@ pub fn spawn_agent_with(
     // Capture the broadcast app handle BEFORE the json-agent match
     // below moves `on_notify` (the emit is after it). A cheap Arc clone.
     let created_app = on_notify.clone();
+    let origin = Origin::with_pass(caller.clone(), pass);
     let created = match json_mode {
         None => ctx
             .registry
-            .create_agent_terminal(
+            .create_agent_terminal_as(
                 cfg,
                 sink,
                 on_notify.clone(),
@@ -2228,11 +2305,12 @@ pub fn spawn_agent_with(
                 meta.clone(),
                 req.close_on_exit,
                 record_id.clone(),
+                origin,
             )
             .map(|_| None),
         Some(mode) => ctx
             .registry
-            .create_json_agent_terminal(
+            .create_json_agent_terminal_as(
                 cfg,
                 sink,
                 on_notify.clone(),
@@ -2241,6 +2319,7 @@ pub fn spawn_agent_with(
                 meta.clone(),
                 req.close_on_exit,
                 record_id.clone(),
+                origin,
             )
             .map(|handle| Some((handle, mode))),
     };
@@ -2252,8 +2331,12 @@ pub fn spawn_agent_with(
             }
             return Err(e);
         }
-        Ok(None) => None,
+        Ok(None) => {
+            token_guard.armed = false;
+            None
+        }
         Ok(Some((handle, mode))) => {
+            token_guard.armed = false;
             let recipe = SpawnRecipe {
                 command: plan.command.clone(),
                 args: plan.args.clone(),
@@ -2373,15 +2456,35 @@ pub fn spawn_agent_with(
             }
         }),
         None => prompt.map(|p| {
-            deliver_prompt_when_ready(
-                ctx.registry,
-                id,
-                p,
-                DeliveryPolicy::spawn_prompt(
-                    u64::from(settings.agent_ready_quiet_ms),
-                    u64::from(settings.agent_ready_max_wait_ms),
-                ),
-            )
+            let policy = DeliveryPolicy::spawn_prompt(
+                u64::from(settings.agent_ready_quiet_ms),
+                u64::from(settings.agent_ready_max_wait_ms),
+            );
+            let Some(grant) = caller.grant() else {
+                return deliver_prompt_when_ready(ctx.registry, id, p, policy);
+            };
+            let receipt = deliver_prompt_when_ready(ctx.registry, id, p, policy.for_agent());
+            // Still asked when the wait ran out: the prompt waits on the
+            // row, where the person can release or drop it.
+            if let Some(reason) = receipt.reason.as_deref().filter(|r| r.starts_with("held")) {
+                let registry = ctx.registry.clone();
+                let text = p.to_owned();
+                ctx.registry.hold_for_screen(
+                    id,
+                    reason.to_owned(),
+                    format!("process {}", grant.process_id),
+                    p.to_owned(),
+                    Box::new(move |_| {
+                        let bracketed = registry
+                            .handle(id)
+                            .and_then(|h| h.modes())
+                            .is_some_and(|m| m.bracketed_paste);
+                        let payload = typed_prompt_payload(&text, bracketed);
+                        registry.write_journaled(id, &payload, text, true);
+                    }),
+                );
+            }
+            receipt
         }),
     };
     // The webview adopts every backend-spawned agent into the rail
@@ -2763,6 +2866,7 @@ pub async fn spawn_agent(
                 // The rail's own "New agent ▸" spawn has NO actor —
                 // user-spawned agents are roots (parent `None`).
                 actor: None,
+                caller: Default::default(),
             },
             req,
             Arc::new(ChannelSink::new(frames, app.clone())),
@@ -2946,6 +3050,31 @@ mod tests {
     /// An `extra_args` element with spaces is ONE argv entry, and for
     /// docker every env entry becomes a `-e` flag the container-side process
     /// sees. The wrapper is `sh -c '<script>' program args…`.
+    /// A docker-exec agent gets its own control token by NAME (`-e`), the
+    /// value only in the client's environment: never on a command line.
+    #[test]
+    fn an_agents_control_token_reaches_a_container_by_name_only() {
+        let tool = docker_tool();
+        let token = "f".repeat(64);
+        let mut identity = identity_env(9, Some(2), tool.id, "abc");
+        identity.push((crate::caller::TOKEN_ENV.to_owned(), token.clone()));
+        let env = merge_env(&[], &tool.env, &identity);
+        let plan = build_spawn_plan(&tool, &[], &env, None, "abc", true);
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w[0] == "-e" && w[1] == crate::caller::TOKEN_ENV));
+        assert!(
+            !plan.args.iter().any(|a| a.contains(&token)),
+            "{:?}",
+            plan.args
+        );
+        assert_eq!(
+            plan.env.get(crate::caller::TOKEN_ENV).map(String::as_str),
+            Some(token.as_str())
+        );
+    }
+
     #[test]
     fn spawn_plan_keeps_extra_args_verbatim_and_flags_env_for_docker() {
         let tool = docker_tool();

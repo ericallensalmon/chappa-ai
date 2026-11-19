@@ -88,6 +88,9 @@ pub enum CoordError {
     Cycle(String),
     /// Bad arguments (missing heading, out-of-range lines, unknown status…).
     Invalid(String),
+    /// The caller's token does not reach what it named (an agent naming
+    /// a process outside its own subtree).
+    Forbidden(String),
     Internal(String),
 }
 
@@ -99,6 +102,7 @@ impl CoordError {
             | CoordError::Locked { .. }
             | CoordError::Cycle(_) => 409,
             CoordError::Invalid(_) => 400,
+            CoordError::Forbidden(_) => 403,
             CoordError::Internal(_) => 500,
         }
     }
@@ -134,6 +138,7 @@ impl CoordError {
             }),
             CoordError::Cycle(m) => json!({"error": "cycle", "message": m}),
             CoordError::Invalid(m) => json!({"error": "invalid", "message": m}),
+            CoordError::Forbidden(m) => json!({"error": "forbidden", "message": m}),
             CoordError::Internal(m) => json!({"error": "internal", "message": m}),
         }
     }

@@ -117,6 +117,8 @@ export function templateFor(toolType: AgentToolType, os: HostOs = detectHostOs()
     resume_argv: resumeArgvFor(toolType),
     prompt_argv: promptArgvFor(toolType),
     session_capture: sessionCaptureFor(toolType),
+    agent_args_allowed: [],
+    agent_args_any: false,
   };
 }
 
@@ -130,6 +132,8 @@ export function cloneTool(t: AgentTool): AgentTool {
     resume_argv: [...(t.resume_argv ?? [])],
     prompt_argv: [...(t.prompt_argv ?? [])],
     session_capture: { ...(t.session_capture ?? { kind: "none" }) },
+    agent_args_allowed: [...(t.agent_args_allowed ?? [])],
+    agent_args_any: t.agent_args_any ?? false,
   };
 }
 

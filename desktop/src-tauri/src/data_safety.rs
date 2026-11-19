@@ -34,8 +34,10 @@
 //! - **New agents** whose working folder is inside a blocked folder are
 //!   refused at the one spawn path every launch takes (a source's `agent`
 //!   action, the app's own spawn over IPC, the control surface and MCP,
-//!   starting a stopped record and resuming one), with the reason.
-//!   Terminals are not agents and are never refused.
+//!   starting a stopped record and resuming one), with the reason. A
+//!   terminal the person opens is not refused (it is the person at a
+//!   keyboard); a terminal an agent opens is refused like an agent
+//!   ([`crate::spawn_gate`]).
 //! - **Running agents** are not stopped. Each one inside a blocked folder
 //!   is listed (the webview raises a Needs you entry for it), and what the
 //!   control surface, MCP and timers deliver to it is held
@@ -571,6 +573,9 @@ pub struct DataSafetyState {
     pub blocks: Vec<ActiveBlock>,
     pub agents: Vec<BlockedAgent>,
     pub held: Vec<HeldCount>,
+    /// Every held delivery, oldest first per pane: what the row lists for
+    /// the person to release or drop.
+    pub held_items: Vec<crate::delivery_hold::HeldEntry>,
 }
 
 /// The state now: the blocks in force, the running agents inside them,
@@ -602,6 +607,7 @@ pub fn state_of(sources: &Sources, registry: &Registry) -> DataSafetyState {
         blocks,
         agents,
         held,
+        held_items: registry.held_list(None),
     }
 }
 
@@ -648,6 +654,52 @@ pub fn data_safety_state(
 ) -> Result<DataSafetyState, String> {
     main_window_only(&window)?;
     Ok(state_of(&sources, &registry))
+}
+
+/// `held_deliveries`: what is held for pane `term_id` (every pane when
+/// absent).
+#[tauri::command]
+pub fn held_deliveries(
+    window: tauri::Window,
+    registry: State<'_, Registry>,
+    term_id: Option<TermId>,
+) -> Result<Vec<crate::delivery_hold::HeldEntry>, String> {
+    main_window_only(&window)?;
+    Ok(registry.held_list(term_id))
+}
+
+/// `release_held_delivery`: the person lets one held delivery go now,
+/// whatever held it. It is made off the main thread (a timer body waits for
+/// the program to be ready); the state broadcast shows it gone.
+#[tauri::command]
+pub fn release_held_delivery(
+    window: tauri::Window,
+    registry: State<'_, Registry>,
+    entry_id: u64,
+) -> Result<bool, String> {
+    main_window_only(&window)?;
+    if !registry.held_list(None).iter().any(|e| e.id == entry_id) {
+        return Ok(false);
+    }
+    let registry = registry.inner().clone();
+    std::thread::Builder::new()
+        .name("held release".into())
+        .spawn(move || {
+            registry.release_held_one(entry_id);
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// `drop_held_delivery`: the person drops one held delivery unsent.
+#[tauri::command]
+pub fn drop_held_delivery(
+    window: tauri::Window,
+    registry: State<'_, Registry>,
+    entry_id: u64,
+) -> Result<bool, String> {
+    main_window_only(&window)?;
+    Ok(registry.discard_held(entry_id).is_some())
 }
 
 #[cfg(test)]

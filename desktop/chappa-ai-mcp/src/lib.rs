@@ -472,6 +472,12 @@ pub fn tools() -> Vec<Value> {
     };
     vec![
         json!({
+            "name": "whoami",
+            "description": "Who this MCP server speaks as: {kind: person | agent, process_id?, project_id?, parent?, tool?, name?, routes: [{method, path, access}]}. An agent the app spawned (or a terminal an agent opened) holds its own token, scoped to its own row and the rows it spawned (its subtree), its own project, and project-level reads; `routes` lists what it may call and how far each reaches. The person's token reaches everything.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations(true, false, true),
+        }),
+        json!({
             "name": "list_processes",
             "description": "Every live terminal/process in chappa-ai: id, name, status (starting|running|stopped|exited|failed), exit_code, cols, rows, seq, plus byte-stream liveness: output_bytes, last_output_at (unix ms), has_output (false = still booting, distinct from dead), child_alive. `agent.parent_process_id` = the process that spawned it, null for a root; `close_on_exit` is the row's self-reap flag. `record_id` + `last_run` {run_uuid, status, started_at_ms, ended_at_ms, exit_code, success, tail_kind, tail_len} name the durable record a row belongs to: a stopped row with a record_id can be started again (start_record) and its history read (get_record_runs); both null for an ephemeral row. `program_status` (working|blocked|done|failed|idle, null when never reported or the run ended) is what the program last said about itself with `OSC 777;status;<state>`; `blocked` means it is waiting on a person, and timer deliveries to it wait until it reports anything else.",
             "inputSchema": schema(json!({}), &[]),
@@ -1174,6 +1180,7 @@ pub fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value, Too
         args
     };
     match name {
+        "whoami" => client.request("GET", "/whoami", None),
         "list_processes" => client.request("GET", "/processes", None),
         "get_process_status" => {
             let id = req_u64(args, "id")?;

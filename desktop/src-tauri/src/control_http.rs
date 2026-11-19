@@ -58,15 +58,18 @@ use crate::agent_tools::AgentToolsState;
 use crate::agents::{
     agent_events, json_send_input, spawn_agent_headless, SpawnAgentRequest, SpawnContext,
 };
+use crate::caller::{AgentGrant, Caller};
 use crate::commands::default_shell;
 use crate::coordination::Coordination;
 use crate::coordination_http as coord;
 use crate::projects::{ControlError, Projects};
 use crate::records::{self, Records};
 use crate::registry::{
-    actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, NullSink, Registry, TermId,
+    actor_config, emit_created, AppCreatedBroadcast, CreatedEvent, NullSink, Origin, Registry,
+    TermId,
 };
 use crate::settings::SettingsState;
+use crate::spawn_gate::{refusal_status, AppSpawnGate, GateRequest, SpawnKind};
 use crate::timers::TimerService;
 use crate::timers_http as timers;
 
@@ -201,6 +204,45 @@ pub struct Route {
     pub fields: &'static [&'static str],
     pub description: &'static str,
     handler: Handler,
+    /// Who may call it.
+    pub access: Access,
+}
+
+/// Who may call a route. The person's token reaches every route; an agent
+/// token reaches what its row's authority covers. See [`crate::caller`]
+/// for why this holds only for agents that cannot read the person's files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Any token. What it answers or does may still depend on the caller
+    /// (a listing filtered to the agent's own rows, a spawn gated to its
+    /// project, timers and coordination attributed to it).
+    Any,
+    /// `{id}` must be the agent's own row or one it spawned (transitively).
+    Subtree,
+    /// `{record_id}` must be a record of the agent's subtree: its live row
+    /// is in the subtree, or its recorded parent chain reaches the agent's
+    /// own record.
+    SubtreeRecord,
+    /// A project- or app-level read: allowed, with what is secret redacted.
+    Project,
+    /// `{project}` must be the agent's own project.
+    OwnProject,
+    /// The person only: an agent token is refused (403).
+    Person,
+}
+
+impl Access {
+    /// The doc table's "Who" column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Access::Any => "person; agent",
+            Access::Subtree => "person; agent: own subtree",
+            Access::SubtreeRecord => "person; agent: own subtree's records",
+            Access::Project => "person; agent: project-level read",
+            Access::OwnProject => "person; agent: own project",
+            Access::Person => "person only",
+        }
+    }
 }
 
 pub const ROUTES: &[Route] = &[
@@ -210,6 +252,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "This route table as JSON (discoverability), plus `instance` {pid, config_dir} — which running chappa-ai answered, so two instances (or a stale one holding the port) are diagnosable.",
         handler: route_table,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -217,6 +260,15 @@ pub const ROUTES: &[Route] = &[
         fields: &["challenge"],
         description: "The ONE route that needs no token: it lets a client check that this server is the app BEFORE sending the token to it (anything else can bind this port first). `challenge` = 32 random bytes as lowercase hex. Answers {addr, nonce, proof}: addr = the address this server bound, nonce = a random value fresh for this run (both also in the owner-only `<app-config>/control_endpoint`, written after each successful bind), proof = hex BLAKE3 keyed hash of `challenge 0x00 addr 0x00 nonce` under the key BLAKE3-derive_key(\"chappa-ai control-surface identity proof v1\", token). A client recomputes the proof from its own token, checks addr/nonce against the endpoint file, and only then sends its authenticated request on the same keep-alive connection.",
         handler: identity_route,
+        access: Access::Any,
+    },
+    Route {
+        method: "GET",
+        path: "/whoami",
+        fields: &[],
+        description: "Who the presented token is: {kind: person | agent, process_id?, project_id?, parent?, tool?, routes: [{method, path, access}]} — for an agent token the row it was minted for, that row's project, the agent row that spawned it (null when the person did), and the routes it may call with how far each reaches. An agent token is minted for each spawned agent (and each terminal an agent opens), delivered only in the child's CHAPPA_AI_CONTROL_TOKEN, held only in the app's memory, and revoked when the row exits or closes; the X-Chappa-Actor header is ignored for it.",
+        handler: whoami,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -224,13 +276,15 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "Every live terminal/process: id, name, status, exit_code, cols, rows, seq, plus byte-stream liveness (output_bytes, last_output_at, has_output, child_alive), `close_on_exit` (the spawn flag — the row reaps itself when its child exits) and, for agents, `agent.parent_process_id` (the process that spawned it, null for a root). `record_id` + `last_run` (see Records) name the durable record a row belongs to: a stopped row with a record_id can be started again (`POST /records/{record_id}/start`) or, when `last_run.session` holds the provider's session id, resumed (`POST /records/{record_id}/resume`); both are null for an ephemeral row. `program_status` is what the program last reported with `OSC 777;status;<working|blocked|done|failed|idle>` (null when it never did or the run ended); `blocked` is the same attention as an agent waiting for input and holds timer and queued-prompt deliveries. Stats fields will ride along here.",
         handler: list_processes,
+        access: Access::Any,
     },
     Route {
         method: "POST",
         path: "/processes",
         fields: &["command?", "args?", "cwd?", "name?", "cols?", "rows?", "env?"],
-        description: "Spawn a terminal. `command` + `args` reach the OS verbatim (never re-split); no command = the default shell; `env` = {NAME: value} applied over the inherited environment. cols/rows 1..=4096. Returns {id, name}. Ephemeral: the row has no record and vanishes on close.",
+        description: "Spawn a terminal. `command` + `args` reach the OS verbatim (never re-split); no command = the default shell; `env` = {NAME: value} applied over the inherited environment. cols/rows 1..=4096. Returns {id, name}. Ephemeral: the row has no record and vanishes on close. The person's terminal starts as asked; a terminal an agent opens starts only inside the agent's own project roots (no cwd = the project root) and only where the data-safety and secret-scan checks allow (409 naming the check; 403 for a folder outside the roots), is in the agent's subtree, and gets its own agent token plus CHAPPA_AI_PROCESS_ID / CHAPPA_AI_PROJECT_ID in its env (a request's env cannot set those).",
         handler: spawn_terminal,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -238,6 +292,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "One process row (same shape as the listing). has_output=false means still booting; child_alive=false means the child has exited.",
         handler: get_process,
+        access: Access::Subtree,
     },
     Route {
         method: "GET",
@@ -245,6 +300,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["lines?", "offset?"],
         description: "Terminal text. Default = the WHOLE current screen. `lines`=N adds the last N scrollback lines above it; `offset`=O (with lines) returns a history-only window skipping the O most recent scrollback lines. No silent cap.",
         handler: get_output,
+        access: Access::Subtree,
     },
     Route {
         method: "GET",
@@ -252,13 +308,15 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "The last 100 send_input/send_bytes deliveries: [{ts, bytes_len, text, submit}], oldest first.",
         handler: get_input_journal,
+        access: Access::Subtree,
     },
     Route {
         method: "POST",
         path: "/processes/{id}/input",
         fields: &["text", "submit?", "wait_ms?"],
-        description: "Write text to the pty in ONE atomic write (submit appends \\r to the same write). Returns a receipt {written, seq_before, seq_after, had_output_within_ms, wait_ms} off the byte counter. For a json-transport agent the text is delivered as ONE user message (claude: a stream-json user line on stdin; opencode: a `run -s <session>` continuation child) and the receipt is {written, transport: \"json\", delivered, reason?, waited_ms, seq_before, turn_started_seq?, wait_ms}: delivered=true means the CLI's next turn_started arrived within wait_ms (default 5000, max 20000); reason=timeout means written but not yet acknowledged, exited = no child to write to (or it died before its turn started: `exited: <why>`), busy = the previous opencode turn is still running. `wait_ms` is the effective wait. A json agent takes whole messages: `submit: false` or empty text is a 400, and a refused send (busy/exited/unsupported) is not journaled. Held: when the target is an agent working next to a database a stack source reports may hold real data (its data-safety block covers the agent's folder), nothing is written; the text is queued and the answer is {written: false, held: true, held_count, reason}. Queued messages are delivered in order once the block clears (clean check or acknowledgement); what the person types is never held.",
+        description: "Write text to the pty in ONE atomic write (submit appends \\r to the same write). Returns a receipt {written, seq_before, seq_after, had_output_within_ms, wait_ms} off the byte counter. For a json-transport agent the text is delivered as ONE user message (claude: a stream-json user line on stdin; opencode: a `run -s <session>` continuation child) and the receipt is {written, transport: \"json\", delivered, reason?, waited_ms, seq_before, turn_started_seq?, wait_ms}: delivered=true means the CLI's next turn_started arrived within wait_ms (default 5000, max 20000); reason=timeout means written but not yet acknowledged, exited = no child to write to (or it died before its turn started: `exited: <why>`), busy = the previous opencode turn is still running. `wait_ms` is the effective wait. A json agent takes whole messages: `submit: false` or empty text is a 400, and a refused send (busy/exited/unsupported) is not journaled. Held: when the target is an agent working next to a database a stack source reports may hold real data (its data-safety block covers the agent's folder), nothing is written; the text is queued and the answer is {written: false, held: true, held_count, reason}. Queued messages are delivered in order once the block clears (clean check or acknowledgement); what the person types is never held. From an agent token (see Callers): held while the target's screen shows a confirmation-shaped state ({written: false, held: true, held_id, held_count, reason}; the person releases or drops it on the row), refused (403) when the text is only a choice key, and written with the sender line first when the target is another agent.",
         handler: send_input,
+        access: Access::Subtree,
     },
     Route {
         method: "GET",
@@ -266,13 +324,15 @@ pub const ROUTES: &[Route] = &[
         fields: &["since?"],
         description: "A json-transport agent's typed events with seq > since (default 0), from a per-agent ring of the last 1000: [{id, seq, ts, kind, payload}], kind = turn_started | turn_ended | tool_call | text | usage | awaiting_input | compaction | error | raw. `raw` carries the unclassified native object (or {line} / {stderr}) so nothing is lost. 409 for a tty agent or a plain terminal.",
         handler: get_agent_events,
+        access: Access::Subtree,
     },
     Route {
         method: "POST",
         path: "/processes/{id}/bytes",
         fields: &["bytes", "wait_ms?"],
-        description: "Raw bytes ([u8]) to the pty, same receipt and journal treatment as /input. The escape hatch for control sequences. Held like /input while a data-safety block covers an agent's folder.",
+        description: "Raw bytes ([u8]) to the pty, same receipt and journal treatment as /input. The escape hatch for control sequences. Held like /input while a data-safety block covers an agent's folder. From an agent token: held and refused like /input, and refused (403) into another agent's terminal (raw bytes cannot carry the sender line).",
         handler: send_bytes,
+        access: Access::Subtree,
     },
     Route {
         method: "POST",
@@ -280,6 +340,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["confirm"],
         description: "Close a terminal (kills the child). Requires confirm=true. For a docker-exec agent the container-side process is killed and verified FIRST (TERM, poll, KILL), then the host client; the answer carries verification = gone | still-present | container-down | unresolved (null for plain terminals).",
         handler: close_terminal,
+        access: Access::Subtree,
     },
     Route {
         method: "POST",
@@ -287,6 +348,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["session_id"],
         description: "The process names the conversation it is running (the self-targeting half of the announce path: `set_session` over MCP sends the caller's own id here). The id lands on the row's current run under the run-uuid rule — the record head, the ledger row, and a `term://session` broadcast when it changed — and is what `POST /records/{record_id}/resume` continues later. The id must be one plain word, `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` (it later becomes a word on the resume command line): anything else is a 400. Answers {id, record_id, run_uuid, session, durable}; durable=false for an ephemeral row (stored on the live row only). The other announce path needs no call at all: print `OSC 777;session;<id>` (`printf '\\033]777;session;%s\\007' \"$ID\"`).",
         handler: records::route_set_session,
+        access: Access::Subtree,
     },
     Route {
         method: "POST",
@@ -294,6 +356,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["text"],
         description: "The process posts what its run was about (the self-targeting control twin of `OSC 777;summary;<text>`: `set_summary` over MCP sends the caller's own id here). Markdown, normalized like the OSC path (CRLF to LF, surrounding blank lines trimmed) and capped at 16 KiB with a truncation marker; lands on the row's CURRENT run — the record head and the ledger row, last writer wins — and broadcasts `term://summary` when it changed. Shown on the row's record card and the strip above its exited pane. Only a live run takes one: 409 {error: not_running} once the run has ended. Answers {id, record_id, run_uuid, summary, summary_source: mcp, truncated, durable}. The no-call path: print `OSC 777;summary;<text>` (`printf '\\033]777;summary;%s\\007' \"build ok, 3 warnings\"`).",
         handler: records::route_set_summary,
+        access: Access::Subtree,
     },
     Route {
         method: "GET",
@@ -301,13 +364,15 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "Registered agent tools (the shape {id, name, command, tool_type, enabled} plus model, runtime {kind: host | docker_exec, container?, user?, workdir?, tty?, max_busy_in_container?}, container (the tool's container name, or null), program, args, env (the variable NAMES only; values are never served), max_busy). `command` is DERIVED for display; program/args are the truth.",
         handler: list_agent_tools,
+        access: Access::Project,
     },
     Route {
         method: "POST",
         path: "/agents",
         fields: &["agent_tool_id", "project_id?", "name?", "extra_args?", "prompt?", "working_dir?", "env?", "force?", "cols?", "rows?", "parent_process_id?", "close_on_exit?", "ephemeral?"],
-        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < `env` < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID; `env` names must be [A-Z_][A-Z0-9_]*); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `working_dir` starts the agent in a folder other than the project root; it must resolve inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else 400 with the reason. Before any spawn with a working directory the folder is scanned for secrets when Settings ▸ Security has it on (default: on when gitleaks is installed): under the block-agents policy a finding refuses the spawn with `secret-scan-blocked:` + JSON {projectRoot, cwd, findings: [{file, rule, line}], skipped} — never a value, files named from the project's folder — until it is fixed or acknowledged; under warn it launches and notifies. A scan that does not finish (no scanner while the setting forces the scan on, a timeout, a scanner error, the scan's total size limit) refuses under either policy with the same prefix and `incomplete: <why>` instead of findings; only the person can launch past it, from the app's dialog. A folder covered by a stack source's data-safety block (its database may hold real data) or secret-scan block (possible secrets in its worktrees, or their scan did not finish) refuses the spawn with the reason, naming the check, until it is clean or acknowledged in Environment. `prompt`: a tool with a prompt_argv (claude and codex by default, as `-- <prompt>`) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv), so it can never answer a startup question; a prompt that starts with `-` is refused unless the word before `{prompt}` in the prompt_argv is `--`, since the program would read it as an option; otherwise it queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), is HELD while a known startup or permission question is on screen (folder trust, a new MCP server, an external CLAUDE.md, the bypass-permissions warning: delivered=false, reason=`held: waiting on <question>` when the cap passes), then ONE atomic write of text+\\r (text with a line break or other control character goes as a bracketed paste when the program enabled that mode, so it cannot submit early); prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
+        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < `env` < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID; `env` names must be [A-Z_][A-Z0-9_]*); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `working_dir` starts the agent in a folder other than the project root; it must resolve inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else 400 with the reason. Before any spawn with a working directory the folder is scanned for secrets when Settings ▸ Security has it on (default: on when gitleaks is installed): under the block-agents policy a finding refuses the spawn with `secret-scan-blocked:` + JSON {projectRoot, cwd, findings: [{file, rule, line}], skipped} — never a value, files named from the project's folder — until it is fixed or acknowledged; under warn it launches and notifies. A scan that does not finish (no scanner while the setting forces the scan on, a timeout, a scanner error, the scan's total size limit) refuses under either policy with the same prefix and `incomplete: <why>` instead of findings; only the person can launch past it, from the app's dialog. A folder covered by a stack source's data-safety block (its database may hold real data) or secret-scan block (possible secrets in its worktrees, or their scan did not finish) refuses the spawn with the reason, naming the check, until it is clean or acknowledged in Environment. `prompt`: a tool with a prompt_argv (claude and codex by default, as `-- <prompt>`) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv), so it can never answer a startup question; a prompt that starts with `-` is refused unless the word before `{prompt}` in the prompt_argv is `--`, since the program would read it as an option; otherwise it queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), is HELD while a known startup or permission question is on screen (folder trust, a new MCP server, an external CLAUDE.md, the bypass-permissions warning: delivered=false, reason=`held: waiting on <question>` when the cap passes), then ONE atomic write of text+\\r (text with a line break or other control character goes as a bracketed paste when the program enabled that mode, so it cannot submit early); prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root). An agent token's spawn nests under the calling agent (or a row of its own subtree it names) whatever the header says, starts only in the agent's own project (another project_id is refused) and its roots, passes the launch checks with no way past them, may add only the tool's allowed extra_args (400 otherwise), and may not send a first prompt that is only a choice key; a typed first prompt from an agent starts with the sender line and is held while the new agent's screen shows a confirmation-shaped state. Every spawned agent gets its own agent token in CHAPPA_AI_CONTROL_TOKEN. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
         handler: spawn_agent,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -315,6 +380,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "Sweep every ENABLED docker_exec tool's distinct (container, user) pair for container processes carrying CHAPPA_AI_SPAWN_UUID that no LIVE registry entry owns, and reap each orphan root through the shared TERM/poll/KILL/verify sequence (as the tool's user). Returns one entry per orphan handled: {container, user, pid, uuid, verdict: gone | still-present | container-down | unresolved}. NOT gated by the agentReapOrphans setting (that gates only the automatic startup/probe sweeps) - this is the on-demand path. A container that is down or docker unreachable is skipped silently. Does not touch processes without the marker, and never consults docker top.",
         handler: reap_orphans,
+        access: Access::Person,
     },
     Route {
         method: "GET",
@@ -322,6 +388,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "Stored projects: [{id, name, path, icon, open, processes}]; processes are populated only for open projects.",
         handler: list_projects,
+        access: Access::Project,
     },
     Route {
         method: "GET",
@@ -329,6 +396,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "One project with its process rows (status, term_id, exit_code, auto_start, …).",
         handler: get_project,
+        access: Access::OwnProject,
     },
     Route {
         method: "POST",
@@ -336,6 +404,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["wait_ms?"],
         description: "Start a project process (idempotent on a live one). The app's frontend performs the spawn; waits up to wait_ms (default 3000) for it to register, else answers pending=true.",
         handler: start_process,
+        access: Access::Person,
     },
     Route {
         method: "POST",
@@ -343,6 +412,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "Stop a project process. Non-running = no-op success (never an error).",
         handler: stop_process,
+        access: Access::Person,
     },
     Route {
         method: "POST",
@@ -350,6 +420,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["wait_ms?"],
         description: "Restart = stop (no-op if not running) then start.",
         handler: restart_process,
+        access: Access::Person,
     },
     // ---- records ----
     Route {
@@ -358,6 +429,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["limit?"],
         description: "A record's run history, newest first: {record_id, runs: [{run_uuid, status: running | exited | failed | stopped, started_at_ms, ended_at_ms, exit_code, success, tail_kind: text | events, tail: [...], summary?, session?}]}. `tail` is the automatic tail captured at exit — the last 200 screen lines, or the last 200 typed events for a json-transport agent. The ledger keeps the last 20 runs per record (`limit`, default and max 20). 404 for an unknown record.",
         handler: records::route_record_runs,
+        access: Access::SubtreeRecord,
     },
     Route {
         method: "POST",
@@ -365,6 +437,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["wait_ms?"],
         description: "Start a stopped record: a fresh terminal and a NEW run (new run_uuid; the previous run stays in the ledger). An agent starts a new session — its stored prompt is never replayed. A project command is started by the app's frontend like start_process (waits up to wait_ms, default 3000, else pending=true); a workspace command answers 409 (it starts from the app). A record whose terminal is still live is a no-op answering that terminal. Answers {record_id, kind, term_id, run_uuid, pending}; the webview receives `term://created` carrying the record_id.",
         handler: records::route_start_record,
+        access: Access::SubtreeRecord,
     },
     Route {
         method: "POST",
@@ -372,6 +445,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["session_id?"],
         description: "Resume an agent record: start it again with the PROVIDER continuing `session_id` (default: the last run's saved `last_run.session`), so the agent comes back with its complete prior conversation — nothing is replayed by the app. The tool's `resume_argv` (`{session_id}` substituted: claude `--resume=<id>`, opencode `-s <id>`) goes on the command line; the id must be one plain word (`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`), and a saved id of any other shape answers 409 resume_unavailable; a per-turn json CLI is continued through its adapter. The start is watched through the ready gate and answers {record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent | deferred}. A child that exits before it is ready was refused by the provider: 409 {error: resume_rejected, record_id, run_uuid, term_id, exit_code, provider_text, message} with the provider's own words (e.g. `No conversation found with session ID: <id>`) — never a silent fresh start. 409 {error: no_session} when there is nothing to resume (start the record instead); 409 {error: resume_unavailable} for a running record, a non-agent, a missing tool or an empty resume_argv; 404 for an unknown record.",
         handler: records::route_resume_record,
+        access: Access::SubtreeRecord,
     },
     Route {
         method: "POST",
@@ -379,6 +453,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["confirm"],
         description: "Remove a record and its run history (requires confirm=true). An attached terminal is closed first; for a command record this deletes the command definition itself. Answers {record_id, kind, removed, runs_deleted}.",
         handler: records::route_remove_record,
+        access: Access::SubtreeRecord,
     },
     // ---- scratchpads ----
     Route {
@@ -387,6 +462,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["project_id?", "include_global?", "query?", "tags?", "include_archived?", "offset?", "limit?"],
         description: "List scratchpads (no content): {scratchpads: [{scratchpad_id, project_id, name, revision, tags, archived, updated_at, updated_by, line_count, matched_fields?, snippet?}], total}. `project_id` scopes to one project (`global` = pads with no project; absent = every pad); include_global=true adds the global pads to a project scope; `query` matches name + content case-insensitively and adds matched_fields + a snippet; `tags` (comma list) = any-of; archived pads are hidden unless include_archived=true.",
         handler: coord::scratchpad_list,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -394,6 +470,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["name", "content", "tags?", "project_id?", "response_mode?"],
         description: "Create a scratchpad (scratchpad_write without scratchpad_id). A leading `# Title` line in the content overrides `name`. project_id null/absent = a global pad. Answers a slim receipt {scratchpad_id, project_id, revision, name}; response_mode=rich answers the full row.",
         handler: coord::scratchpad_create,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -401,6 +478,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["project_id?"],
         description: "Distinct scratchpad tags: {tags: [..]} (project_id scopes; absent = every pad).",
         handler: coord::scratchpad_tags_list,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -408,6 +486,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["mode?", "section_heading?", "offset?", "limit?"],
         description: "Read a scratchpad with its revision metadata. mode = full (default; `offset`/`limit` window the lines) | outline (heading outline only, no content) | section (one markdown section — `section_heading` required, exact text after trimming, first duplicate wins). The `content`/`headings`/`lines` spellings are accepted.",
         handler: coord::scratchpad_read,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -415,6 +494,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["name", "content", "expected_revision", "tags?", "response_mode?"],
         description: "Overwrite a scratchpad (scratchpad_write with scratchpad_id). expected_revision is REQUIRED; a mismatch is 409 {error: revision_conflict, current_revision, current_content}. A leading `# Title` overrides name; omitted tags are kept.",
         handler: coord::scratchpad_overwrite,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -422,6 +502,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["query", "case_sensitive?", "limit?", "context_lines?", "scope?"],
         description: "Literal substring search in one pad: {matches: [{line (1-based), text, before, after}], total_matches, truncated}. limit default 20 (1..=100), context_lines default 1 (0..=3), scope = all | headings | content.",
         handler: coord::scratchpad_find,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -429,6 +510,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["lines?"],
         description: "The last `lines` lines (default 10) with revision metadata.",
         handler: coord::scratchpad_tail,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -436,6 +518,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["name", "expected_revision", "response_mode?"],
         description: "Rename at expected_revision (required) without touching the content.",
         handler: coord::scratchpad_rename,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -443,6 +526,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["content", "expected_revision?", "response_mode?"],
         description: "Append at the end (a newline separates it from existing content). expected_revision is optional — appends cannot clobber, last-writer-wins is fine; the revision still advances.",
         handler: coord::scratchpad_append,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -450,6 +534,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["heading", "content", "expected_revision?", "response_mode?"],
         description: "Append at the end of the section under an EXISTING heading (before the next heading of the same or higher level). A missing heading is 400 and changes nothing. expected_revision optional.",
         handler: coord::scratchpad_append_section,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -457,6 +542,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["target", "content", "expected_revision", "response_mode?"],
         description: "Replace one section or line range at expected_revision (required). target = {heading} (content starting with a heading replaces the whole section; otherwise the heading is kept and its body replaced) | {start_line, end_line} (1-based inclusive, bounds-checked). {type: section, section_heading} / {type: line_range, offset, limit} are accepted too. Never renames: the leading-H1 title override applies on create and full overwrite only, so an explicit rename survives edits.",
         handler: coord::scratchpad_edit,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -464,6 +550,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["tags", "expected_revision", "response_mode?"],
         description: "Add tags in one revision bump at expected_revision (required).",
         handler: coord::scratchpad_add_tags,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -471,6 +558,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["tags", "expected_revision", "response_mode?"],
         description: "Remove tags in one revision bump at expected_revision (required).",
         handler: coord::scratchpad_remove_tags,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -478,6 +566,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["expected_revision", "confirm", "response_mode?"],
         description: "Empty the content at expected_revision (required). Requires confirm=true.",
         handler: coord::scratchpad_clear,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -485,6 +574,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["expected_revision", "confirm"],
         description: "Delete the pad at expected_revision (required). Requires confirm=true. Answers {scratchpad_id, project_id, deleted: true}.",
         handler: coord::scratchpad_delete,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -492,6 +582,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["archived?", "response_mode?"],
         description: "Hide from the default list without deleting (archived=false un-hides). No revision guard.",
         handler: coord::scratchpad_archive,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -499,6 +590,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["target_project_id", "expected_revision?", "response_mode?"],
         description: "Move the pad to another project (null = global). Only the project changes.",
         handler: coord::scratchpad_transfer,
+        access: Access::Any,
     },
     // ---- todos ----
     Route {
@@ -507,6 +599,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["project_id?", "status?", "completed?", "is_blocked?", "priority?", "query?", "tags?", "sort?", "offset?", "limit?"],
         description: "Todo summaries (no body): {todos: [..], total}. Filters: status (open | in_progress | done), completed, is_blocked (derived: any blocker not completed), priority (low | normal | high | urgent), query (title + body + comments), tags (any-of). sort = updated_desc (default) | updated_asc | created_desc | created_asc | priority_desc | priority_asc | title. limit default 50, max 200.",
         handler: coord::todo_list,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -514,6 +607,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["project_id", "title", "body?", "priority?", "tags?", "response_mode?"],
         description: "Create a todo in a project (project_id required — todos are project-scoped). Slim receipt {todo_id, project_id, revision, title}; response_mode=rich answers the full row.",
         handler: coord::todo_create,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -521,6 +615,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["project_id?"],
         description: "Distinct todo tags: {tags: [..]}.",
         handler: coord::todo_tags_list,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -528,6 +623,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["include_comments?"],
         description: "One todo: {todo_id, project_id, title, body, priority, status, completed, tags, revision, locked_by, lock_expires_at, is_blocked, blocker_ids, comment_count, created_at, updated_at, updated_by} (+ comments with include_comments=true). An expired lock reads as no lock.",
         handler: coord::todo_get,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -535,6 +631,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["title?", "body?", "priority?", "status?", "tags?", "expected_revision?", "response_mode?"],
         description: "Update a subset of fields; omitted fields are preserved. status=done sets completed. A foreign live lock is 409 {error: locked, locked_by, lock_expires_at}; a stale expected_revision is 409 revision_conflict. Slim receipt = {todo_id, project_id, revision} + the changed fields.",
         handler: coord::todo_update,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -542,6 +639,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["tag", "response_mode?"],
         description: "Add one tag (lock-guarded).",
         handler: coord::todo_add_tag,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -549,6 +647,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["tag", "response_mode?"],
         description: "Remove one tag (lock-guarded).",
         handler: coord::todo_remove_tag,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -556,6 +655,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["blocker_ids", "response_mode?"],
         description: "Replace the blocker list. Blockers must be in the same project; a cycle (including self) is 409 {error: cycle}. Answers blocker_ids + the derived is_blocked.",
         handler: coord::todo_set_blockers,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -563,6 +663,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["blocker_id", "response_mode?"],
         description: "Add one blocker (cycle-checked).",
         handler: coord::todo_add_blocker,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -570,6 +671,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["blocker_id", "response_mode?"],
         description: "Remove one blocker.",
         handler: coord::todo_remove_blocker,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -577,13 +679,15 @@ pub const ROUTES: &[Route] = &[
         fields: &["completed", "release_lock?", "response_mode?"],
         description: "Mark complete (status=done) or incomplete (status back to open). Releases the caller's OWN lock unless release_lock=false. affected_todo_ids = todos blocked by this one.",
         handler: coord::todo_complete,
+        access: Access::Any,
     },
     Route {
         method: "POST",
         path: "/todos/{rid}/lock",
         fields: &["lease_ms?", "lease_ttl_seconds?", "response_mode?"],
-        description: "Take or renew an edit lease keyed by ACTOR id (default 300 s, max 24 h; lease_ttl_seconds saturates). A foreign live lock is 409 locked; expired leases are ignored. Advisory coordination only: the actor is the unauthenticated X-Chappa-Actor header, so a lock is a courtesy between cooperating agents, not access control.",
+        description: "Take or renew an edit lease keyed by ACTOR id (default 300 s, max 24 h; lease_ttl_seconds saturates). A foreign live lock is 409 locked; expired leases are ignored. Advisory coordination only: for the person's token the actor is the X-Chappa-Actor header (any of the person's tools can claim any id), so a lock is a courtesy between cooperating callers, not access control; for an agent token the actor is the agent's own row.",
         handler: coord::todo_lock,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -591,6 +695,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["response_mode?"],
         description: "Release a lock you hold (none/expired = no-op success; a foreign live lock is 409).",
         handler: coord::todo_unlock,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -598,6 +703,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["target_project_id", "response_mode?"],
         description: "Move a todo to another project: comments kept, blockers (both directions) and lock cleared.",
         handler: coord::todo_transfer,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -605,6 +711,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["confirm"],
         description: "Delete a todo with its comments and blocker edges. Requires confirm=true. Answers {todo_id, project_id, deleted, affected_todo_ids}.",
         handler: coord::todo_delete,
+        access: Access::Any,
     },
     Route {
         method: "GET",
@@ -612,6 +719,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["offset?", "limit?"],
         description: "Comments on a todo, oldest first: {comments: [{comment_id, todo_id, actor, body, created_at, updated_at}], total}.",
         handler: coord::todo_comment_list,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -619,6 +727,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["body", "response_mode?"],
         description: "Add a comment (attributed to the actor). Slim receipt {comment_id, todo_id}.",
         handler: coord::todo_comment_create,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -626,6 +735,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["body", "response_mode?"],
         description: "Edit a comment's body.",
         handler: coord::todo_comment_update,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -633,14 +743,16 @@ pub const ROUTES: &[Route] = &[
         fields: &["confirm"],
         description: "Delete a comment. Requires confirm=true.",
         handler: coord::todo_comment_delete,
+        access: Access::Any,
     },
     // ---- timers ----
     Route {
         method: "POST",
         path: "/timers",
         fields: &["delay_ms", "body", "delivery_process_id?", "loop?", "repeat_every_ms?", "name?", "project_id?"],
-        description: "timer_set: fire `body` into a process after delay_ms. `loop: true` repeats every delay_ms; `repeat_every_ms` overrides the interval. delivery_process_id defaults to the CALLER's own process (the X-Chappa-Actor header, which chappa-ai-mcp fills from CHAPPA_AI_PROCESS_ID) — a timer delivers to exactly one process, which must be LIVE now (404 otherwise) and is pinned by its uuid. project_id defaults to the actor's own project. The body is injected verbatim as a fresh user turn through the delivery path (quiet-only policy). It may hold line breaks but no other control character (ESC, CR, Ctrl-C and the like): 400 otherwise.",
+        description: "timer_set: fire `body` into a process after delay_ms. `loop: true` repeats every delay_ms; `repeat_every_ms` overrides the interval. delivery_process_id defaults to the CALLER's own process (an agent token's row, else the X-Chappa-Actor header, which chappa-ai-mcp fills from CHAPPA_AI_PROCESS_ID; an agent token may deliver only to its own subtree, 403 otherwise) — a timer delivers to exactly one process, which must be LIVE now (404 otherwise) and is pinned by its uuid. project_id defaults to the actor's own project. The body is injected verbatim as a fresh user turn through the delivery path (quiet-only policy). It may hold line breaks but no other control character (ESC, CR, Ctrl-C and the like): 400 otherwise. A body an agent set is, at firing time, held while the target's screen shows a confirmation-shaped state (the firing stays in flight and is listed on the row for the person), refused when it is only a choice key (the firing fails with the reason), and starts with the sender line when it goes into another agent's terminal.",
         handler: timers::timer_set,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -648,6 +760,7 @@ pub const ROUTES: &[Route] = &[
         fields: &["processes", "max_wait_ms", "body", "delivery_process_id?", "idle_ms?", "confirm_ms?", "rearm?", "name?", "project_id?"],
         description: "timer_fire_when_idle_any: fire when ANY watched process goes idle, or at max_wait_ms (reason=deadline). `processes` accepts ids or names — a name resolves within project_id (default: the actor's project) first, and one that matches in several projects with no scope is a 400 naming the candidates. Idle = child_alive and now - last_output_at >= idle_ms (default idle_threshold_ms, 120000) off the BYTE STREAM, never render diffs. Processes already idle at schedule time are IGNORED until they become busy again (`any` waits for a NEW transition) and reported as already_idle. A met condition enters `confirming` and is re-checked after confirm_ms; bytes in that window re-arm it (rearm defaults true). Answers {timer_id, status: scheduled, already_idle, waiting_on, note, deadline_at}.",
         handler: timers::timer_fire_when_idle_any,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -655,13 +768,15 @@ pub const ROUTES: &[Route] = &[
         fields: &["processes", "max_wait_ms", "body", "delivery_process_id?", "idle_ms?", "confirm_ms?", "rearm?", "name?", "project_id?"],
         description: "timer_fire_when_idle_all: same, but every watched process must be idle. Already-idle processes COUNT AS SATISFIED; when all of them are, the answer is {status: \"already_satisfied\", timer_id: null} and NO timer is created.",
         handler: timers::timer_fire_when_idle_all,
+        access: Access::Any,
     },
     Route {
         method: "GET",
         path: "/timers",
         fields: &["include_fired?", "all?", "limit?", "offset?", "project_id?"],
-        description: "timer_list: {timers: [{id, name, kind, status: pending | confirming | paused | fired | cancelled | expired, delivery: {firing_id, process_id, status: in_flight | delivered | failed | coalesced, delivered: true | false | null, receipt, reason: condition | deadline | missed | expired, error, coalesced_with, at}, fired_count, next_fire_at, deadline_at, waiting_on, …}], total, limit, offset}. Pending first, newest first. Pending only by default; include_fired=true adds fired/cancelled/expired within timer_retention_hours. Owner-scoped (the actor that created them); all=true lists every actor's, for the orchestrator seat. project_id defaults to the actor's project.",
+        description: "timer_list: {timers: [{id, name, kind, status: pending | confirming | paused | fired | cancelled | expired, delivery: {firing_id, process_id, status: in_flight | delivered | failed | coalesced, delivered: true | false | null, receipt, reason: condition | deadline | missed | expired, error, coalesced_with, at}, fired_count, next_fire_at, deadline_at, waiting_on, …}], total, limit, offset}. Pending first, newest first. Pending only by default; include_fired=true adds fired/cancelled/expired within timer_retention_hours. Owner-scoped (the actor that created them); all=true lists every actor's (the person's token only; an agent token always sees its own). project_id defaults to the actor's project.",
         handler: timers::timer_list,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -669,6 +784,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "timer_cancel: stop a pending/confirming timer (owner-scoped; the `user` actor may act on any timer). Answers {timer_id, project_id, cancelled, status}.",
         handler: timers::timer_cancel,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -676,6 +792,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "timer_pause: STOPS THE CLOCK — the remaining delay (or remaining deadline) is captured, so a paused timer never comes due while paused.",
         handler: timers::timer_pause,
+        access: Access::Any,
     },
     Route {
         method: "POST",
@@ -683,6 +800,7 @@ pub const ROUTES: &[Route] = &[
         fields: &[],
         description: "timer_resume: continue from the captured remaining delay.",
         handler: timers::timer_resume,
+        access: Access::Any,
     },
 ];
 
@@ -975,15 +1093,18 @@ fn accept_loop(server: &tiny_http::Server, state: &ControlState, token: &str) {
 fn respond(state: &ControlState, token: &str, mut request: tiny_http::Request) {
     let method = request.method().as_str().to_owned();
     let url = request.url().to_owned();
-    let authorized = request
+    let presented: Vec<String> = request
         .headers()
         .iter()
         .filter(|h| h.field.equiv("Authorization"))
-        .any(|h| bearer_matches(h.value.as_str(), token));
-    // Who is writing. chappa-ai-mcp sends its own
-    // CHAPPA_AI_PROCESS_ID here; a bare curl (or an agent outside
-    // chappa-ai) is attributed to "user".
-    let actor = request
+        .map(|h| h.value.as_str().to_owned())
+        .collect();
+    let caller = caller_of(&state.registry, &presented, token);
+    // Who is writing. For the person's token, the header: chappa-ai-mcp
+    // sends its own CHAPPA_AI_PROCESS_ID, a bare curl is attributed to
+    // "user". For an agent token the header is ignored: the actor is the
+    // row the token was minted for.
+    let header_actor = request
         .headers()
         .iter()
         .find(|h| h.field.equiv(ACTOR_HEADER))
@@ -994,9 +1115,13 @@ fn respond(state: &ControlState, token: &str, mut request: tiny_http::Request) {
     let public = method == "GET" && url.split('?').next() == Some(IDENTITY_PATH);
     let response = if public {
         guarded(|| dispatch_as(state, None, &method, &url, ""))
-    } else if authorized {
+    } else if let Some(caller) = caller {
         let body = read_body(&mut request.as_reader());
-        guarded(|| dispatch_as(state, actor.as_deref(), &method, &url, &body))
+        let actor = match caller.grant() {
+            Some(grant) => Some(grant.process_id.to_string()),
+            None => header_actor,
+        };
+        guarded(|| dispatch_caller(state, &caller, actor.as_deref(), &method, &url, &body))
     } else {
         json(
             401,
@@ -1027,6 +1152,18 @@ fn guarded(f: impl FnOnce() -> Resp) -> Resp {
     }
 }
 
+/// The caller an `Authorization` header names: the person's token, a live
+/// agent token, or nobody (`None` = 401).
+pub fn caller_of(registry: &Registry, headers: &[String], person_token: &str) -> Option<Caller> {
+    if headers.iter().any(|h| bearer_matches(h, person_token)) {
+        return Some(Caller::Person);
+    }
+    headers.iter().find_map(|h| {
+        let presented = h.strip_prefix("Bearer ")?.trim();
+        registry.tokens().lookup(presented).map(Caller::Agent)
+    })
+}
+
 /// Constant-time-ish compare of the header value against the token.
 fn bearer_matches(header: &str, token: &str) -> bool {
     let presented = match header.strip_prefix("Bearer ") {
@@ -1053,8 +1190,11 @@ pub struct Params {
     pub record: Option<i64>,
     /// `{record_id}`: a durable row record's uuid.
     pub record_id: Option<String>,
-    /// The writing actor: `X-Chappa-Actor` or `"user"`.
+    /// The writing actor: `X-Chappa-Actor` or `"user"` for the person's
+    /// token, the row's process id for an agent token.
     pub actor: String,
+    /// Who presented the token.
+    pub caller: Caller,
 }
 
 impl Default for Params {
@@ -1066,6 +1206,7 @@ impl Default for Params {
             record: None,
             record_id: None,
             actor: crate::coordination::USER_ACTOR.to_owned(),
+            caller: Caller::Person,
         }
     }
 }
@@ -1098,9 +1239,22 @@ pub fn dispatch(state: &ControlState, method: &str, url: &str, body: &str) -> Re
     dispatch_as(state, None, method, url, body)
 }
 
-/// [`dispatch`] with an explicit actor (`None` = `"user"`).
+/// [`dispatch`] with an explicit actor (`None` = `"user"`), as the person.
 pub fn dispatch_as(
     state: &ControlState,
+    actor: Option<&str>,
+    method: &str,
+    url: &str,
+    body: &str,
+) -> Resp {
+    dispatch_caller(state, &Caller::Person, actor, method, url, body)
+}
+
+/// [`dispatch_as`] for `caller`: a route an agent token does not reach
+/// answers 403 before its handler runs.
+pub fn dispatch_caller(
+    state: &ControlState,
+    caller: &Caller,
     actor: Option<&str>,
     method: &str,
     url: &str,
@@ -1114,6 +1268,12 @@ pub fn dispatch_as(
             if route.method == method {
                 if let Some(actor) = actor {
                     params.actor = actor.to_owned();
+                }
+                params.caller = caller.clone();
+                if let Caller::Agent(grant) = caller {
+                    if let Err(why) = authorize(state, route.access, grant, &params) {
+                        return json(403, json!({"error": why}));
+                    }
                 }
                 return (route.handler)(state, &params, query, body);
             }
@@ -1129,7 +1289,100 @@ pub fn dispatch_as(
     }
 }
 
+/// Whether an agent token reaches this route for these parameters.
+fn authorize(
+    state: &ControlState,
+    access: Access,
+    grant: &AgentGrant,
+    params: &Params,
+) -> Result<(), String> {
+    let me = grant.process_id;
+    match access {
+        Access::Any | Access::Project => Ok(()),
+        Access::Person => Err(
+            "forbidden: this route is the person's; an agent token does not reach it".to_owned(),
+        ),
+        Access::Subtree => {
+            let id = params.id.unwrap_or_default();
+            if state.registry.in_subtree(me, id) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "forbidden: process {id} is not this agent's own row or one it spawned"
+                ))
+            }
+        }
+        Access::OwnProject => {
+            if params.project.is_some() && params.project == grant.project_id {
+                Ok(())
+            } else {
+                Err("forbidden: an agent token reads only its own project".to_owned())
+            }
+        }
+        Access::SubtreeRecord => {
+            let record_id = params.record_id.clone().unwrap_or_default();
+            if record_in_subtree(state, me, &record_id) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "forbidden: record {record_id} is not one this agent's subtree spawned"
+                ))
+            }
+        }
+    }
+}
+
+/// Whether `record_id` belongs to agent row `me`'s subtree: its live row
+/// is in the subtree, or walking its recorded parents reaches `me`'s own
+/// record (a stopped child the agent spawned, a grandchild).
+fn record_in_subtree(state: &ControlState, me: TermId, record_id: &str) -> bool {
+    if let Some((term, _)) = state.registry.term_of_record(record_id) {
+        if state.registry.in_subtree(me, term) {
+            return true;
+        }
+    }
+    let Some(mine) = state.registry.record_of(me) else {
+        return false;
+    };
+    if mine == record_id {
+        return true;
+    }
+    let mut at = record_id.to_owned();
+    for _ in 0..64 {
+        match state.records.parent_record_of(&at) {
+            Some(parent) if parent == mine => return true,
+            Some(parent) => at = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
 // ---- handlers ---------------------------------------------------------------
+
+/// `GET /whoami`.
+fn whoami(state: &ControlState, params: &Params, _: &str, _: &str) -> Resp {
+    let routes: Vec<Value> = ROUTES
+        .iter()
+        .filter(|r| !(params.caller.is_agent() && r.access == Access::Person))
+        .map(|r| {
+            json!({
+                "method": r.method,
+                "path": r.path,
+                "access": if params.caller.is_agent() { r.access.label() } else { "person" },
+            })
+        })
+        .collect();
+    let mut out = json!({ "kind": params.caller.kind(), "routes": routes });
+    if let Some(grant) = params.caller.grant() {
+        out["process_id"] = json!(grant.process_id);
+        out["project_id"] = json!(grant.project_id);
+        out["parent"] = json!(grant.parent_process_id);
+        out["tool"] = json!(grant.tool);
+        out["name"] = json!(state.registry.name_of(grant.process_id));
+    }
+    json(200, out)
+}
 
 fn route_table(state: &ControlState, _: &Params, _: &str, _: &str) -> Resp {
     json(
@@ -1195,8 +1448,13 @@ pub fn route_table_json() -> Vec<Value> {
         .collect()
 }
 
-fn list_processes(state: &ControlState, _: &Params, _: &str, _: &str) -> Resp {
-    json(200, json!(state.registry.list_control()))
+fn list_processes(state: &ControlState, params: &Params, _: &str, _: &str) -> Resp {
+    let mut rows = state.registry.list_control();
+    if let Some(grant) = params.caller.grant() {
+        let mine = state.registry.subtree(grant.process_id);
+        rows.retain(|row| mine.contains(&row.base.id));
+    }
+    json(200, json!(rows))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1222,7 +1480,7 @@ struct SpawnBody {
 /// actor cannot address (review), and anything past this is a typo.
 const MAX_SPAWN_DIM: u16 = 4096;
 
-fn spawn_terminal(state: &ControlState, _: &Params, _: &str, body: &str) -> Resp {
+fn spawn_terminal(state: &ControlState, params: &Params, _: &str, body: &str) -> Resp {
     let spec: SpawnBody = if body.trim().is_empty() {
         SpawnBody::default()
     } else {
@@ -1246,12 +1504,71 @@ fn spawn_terminal(state: &ControlState, _: &Params, _: &str, body: &str) -> Resp
         spec.command
     };
     let name = spec.name.unwrap_or_else(|| command.clone());
+    let mut env: Vec<(String, String)> = spec.env.into_iter().collect();
+    let caller = params.caller.clone();
+    // A terminal an agent opens is the agent's: it starts only where the
+    // agent may start things (the launch gate), into a reserved id so its
+    // identity env can name it, with a token of its own scoped under the
+    // agent. The person's terminal starts as asked.
+    let (at, origin, cwd, notice, guard) = match caller.grant() {
+        None => (
+            None,
+            Origin::person(),
+            spec.cwd.map(PathBuf::from),
+            None,
+            None,
+        ),
+        Some(grant) => {
+            let gate = AppSpawnGate {
+                projects: state.projects.clone(),
+                settings: state.settings.clone(),
+            };
+            let (pass, notice) = match state.registry.gate_spawn(
+                &gate,
+                &GateRequest {
+                    caller: &caller,
+                    kind: SpawnKind::Terminal,
+                    project_id: grant.project_id,
+                    working_dir: spec.cwd.as_deref(),
+                    launch_anyway: None,
+                },
+            ) {
+                Ok(cleared) => cleared,
+                Err(err) => return json(refusal_status(&err), json!({ "error": err })),
+            };
+            let id = state.registry.reserve_id();
+            let token = match state.registry.tokens().mint(AgentGrant {
+                process_id: id,
+                project_id: grant.project_id,
+                parent_process_id: Some(grant.process_id),
+                tool: None,
+                created_ms: term_core::actor::epoch_ms(),
+            }) {
+                Ok(token) => token,
+                Err(err) => return json(500, json!({ "error": err })),
+            };
+            env.retain(|(k, _)| !IDENTITY_NAMES.contains(&k.as_str()));
+            env.push(("CHAPPA_AI_PROCESS_ID".into(), id.to_string()));
+            if let Some(project) = grant.project_id {
+                env.push(("CHAPPA_AI_PROJECT_ID".into(), project.to_string()));
+            }
+            env.push((crate::caller::TOKEN_ENV.into(), token));
+            let cwd = pass.cwd().map(Path::to_path_buf);
+            (
+                Some(id),
+                Origin::with_pass(caller.clone(), pass),
+                cwd,
+                notice,
+                Some(id),
+            )
+        }
+    };
     let cfg = actor_config(
         PtySpec {
             command,
             args: spec.args,
-            cwd: spec.cwd.map(Into::into),
-            env: spec.env.into_iter().collect(),
+            cwd,
+            env,
             cols,
             rows,
         },
@@ -1265,7 +1582,7 @@ fn spawn_terminal(state: &ControlState, _: &Params, _: &str, body: &str) -> Resp
     // rail (the NullSink invisibility fix).
     match state
         .registry
-        .create_terminal(cfg, Arc::new(NullSink), None, name.clone())
+        .create_terminal_as(cfg, Arc::new(NullSink), name.clone(), at, origin)
     {
         Ok(id) => {
             if let Some(app) = &state.app {
@@ -1277,18 +1594,38 @@ fn spawn_terminal(state: &ControlState, _: &Params, _: &str, body: &str) -> Resp
                         kind: "terminal",
                         project_id: None,
                         agent_tool_id: None,
-                        parent_process_id: None,
+                        parent_process_id: caller.grant().map(|g| g.process_id),
                         record_id: None,
                         last_run: None,
                         record_kind: None,
                     },
                 );
             }
+            if let Some(notice) = &notice {
+                crate::secret_scan::emit_notice(state.app.as_ref(), id, notice);
+            }
             json(200, json!({"id": id, "name": name}))
         }
-        Err(err) => json(500, json!({"error": format!("spawn failed: {err}")})),
+        Err(err) => {
+            if let Some(id) = guard {
+                state.registry.tokens().revoke(id);
+            }
+            match refusal_status(&err) {
+                500 => json(500, json!({"error": format!("spawn failed: {err}")})),
+                status => json(status, json!({ "error": err })),
+            }
+        }
     }
 }
+
+/// The identity variables the app sets for a row it spawned for an agent;
+/// a request's own env cannot set them.
+const IDENTITY_NAMES: &[&str] = &[
+    "CHAPPA_AI_PROCESS_ID",
+    "CHAPPA_AI_PROJECT_ID",
+    "CHAPPA_AI_AGENT_TOOL_ID",
+    crate::caller::TOKEN_ENV,
+];
 
 fn get_process(state: &ControlState, params: &Params, _: &str, _: &str) -> Resp {
     let id = params.id.unwrap_or_default();
@@ -1411,12 +1748,177 @@ fn held(
     )
 }
 
+/// The journal's name for an agent sender.
+fn agent_actor(me: TermId) -> String {
+    format!("agent:{me}")
+}
+
+/// The bytes an agent's text becomes in a pty: a sender line makes it
+/// several lines, which go as one bracketed paste when the program turned
+/// that mode on (a raw line break would submit the sender line alone).
+fn agent_payload(registry: &Registry, id: TermId, text: &str, submit: bool) -> Vec<u8> {
+    let bracketed = registry
+        .handle(id)
+        .and_then(|h| h.modes())
+        .is_some_and(|m| m.bracketed_paste);
+    if bracketed && text.contains('\n') {
+        let mode = term_core::keys::ModeSnapshot {
+            bracketed_paste: true,
+            ..Default::default()
+        };
+        let mut bytes = term_core::keys::encode_paste(text, &mode);
+        if submit {
+            bytes.push(b'\r');
+        }
+        bytes
+    } else {
+        submit_payload(text, submit)
+    }
+}
+
+/// How an agent's pty delivery is made once nothing holds it, re-judged
+/// when it was held and what held it lifted: a choice key is dropped, and
+/// a question on screen holds it again. When the person releases it, it is
+/// made as it is: the person has seen it.
+fn agent_pty_delivery(
+    registry: Registry,
+    id: TermId,
+    me: TermId,
+    raw: Vec<u8>,
+    payload: Vec<u8>,
+    shown: String,
+    submit: bool,
+) -> crate::delivery_hold::Deliver {
+    Box::new(move |release| {
+        if release == crate::delivery_hold::Release::Lifted {
+            if crate::agent_delivery::is_choice_key(&raw) {
+                log::info!("[control] a held choice key from {me} to {id} was dropped");
+                return;
+            }
+            if let Some(question) = registry.confirmation_on_screen(id) {
+                let again = agent_pty_delivery(
+                    registry.clone(),
+                    id,
+                    me,
+                    raw,
+                    payload,
+                    shown.clone(),
+                    submit,
+                );
+                registry.hold_for_screen(
+                    id,
+                    screen_hold_reason(&question),
+                    agent_actor(me),
+                    shown,
+                    again,
+                );
+                return;
+            }
+        }
+        registry.write_journaled_as(id, &payload, shown, submit, Some(&agent_actor(me)));
+    })
+}
+
+fn screen_hold_reason(question: &str) -> String {
+    format!("held: {question} is on screen; the person releases or drops it on the row")
+}
+
+/// `/input` and `/bytes` from an agent to a pty: held while a question is
+/// on screen (or data safety holds the target), else refused when it is
+/// only a choice key, else written with the sender line when the target is
+/// another agent. `raw` is the caller's bytes as sent.
+#[allow(clippy::too_many_arguments)]
+fn agent_send(
+    state: &ControlState,
+    me: TermId,
+    id: TermId,
+    raw: Vec<u8>,
+    text: String,
+    submit: bool,
+    wrap: bool,
+    wait_ms: Option<u64>,
+) -> Resp {
+    let (payload, shown) = if wrap {
+        let name = state.registry.name_of(me).unwrap_or_default();
+        let wrapped = crate::agent_delivery::wrap(&name, me, &text);
+        (
+            agent_payload(&state.registry, id, &wrapped, submit),
+            wrapped,
+        )
+    } else {
+        (raw.clone(), text)
+    };
+    let held_answer = |count: usize, entry: Option<u64>, reason: String| {
+        json(
+            200,
+            json!({"written": false, "held": true, "held_count": count, "held_id": entry, "reason": reason}),
+        )
+    };
+    if let Some(reason) = state.registry.hold_reason(id) {
+        let deliver = agent_pty_delivery(
+            state.registry.clone(),
+            id,
+            me,
+            raw,
+            payload,
+            shown.clone(),
+            submit,
+        );
+        let count = state.registry.hold_delivery(
+            id,
+            agent_actor(me),
+            shown,
+            Box::new(move || deliver(crate::delivery_hold::Release::Lifted)),
+        );
+        return held_answer(count, None, reason);
+    }
+    if let Some(question) = state.registry.confirmation_on_screen(id) {
+        let reason = screen_hold_reason(&question);
+        let deliver = agent_pty_delivery(
+            state.registry.clone(),
+            id,
+            me,
+            raw,
+            payload,
+            shown.clone(),
+            submit,
+        );
+        let (entry, count) =
+            state
+                .registry
+                .hold_for_screen(id, reason.clone(), agent_actor(me), shown, deliver);
+        return held_answer(count, Some(entry), reason);
+    }
+    if crate::agent_delivery::is_choice_key(&raw) {
+        return json(
+            403,
+            json!({"error": crate::agent_delivery::CHOICE_KEY_REFUSAL}),
+        );
+    }
+    deliver_as(
+        state,
+        id,
+        &payload,
+        shown,
+        submit,
+        wait_ms,
+        Some(&agent_actor(me)),
+    )
+}
+
+/// Whether text from agent `me` to row `id` carries the sender line: it
+/// goes into ANOTHER agent's terminal.
+fn needs_sender_line(state: &ControlState, me: TermId, id: TermId) -> bool {
+    id != me && state.registry.is_agent(id)
+}
+
 fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Resp {
     let id = params.id.unwrap_or_default();
     let body: InputBody = match serde_json::from_str(body) {
         Ok(body) => body,
         Err(err) => return json(400, json!({"error": format!("bad body: {err}")})),
     };
+    let me = params.caller.grant().map(|g| g.process_id);
     let hold = state.registry.hold_reason(id);
     // A json-transport agent takes a user MESSAGE, not keystrokes
     // — `submit` is implied (an explicit false, or nothing to say, is a
@@ -1434,23 +1936,38 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
                 json!({"error": "text is empty: a json-transport agent takes whole messages"}),
             );
         }
+        let mut text = body.text.clone();
+        if let Some(me) = me {
+            // A message has no screen to ask questions on; the bare-answer
+            // and sender-line rules still hold.
+            if crate::agent_delivery::is_choice_key(text.as_bytes()) {
+                return json(
+                    403,
+                    json!({"error": crate::agent_delivery::CHOICE_KEY_REFUSAL}),
+                );
+            }
+            if needs_sender_line(state, me, id) {
+                let name = state.registry.name_of(me).unwrap_or_default();
+                text = crate::agent_delivery::wrap(&name, me, &text);
+            }
+        }
         if let Some(reason) = hold {
             let registry = state.registry.clone();
-            let text = body.text.clone();
+            let queued = text.clone();
             return held(
                 state,
                 params,
                 id,
                 reason,
-                &body.text,
+                &text,
                 Box::new(move || {
-                    if let Err(e) = json_send_input(&registry, id, &text, None) {
+                    if let Err(e) = json_send_input(&registry, id, &queued, None) {
                         log::warn!("[control] a held message to {id} was not delivered: {e}");
                     }
                 }),
             );
         }
-        return match json_send_input(&state.registry, id, &body.text, body.wait_ms) {
+        return match json_send_input(&state.registry, id, &text, body.wait_ms) {
             Ok(receipt) => {
                 let mut value = serde_json::to_value(&receipt).unwrap_or_default();
                 value["written"] = json!(receipt.written());
@@ -1461,6 +1978,11 @@ fn send_input(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
         };
     }
     let submit = body.submit.unwrap_or(false);
+    if let Some(me) = me {
+        let wrap = needs_sender_line(state, me, id);
+        let typed = submit_payload(&body.text, submit);
+        return agent_send(state, me, id, typed, body.text, submit, wrap, body.wait_ms);
+    }
     let payload = submit_payload(&body.text, submit);
     if let Some(reason) = hold {
         let registry = state.registry.clone();
@@ -1508,6 +2030,17 @@ fn send_bytes(state: &ControlState, params: &Params, _: &str, body: &str) -> Res
         );
     }
     let text = String::from_utf8_lossy(&body.bytes).into_owned();
+    if let Some(me) = params.caller.grant().map(|g| g.process_id) {
+        // Raw bytes cannot carry a sender line: into another agent's
+        // terminal an agent sends text, through /input.
+        if needs_sender_line(state, me, id) {
+            return json(
+                403,
+                json!({"error": format!("forbidden: raw bytes from an agent cannot go into another agent's terminal (process {id}); send text with /input, which names the sender")}),
+            );
+        }
+        return agent_send(state, me, id, body.bytes, text, false, false, body.wait_ms);
+    }
     if let Some(reason) = state.registry.hold_reason(id) {
         let registry = state.registry.clone();
         let (bytes, shown) = (body.bytes.clone(), text.clone());
@@ -1546,6 +2079,19 @@ fn deliver(
     submit: bool,
     wait_ms: Option<u64>,
 ) -> Resp {
+    deliver_as(state, id, payload, text, submit, wait_ms, None)
+}
+
+/// [`deliver`], the journal naming `actor`.
+fn deliver_as(
+    state: &ControlState,
+    id: TermId,
+    payload: &[u8],
+    text: String,
+    submit: bool,
+    wait_ms: Option<u64>,
+    actor: Option<&str>,
+) -> Resp {
     let wait_ms = wait_ms
         .unwrap_or(RECEIPT_WAIT_DEFAULT_MS)
         .min(RECEIPT_WAIT_MAX_MS);
@@ -1554,7 +2100,10 @@ fn deliver(
         None => return no_such_terminal(id),
     };
     let seq_before = handle.io().output_bytes();
-    if !state.registry.write_journaled(id, payload, text, submit) {
+    if !state
+        .registry
+        .write_journaled_as(id, payload, text, submit, actor)
+    {
         return no_such_terminal(id);
     }
     let seq_after = handle
@@ -1639,7 +2188,10 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
     // process id. A non-numeric / `user` actor → `None` (a root spawn). This
     // is the default parent candidate the spawn validates against a live
     // entry; the rail nests the child under it.
-    let actor = params.actor.parse::<TermId>().ok();
+    let actor = match params.caller.grant() {
+        Some(grant) => Some(grant.process_id),
+        None => params.actor.parse::<TermId>().ok(),
+    };
     let ctx = SpawnContext {
         registry: &state.registry,
         tools: &state.agent_tools,
@@ -1647,6 +2199,7 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
         projects: &state.projects,
         records: &state.records,
         actor,
+        caller: params.caller.clone(),
     };
     match spawn_agent_headless(ctx, req) {
         Ok(resp) => {
@@ -1676,8 +2229,15 @@ fn spawn_agent(state: &ControlState, params: &Params, _: &str, body: &str) -> Re
             json(200, json!(resp))
         }
         Err(err) if err.starts_with("no such") => json(404, json!({"error": err})),
+        Err(err) if err.starts_with(crate::agent_tools::AGENT_ARGS_REFUSAL_LEAD) => {
+            json(400, json!({"error": err}))
+        }
+        Err(err) if err == crate::agent_delivery::CHOICE_KEY_REFUSAL => {
+            json(403, json!({"error": err}))
+        }
         Err(err)
             if err.starts_with("refused")
+                || err.starts_with(crate::secret_scan::BLOCK_PREFIX)
                 || err.contains("disabled")
                 || crate::data_safety::is_refusal(&err) =>
         {
@@ -1835,6 +2395,42 @@ pub fn json(status: u16, value: Value) -> Resp {
 
 // ---- doc emitter -------------------------------------------------------------
 
+/// The `## Callers` section: the two kinds of token and how far each
+/// reaches. The table's "Who" column is [`Access::label`].
+pub const CALLERS_DOC: &str = "## Callers: the person and agents\n\n\
+Two kinds of token are accepted.\n\n\
+- **The person's token**: `<app-config>/control_token`. Full authority over every route, for the \
+person's own tools and scripts. `X-Chappa-Actor` attributes a call among them (absent = `user`). The app \
+never puts it in an agent's environment, MCP configuration or command line.\n\
+- **Agent tokens**: one per agent the app spawns, and one per terminal an agent opens. 32 random bytes \
+held only in the app's memory (only a digest of each), never written to disk, delivered to the child in \
+`CHAPPA_AI_CONTROL_TOKEN` (a docker-exec tool gets it by name with `-e`, never on the command line), and \
+revoked when the row exits or closes (a started-again or resumed row gets a new one). `chappa-ai-mcp` \
+prefers that variable over the token file. For an agent token the server sets the actor from the token \
+(the row's process id) and ignores `X-Chappa-Actor`; records, the input journal (`agent:<id>`), \
+coordination writes and timers show that actor.\n\n\
+What an agent token reaches (the Who column): **own subtree** = the agent's own row and every row it \
+spawned with its token, transitively (anything else answers 403); **own subtree's records** = records whose \
+live row is in the subtree or whose recorded parents lead back to the agent's own record; **own project** = \
+the project its row works in; **project-level read** = allowed, with secrets redacted (tool env values are \
+never served); **person only** = 403 for an agent token. `GET /processes` lists an agent's own subtree. \
+A spawn by an agent (`POST /processes`, `POST /agents`) must start inside its own project's roots (no \
+folder = the project root; an agent with no project must name a folder inside an open project; another \
+project is refused) and passes the data-safety and secret-scan checks with no way past them; an agent's \
+`extra_args` must be words on the tool's allowlist unless the person turned on \"agents may pass any \
+arguments\" for that tool (Settings ▸ Agents). Text an agent sends (`/input`, `/bytes`, timer bodies, a typed \
+first prompt) is held while the target's screen shows a confirmation-shaped state (a known startup question, \
+a numbered choice, a `(y/n)` question, an Allow / Deny choice) — the answer is `{written: false, held: true, \
+held_id, reason}` and the person releases or drops it on the row; a body that is only a choice key (`1`–`9`, \
+`y`, `n`, `a`, Enter, Escape, arrow keys) is refused (403); into another agent's terminal it goes with a \
+first line `[from <row name> (process <id>) · agent]` that the body cannot forge (leading lines of that \
+shape are removed from it first), and raw `/bytes` into another agent's terminal are refused. \
+Settings, trust and acknowledgements are not on this surface at all.\n\n\
+**This boundary is complete only for agents that cannot read the person's files** — containerised \
+(docker-exec) tools that see only their own workspace. An agent running unsandboxed on the host, with a \
+shell, as the same OS user, can still read `<app-config>/control_token` and act as the person, and can edit \
+the app's own files. Nothing here can tell such an agent from the person.\n\n";
+
 /// `desktop/CONTROL_API.md`, rendered from [`ROUTES`]. The test
 /// `control_api_doc_is_in_sync` fails when the checked-in file differs;
 /// regenerate with `CONTROL_API_WRITE=1 cargo test -p chappa-ai-desktop
@@ -1874,7 +2470,8 @@ pub fn render_api_doc() -> String {
          This is the MCP server's transport (`chappa-ai-mcp`) and a curl interface —\n\
          not a public API. Localhost only, no CLI binary.\n\n"
     ));
-    out.push_str("| Method | Path | Fields | Description |\n|---|---|---|---|\n");
+    out.push_str(CALLERS_DOC);
+    out.push_str("| Method | Path | Who | Fields | Description |\n|---|---|---|---|---|\n");
     for r in ROUTES {
         let fields = if r.fields.is_empty() {
             "—".to_owned()
@@ -1886,9 +2483,10 @@ pub fn render_api_doc() -> String {
                 .join(", ")
         };
         out.push_str(&format!(
-            "| `{}` | `{}` | {} | {} |\n",
+            "| `{}` | `{}` | {} | {} | {} |\n",
             r.method,
             r.path,
+            r.access.label(),
             fields,
             r.description.replace('|', "\\|")
         ));
@@ -1970,10 +2568,10 @@ pub fn render_api_doc() -> String {
          applies on create and full overwrite only — edit never renames.\n\
          Write routes answer slim receipts (`{id, project_id, revision}` + the changed fields);\n\
          `response_mode: \"rich\"` answers the full row. Timestamps are unix ms.\n\n\
-         Trust model: `X-Chappa-Actor` is UNAUTHENTICATED attribution — any bearer of the control\n\
-         token can claim any actor id; the token is the only credential. Todo locks are therefore\n\
-         advisory coordination between cooperating agents (a courtesy that prevents lost updates),\n\
-         not access control; nothing here isolates one agent from another.\n",
+         Trust model: with the person's token `X-Chappa-Actor` is UNAUTHENTICATED attribution — any\n\
+         of the person's tools can claim any actor id. With an agent token the actor is the agent's\n\
+         own row, set from the token. Todo locks are advisory coordination either way (a courtesy\n\
+         that prevents lost updates), and scratchpads and todos are shared by every caller.\n",
     );
     out.push_str("\n## Timers\n\n");
     out.push_str(crate::timers_http::DOC);

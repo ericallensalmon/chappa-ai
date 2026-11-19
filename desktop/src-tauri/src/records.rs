@@ -376,6 +376,9 @@ pub struct StartDeps<'a> {
     /// The app handle: the frontend's frames channel is bound to it, and a
     /// headless start broadcasts `term://created` through it. `None` in tests.
     pub app: Option<AppHandle>,
+    /// Who asked: an agent may start or resume only records of its own
+    /// subtree, and what it starts gets a token scoped under it.
+    pub caller: crate::caller::Caller,
 }
 
 /// The reply to `start_record`.
@@ -668,6 +671,12 @@ impl Records {
             .ok()
             .and_then(|s| s.record(record_id))
             .map(|r| (Scope::Workspace, r))
+    }
+
+    /// The record id of the agent that spawned agent record `record_id`,
+    /// `None` for a root, a non-agent or an unknown record.
+    pub fn parent_record_of(&self, record_id: &str) -> Option<String> {
+        self.get(record_id)?.1.agent?.parent_record_id
     }
 
     /// Every stored record, project ones first.
@@ -1020,7 +1029,8 @@ impl Records {
                     settings: deps.settings,
                     projects: &parts.projects,
                     records: self,
-                    actor: None,
+                    actor: deps.caller.grant().map(|g| g.process_id),
+                    caller: deps.caller.clone(),
                 };
                 let (sink, on_notify): (Arc<dyn EventSink>, Option<AppHandle>) = match (frames, deps.app.clone()) {
                     (Some(frames), Some(app)) => (Arc::new(ChannelSink::new(frames, app.clone())), Some(app)),
@@ -1305,7 +1315,8 @@ impl Records {
             settings: deps.settings,
             projects: &parts.projects,
             records: self,
-            actor: None,
+            actor: deps.caller.grant().map(|g| g.process_id),
+            caller: deps.caller.clone(),
         };
         let (sink, on_notify): (Arc<dyn EventSink>, Option<AppHandle>) =
             match (frames, deps.app.clone()) {
@@ -1585,6 +1596,7 @@ pub fn route_start_record(state: &ControlState, params: &Params, query: &str, bo
             tools: &state.agent_tools,
             settings: &state.settings,
             app: state.app.clone(),
+            caller: params.caller.clone(),
         };
         state.records.start(deps, &record_id, None, wait_ms)
     });
@@ -1609,6 +1621,7 @@ pub fn route_resume_record(state: &ControlState, params: &Params, query: &str, b
                 tools: &state.agent_tools,
                 settings: &state.settings,
                 app: state.app.clone(),
+                caller: params.caller.clone(),
             };
             state.records.resume(deps, &record_id, session_id, None)
         });
@@ -1865,6 +1878,7 @@ pub async fn start_record(
             tools: &tools,
             settings: &settings,
             app: Some(app),
+            caller: Default::default(),
         };
         records
             .start(deps, &record_id, Some(frames), START_WAIT_DEFAULT_MS)
@@ -1905,6 +1919,7 @@ pub async fn resume_record(
             tools: &tools,
             settings: &settings,
             app: Some(app),
+            caller: Default::default(),
         };
         records.resume(deps, &record_id, session_id, Some(frames))
     })

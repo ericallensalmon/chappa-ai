@@ -542,6 +542,7 @@ fn run_found(
                 projects: &deps.projects,
                 records: &deps.records,
                 actor: None,
+                caller: Default::default(),
             };
             let resp = spawn_agent_with(ctx, req, Arc::new(NullSink), deps.app.clone())?;
             if accepted_now {

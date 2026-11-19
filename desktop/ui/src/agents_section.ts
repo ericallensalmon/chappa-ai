@@ -74,6 +74,14 @@ const OK_BTN_CSS =
 /** Unique-id source for the modal's `<label for>` associations. */
 let ids = 0;
 
+/** Under "Arguments from agents": what the list and the toggle do, and
+ *  how far that protection reaches. */
+export const AGENT_ARGS_HINT =
+  "When an agent (not you) starts this tool, it may add only these words to the command line; anything else " +
+  "is refused. Empty = nothing. Never list a permission-bypass flag. \"Agents may pass any arguments\" lifts the " +
+  "limit for this tool. This holds only for agents that cannot read your files (tools in a container): an " +
+  "agent running on this computer with a shell, as you, can read the app's own token and act as you.";
+
 /** The one-line explanation per capture kind. */
 const CAPTURE_HINTS: Record<SessionCaptureKind, string> = {
   json:
@@ -756,6 +764,39 @@ export class AgentsSection {
     promptWrap.append(promptInput, promptHint);
     field("First prompt argv", promptWrap);
 
+    // What an agent may add to this tool's command line when IT spawns the
+    // tool (the person's own launches are not limited): one allowed word
+    // per line, or every word when the box is ticked.
+    const allowedArgs = tool.agent_args_allowed ?? [];
+    const allowedInput = document.createElement("textarea");
+    allowedInput.value = allowedArgs.join("\n");
+    allowedInput.rows = Math.max(2, Math.min(4, allowedArgs.length + 1));
+    allowedInput.spellcheck = false;
+    allowedInput.placeholder = "one allowed argument per line, e.g. --verbose";
+    allowedInput.style.cssText = `${INPUT_CSS}flex:1 1 auto;resize:vertical;`;
+    allowedInput.dataset.field = "agent_args_allowed";
+    const anyArgsToggle = document.createElement("input");
+    anyArgsToggle.type = "checkbox";
+    anyArgsToggle.checked = tool.agent_args_any ?? false;
+    anyArgsToggle.dataset.field = "agent_args_any";
+    anyArgsToggle.style.cssText = "flex:none;accent-color:#5ea6ff;";
+    const anyArgsLabel = document.createElement("label");
+    anyArgsLabel.style.cssText = "display:flex;gap:6px;align-items:center;";
+    anyArgsLabel.append(anyArgsToggle, document.createTextNode("Agents may pass any arguments"));
+    const syncAllowed = (): void => {
+      allowedInput.disabled = anyArgsToggle.checked;
+    };
+    anyArgsToggle.addEventListener("change", syncAllowed);
+    syncAllowed();
+    const argsWrap = document.createElement("div");
+    argsWrap.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;";
+    const argsHint = document.createElement("div");
+    argsHint.className = "chappa-agent-args-hint";
+    argsHint.style.cssText = HINT_CSS;
+    argsHint.textContent = AGENT_ARGS_HINT;
+    argsWrap.append(allowedInput, anyArgsLabel, argsHint);
+    field("Arguments from agents", argsWrap);
+
     // Env rows: key/value pairs, each deletable — the claude template's
     // CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 is one of these, visibly.
     const envWrap = document.createElement("div");
@@ -897,6 +938,11 @@ export class AgentsSection {
           .map((a) => a.replace(/\r$/, ""))
           .filter((a) => a.trim() !== ""),
         session_capture: sessionCapture,
+        agent_args_allowed: allowedInput.value
+          .split("\n")
+          .map((a) => a.replace(/\r$/, ""))
+          .filter((a) => a.trim() !== ""),
+        agent_args_any: anyArgsToggle.checked,
       };
       void this.commit(next).then((ok) => {
         if (ok) this.closeModal();

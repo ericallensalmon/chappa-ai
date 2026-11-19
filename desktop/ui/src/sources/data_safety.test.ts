@@ -6,7 +6,10 @@ import {
   blockedBanner,
   folderInside,
   heldCount,
+  heldEntries,
+  heldQuestion,
   heldText,
+  heldTitle,
   markDataSafety,
   normFolder,
   SECRETS_BADGE_TEXT,
@@ -109,5 +112,42 @@ describe("data safety in the views", () => {
     expect(heldCount(state, 4)).toBe(0);
     expect(heldText(1)).toBe("held: 1 message");
     expect(heldText(3)).toBe("held: 3 messages");
+  });
+});
+
+describe("held deliveries", () => {
+  const entry = (over: Partial<ipc.HeldEntryDto>): ipc.HeldEntryDto => ({
+    id: 1,
+    pane: 4,
+    from: "agent:7",
+    queuedMs: 1,
+    firstLine: "1",
+    kind: "screen",
+    reason: "held: a numbered choice is on screen; the person releases or drops it on the row",
+    ...over,
+  });
+
+  it("lists a pane's held deliveries and says why they wait", () => {
+    const state: ipc.DataSafetyStateDto = {
+      blocks: [],
+      agents: [],
+      held: [{ termId: 4, count: 2 }],
+      heldItems: [entry({}), entry({ id: 2, pane: 5, kind: "data-safety" })],
+    };
+    expect(heldEntries(state, 4).map((h) => h.id)).toEqual([1]);
+    expect(heldEntries({ blocks: [], agents: [], held: [] }, 4)).toEqual([]);
+    const screen = heldTitle(heldEntries(state, 4));
+    expect(screen).toMatch(/question is on this pane's screen/);
+    expect(screen).not.toMatch(/data next to its folder/);
+    expect(heldTitle([])).toMatch(/data next to its folder may be real/);
+    expect(heldTitle([entry({ kind: "data-safety" })])).toMatch(/release or drop/);
+  });
+
+  it("shows the sender, the text and the reason before a release", () => {
+    const q = heldQuestion(entry({}));
+    expect(q).toContain("agent process 7");
+    expect(q).toContain("“1”");
+    expect(q).toContain("numbered choice");
+    expect(heldQuestion(entry({ firstLine: "", from: "timer 3" }))).toContain("Enter alone");
   });
 });

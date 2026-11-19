@@ -86,7 +86,14 @@ import { NeedsYouView } from "./sources/needs_you_view";
 import { WorkView } from "./sources/work_view";
 import { buildEnvironmentModel, type EnvironmentModel } from "./sources/environment_model";
 import { EnvironmentView } from "./sources/environment_view";
-import { EMPTY_DATA_SAFETY, heldCount, heldText } from "./sources/data_safety";
+import {
+  EMPTY_DATA_SAFETY,
+  heldCount,
+  heldEntries,
+  heldQuestion,
+  heldText,
+  heldTitle,
+} from "./sources/data_safety";
 import type { SourceViewDeps } from "./sources/view_common";
 import { SOURCE_PICKER_CSS, SourcePicker, filterPayloads, isAll, resolvePick, ALL_SOURCES, type PickerOption } from "./sources/source_picker";
 import { ActivityBar, NAV_BAR_CSS, navTabFor, readNavProject, readNavTab, readViewSource, writeNavProject, writeNavTab, writeViewSource, type NavTab, type NavTabState, type NavViewTab } from "./nav_bar";
@@ -2488,6 +2495,29 @@ export class App {
     this.renderSourceViews();
   }
 
+  /** The person goes through what is held for pane `id`, oldest first:
+   *  release one (typed into the pane now), drop it, or keep holding (which
+   *  stops). Keep holding has focus: nothing goes out without a choice. */
+  private async reviewHeld(id: number): Promise<void> {
+    for (const entry of heldEntries(this.dataSafety, id)) {
+      const answer = await choiceDialog<"keep" | "drop" | "release">(
+        heldQuestion(entry),
+        { label: "Keep holding", value: "keep" },
+        [
+          { label: "Drop", value: "drop" },
+          { label: "Release", value: "release" },
+        ],
+      );
+      if (answer === "keep") return;
+      try {
+        if (answer === "release") await ipc.releaseHeldDelivery(entry.id);
+        else await ipc.dropHeldDelivery(entry.id);
+      } catch (err) {
+        console.warn("[held] could not", answer, "held message", entry.id, err);
+      }
+    }
+  }
+
   /** Boot the settings store and subscribe: a font change re-measures every
    *  open panel. Wheel speed and synthetic prompt marks need NO frontend
    *  work — `set_settings` broadcasts them to every open actor and new spawns
@@ -4170,16 +4200,22 @@ export class App {
         transport.title = "structured transport (machine-mode JSON, transcript view)";
         row.append(transport);
       }
-      // Deliveries from MCP, the control surface and timers held back by
-      // data safety: how many wait, delivered once the block clears.
-      const held = heldCount(this.dataSafety, id);
-      if (held > 0) {
-        const marker = document.createElement("span");
-        marker.className = "chappa-rail-held";
-        marker.textContent = heldText(held);
-        marker.title = "Messages to this agent are held: the data next to its folder may be real. They are delivered once the block clears in Environment.";
-        row.append(marker);
-      }
+    }
+    // Deliveries from MCP, the control surface and timers held back (by
+    // data safety, or because an agent's message met a question on this
+    // pane's screen): how many wait. A click lets the person release or
+    // drop each one.
+    const held = heldCount(this.dataSafety, id);
+    if (held > 0) {
+      const marker = document.createElement("span");
+      marker.className = "chappa-rail-held";
+      marker.textContent = heldText(held);
+      marker.title = heldTitle(heldEntries(this.dataSafety, id));
+      marker.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.reviewHeld(id);
+      });
+      row.append(marker);
     }
     // The typed attention tier (agent-waiting, or a program reporting
     // `blocked`): read off the entry, never recomputed here.

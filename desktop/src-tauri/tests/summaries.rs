@@ -165,6 +165,8 @@ impl World {
                 prompt_argv: Vec::new(),
                 session_capture: SessionCapture::None,
                 hooks_opt_out: false,
+                agent_args_allowed: Vec::new(),
+                agent_args_any: false,
             })
             .unwrap()
     }

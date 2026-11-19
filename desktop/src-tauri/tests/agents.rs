@@ -295,6 +295,8 @@ fn host_tool(tools: &AgentToolsState, name: &str, max_busy: Option<u32>) -> Agen
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap()
 }
@@ -326,6 +328,7 @@ fn spawn_agent_passes_extra_args_verbatim_and_delivers_the_prompt_when_ready() {
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     let resp = app_lib::agents::spawn_agent_headless(
         ctx,
@@ -594,6 +597,8 @@ fn json_transport_spawns_over_pipes_and_flips_awaiting_input() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap();
     // A json transport on a type without a machine mode is refused at upsert.
@@ -792,6 +797,8 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -803,6 +810,7 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     let err = app_lib::agents::spawn_agent_headless(
         ctx(),
@@ -833,6 +841,8 @@ fn json_transport_spawn_failure_and_per_turn_idle() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -949,6 +959,8 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -965,6 +977,7 @@ fn json_persistent_no_prompt_spawn_is_awaiting_after_the_ready_signal() {
             projects: &projects,
             records: &records,
             actor: None,
+            caller: Default::default(),
         },
         SpawnAgentRequest {
             agent_tool_id: tool.id,
@@ -1055,6 +1068,8 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
             enabled: true,
             ..AgentTool::default()
         })
@@ -1071,6 +1086,7 @@ fn json_persistent_child_exit_clears_awaiting_on_the_record() {
             projects: &projects,
             records: &records,
             actor: None,
+            caller: Default::default(),
         },
         SpawnAgentRequest {
             agent_tool_id: tool.id,
@@ -1245,6 +1261,8 @@ fn docker_tools(dir: &std::path::Path, extra_container: Option<&str>) -> AgentTo
         prompt_argv: Vec::new(),
         session_capture: Default::default(),
         hooks_opt_out: false,
+        agent_args_allowed: Vec::new(),
+        agent_args_any: false,
     };
     tools.upsert(tool.clone()).unwrap();
     if let Some(container) = extra_container {
@@ -1568,6 +1586,7 @@ fn a_prompt_is_held_while_a_startup_question_is_on_screen_and_never_typed() {
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     // The fake echoes its last argument: the question, as one line.
     let question = "Do you trust the files in this folder? 1. Yes, proceed 2. No, exit";
@@ -1626,6 +1645,7 @@ fn a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing() {
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     let resp = app_lib::agents::spawn_agent_headless(
         ctx,
@@ -1669,6 +1689,7 @@ fn a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing() {
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     let before = registry.list().len();
     let err = app_lib::agents::spawn_agent_headless(
@@ -1768,6 +1789,8 @@ fn an_agent_settings_file_written_during_a_run_is_found_when_the_agent_exits() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap();
     let registry = Registry::with_docker(FakeDocker::new());
@@ -1781,6 +1804,7 @@ fn an_agent_settings_file_written_during_a_run_is_found_when_the_agent_exits() {
             projects: &projects,
             records: &records,
             actor: None,
+            caller: Default::default(),
         },
         SpawnAgentRequest {
             agent_tool_id: tool.id,

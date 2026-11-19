@@ -261,6 +261,46 @@ pub struct AgentTool {
     /// The user took the session-hook `--settings` flag off this tool, so
     /// the store never adds it back. Set by the store, not the edit form.
     pub hooks_opt_out: bool,
+    /// The words an agent may put in `extra_args` when it spawns this
+    /// tool (an exact match each). Empty by default, so an agent adds
+    /// nothing to the command line the person set up; a permission-bypass
+    /// flag is never on a default list.
+    pub agent_args_allowed: Vec<String>,
+    /// The person lets agents pass any `extra_args` to this tool (Settings,
+    /// off by default).
+    pub agent_args_any: bool,
+}
+
+/// How a refused `extra_args` from an agent starts (a 400).
+pub const AGENT_ARGS_REFUSAL_LEAD: &str = "extra_args refused:";
+
+impl AgentTool {
+    /// Why an agent may not pass `extra` to this tool, `None` when it may:
+    /// every word must be on [`AgentTool::agent_args_allowed`] unless the
+    /// person turned on [`AgentTool::agent_args_any`].
+    pub fn agent_args_refusal(&self, extra: &[String]) -> Option<String> {
+        if self.agent_args_any {
+            return None;
+        }
+        let refused: Vec<&str> = extra
+            .iter()
+            .filter(|w| !self.agent_args_allowed.iter().any(|a| a == *w))
+            .map(String::as_str)
+            .collect();
+        if refused.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{AGENT_ARGS_REFUSAL_LEAD} an agent may pass only the words this tool allows agents              (Settings > Agents > \"{}\"), and {} {} not among them",
+            self.name,
+            refused
+                .iter()
+                .map(|w| format!("`{w}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if refused.len() == 1 { "is" } else { "are" },
+        ))
+    }
 }
 
 /// How the app learns the id of the conversation a run is having.
@@ -429,6 +469,8 @@ impl AgentTool {
             prompt_argv: prompt_argv_template(tool_type),
             session_capture: SessionCapture::template(tool_type),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         }
     }
 
@@ -2044,6 +2086,31 @@ mod tests {
     /// A new claude tty tool gets the hook when first saved; an edit that
     /// drops the flag opts the tool out for good, even though the edit form
     /// never sends the opt-out itself.
+    /// An agent adds to a tool's command line only words on its allowlist
+    /// (exact matches), unless the person opened the tool up; the default
+    /// list is empty.
+    #[test]
+    fn an_agent_passes_only_allowed_extra_args() {
+        let mut tool = AgentTool::template(ToolType::Claude);
+        assert!(tool.agent_args_allowed.is_empty() && !tool.agent_args_any);
+        assert_eq!(tool.agent_args_refusal(&[]), None);
+        let why = tool
+            .agent_args_refusal(&["--dangerously-skip-permissions".into()])
+            .expect("refused");
+        assert!(why.starts_with(AGENT_ARGS_REFUSAL_LEAD), "{why}");
+        assert!(why.contains("`--dangerously-skip-permissions`"), "{why}");
+        tool.agent_args_allowed = vec!["--verbose".into()];
+        assert_eq!(tool.agent_args_refusal(&["--verbose".into()]), None);
+        assert!(tool
+            .agent_args_refusal(&["--verbose".into(), "--verbose=1".into()])
+            .is_some());
+        tool.agent_args_any = true;
+        assert_eq!(
+            tool.agent_args_refusal(&["--dangerously-skip-permissions".into()]),
+            None
+        );
+    }
+
     #[test]
     fn a_removed_session_hook_stays_removed() {
         let dir = tempfile::tempdir().unwrap();

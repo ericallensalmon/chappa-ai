@@ -36,8 +36,10 @@ use term_core::actor::{
 use term_core::status::ProgramStatus;
 
 use crate::agent_json::JsonAgent;
+use crate::caller::{AgentTokens, Caller};
 use crate::delivery_hold::{DeliveryHolds, HoldGate};
 use crate::event_ring::{EventRing, Sequenced};
+use crate::spawn_gate::{GatePass, GateRequest, SpawnGate, SpawnKind};
 use term_core::frame::encode_frame;
 use term_core::pty::PtySpec;
 use term_core::status::{
@@ -566,6 +568,9 @@ struct Entry {
     /// The folder the child was started in (`None` = the home directory):
     /// what data safety judges an agent's deliveries by.
     cwd: Option<PathBuf>,
+    /// The row that spawned this one with its own agent token (its
+    /// authority reaches this row), `None` for anything the person started.
+    spawned_by: Option<TermId>,
 }
 
 struct Inner {
@@ -619,6 +624,33 @@ pub struct Registry {
     /// Deliveries from the control surface and timers held back from an
     /// agent until it is safe to make them ([`crate::delivery_hold`]).
     holds: DeliveryHolds,
+    /// The live agent tokens, one per row an agent token was minted for;
+    /// revoked when that row exits or closes.
+    tokens: AgentTokens,
+    /// The launch gate the spawn path runs when a spawn arrives without a
+    /// pass (set once at app setup; see [`crate::spawn_gate`]).
+    spawn_gate: Arc<Mutex<Option<Arc<dyn SpawnGate>>>>,
+}
+
+/// Who a spawn is for and what the launch gate said about it.
+#[derive(Debug, Clone, Default)]
+pub struct Origin {
+    pub caller: Caller,
+    pub pass: Option<GatePass>,
+}
+
+impl Origin {
+    /// The person (or the app itself), no pass: a terminal starts as asked.
+    pub fn person() -> Self {
+        Self::default()
+    }
+
+    pub fn with_pass(caller: Caller, pass: GatePass) -> Self {
+        Self {
+            caller,
+            pass: Some(pass),
+        }
+    }
 }
 
 impl Default for Registry {
@@ -642,7 +674,132 @@ impl Registry {
             )),
             run_recorder: Arc::default(),
             holds: DeliveryHolds::default(),
+            tokens: AgentTokens::default(),
+            spawn_gate: Arc::default(),
         }
+    }
+
+    // ---- caller identity ------------------------------------------------------
+
+    /// The live agent tokens.
+    pub fn tokens(&self) -> &AgentTokens {
+        &self.tokens
+    }
+
+    /// The gate the spawn path runs for a spawn that brings no pass.
+    pub fn set_spawn_gate(&self, gate: Arc<dyn SpawnGate>) {
+        *self.spawn_gate.lock().unwrap_or_else(|e| e.into_inner()) = Some(gate);
+    }
+
+    fn spawn_gate(&self) -> Option<Arc<dyn SpawnGate>> {
+        self.spawn_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Run `gate` for one spawn: the pass for the folder it cleared, and any
+    /// notice to raise. The pass is what the spawn path then accepts.
+    pub fn gate_spawn(
+        &self,
+        gate: &dyn SpawnGate,
+        req: &GateRequest<'_>,
+    ) -> Result<(GatePass, Option<crate::secret_scan::ScanNotice>), String> {
+        let outcome = gate.check(req)?;
+        Ok((GatePass::issue(outcome.cwd, req.caller), outcome.notice))
+    }
+
+    /// The row an agent token holder's row was spawned by, `None` for a row
+    /// the person started (or an unknown id).
+    pub fn spawned_by(&self, id: TermId) -> Option<TermId> {
+        self.inner
+            .lock()
+            .ok()?
+            .entries
+            .get(&id)
+            .and_then(|e| e.spawned_by)
+    }
+
+    /// Whether `id` is `root` or was spawned, directly or through rows that
+    /// are still listed, by `root` with its own token.
+    pub fn in_subtree(&self, root: TermId, id: TermId) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        subtree_contains(&inner, root, id)
+    }
+
+    /// `root` and every listed row it spawned, transitively.
+    pub fn subtree(&self, root: TermId) -> Vec<TermId> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ids: Vec<TermId> = inner
+            .entries
+            .keys()
+            .copied()
+            .filter(|id| subtree_contains(&inner, root, *id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The row's display name.
+    pub fn name_of(&self, id: TermId) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()?
+            .entries
+            .get(&id)
+            .map(|e| e.name.clone())
+    }
+
+    /// Whether `id` is a live agent row.
+    pub fn is_agent(&self, id: TermId) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.entries.get(&id).map(|e| e.agent.is_some()))
+            .unwrap_or(false)
+    }
+
+    /// The confirmation-shaped state on `id`'s screen now (its label), if
+    /// any: what holds an agent's delivery to it.
+    pub fn confirmation_on_screen(&self, id: TermId) -> Option<String> {
+        let handle = self.handle(id)?;
+        crate::startup_questions::detect_confirmation(&handle.dump_text(0))
+            .map(|q| q.label.to_owned())
+    }
+
+    /// Queue an agent's delivery to `id` while a question is on its screen.
+    /// Answers the entry's id and how many are held for the pane.
+    pub fn hold_for_screen(
+        &self,
+        id: TermId,
+        reason: String,
+        from: String,
+        text: String,
+        deliver: crate::delivery_hold::Deliver,
+    ) -> (u64, usize) {
+        self.holds.hold_as(
+            id,
+            crate::delivery_hold::HoldKind::Screen,
+            reason,
+            from,
+            text,
+            deliver,
+        )
+    }
+
+    /// What is held for pane `id` (every pane when `None`), oldest first.
+    pub fn held_list(&self, id: Option<TermId>) -> Vec<crate::delivery_hold::HeldEntry> {
+        self.holds.list(id)
+    }
+
+    /// The person releases one held delivery now.
+    pub fn release_held_one(&self, entry_id: u64) -> Option<crate::delivery_hold::HeldEntry> {
+        self.holds.release_one(entry_id)
+    }
+
+    /// The person drops one held delivery.
+    pub fn discard_held(&self, entry_id: u64) -> Option<crate::delivery_hold::HeldEntry> {
+        self.holds.discard(entry_id)
     }
 
     // ---- held deliveries --------------------------------------------------------
@@ -689,7 +846,9 @@ impl Registry {
     /// Make the held deliveries whose hold lifted, in order (the data-safety
     /// watcher calls this every second). Answers how many were made.
     pub fn release_held(&self) -> usize {
-        self.holds.release(&|id| self.agent_cwd(id))
+        self.holds.release_with(&|id| self.agent_cwd(id), &|id| {
+            self.confirmation_on_screen(id)
+        })
     }
 
     /// How many deliveries are held per pane.
@@ -769,6 +928,34 @@ impl Registry {
         close_on_exit: bool,
         record: Option<String>,
     ) -> Result<TermId, String> {
+        self.create_agent_terminal_as(
+            cfg,
+            sink,
+            on_notify,
+            name,
+            id,
+            meta,
+            close_on_exit,
+            record,
+            Origin::person(),
+        )
+    }
+
+    /// [`Registry::create_agent_terminal`] for a caller, with the launch
+    /// gate's pass for the folder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_agent_terminal_as(
+        &self,
+        cfg: ActorConfig,
+        sink: Arc<dyn EventSink>,
+        on_notify: Option<AppHandle>,
+        name: String,
+        id: TermId,
+        meta: AgentMeta,
+        close_on_exit: bool,
+        record: Option<String>,
+        origin: Origin,
+    ) -> Result<TermId, String> {
         let docker = meta.runtime.is_docker();
         let binding = agent_binding(&meta, record);
         let id = self.create_terminal_full(
@@ -782,6 +969,7 @@ impl Registry {
             false,
             close_on_exit,
             binding,
+            origin,
         )?;
         if docker {
             self.bridge_waker.wake();
@@ -954,6 +1142,34 @@ impl Registry {
         close_on_exit: bool,
         record: Option<String>,
     ) -> Result<TermHandle, String> {
+        self.create_json_agent_terminal_as(
+            cfg,
+            sink,
+            on_notify,
+            name,
+            id,
+            meta,
+            close_on_exit,
+            record,
+            Origin::person(),
+        )
+    }
+
+    /// [`Registry::create_json_agent_terminal`] for a caller, with the
+    /// launch gate's pass for the folder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_json_agent_terminal_as(
+        &self,
+        cfg: ActorConfig,
+        sink: Arc<dyn EventSink>,
+        on_notify: Option<AppHandle>,
+        name: String,
+        id: TermId,
+        meta: AgentMeta,
+        close_on_exit: bool,
+        record: Option<String>,
+        origin: Origin,
+    ) -> Result<TermHandle, String> {
         let docker = meta.runtime.is_docker();
         let binding = agent_binding(&meta, record);
         let id = self.create_terminal_full(
@@ -967,6 +1183,7 @@ impl Registry {
             true,
             close_on_exit,
             binding,
+            origin,
         )?;
         if docker {
             self.bridge_waker.wake();
@@ -1092,14 +1309,86 @@ impl Registry {
         record: Option<RecordBinding>,
     ) -> Result<TermId, String> {
         self.create_terminal_full(
-            cfg, sink, on_notify, name, at, on_exit, None, false, false, record,
+            cfg,
+            sink,
+            on_notify,
+            name,
+            at,
+            on_exit,
+            None,
+            false,
+            false,
+            record,
+            Origin::person(),
         )
+    }
+
+    /// A terminal started for `origin`'s caller into `at` (a reserved id,
+    /// so its identity env can name it) or the next id: an agent's terminal
+    /// starts only with the launch gate's pass.
+    pub fn create_terminal_as(
+        &self,
+        cfg: ActorConfig,
+        sink: Arc<dyn EventSink>,
+        name: String,
+        at: Option<TermId>,
+        origin: Origin,
+    ) -> Result<TermId, String> {
+        self.create_terminal_full(
+            cfg, sink, None, name, at, None, None, false, false, None, origin,
+        )
+    }
+
+    /// The launch gate's verdict for a spawn reaching the spawn path: a
+    /// pass must cover the folder and caller of the spawn it came with;
+    /// without one the registry's own gate runs (and its folder replaces
+    /// the asked-for one), except for the person's own terminals. An
+    /// agent's spawn with neither a pass nor a gate is refused.
+    fn admit(
+        &self,
+        cfg: &mut ActorConfig,
+        agent: Option<&AgentMeta>,
+        origin: &Origin,
+    ) -> Result<(), String> {
+        if let Some(pass) = &origin.pass {
+            return if pass.covers(cfg.spec.cwd.as_deref(), &origin.caller) {
+                Ok(())
+            } else {
+                Err("refused: the launch gate cleared a different folder or caller".into())
+            };
+        }
+        if !origin.caller.is_agent() && agent.is_none() {
+            return Ok(());
+        }
+        let Some(gate) = self.spawn_gate() else {
+            return if origin.caller.is_agent() {
+                Err("refused: no launch gate is set up for an agent's spawn".into())
+            } else {
+                Ok(())
+            };
+        };
+        let asked = cfg.spec.cwd.as_ref().map(|p| p.display().to_string());
+        let kind = match agent {
+            Some(meta) => SpawnKind::Agent {
+                container: meta.runtime.is_docker(),
+            },
+            None => SpawnKind::Terminal,
+        };
+        let outcome = gate.check(&GateRequest {
+            caller: &origin.caller,
+            kind,
+            project_id: agent.and_then(|m| m.project_id),
+            working_dir: asked.as_deref(),
+            launch_anyway: None,
+        })?;
+        cfg.spec.cwd = outcome.cwd;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     fn create_terminal_full(
         &self,
-        cfg: ActorConfig,
+        mut cfg: ActorConfig,
         sink: Arc<dyn EventSink>,
         on_notify: Option<AppHandle>,
         name: String,
@@ -1109,7 +1398,10 @@ impl Registry {
         nopty: bool,
         close_on_exit: bool,
         record: Option<RecordBinding>,
+        origin: Origin,
     ) -> Result<TermId, String> {
+        self.admit(&mut cfg, agent.as_ref(), &origin)?;
+        let spawned_by = origin.caller.grant().map(|g| g.process_id);
         // The stable identity, before anything else can fail: an agent keeps
         // its spawn uuid (one identity end to end), a recorded spawn the run
         // uuid its caller already wrote to the store, a bare shell a fresh one.
@@ -1173,6 +1465,7 @@ impl Registry {
             summary: None,
             program_status: None,
             cwd: cfg.spec.cwd.clone(),
+            spawned_by,
         };
         inner.entries.insert(id, entry);
         // Entry in place before the pump starts, so the pump can never race a
@@ -1352,6 +1645,7 @@ impl Registry {
         broadcast: bool,
     ) -> Option<CloseOutcome> {
         let entry = self.inner.lock().unwrap().entries.remove(&id)?;
+        self.tokens.revoke(id);
         // The json agent is marked closing (no more events) but its
         // piped child — for docker, the host `docker exec -i` client — stays
         // alive through the container-side kill, exactly like a pty agent's
@@ -1699,12 +1993,25 @@ impl Registry {
     /// the handle and goes nowhere; the attempt is still journaled, and the
     /// caller's receipt shows no output came back.
     pub fn write_journaled(&self, id: TermId, bytes: &[u8], text: String, submit: bool) -> bool {
+        self.write_journaled_as(id, bytes, text, submit, None)
+    }
+
+    /// [`Registry::write_journaled`], the journal naming `actor` as the
+    /// sender (an agent's deliveries: `agent:<process id>`).
+    pub fn write_journaled_as(
+        &self,
+        id: TermId,
+        bytes: &[u8],
+        text: String,
+        submit: bool,
+        actor: Option<&str>,
+    ) -> bool {
         let handle = match self.handle(id) {
             Some(handle) => handle,
             None => return false,
         };
         let _ = handle.write_input(bytes);
-        self.record_input(id, bytes.len(), text, submit);
+        self.record_input_as(id, bytes.len(), text, submit, actor, None);
         true
     }
 
@@ -2065,6 +2372,9 @@ fn spawn_pump(
                     }
                 }
                 TermEvent::Exited(status) => {
+                    // The row's agent token dies with its run: a resumed or
+                    // restarted row is given a new one.
+                    registry_owned.tokens.revoke(term_id);
                     apply_status(
                         term_id,
                         seq,
@@ -2454,6 +2764,22 @@ fn run_head(entry: &Entry) -> RunHead {
         summary_source: entry.summary.as_ref().map(|(_, source)| *source),
         session: entry.session.clone(),
     }
+}
+
+/// Whether walking `id`'s `spawned_by` links reaches `root` (bounded: a
+/// chain longer than the registry is a cycle and reaches nothing).
+fn subtree_contains(inner: &Inner, root: TermId, id: TermId) -> bool {
+    let mut at = id;
+    for _ in 0..=inner.entries.len() {
+        if at == root {
+            return inner.entries.contains_key(&root);
+        }
+        match inner.entries.get(&at).and_then(|e| e.spawned_by) {
+            Some(parent) => at = parent,
+            None => return false,
+        }
+    }
+    false
 }
 
 fn entry_project(entry: &Entry) -> Option<u32> {

@@ -40,6 +40,52 @@ fn delivery_target(args: &Args, params: &Params) -> Result<u32, CoordError> {
     })
 }
 
+/// An agent's timer reaches only its own subtree: what it delivers to and
+/// what it watches. The person's reaches everything.
+fn check_reach(state: &ControlState, params: &Params, id: u32) -> Result<(), CoordError> {
+    match params.caller.grant() {
+        Some(grant) if !state.registry.in_subtree(grant.process_id, id) => {
+            Err(CoordError::Forbidden(format!(
+                "process {id} is not this agent's own row or one it spawned"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// For an agent, each watched process named by id or by name, resolved
+/// within its own subtree (ids, so the service cannot pick a namesake
+/// elsewhere).
+fn reachable_processes(
+    state: &ControlState,
+    params: &Params,
+    tokens: Vec<String>,
+) -> Result<Vec<String>, CoordError> {
+    let Some(grant) = params.caller.grant() else {
+        return Ok(tokens);
+    };
+    let mine = state.registry.subtree(grant.process_id);
+    tokens
+        .into_iter()
+        .map(|t| {
+            let by_id = t.trim().parse::<u32>().ok().filter(|id| mine.contains(id));
+            let by_name = || {
+                mine.iter()
+                    .copied()
+                    .find(|id| state.registry.name_of(*id).as_deref() == Some(t.trim()))
+            };
+            by_id
+                .or_else(by_name)
+                .map(|id| id.to_string())
+                .ok_or_else(|| {
+                    CoordError::Forbidden(format!(
+                        "`{t}` is not one of this agent's own rows or rows it spawned"
+                    ))
+                })
+        })
+        .collect()
+}
+
 /// A non-negative millisecond count (`Args::usize` already refuses negatives).
 fn optional_ms(args: &Args, key: &str) -> Result<Option<u64>, CoordError> {
     Ok(args.usize(key)?.map(|v| v as u64))
@@ -104,10 +150,13 @@ pub fn timer_set(state: &ControlState, params: &Params, query: &str, body: &str)
             _ if a.bool("loop")? == Some(true) => Some(delay_ms),
             _ => None,
         };
-        state.timers.set(
+        let target = delivery_target(a, params)?;
+        check_reach(state, params, target)?;
+        state.timers.set_from(
+            params.caller.grant().map(|g| g.process_id),
             &params.actor,
             project_scope(a, params)?,
-            delivery_target(a, params)?,
+            target,
             text,
             delay_ms,
             repeat,
@@ -124,14 +173,17 @@ fn fire_when_idle(
     body: &str,
 ) -> Resp {
     run(query, body, |a| {
-        let processes = process_tokens(a)?;
+        let processes = reachable_processes(state, params, process_tokens(a)?)?;
         let max_wait_ms = required_ms(a, "max_wait_ms")?;
         let text = a.req_str("body")?;
-        state.timers.fire_when_idle(
+        let target = delivery_target(a, params)?;
+        check_reach(state, params, target)?;
+        state.timers.fire_when_idle_from(
+            params.caller.grant().map(|g| g.process_id),
             kind,
             &params.actor,
             project_scope(a, params)?,
-            delivery_target(a, params)?,
+            target,
             text,
             &processes,
             max_wait_ms,
@@ -167,7 +219,8 @@ pub fn timer_list(state: &ControlState, params: &Params, query: &str, body: &str
         state.timers.list(
             &params.actor,
             a.bool("include_fired")?.unwrap_or(false),
-            a.bool("all")?.unwrap_or(false),
+            // Every actor's timers are the person's view, not an agent's.
+            a.bool("all")?.unwrap_or(false) && !params.caller.is_agent(),
             a.usize("limit")?,
             a.usize("offset")?,
             project_scope(a, params)?,

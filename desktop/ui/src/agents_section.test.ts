@@ -340,6 +340,34 @@ describe("Agents settings section", () => {
     s.dispose();
   });
 
+  it("arguments from agents: empty and off by default, saved one per line, the toggle lifts the list, and the hint says how far it reaches", async () => {
+    const { api, host, section: s } = await section([]);
+    field<HTMLSelectElement>(host, "newAgentType").value = "claude";
+    action(host, "addAgent").click();
+    const modal = s.modalElement!;
+    const allowed = field<HTMLTextAreaElement>(modal, "agent_args_allowed");
+    const any = field<HTMLInputElement>(modal, "agent_args_any");
+    expect(allowed.value).toBe("");
+    expect(any.checked).toBe(false);
+    const hint = modal.querySelector(".chappa-agent-args-hint")?.textContent ?? "";
+    expect(hint).toMatch(/Agents may pass any arguments/);
+    expect(hint).toMatch(/only for agents that cannot read your files/);
+    allowed.value = "--verbose\n\n--model\r";
+    action(modal, "saveAgent").click();
+    await FLUSH();
+    expect(api.tools()[0].agent_args_allowed).toEqual(["--verbose", "--model"]);
+    expect(api.tools()[0].agent_args_any).toBe(false);
+    action(host, "editAgent").click();
+    const edit = s.modalElement!;
+    const toggle = field<HTMLInputElement>(edit, "agent_args_any");
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change"));
+    expect(field<HTMLTextAreaElement>(edit, "agent_args_allowed").disabled).toBe(true);
+    action(edit, "saveAgent").click();
+    await FLUSH();
+    expect(api.tools()[0].agent_args_any).toBe(true);
+  });
+
   it("the Resume group: templates prefilled, per-kind hints, the pattern row for regex, and the saved shape", async () => {
     const { api, host, section: s } = await section([]);
     // The claude template: json capture, `--resume={session_id}`, both hints.

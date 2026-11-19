@@ -186,9 +186,29 @@ HTTP API under it is listed in [`desktop/CONTROL_API.md`](desktop/CONTROL_API.md
 
 ## Safety model
 
-Agents run with your authority, and a cloned repository can name any
-command. The rule: nothing a repository says runs before you have seen it,
-and nothing it holds can quietly widen what an agent gets.
+A cloned repository can name any command. The rule: nothing a repository
+says runs before you have seen it, and nothing it holds can quietly widen
+what an agent gets.
+
+**Agents have less authority than you.** Your own tools and scripts reach
+the control surface with your token (`<app-config>/control_token`). Each
+agent the app starts, and each terminal an agent opens, gets a token of its
+own instead, by environment only and held only in the app's memory; it ends
+when the row exits. With it an agent reaches its own row and the rows it
+started, and reads at the project level. It starts things only in its own
+project's folders, past the data-safety and secret-scan checks with no way
+around them, and adds only the command-line words a tool allows agents
+(Settings ▸ Agents; "Agents may pass any arguments" is off by default).
+What it types into another terminal waits while a question is on that
+screen (you release or drop it from the row), a bare answer key is refused,
+and another agent sees who sent it. Trust, acknowledgements and settings
+are not reachable over the control surface at all.
+
+This boundary is complete only for agents that cannot read your files:
+tools running in a container that sees only their workspace. An agent
+running unsandboxed on your computer, with a shell, as you, can read your
+token file and the app's own files, and then act as you; nothing in the app
+can tell it from you.
 
 <!-- screenshot: assets/screenshots/trust-prompt.png — The trust prompt for a newly opened project, listing its auto-start commands with their environment and working folder -->
 

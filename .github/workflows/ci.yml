@@ -125,7 +125,21 @@ jobs:
         # runners have none.
         env:
           CHAPPA_TEST_DOCKER: ${{ runner.os == 'Linux' && '1' || '0' }}
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+
+      # The security negative controls in desktop/SECURITY_TESTS must have
+      # run and passed: a test deleted, renamed or skipped fails here even
+      # when everything else is green.
+      - name: Check the required security tests ran
+        if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
+        working-directory: desktop
+        run: |
+          case "$RUNNER_OS" in
+            Windows) os=windows ;;
+            macOS) os=macos ;;
+            *) os=linux ;;
+          esac
+          node scripts/check-security-tests.mjs --suite rust --os "$os" "$RUNNER_TEMP/cargo-test.log"
 
       # Each OS compiles code the others don't (ConPTY and Win32 process
       # handling, Unix ptys and sockets, macOS-only startup), so clippy runs
@@ -274,11 +288,21 @@ jobs:
         working-directory: desktop/ui
       - run: npx tsc --noEmit
         working-directory: desktop/ui
-      - run: npm test
+      - run: npm test -- --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/vitest.json"
         working-directory: desktop/ui
       # The bundled sources use only the Node standard library: no install.
-      - run: npm run test:sources
+      - run: |
+          set -o pipefail
+          npm run test:sources 2>&1 | tee "$RUNNER_TEMP/node-test.log"
+          node --test --test-reporter=tap scripts/check-security-tests.test.mjs 2>&1 | tee -a "$RUNNER_TEMP/node-test.log"
         working-directory: desktop
+      # As in the rust job: the listed security tests must have run.
+      - name: Check the required security tests ran
+        if: ${{ !cancelled() }}
+        working-directory: desktop
+        run: |
+          node scripts/check-security-tests.mjs --suite ui "$RUNNER_TEMP/vitest.json"
+          node scripts/check-security-tests.mjs --suite node "$RUNNER_TEMP/node-test.log"
 
   # A second net only: the local pre-push scan is the gate, because by the
   # time this runs a leak is already public. It must not be silenceable from

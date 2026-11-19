@@ -90,6 +90,115 @@ pub fn detect_startup_question(lines: &[String]) -> Option<&'static StartupQuest
         .find(|q| q.all.iter().all(|n| text.contains(n)) && q.any.iter().any(|n| text.contains(n)))
 }
 
+/// Shapes of a question that waits for a one-key answer, recognised on any
+/// program's screen rather than by its wording. What an agent sends another
+/// terminal is held while one of these (or a known question above) is on
+/// screen, so an agent cannot answer a permission or confirmation prompt
+/// that was put to the person.
+pub const CONFIRMATION_SHAPES: &[StartupQuestion] = &[
+    StartupQuestion {
+        id: "numbered-choice",
+        label: "a numbered choice",
+        all: &[],
+        any: &[],
+    },
+    StartupQuestion {
+        id: "yes-no",
+        label: "a yes/no question",
+        all: &[],
+        any: &[],
+    },
+    StartupQuestion {
+        id: "allow-deny",
+        label: "an allow/deny question",
+        all: &[],
+        any: &[],
+    },
+];
+
+/// How many of the last non-blank rows the shape detector reads: a prompt
+/// waiting for an answer sits at the bottom of the screen; a numbered list
+/// scrolled far up is history.
+pub const CONFIRMATION_ROWS: usize = 15;
+
+fn shape(id: &str) -> &'static StartupQuestion {
+    CONFIRMATION_SHAPES
+        .iter()
+        .find(|q| q.id == id)
+        .unwrap_or(&CONFIRMATION_SHAPES[0])
+}
+
+/// The number a menu row starts with: `1. Yes`, `❯ 2) No`, `> 3. Later`.
+fn menu_number(row: &str) -> Option<(u32, bool)> {
+    let mut rest = row.trim_start();
+    let mut cursor = false;
+    if let Some(c) = rest.chars().next() {
+        if matches!(c, '❯' | '›' | '>' | '▶' | '→' | '*' | '●' | '○' | '◯' | '◉') {
+            cursor = true;
+            rest = rest[c.len_utf8()..].trim_start();
+        }
+    }
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    let after = &rest[digits.len()..];
+    let mut chars = after.chars();
+    if !matches!(chars.next(), Some('.' | ')')) {
+        return None;
+    }
+    // `1.5` is a number, not a menu entry; the entry has text after a space.
+    if !matches!(chars.next(), Some(' ' | '\t')) || chars.as_str().trim().is_empty() {
+        return None;
+    }
+    Some((digits.parse().ok()?, cursor))
+}
+
+fn has_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// A confirmation-shaped state on `lines` (a dump of the visible grid): a
+/// known startup question, or, on the last [`CONFIRMATION_ROWS`] non-blank
+/// rows, a numbered choice list (`1.` and `2.` entries, or a cursor on a
+/// numbered entry), a `(y/n)`-style question, or an Allow / Deny choice.
+pub fn detect_confirmation(lines: &[String]) -> Option<&'static StartupQuestion> {
+    if let Some(q) = detect_startup_question(lines) {
+        return Some(q);
+    }
+    let rows: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let tail = &rows[rows.len().saturating_sub(CONFIRMATION_ROWS)..];
+    let numbers: Vec<(u32, bool)> = tail.iter().filter_map(|r| menu_number(r)).collect();
+    let has = |n: u32| numbers.iter().any(|(m, _)| *m == n);
+    if numbers.iter().any(|(_, cursor)| *cursor) || (has(1) && has(2)) {
+        return Some(shape("numbered-choice"));
+    }
+    let text = tail.join("\n").to_lowercase();
+    let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if [
+        "(y/n)", "[y/n]", "(yes/no)", "[yes/no]", "(y/n/a)", "[y/n/a]",
+    ]
+    .iter()
+    .any(|n| squeezed.contains(n))
+    {
+        return Some(shape("yes-no"));
+    }
+    if has_word(&text, "allow")
+        && (has_word(&text, "deny") || text.contains("don't allow") || has_word(&text, "reject"))
+    {
+        return Some(shape("allow-deny"));
+    }
+    None
+}
+
 /// The receipt reason for a prompt that was still held when the gate's cap
 /// passed: `held: waiting on <label>`.
 pub fn held_reason(question: &StartupQuestion) -> String {
@@ -216,6 +325,36 @@ mod tests {
             "folder-trust"
         );
         assert_eq!(normalise(&screen("  A  b\n\n c ")), "a b c");
+    }
+
+    /// Any program's one-key question is recognised by its shape at the
+    /// bottom of the screen, and ordinary output is not.
+    #[test]
+    fn confirmation_shapes_are_recognised_on_the_last_rows() {
+        let id = |text: &str| detect_confirmation(&screen(text)).map(|q| q.id);
+        assert_eq!(id(FOLDER_TRUST), Some("folder-trust"));
+        assert_eq!(
+            id("Run this command?\n  1. Yes\n  2. Yes, and don't ask again\n  3. No"),
+            Some("numbered-choice")
+        );
+        assert_eq!(id("Pick one\n ❯ 1. Apply"), Some("numbered-choice"));
+        assert_eq!(id("Overwrite file.txt? (y/N)"), Some("yes-no"));
+        assert_eq!(id("Continue? [ Y / n ]"), Some("yes-no"));
+        assert_eq!(
+            id("The tool wants to read ~/.ssh\n  Allow    Deny"),
+            Some("allow-deny")
+        );
+        // Ordinary output: a decimal, a sentence about allowing, one list item.
+        assert_eq!(id("version 1.5 installed\n$ "), None);
+        assert_eq!(id("this setting allows more memory\n$ "), None);
+        assert_eq!(id("1. only one entry\n$ "), None);
+        assert_eq!(id(""), None);
+        // A choice that has scrolled far above the bottom is history.
+        let mut long = String::from("1. Yes\n2. No\n");
+        for n in 0..CONFIRMATION_ROWS {
+            long.push_str(&format!("line {n}\n"));
+        }
+        assert_eq!(id(&long), None);
     }
 
     #[test]

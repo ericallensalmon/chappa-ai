@@ -294,6 +294,11 @@ export interface AgentToolDto {
   prompt_argv: string[];
   /** How the id of the conversation a run is having is learned. */
   session_capture: SessionCaptureDto;
+  /** Words an agent may put in `extra_args` when it spawns this tool
+   *  (exact matches). Empty by default. */
+  agent_args_allowed?: string[];
+  /** Agents may pass any `extra_args` to this tool (off by default). */
+  agent_args_any?: boolean;
 }
 
 export type AgentTransport = "tty" | "json";
@@ -1967,6 +1972,31 @@ export interface DataSafetyStateDto {
   agents: DataSafetyAgentDto[];
   /** Deliveries held per pane (panes with none left out). */
   held: { termId: number; count: number }[];
+  /** Every held delivery, oldest first per pane. */
+  heldItems?: HeldEntryDto[];
+}
+
+/** One delivery held for a pane: by data safety, or (for what an agent
+ *  sent) by a question on the pane's screen. */
+export interface HeldEntryDto {
+  id: number;
+  pane: number;
+  /** Who sent it: `user`, `agent:<id>`, `timer <id>`, … */
+  from: string;
+  queuedMs: number;
+  firstLine: string;
+  kind: "data-safety" | "screen";
+  reason: string;
+}
+
+/** The person lets one held delivery go now. */
+export function releaseHeldDelivery(entryId: number): Promise<boolean> {
+  return call("release_held_delivery", { entryId });
+}
+
+/** The person drops one held delivery unsent. */
+export function dropHeldDelivery(entryId: number): Promise<boolean> {
+  return call("drop_held_delivery", { entryId });
 }
 
 /** The macOS menu bar's File ▸ Close Pane (Cmd+W), emitted by the app's

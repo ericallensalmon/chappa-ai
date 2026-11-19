@@ -239,6 +239,8 @@ fn host_tool(tools: &AgentToolsState, name: &str) -> AgentTool {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap()
 }
@@ -251,6 +253,7 @@ fn spawn_ctx(w: &World) -> SpawnContext<'_> {
         projects: &w.projects,
         records: &w.records,
         actor: None,
+        caller: Default::default(),
     }
 }
 
@@ -470,6 +473,7 @@ fn start_assigns_a_new_run_uuid_and_a_new_terminal() {
         tools: &w.tools,
         settings: &w.settings,
         app: None,
+        caller: Default::default(),
     };
     let first = w.records.start(deps(), "t-start", None, 0).unwrap();
     let (t1, u1) = (first.term_id.unwrap(), first.run_uuid.clone().unwrap());
@@ -545,6 +549,7 @@ fn a_project_shell_record_lives_with_its_project() {
                 tools: &w.tools,
                 settings: &w.settings,
                 app: None,
+                caller: Default::default(),
             },
             "t-proj",
             None,
@@ -944,6 +949,7 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
                 tools: &w.tools,
                 settings: &w.settings,
                 app: None,
+                caller: Default::default(),
             },
             &parent_record,
             None,
@@ -982,6 +988,7 @@ fn agent_spawns_create_records_and_resolve_parents_by_record_id() {
                 tools: &w.tools,
                 settings: &w.settings,
                 app: None,
+                caller: Default::default(),
             },
             &parent_record,
             None,

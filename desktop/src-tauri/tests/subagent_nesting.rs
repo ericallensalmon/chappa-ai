@@ -319,6 +319,7 @@ fn spawn_records_parent_from_explicit_then_actor_else_none() {
             projects: &projects,
             records: &records,
             actor,
+            caller: Default::default(),
         };
         app_lib::agents::spawn_agent_headless(
             ctx,
@@ -377,6 +378,8 @@ fn host_tool(tools: &AgentToolsState, name: &str) -> app_lib::agent_tools::Agent
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap()
 }

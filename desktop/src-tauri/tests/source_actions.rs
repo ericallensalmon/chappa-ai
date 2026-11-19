@@ -165,6 +165,8 @@ fn stage() -> Option<Stage> {
             prompt_argv: vec!["{prompt}".into()],
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap();
     // The source's process row: a plain shell standing in for the launched
@@ -517,6 +519,7 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
                 tools: &deps.tools,
                 settings: &deps.settings,
                 app: None,
+                caller: Default::default(),
             },
             &record_id,
             None,
@@ -878,6 +881,8 @@ fn spawn_working_dir_is_checked_against_the_roots() {
             prompt_argv: Vec::new(),
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap();
     let registry = Registry::with_docker(FakeDocker::new());
@@ -890,6 +895,7 @@ fn spawn_working_dir_is_checked_against_the_roots() {
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     let req = |working_dir: &Path| SpawnAgentRequest {
         agent_tool_id: tool.id,

@@ -21,8 +21,15 @@
 //! the same while it is held (and is never reused in a run), who sent it,
 //! when, and its first line ([`HeldEntry`], from [`DeliveryHolds::list`]).
 //! [`DeliveryHolds::discard`] takes one out by id without delivering it.
-//! Nothing shows the list yet: the app shows a count per agent; these are
-//! the parts a "held messages" view with a discard button is built on.
+//! The row shows the list; the person can release one (it is delivered
+//! now, whatever held it) or drop it ([`DeliveryHolds::release_one`],
+//! [`DeliveryHolds::discard`]).
+//!
+//! Two things hold a delivery ([`HoldKind`]): the data-safety gate, for
+//! anything sent to an agent next to data that may be real, and a question
+//! on the target's screen, for what an agent sends (see
+//! [`crate::agent_delivery`]). A screen hold lifts when the question is no
+//! longer on screen.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -40,14 +47,40 @@ pub trait HoldGate: Send + Sync {
     fn hold_reason(&self, cwd: &Path) -> Option<String>;
 }
 
+/// What holds a delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HoldKind {
+    /// The data-safety gate for the target's folder.
+    DataSafety,
+    /// A confirmation-shaped state on the target's screen, for a delivery
+    /// an agent sent.
+    Screen,
+}
+
+/// Who let a held delivery go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// What held it lifted.
+    Lifted,
+    /// The person released it from the row.
+    Person,
+}
+
+/// The call that makes a held delivery, told who released it.
+pub type Deliver = Box<dyn FnOnce(Release) + Send>;
+
 /// One held delivery: its id, who sent it, what it says (for the journal
-/// and the marker), when it was queued, and the call that makes it.
+/// and the marker), when it was queued, what holds it, and the call that
+/// makes it.
 pub struct Held {
     pub id: u64,
     pub from: String,
     pub text: String,
     pub queued_ms: u64,
-    run: Box<dyn FnOnce() + Send>,
+    pub kind: HoldKind,
+    pub reason: String,
+    run: Deliver,
 }
 
 /// A held delivery as a list shows it.
@@ -65,6 +98,9 @@ pub struct HeldEntry {
     /// Its first non-empty line, trimmed, at most [`FIRST_LINE_CAP`]
     /// characters (an ellipsis marks a cut).
     pub first_line: String,
+    /// What holds it, and why in words.
+    pub kind: HoldKind,
+    pub reason: String,
 }
 
 /// The first non-empty line of `text`, trimmed and capped.
@@ -91,6 +127,8 @@ impl Held {
             from: self.from.clone(),
             queued_ms: self.queued_ms,
             first_line: first_line(&self.text),
+            kind: self.kind,
+            reason: self.reason.clone(),
         }
     }
 }
@@ -147,8 +185,8 @@ impl DeliveryHolds {
         ))
     }
 
-    /// Queue `run` for pane `id`, sent by `from`. Answers how many
-    /// deliveries are now held for it.
+    /// Queue `run` for pane `id`, sent by `from`, held by the data-safety
+    /// gate. Answers how many deliveries are now held for it.
     pub fn hold(
         &self,
         id: u32,
@@ -156,18 +194,72 @@ impl DeliveryHolds {
         text: String,
         run: Box<dyn FnOnce() + Send>,
     ) -> usize {
+        self.hold_as(
+            id,
+            HoldKind::DataSafety,
+            String::new(),
+            from,
+            text,
+            Box::new(move |_| run()),
+        )
+        .1
+    }
+
+    /// Queue `run` for pane `id`, held by `kind` for `reason`. Answers the
+    /// entry's id and how many deliveries are now held for the pane.
+    pub fn hold_as(
+        &self,
+        id: u32,
+        kind: HoldKind,
+        reason: String,
+        from: String,
+        text: String,
+        run: Deliver,
+    ) -> (u64, usize) {
         let mut inner = self.lock();
         inner.next_id += 1;
+        let entry_id = inner.next_id;
         let held = Held {
-            id: inner.next_id,
+            id: entry_id,
             from,
             text,
             queued_ms: epoch_ms(),
+            kind,
+            reason,
             run,
         };
         let q = inner.panes.entry(id).or_default();
         q.items.push_back(held);
-        q.items.len()
+        (entry_id, q.items.len())
+    }
+
+    /// The person releases held delivery `entry_id`: it is taken out and
+    /// made now, on the calling thread, whatever held it. Answers what it
+    /// was, `None` when nothing with that id is held.
+    pub fn release_one(&self, entry_id: u64) -> Option<HeldEntry> {
+        let (pane, held) = {
+            let mut inner = self.lock();
+            let (pane, at) = inner.panes.iter().find_map(|(pane, q)| {
+                q.items
+                    .iter()
+                    .position(|h| h.id == entry_id)
+                    .map(|at| (*pane, at))
+            })?;
+            let q = inner.panes.get_mut(&pane)?;
+            let held = q.items.remove(at)?;
+            if q.items.is_empty() && !q.releasing {
+                inner.panes.remove(&pane);
+            }
+            (pane, held)
+        };
+        let entry = held.entry(pane);
+        log::info!(
+            "[holds] held message {} for pane {pane} from {} released by the person",
+            entry.id,
+            entry.from
+        );
+        (held.run)(Release::Person);
+        Some(entry)
     }
 
     /// How many deliveries are held per pane (panes with none are left out).
@@ -222,6 +314,17 @@ impl DeliveryHolds {
     /// half way keeps the rest for the next release. Answers how many
     /// deliveries were made.
     pub fn release(&self, cwd_of: &dyn Fn(u32) -> Option<Option<std::path::PathBuf>>) -> usize {
+        self.release_with(cwd_of, &|_| None)
+    }
+
+    /// [`DeliveryHolds::release`], with `screen_of` answering the question
+    /// on a pane's screen now (`None` = none): a screen-held delivery at the
+    /// front of a queue waits while there is one.
+    pub fn release_with(
+        &self,
+        cwd_of: &dyn Fn(u32) -> Option<Option<std::path::PathBuf>>,
+        screen_of: &dyn Fn(u32) -> Option<String>,
+    ) -> usize {
         let gate = self.gate();
         let ids: Vec<u32> = self
             .lock()
@@ -245,7 +348,16 @@ impl DeliveryHolds {
                 (Some(g), Some(dir)) => g.hold_reason(dir).is_some(),
                 _ => false,
             };
-            if blocked(&gate) {
+            let front_waits_on_screen = |holds: &DeliveryHolds| {
+                holds
+                    .lock()
+                    .panes
+                    .get(&id)
+                    .and_then(|q| q.items.front())
+                    .is_some_and(|h| h.kind == HoldKind::Screen)
+                    && screen_of(id).is_some()
+            };
+            if blocked(&gate) || front_waits_on_screen(self) {
                 continue;
             }
             match self.lock().panes.get_mut(&id) {
@@ -266,9 +378,9 @@ impl DeliveryHolds {
                         }
                     }
                 };
-                (next.run)();
+                (next.run)(Release::Lifted);
                 delivered += 1;
-                if blocked(&self.gate()) {
+                if blocked(&self.gate()) || front_waits_on_screen(self) {
                     if let Some(q) = self.lock().panes.get_mut(&id) {
                         q.releasing = false;
                     }
@@ -367,6 +479,55 @@ mod tests {
         );
         gate.0.store(false, Ordering::SeqCst);
         assert_eq!(holds.release(&cwd_of), 1);
+        assert!(holds.counts().is_empty());
+    }
+
+    /// A delivery held for a question on screen waits while the question is
+    /// there, goes once it is gone, and the person can release one at once
+    /// (the call is told it was the person).
+    #[test]
+    fn a_screen_hold_waits_for_the_question_and_the_person_can_release_one() {
+        let holds = DeliveryHolds::default();
+        let out = Arc::new(Mutex::new(Vec::<(&str, Release)>::new()));
+        let push = |text: &'static str| {
+            let out = out.clone();
+            Box::new(move |r: Release| out.lock().unwrap().push((text, r))) as Deliver
+        };
+        let (first, n) = holds.hold_as(
+            1,
+            HoldKind::Screen,
+            "held: a numbered choice is on screen".into(),
+            "agent 7".into(),
+            "1".into(),
+            push("one"),
+        );
+        assert_eq!(n, 1);
+        holds.hold_as(
+            1,
+            HoldKind::Screen,
+            "held".into(),
+            "agent 7".into(),
+            "two".into(),
+            push("two"),
+        );
+        let listed = holds.list(Some(1));
+        assert_eq!(listed[0].kind, HoldKind::Screen);
+        assert!(listed[0].reason.contains("numbered choice"));
+        let question = AtomicBool::new(true);
+        let cwd_of = |_: u32| Some(None);
+        let screen_of = |_: u32| {
+            question
+                .load(Ordering::SeqCst)
+                .then(|| "a numbered choice".to_owned())
+        };
+        assert_eq!(holds.release_with(&cwd_of, &screen_of), 0, "still asked");
+        let released = holds.release_one(first).expect("held");
+        assert_eq!(released.first_line, "1");
+        assert_eq!(*out.lock().unwrap(), [("one", Release::Person)]);
+        assert_eq!(holds.release_one(first), None);
+        question.store(false, Ordering::SeqCst);
+        assert_eq!(holds.release_with(&cwd_of, &screen_of), 1);
+        assert_eq!(out.lock().unwrap()[1], ("two", Release::Lifted));
         assert!(holds.counts().is_empty());
     }
 

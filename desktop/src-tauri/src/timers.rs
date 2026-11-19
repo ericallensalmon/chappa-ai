@@ -1421,6 +1421,11 @@ pub struct Delivery {
 /// substitute a recorder.
 pub trait Deliverer: Send + Sync {
     fn deliver(&self, process_id: u32, body: &str, timeout_ms: u64) -> Delivery;
+    /// A body an agent set: the gate also waits out any
+    /// confirmation-shaped state on screen, not only the known questions.
+    fn deliver_from_agent(&self, process_id: u32, body: &str, timeout_ms: u64) -> Delivery {
+        self.deliver(process_id, body, timeout_ms)
+    }
 }
 
 /// The registry-backed deliverer: the SAME code path a queued spawn prompt
@@ -1434,6 +1439,22 @@ pub struct PromptDeliverer {
 
 impl Deliverer for PromptDeliverer {
     fn deliver(&self, process_id: u32, body: &str, timeout_ms: u64) -> Delivery {
+        self.deliver_with(process_id, body, timeout_ms, false)
+    }
+
+    fn deliver_from_agent(&self, process_id: u32, body: &str, timeout_ms: u64) -> Delivery {
+        self.deliver_with(process_id, body, timeout_ms, true)
+    }
+}
+
+impl PromptDeliverer {
+    fn deliver_with(
+        &self,
+        process_id: u32,
+        body: &str,
+        timeout_ms: u64,
+        from_agent: bool,
+    ) -> Delivery {
         if self.registry.handle(process_id as TermId).is_none() {
             return Delivery {
                 delivered: false,
@@ -1442,14 +1463,18 @@ impl Deliverer for PromptDeliverer {
             };
         }
         let settings = self.settings.snapshot();
+        let mut policy = crate::agents::DeliveryPolicy::quiet_only(
+            u64::from(settings.agent_ready_quiet_ms),
+            Duration::from_millis(timeout_ms),
+        );
+        if from_agent {
+            policy = policy.for_agent();
+        }
         let receipt = crate::agents::deliver_prompt_when_ready(
             &self.registry,
             process_id as TermId,
             body,
-            crate::agents::DeliveryPolicy::quiet_only(
-                u64::from(settings.agent_ready_quiet_ms),
-                Duration::from_millis(timeout_ms),
-            ),
+            policy,
         );
         let detail = match receipt.reason.as_deref() {
             Some("exited") => Some(PROCESS_GONE.to_owned()),
@@ -1530,6 +1555,30 @@ pub trait TimerHold: Send + Sync {
         text: String,
         deliver: Box<dyn FnOnce() + Send>,
     ) -> usize;
+    /// The confirmation-shaped state on the target's screen now, which
+    /// holds a body an agent set. `None` = none (or not known).
+    fn screen_reason(&self, _process_id: u32) -> Option<String> {
+        None
+    }
+    /// Queue a body an agent set while a question is on screen; the row
+    /// lists it for the person.
+    fn hold_for_screen(
+        &self,
+        _process_id: u32,
+        _reason: String,
+        _from: String,
+        _text: String,
+        _deliver: crate::delivery_hold::Deliver,
+    ) {
+    }
+    /// The target row is an agent (an agent's body to it gets the sender
+    /// line) and the sender's name.
+    fn is_agent(&self, _process_id: u32) -> bool {
+        false
+    }
+    fn name_of(&self, _process_id: u32) -> Option<String> {
+        None
+    }
 }
 
 impl TimerHold for Registry {
@@ -1544,6 +1593,116 @@ impl TimerHold for Registry {
         deliver: Box<dyn FnOnce() + Send>,
     ) -> usize {
         self.hold_delivery(process_id as TermId, from, text, deliver)
+    }
+    fn screen_reason(&self, process_id: u32) -> Option<String> {
+        self.confirmation_on_screen(process_id as TermId)
+    }
+    fn hold_for_screen(
+        &self,
+        process_id: u32,
+        reason: String,
+        from: String,
+        text: String,
+        deliver: crate::delivery_hold::Deliver,
+    ) {
+        Registry::hold_for_screen(self, process_id as TermId, reason, from, text, deliver);
+    }
+    fn is_agent(&self, process_id: u32) -> bool {
+        Registry::is_agent(self, process_id as TermId)
+    }
+    fn name_of(&self, process_id: u32) -> Option<String> {
+        Registry::name_of(self, process_id as TermId)
+    }
+}
+
+/// Make one firing: data safety first (it holds anything sent to an agent
+/// next to data that may be real), then, for a body an agent set, a
+/// question on the target's screen holds it, a bare choice key is refused,
+/// and into another agent's terminal it goes with the sender line. What
+/// held it lifting runs this again; the person releasing it delivers it.
+fn run_job(
+    deliverer: Arc<dyn Deliverer>,
+    store: TimerStore,
+    gate: Option<Arc<dyn TimerHold>>,
+    job: Job,
+    data_safety_checked: bool,
+) {
+    if let Some(gate) = gate.as_ref() {
+        if !data_safety_checked && gate.hold_reason(job.process_id).is_some() {
+            let (process_id, body) = (job.process_id, job.body.clone());
+            let from = format!("timer {}", job.timer_id);
+            let (deliverer, store, again) = (deliverer.clone(), store.clone(), gate.clone());
+            gate.hold(
+                process_id,
+                from,
+                body,
+                Box::new(move || run_job(deliverer, store, Some(again), job, true)),
+            );
+            return;
+        }
+    }
+    let Some(sender) = job.sender else {
+        let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
+        finish_job(&store, &job, &out);
+        return;
+    };
+    if let Some(gate) = gate.as_ref() {
+        if let Some(question) = gate.screen_reason(job.process_id) {
+            let reason = format!(
+                "held: {question} is on screen; the person releases or drops it on the row"
+            );
+            let from = format!("timer {} (agent:{sender})", job.timer_id);
+            let text = job.body.clone();
+            let process_id = job.process_id;
+            let (deliverer2, store2, again) = (deliverer.clone(), store.clone(), gate.clone());
+            gate.hold_for_screen(
+                process_id,
+                reason,
+                from,
+                text,
+                Box::new(move |release| match release {
+                    crate::delivery_hold::Release::Lifted => {
+                        run_job(deliverer2, store2, Some(again), job, true)
+                    }
+                    // The person has seen it: it goes as it is, waiting
+                    // only for the program to be ready.
+                    crate::delivery_hold::Release::Person => {
+                        let body = sender_body(Some(again.as_ref()), &job, sender);
+                        let out = deliverer2.deliver(job.process_id, &body, job.timeout_ms);
+                        finish_job(&store2, &job, &out);
+                    }
+                }),
+            );
+            return;
+        }
+    }
+    if crate::agent_delivery::is_choice_key(job.body.as_bytes()) {
+        let out = Delivery {
+            delivered: false,
+            detail: Some(crate::agent_delivery::CHOICE_KEY_REFUSAL.to_owned()),
+            receipt: None,
+        };
+        finish_job(&store, &job, &out);
+        return;
+    }
+    let body = sender_body(gate.as_deref(), &job, sender);
+    let out = deliverer.deliver_from_agent(job.process_id, &body, job.timeout_ms);
+    finish_job(&store, &job, &out);
+}
+
+/// A body an agent set, as delivered: with the sender line when it goes
+/// into another agent's terminal (an agent's timer to itself is it talking
+/// to itself, and goes as set).
+fn sender_body(gate: Option<&dyn TimerHold>, job: &Job, sender: u32) -> String {
+    match gate {
+        Some(gate) if job.process_id != sender && gate.is_agent(job.process_id) => {
+            crate::agent_delivery::wrap(
+                &gate.name_of(sender).unwrap_or_default(),
+                sender,
+                &job.body,
+            )
+        }
+        _ => job.body.clone(),
     }
 }
 
@@ -1572,6 +1731,8 @@ struct Job {
     process_id: u32,
     body: String,
     timeout_ms: u64,
+    /// The agent row that set the timer, `None` for the person's.
+    sender: Option<u32>,
 }
 
 /// The managed timer state: the scheduler, its store, and the two threads.
@@ -1594,6 +1755,10 @@ struct ServiceInner {
     /// Knobs, read fresh on every use (the settings pane is live).
     knobs: Arc<dyn Fn() -> Knobs + Send + Sync>,
     running: bool,
+    /// Who set each timer created in this run: the agent row, or `None`
+    /// for the person. A timer restored from disk is not here; one whose
+    /// owner is a process id is then treated as an agent's.
+    senders: Mutex<BTreeMap<i64, Option<u32>>>,
 }
 
 /// The settings, snapshotted.
@@ -1658,6 +1823,7 @@ impl Default for TimerService {
                 hold: Arc::default(),
                 knobs: Arc::new(Knobs::default),
                 running: false,
+                senders: Mutex::default(),
             }),
         }
     }
@@ -1715,6 +1881,7 @@ impl TimerService {
                 hold: hold.clone(),
                 knobs,
                 running: true,
+                senders: Mutex::default(),
             }),
         };
         // The delivery thread. One thread, one queue: a firing whose target
@@ -1727,26 +1894,7 @@ impl TimerService {
         std::thread::spawn(move || {
             while let Ok(job) = rx.recv() {
                 let gate = hold.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(gate) = gate {
-                    if gate.hold_reason(job.process_id).is_some() {
-                        let (deliverer, store) = (deliverer.clone(), deliver_store.clone());
-                        let (process_id, body) = (job.process_id, job.body.clone());
-                        let from = format!("timer {}", job.timer_id);
-                        gate.hold(
-                            process_id,
-                            from,
-                            body,
-                            Box::new(move || {
-                                let out =
-                                    deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
-                                finish_job(&store, &job, &out);
-                            }),
-                        );
-                        continue;
-                    }
-                }
-                let out = deliverer.deliver(job.process_id, &job.body, job.timeout_ms);
-                finish_job(&deliver_store, &job, &out);
+                run_job(deliverer.clone(), deliver_store.clone(), gate, job, false);
             }
         });
         service
@@ -2005,6 +2153,7 @@ impl TimerService {
             process_id: timer.delivery_process_id,
             body: timer.body.clone(),
             timeout_ms: knobs.delivery_timeout_ms,
+            sender: self.sender_of(timer),
         };
         let sent = self
             .inner
@@ -2052,10 +2201,52 @@ impl TimerService {
             })
     }
 
+    /// The agent row that set `timer`, `None` for the person's.
+    fn sender_of(&self, timer: &Timer) -> Option<u32> {
+        let senders = self.inner.senders.lock().unwrap_or_else(|e| e.into_inner());
+        match senders.get(&timer.id) {
+            Some(sender) => *sender,
+            None => timer.owner.parse().ok(),
+        }
+    }
+
+    fn note_sender(&self, timer_id: i64, sender: Option<u32>) {
+        self.inner
+            .senders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(timer_id, sender);
+    }
+
     /// `timer_set`.
     #[allow(clippy::too_many_arguments)]
     pub fn set(
         &self,
+        owner: &str,
+        project_id: Option<i64>,
+        delivery_process_id: u32,
+        body: String,
+        delay_ms: u64,
+        repeat_every_ms: Option<u64>,
+        name: Option<String>,
+    ) -> Result<Value> {
+        self.set_from(
+            None,
+            owner,
+            project_id,
+            delivery_process_id,
+            body,
+            delay_ms,
+            repeat_every_ms,
+            name,
+        )
+    }
+
+    /// `timer_set` by `sender` (an agent row; `None` = the person).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_from(
+        &self,
+        sender: Option<u32>,
         owner: &str,
         project_id: Option<i64>,
         delivery_process_id: u32,
@@ -2077,6 +2268,7 @@ impl TimerService {
         timer.repeat_every_ms = repeat_every_ms;
         timer.name = name;
         timer.id = self.inner.store.save(&timer)?;
+        self.note_sender(timer.id, sender);
         let row = {
             let mut sched = self.lock()?;
             sched.insert(timer.clone());
@@ -2090,6 +2282,40 @@ impl TimerService {
     #[allow(clippy::too_many_arguments)]
     pub fn fire_when_idle(
         &self,
+        kind: TimerKind,
+        owner: &str,
+        project_id: Option<i64>,
+        delivery_process_id: u32,
+        body: String,
+        processes: &[String],
+        max_wait_ms: u64,
+        idle_ms: Option<u64>,
+        confirm_ms: Option<u64>,
+        rearm: Option<bool>,
+        name: Option<String>,
+    ) -> Result<Value> {
+        self.fire_when_idle_from(
+            None,
+            kind,
+            owner,
+            project_id,
+            delivery_process_id,
+            body,
+            processes,
+            max_wait_ms,
+            idle_ms,
+            confirm_ms,
+            rearm,
+            name,
+        )
+    }
+
+    /// The idle timers, set by `sender` (an agent row; `None` = the
+    /// person).
+    #[allow(clippy::too_many_arguments)]
+    pub fn fire_when_idle_from(
+        &self,
+        sender: Option<u32>,
         kind: TimerKind,
         owner: &str,
         project_id: Option<i64>,
@@ -2161,6 +2387,7 @@ impl TimerService {
         timer.project_id = project_id;
         timer.name = name;
         timer.id = self.inner.store.save(&timer)?;
+        self.note_sender(timer.id, sender);
         let waiting_on = timer.waiting_on();
         {
             let mut sched = self.lock()?;

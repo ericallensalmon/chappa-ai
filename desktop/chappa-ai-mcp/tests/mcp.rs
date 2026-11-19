@@ -195,6 +195,10 @@ fn canned(method: &str, path: &str) -> (u16, Value) {
         ),
         ("POST", "/processes/1/bytes") => (200, json!({"written": true})),
         ("POST", "/processes/1/close") => (200, json!({"ok": true, "id": 1, "verification": null})),
+        ("GET", "/whoami") => (
+            200,
+            json!({"kind": "agent", "process_id": 4, "project_id": 1, "parent": null, "routes": []}),
+        ),
         ("GET", "/agent_tools") => (
             200,
             json!([{"id": 3, "name": "worker", "command": "docker exec -u dev -it -w /workspace/app dev-worker opencode -m gateway/model-fast", "tool_type": "opencode", "enabled": true, "model": "model-fast", "runtime": {"kind": "docker_exec", "container": "dev-worker"}, "container": "dev-worker"}]),
@@ -553,6 +557,14 @@ fn every_tool_round_trips_with_the_token_attached() {
             json!({"ok": true, "id": 1, "verification": null}),
         ),
         (
+            "whoami",
+            json!({}),
+            "GET",
+            "/whoami",
+            Value::Null,
+            json!({"kind": "agent", "process_id": 4, "project_id": 1, "parent": null, "routes": []}),
+        ),
+        (
             "list_agent_tools",
             json!({}),
             "GET",
@@ -713,6 +725,7 @@ fn every_tool_round_trips_with_the_token_attached() {
     }
     // Every listed tool was exercised.
     let exercised: std::collections::BTreeSet<&str> = [
+        "whoami",
         "list_processes",
         "get_process_status",
         "get_process_output",
@@ -1731,7 +1744,8 @@ fn tool_schema_snapshot_including_annotations() {
     // Annotation policy: reads are readOnlyHint (list_/get_ plus the
     // read tools), destructiveHint on close and on the confirm-gated
     // clear/delete tools, nothing else is destructive.
-    const READS: [&str; 10] = [
+    const READS: [&str; 11] = [
+        "whoami",
         "scratchpad_read",
         "scratchpad_list",
         "scratchpad_find",

@@ -1,10 +1,12 @@
 use tauri::{Manager, RunEvent};
 
+pub mod agent_delivery;
 pub mod agent_json;
 pub mod agent_settings;
 pub mod agent_tools;
 pub mod agents;
 pub mod app_menu;
+pub mod caller;
 mod commands;
 pub mod control_http;
 pub mod coordination;
@@ -28,6 +30,7 @@ pub mod secret_scan;
 pub mod settings;
 pub mod source_actions;
 pub mod sources;
+pub mod spawn_gate;
 pub mod stack_trust;
 pub mod startup_questions;
 pub mod stats;
@@ -212,6 +215,12 @@ pub fn run() {
                 let registry = app.state::<Registry>().inner().clone();
                 let sources = app.state::<Sources>().inner().clone();
                 registry.set_hold_gate(std::sync::Arc::new(sources.clone()));
+                // Every pty spawn that comes without the launch gate's pass
+                // is judged by the same gate.
+                registry.set_spawn_gate(std::sync::Arc::new(spawn_gate::AppSpawnGate {
+                    projects: app.state::<Projects>().inner().clone(),
+                    settings: settings.inner().clone(),
+                }));
                 timers.set_hold(std::sync::Arc::new(registry.clone()));
                 data_safety::spawn_watch(sources, registry, app.handle().clone());
             }
@@ -395,6 +404,9 @@ pub fn run() {
         secret_scan::agent_settings_warnings,
         projects::set_project_secret_scan,
         data_safety::data_safety_state,
+        data_safety::held_deliveries,
+        data_safety::release_held_delivery,
+        data_safety::drop_held_delivery,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -480,6 +492,9 @@ pub fn run() {
         secret_scan::agent_settings_warnings,
         projects::set_project_secret_scan,
         data_safety::data_safety_state,
+        data_safety::held_deliveries,
+        data_safety::release_held_delivery,
+        data_safety::drop_held_delivery,
         workspace::list_workspace_commands,
         workspace::save_workspace_command,
         workspace::delete_workspace_command,

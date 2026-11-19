@@ -112,3 +112,30 @@ export function heldText(count: number): string {
 export function heldCount(state: ipc.DataSafetyStateDto, termId: number): number {
   return state.held.find((h) => h.termId === termId)?.count ?? 0;
 }
+
+/** The deliveries held for a pane, oldest first. */
+export function heldEntries(state: ipc.DataSafetyStateDto, termId: number): ipc.HeldEntryDto[] {
+  return (state.heldItems ?? []).filter((h) => h.pane === termId);
+}
+
+/** The held marker's tooltip: why messages to this pane wait. */
+export function heldTitle(entries: ipc.HeldEntryDto[]): string {
+  const screen = entries.some((h) => h.kind === "screen");
+  const safety = entries.some((h) => h.kind === "data-safety");
+  const parts: string[] = [];
+  if (screen) {
+    parts.push("An agent's message waits because a question is on this pane's screen: an agent may not answer it for you.");
+  }
+  if (safety || !screen) {
+    parts.push("Messages to this agent are held: the data next to its folder may be real. They are delivered once the block clears in Environment.");
+  }
+  parts.push("Click to release or drop them.");
+  return parts.join(" ");
+}
+
+/** The question shown for one held delivery. */
+export function heldQuestion(entry: ipc.HeldEntryDto): string {
+  const from = entry.from.startsWith("agent:") ? `agent process ${entry.from.slice(6)}` : entry.from;
+  const text = entry.firstLine === "" ? "(an empty line: Enter alone)" : `“${entry.firstLine}”`;
+  return `A message from ${from} is held for this pane:\n\n${text}\n\n${entry.reason}\n\nRelease it to type it into the pane now, or drop it.`;
+}

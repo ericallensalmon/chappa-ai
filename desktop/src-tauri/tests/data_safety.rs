@@ -189,6 +189,8 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
             prompt_argv: vec!["{prompt}".into()],
             session_capture: Default::default(),
             hooks_opt_out: false,
+            agent_args_allowed: Vec::new(),
+            agent_args_any: false,
         })
         .unwrap();
     let registry = Registry::with_docker(FakeDocker::new());
@@ -251,6 +253,7 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
         projects: &projects,
         records: &records,
         actor: None,
+        caller: Default::default(),
     };
     let spawn_in = |folder: Option<&Path>| SpawnAgentRequest {
         agent_tool_id: tool.id,
@@ -263,6 +266,7 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
         tools: &tools,
         settings: &settings,
         app: None,
+        caller: Default::default(),
     };
 
     // Clean: nothing is blocked. One agent keeps running in the bound
