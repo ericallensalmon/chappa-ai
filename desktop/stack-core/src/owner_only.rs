@@ -433,7 +433,29 @@ mod tests {
     #[test]
     fn the_grant_names_the_process_token_user_by_sid() {
         let sid = win::current_user_sid().unwrap();
-        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        // Compared against an independent source rather than a prefix:
+        // local and domain accounts are S-1-5-21-…, directory-joined
+        // cloud accounts are S-1-12-1-…. The full path keeps a `whoami`
+        // from another toolset on PATH out of it.
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set");
+        let out = std::process::Command::new(
+            std::path::Path::new(&system_root)
+                .join("System32")
+                .join("whoami.exe"),
+        )
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .unwrap();
+        assert!(out.status.success());
+        let line = String::from_utf8_lossy(&out.stdout);
+        let expected = line
+            .trim()
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert_eq!(sid, expected);
         // The environment cannot redirect the grant.
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("t");

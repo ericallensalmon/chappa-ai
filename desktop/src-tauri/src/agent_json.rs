@@ -1838,18 +1838,20 @@ mod tests {
         // The continuation carried the session captured from turn 1.
         assert_eq!(h.agent.session_id().as_deref(), Some("ses_1"));
         // Turn 2's child exits → its own awaiting_input, reported once.
+        // Wait for the event, not the flag: the flag is set under the
+        // lock and the event is emitted after it is released.
+        let awaiting = |h: &Harness| {
+            kinds_of(h)
+                .iter()
+                .filter(|k| **k == "awaiting_input")
+                .count()
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !h.agent.awaiting_input() && std::time::Instant::now() < deadline {
+        while awaiting(&h) < 2 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(h.agent.awaiting_input());
-        assert_eq!(
-            kinds_of(&h)
-                .iter()
-                .filter(|k| **k == "awaiting_input")
-                .count(),
-            2
-        );
+        assert_eq!(awaiting(&h), 2);
         assert!(h.handle.io().child_alive(), "alive between turns");
     }
 
