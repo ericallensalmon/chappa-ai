@@ -18,6 +18,11 @@ use std::process::Command;
 pub const SOURCE_ADDR_ENV: &str = "CHAPPA_SOURCE_ADDR";
 /// The source's bearer token, set by the app on launch.
 pub const SOURCE_TOKEN_ENV: &str = "CHAPPA_SOURCE_TOKEN";
+/// The loopback ports a launched source must never hand on to anything
+/// else (the app's control surface, the sources' own listeners), comma
+/// separated, set by the app on launch. Not secret: a stack's relay reads
+/// it so a definition cannot forward a container to the app's own APIs.
+pub const RESERVED_PORTS_ENV: &str = "CHAPPA_RESERVED_PORTS";
 /// gitleaks reads a config path or a whole config from these, ahead of the
 /// default rules.
 pub const GITLEAKS_CONFIG_ENVS: [&str; 2] = ["GITLEAKS_CONFIG", "GITLEAKS_CONFIG_TOML"];

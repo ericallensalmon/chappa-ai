@@ -252,10 +252,19 @@ fn a_github_pr_is_checked_out_at_its_pull_head_and_shown_in_the_panel() {
     assert_eq!(Path::new(terminal["cwd"].as_str().unwrap()), wt);
     let agent = find(&s["actions"], "review-agent:github-owner-api-12").unwrap();
     assert_eq!(agent["kind"], "agent");
-    assert!(agent["prompt"]
-        .as_str()
-        .unwrap()
-        .starts_with("Review owner/api#12 — Fix it."));
+    let prompt = agent["prompt"].as_str().unwrap();
+    assert!(
+        prompt.starts_with("Review the pull request named below."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.ends_with(&format!(
+            "\n{}\nowner/api#12 — Fix it\n{}",
+            chappa_stack::reviews::PR_TEXT_OPEN,
+            chappa_stack::reviews::PR_TEXT_CLOSE
+        )),
+        "{prompt}"
+    );
     let up = find(&s["actions"], "review-up:github-owner-api-12").unwrap();
     assert!(
         up["confirm"].as_str().unwrap().starts_with(&format!(

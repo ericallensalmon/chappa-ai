@@ -75,7 +75,10 @@
 //! - **`blocksAgents` is the one field to enforce on.** True when a finding
 //!   stands under a policy other than `warn`, or when a scan of a bound
 //!   worktree's files could not finish and is not acknowledged, whatever
-//!   the policy: an agent there would read files nobody checked. A failed
+//!   the policy: an agent there would read files nobody checked. A bound
+//!   worktree that is `unscanned` (not scanned yet, or no scanner at all)
+//!   blocks the same way a finding does, under the same policy, and its
+//!   reason line says which. A failed
 //!   scan of commits, a build context or env files only warns (agents do
 //!   not read those from the worktree); under `block-build` a failed build
 //!   context scan fails the build instead.
@@ -1411,7 +1414,12 @@ pub fn summarize(
         state: "clean",
     };
     if !wanted(loaded, scanner_found) {
+        // Nothing can scan here, and the stack asks for nothing: the bound
+        // worktrees are still folders nobody checked.
         view.state = "unscanned";
+        for t in trees_of(loaded, &loaded.binding) {
+            view.unscanned.push(format!("{} worktree", t.repo));
+        }
         return view;
     }
     let empty = ScanStore::default();
@@ -1557,10 +1565,29 @@ impl SecretsView {
         self.errors.iter().filter(|e| e.agents && !e.covered)
     }
 
-    /// The one field the app enforces on.
+    /// The one field the app enforces on. A bound worktree nobody has
+    /// scanned (not yet, or there is no scanner) blocks the way a finding
+    /// does, under the same policy: an agent there would read files nobody
+    /// checked, and "not checked" must not pass where "found something"
+    /// would not.
     pub fn blocks_agents(&self) -> bool {
         (self.live().next().is_some() && self.policy.blocks_agents())
             || self.agent_errors().next().is_some()
+            || self.unscanned_blocks()
+    }
+
+    /// Unscanned bound worktrees keep agents out (see [`Self::blocks_agents`]).
+    fn unscanned_blocks(&self) -> bool {
+        !self.unscanned.is_empty() && self.policy.blocks_agents()
+    }
+
+    /// Why an unscanned worktree is unscanned, as the reason line says it.
+    fn unscanned_text(&self) -> &'static str {
+        if self.scanner_found {
+            "not scanned yet; agents wait for its first scan"
+        } else {
+            "not scanned: no scanner was found (install gitleaks)"
+        }
     }
 
     pub fn policy_in_force(&self) -> Option<Policy> {
@@ -1626,6 +1653,10 @@ impl SecretsView {
                 format!("{}: {}", e.label, e.text),
                 e.agents,
             ));
+        }
+        let blocks = self.unscanned_blocks();
+        for u in &self.unscanned {
+            out.push((None, format!("{u}: {}", self.unscanned_text()), blocks));
         }
         out
     }
@@ -1792,7 +1823,12 @@ impl SecretsView {
         if !self.blocks_agents() {
             return None;
         }
-        let title = if self.agent_errors().next().is_some() && self.live().next().is_none() {
+        let title = if self.live().next().is_none() && self.agent_errors().next().is_none() {
+            format!(
+                "Agents are blocked on {}: the folders they would read are not scanned yet",
+                self.instance
+            )
+        } else if self.agent_errors().next().is_some() && self.live().next().is_none() {
             format!("Agents are blocked on {}: the secret scan of the folders they would read did not finish", self.instance)
         } else {
             format!(
@@ -1885,7 +1921,7 @@ impl SecretsView {
             rows.push(row(&t.entry.label, value));
         }
         for u in &self.unscanned {
-            rows.push(row(u, "not scanned yet".into()));
+            rows.push(row(u, self.unscanned_text().into()));
         }
         let mut section = json!({
             "id": "secret-scan",

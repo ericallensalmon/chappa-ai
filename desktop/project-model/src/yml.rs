@@ -419,9 +419,13 @@ impl ProjectYml {
     /// Replace `<dir>/chappa.yml` atomically (temp + rename) with this model.
     /// The write-back entry point is `writeback::apply`, which adds the
     /// load-error guard and the one-time backup around this.
-    pub fn write(&self, dir: &Path) -> Result<(), String> {
+    /// Write the project file atomically; answers the content hash of the
+    /// bytes written, so a caller can trust exactly what it wrote rather
+    /// than whatever the file holds when it looks again.
+    pub fn write(&self, dir: &Path) -> Result<String, String> {
         let text = self.to_yaml_string().map_err(|e| e.to_string())?;
-        crate::atomic::write_text_atomic(&dir.join(CHAPPA_YML_NAME), &text, "yml.chappa-tmp")
+        crate::atomic::write_text_atomic(&dir.join(CHAPPA_YML_NAME), &text, "yml.chappa-tmp")?;
+        Ok(crate::hash::content_hash(text.as_bytes()))
     }
 
     // ---- the mutation operations behind the command menu ---------

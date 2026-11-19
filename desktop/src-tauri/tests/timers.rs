@@ -1847,6 +1847,30 @@ fn timer_routes_default_the_delivery_target_to_the_caller() {
     );
     assert_eq!(explicit["delivery_process_id"], 3);
     assert_eq!(explicit["project_id"], 2);
+    // A body is typed into the terminal: an ESC, a CR or any other control
+    // character but a line break is refused before anything is scheduled.
+    for body in [
+        r#""a\u001b[201~b""#,
+        r#""yes\rrm""#,
+        r#""\u0003""#,
+        r#""a\u009bb""#,
+    ] {
+        let (status, reply) = http(
+            &addr,
+            "POST",
+            "/timers",
+            Some("12"),
+            &format!(r#"{{"delay_ms": 5000, "body": {body}}}"#),
+        );
+        assert_eq!(status, 400, "{body}: {reply}");
+        assert!(
+            reply["message"]
+                .as_str()
+                .unwrap()
+                .contains("control character"),
+            "{reply}"
+        );
+    }
     // A target that is not live is a 404 naming what is.
     let (status, missing) = http(
         &addr,

@@ -20,6 +20,33 @@ use std::sync::Arc;
 /// session id is that long, and a hostile stream must not grow memory.
 pub const MAX_LINE: usize = 8 * 1024;
 
+/// Longest session id accepted, in bytes.
+pub const SESSION_ID_MAX: usize = 128;
+
+/// Whether `id` has the shape of a session id: `[A-Za-z0-9]` followed by up
+/// to 127 of `[A-Za-z0-9._:-]`.
+///
+/// A session id is learned from whatever the child prints and is later
+/// substituted into the resume command line as an argv word, so any program
+/// in the terminal could otherwise smuggle an option (`--some-flag`), a
+/// space-separated second word into a typed command, or a control byte into
+/// the record. Every capture point (the OSC announcement, the regex matcher,
+/// the machine-mode adapter, the control route) and the resume itself check
+/// this shape; anything else is dropped, never repaired.
+pub fn is_valid_session_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    match bytes.split_first() {
+        Some((first, rest)) => {
+            bytes.len() <= SESSION_ID_MAX
+                && first.is_ascii_alphanumeric()
+                && rest
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+        }
+        None => false,
+    }
+}
+
 /// The embedder's recognizer: one plain-text line in, the session id out
 /// when the line carries one. Supplied per spawn, so the engine knows
 /// nothing about any particular CLI's wording.
@@ -143,7 +170,11 @@ impl LineMatcher {
     fn finish_line(&mut self, out: &mut Vec<String>) {
         if !self.dropped && !self.line.is_empty() {
             let text = String::from_utf8_lossy(&self.line);
-            if let Some(id) = self.matcher.matches(&text) {
+            if let Some(id) = self
+                .matcher
+                .matches(&text)
+                .filter(|id| is_valid_session_id(id))
+            {
                 out.push(id);
             }
         }
@@ -185,6 +216,46 @@ mod tests {
         assert!(m.feed(b"session: \x1b").is_empty());
         assert!(m.feed(b"[3").is_empty());
         assert_eq!(m.feed(b"1mxyz\n"), vec!["xyz"]);
+    }
+
+    #[test]
+    fn session_id_shape_is_one_plain_word() {
+        let longest = "a".repeat(SESSION_ID_MAX);
+        for ok in [
+            "a",
+            "ses_abc",
+            "0f3c2a1e-0000-4000-8000-000000000000",
+            "proj:run.1",
+            longest.as_str(),
+        ] {
+            assert!(is_valid_session_id(ok), "{ok:?}");
+        }
+        let too_long = "a".repeat(SESSION_ID_MAX + 1);
+        for bad in [
+            "",
+            "-x",
+            "--dangerously-skip-permissions",
+            ".hidden",
+            "_x",
+            "a b",
+            "a\tb",
+            "a\x1bb",
+            "a/b",
+            "a=b",
+            "{\"hooks\":1}",
+            "\u{e9}",
+            too_long.as_str(),
+        ] {
+            assert!(!is_valid_session_id(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_matched_id_of_the_wrong_shape_is_dropped() {
+        let mut m = LineMatcher::new(after("session: "));
+        assert!(m.feed(b"session: --resume-anything\n").is_empty());
+        assert!(m.feed(b"session: a b\n").is_empty());
+        assert_eq!(m.feed(b"session: ok-1\n"), vec!["ok-1"]);
     }
 
     #[test]

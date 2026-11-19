@@ -72,8 +72,10 @@ where
     {
         return Err(CHANGED_ON_DISK.to_owned());
     }
-    yml.write(&root)
+    let written = yml
+        .write(&root)
         .map_err(|e| format!("cannot write {}: {e}", root.join(CHAPPA_YML_NAME).display()))?;
+    store.note_written(id, written);
     Ok(yml)
 }
 

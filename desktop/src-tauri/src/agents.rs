@@ -863,7 +863,8 @@ pub fn deliver_prompt_when_ready(
             None => std::thread::sleep(Duration::from_millis(25)),
         }
     };
-    let payload = crate::control_http::submit_payload(prompt, true);
+    let bracketed = handle.modes().is_some_and(|m| m.bracketed_paste);
+    let payload = typed_prompt_payload(prompt, bracketed);
     let seq_before = handle.io().output_bytes();
     let written = registry.write_journaled(id, &payload, prompt.to_owned(), true);
     let watch = Instant::now() + Duration::from_millis(250);
@@ -886,6 +887,29 @@ pub fn deliver_prompt_when_ready(
         seq_after: Some(seq_after),
         had_output_within_ms: Some(seq_after != seq_before),
     }
+}
+
+/// The bytes of a typed prompt: the text, then one CR to submit it.
+///
+/// Text with a line break or any other control character goes as a
+/// bracketed paste when the program turned that mode on: a raw newline
+/// (or CR) would submit the first line early and an ESC would start a
+/// terminal sequence, while inside the paste markers they are part of the
+/// text. Plain one-line text is written as typed, so programs that treat a
+/// paste differently from typing see no change for the common case.
+/// Embedded paste markers are stripped by the encoder, so the text cannot
+/// close the paste early.
+pub fn typed_prompt_payload(prompt: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed || !prompt.chars().any(char::is_control) {
+        return crate::control_http::submit_payload(prompt, true);
+    }
+    let mode = term_core::keys::ModeSnapshot {
+        bracketed_paste: true,
+        ..Default::default()
+    };
+    let mut bytes = term_core::keys::encode_paste(prompt, &mode);
+    bytes.push(b'\r');
+    bytes
 }
 
 // ---- busy guard (pure) --------------------------------------------------------------
@@ -2077,7 +2101,7 @@ pub fn spawn_agent_with(
     let extra_args: Vec<String> = if prompt_on_argv {
         [
             req.extra_args.clone(),
-            prompt_args(&tool.prompt_argv, prompt.unwrap_or_default()),
+            prompt_args(&tool.prompt_argv, prompt.unwrap_or_default())?,
         ]
         .concat()
     } else {
@@ -2468,6 +2492,14 @@ pub fn resume_words(
     json_mode: Option<crate::agent_json::MachineMode>,
     session_id: &str,
 ) -> Result<Vec<String>, String> {
+    // Checked before the per-turn branch too: that path hands the id to the
+    // adapter, which puts it on every child's command line.
+    if !term_core::session::is_valid_session_id(session_id) {
+        return Err(format!(
+            "session id {:?} is not a plain id, so it cannot be resumed",
+            session_id.chars().take(40).collect::<String>()
+        ));
+    }
     if json_mode.is_some_and(|mode| !mode.persistent) {
         return Ok(Vec::new());
     }
@@ -2783,6 +2815,24 @@ mod tests {
         }
     }
 
+    /// A typed prompt: plain one-line text goes as typed; text with a line
+    /// break goes as a bracketed paste when the program asked for one (so
+    /// the break cannot submit early), and an embedded paste terminator
+    /// cannot close the paste; without the mode the bytes are unchanged.
+    #[test]
+    fn typed_prompts_with_line_breaks_go_as_a_bracketed_paste() {
+        assert_eq!(typed_prompt_payload("fix it", true), b"fix it\r");
+        assert_eq!(typed_prompt_payload("a\nb", false), b"a\nb\r");
+        assert_eq!(
+            typed_prompt_payload("a\nb", true),
+            b"\x1b[200~a\rb\x1b[201~\r"
+        );
+        assert_eq!(
+            typed_prompt_payload("a\n\x1b[201~rm\x1b[200~", true),
+            b"\x1b[200~a\rrm\x1b[201~\r"
+        );
+    }
+
     /// Resume words sit between the machine-mode flags and the tool's own
     /// args for a persistent json CLI, before the tool's args for a tty
     /// one, and nowhere for a per-turn CLI (its adapter carries `-s`); an
@@ -2793,7 +2843,7 @@ mod tests {
         claude.args = vec!["--model".into(), "m".into()];
         let mode = machine_mode(ToolType::Claude).unwrap();
         let words = resume_words(&claude, Some(mode), "ses-1").unwrap();
-        assert_eq!(words, vec!["--resume", "ses-1"]);
+        assert_eq!(words, vec!["--resume=ses-1"]);
         let planned = json_planned_tool(&claude, mode, &words);
         assert_eq!(
             planned.args,
@@ -2804,15 +2854,14 @@ mod tests {
                 "--input-format",
                 "stream-json",
                 "--verbose",
-                "--resume",
-                "ses-1",
+                "--resume=ses-1",
                 "--model",
                 "m"
             ]
         );
         assert_eq!(
             resume_words(&claude, None, "ses-1").unwrap(),
-            vec!["--resume", "ses-1"],
+            vec!["--resume=ses-1"],
             "tty: the same words"
         );
 
@@ -2833,6 +2882,16 @@ mod tests {
         custom.name = "mine".into();
         let err = resume_words(&custom, None, "ses-3").unwrap_err();
         assert!(err.contains("no resume command"), "{err}");
+
+        // An id that would read as an option (or as two words) is refused
+        // on every transport, never passed on.
+        for bad in ["--dangerously-skip-permissions", "-x", "a b", ""] {
+            assert!(resume_words(&claude, None, bad).is_err(), "{bad:?}");
+            assert!(
+                resume_words(&opencode, Some(per_turn), bad).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     /// The kebab names are the serde names — `as_str` must never drift from

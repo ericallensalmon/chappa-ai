@@ -73,8 +73,13 @@ stacks:
 ```
 
 While the instance has something running, the stack runner then listens
-on that engine's gateway address, once per published port, and forwards
-each connection to `127.0.0.1:<same port>`. It never listens on `0.0.0.0`.
+on that engine's gateway address, once per port of each running component,
+and forwards each connection to `127.0.0.1:<same port>`. It never listens
+on `0.0.0.0`, nor on a gateway that is not a private or link-local address,
+and it never relays a port that belongs to the app (its control surface,
+the sources' own listeners). Like everything else in the stack, the relay
+starts only once the definition is trusted in the app; while it is not,
+every listener is stopped and the Relay section says so.
 
 **Only the container network.** When a listener binds, the relay looks
 up the interface that owns the gateway address and its prefix (again on

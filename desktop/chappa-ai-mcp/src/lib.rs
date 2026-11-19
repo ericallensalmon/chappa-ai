@@ -123,9 +123,12 @@ pub enum Target {
     /// answering server must prove it is the run the file describes.
     EndpointFile(PathBuf),
     /// An explicit `http://host:port[/prefix]` (`CHAPPA_AI_CONTROL_URL`, e.g.
-    /// a proxy in front of a container's app). The server must still prove it
-    /// knows the token before the token is sent, but its address is not
-    /// checked: behind a proxy it is the app's address, not the URL's.
+    /// a proxy in front of a container's app). The host must resolve to
+    /// loopback addresses only: the token travels in clear HTTP, so a
+    /// remote app is reached through a tunnel listening on loopback here.
+    /// The server must still prove it knows the token before the token is
+    /// sent, but its address is not checked against the endpoint file:
+    /// behind a proxy it is the app's address, not the URL's.
     Url(String),
 }
 
@@ -275,13 +278,22 @@ impl Client {
             Target::Url(url) => {
                 let (host, port, prefix) = parse_http_url(url)
                     .ok_or_else(|| ToolError::Invalid(format!("bad control url: {url}")))?;
-                let addr = (host.as_str(), port)
+                let addrs: Vec<SocketAddr> = (host.as_str(), port)
                     .to_socket_addrs()
                     .map_err(|e| ToolError::Unreachable(e.to_string()))?
-                    .next()
-                    .ok_or_else(|| {
-                        ToolError::Unreachable(format!("{host}:{port} did not resolve"))
-                    })?;
+                    .collect();
+                let addr = *addrs.first().ok_or_else(|| {
+                    ToolError::Unreachable(format!("{host}:{port} did not resolve"))
+                })?;
+                // The token goes over plain HTTP: only to this machine.
+                if let Some(far) = addrs.iter().find(|a| !a.ip().is_loopback()) {
+                    return Err(ToolError::Untrusted(format!(
+                        "CHAPPA_AI_CONTROL_URL must name a loopback address ({host} is {}): \
+                         the token is sent over plain HTTP, so it never leaves this machine; \
+                         reach a remote app through a tunnel that listens on loopback here",
+                        far.ip()
+                    )));
+                }
                 Ok((addr, format!("{host}:{port}"), prefix, None))
             }
         }

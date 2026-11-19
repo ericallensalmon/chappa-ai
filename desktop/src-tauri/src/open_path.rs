@@ -7,8 +7,10 @@
 //! 1. [`resolve_path`] checks the target on disk (`{path, exists, kind}`), so
 //!    a missing file is reported instead of handed to an editor that would
 //!    create it, and a directory goes to the file manager instead.
-//! 2. [`open_in_editor`] opens it: the `editorCommand` setting's template, or
-//!    the OS default handler when the template is empty.
+//! 2. [`open_in_editor`] opens it: the `editorCommand` setting's template, or,
+//!    when the template is empty, the OS default handler for a passive file
+//!    type (a document or an image) and the file manager, with the file
+//!    selected, for anything else.
 //!
 //! Container agents print container paths; [`parse_mounts`] reads the bind
 //! mounts off `docker inspect` so the webview can map those paths back to the
@@ -135,8 +137,10 @@ pub fn resolve_path(app: tauri::AppHandle, base: Option<String>, text: String) -
 }
 
 /// Open `path` at `line`/`col` (both default to 1). A directory opens in the
-/// file manager. A file opens with the `editorCommand` template, or with the
-/// OS default handler when the template is empty. The editor is started
+/// file manager. A file opens with the `editorCommand` template; when the
+/// template is empty, a passive file type opens with the OS default handler
+/// and anything else is shown selected in its folder (see
+/// [`default_open_refusal`]). The editor is started
 /// detached and never waited on; the error text names what went wrong
 /// (missing file, a program that would not start, a refused default open).
 #[tauri::command]
@@ -280,94 +284,92 @@ fn find_with_pathext(
 
 // --- the OS default handler -------------------------------------------------------
 
-/// Extensions the OS default handler would RUN rather than open for reading.
-/// Terminal output is untrusted text, so a click on a printed path must never
-/// execute it; with no editor configured those files are refused instead.
-#[cfg(windows)]
-const RUNNABLE_EXTENSIONS: &[&str] = &[
-    "exe",
-    "com",
-    "bat",
-    "cmd",
-    "ps1",
-    "psm1",
-    "vbs",
-    "vbe",
-    "js",
-    "jse",
-    "wsf",
-    "wsh",
-    "msc",
-    "msi",
-    "msp",
-    "scr",
-    "pif",
-    "lnk",
-    "url",
-    "hta",
-    "cpl",
-    "reg",
-    "jar",
-    "appref-ms",
-    "application",
-    "appx",
-    "msix",
-    "inf",
-    "scf",
-    "settingcontent-ms",
+/// The only file types handed to the OS default handler when no editor is
+/// configured: documents and images whose usual handlers view them. Any
+/// other file is revealed in the file manager instead of opened.
+///
+/// Terminal output is untrusted text and a repository can ship any file, so
+/// a click on a printed path must never be what runs it. A block list of
+/// "runnable" extensions cannot be complete (script hosts, installers,
+/// remote-desktop and help files, disk images, and whatever else the
+/// machine associates with a program), so the rule is inverted: a short
+/// list of passive types opens, everything else is shown selected in its
+/// folder, which runs nothing and still takes the person to the file.
+/// Source files are deliberately not on the list: several (`.py`, `.js`,
+/// `.ps1`, `.sh` with Git for Windows) are associated with an interpreter.
+/// HTML and SVG are left off too: their handler is a browser that runs
+/// the page's scripts.
+const PASSIVE_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "log", "csv", "tsv", "png", "jpg", "jpeg", "gif", "bmp", "webp", "pdf",
 ];
 
-#[cfg(not(windows))]
-const RUNNABLE_EXTENSIONS: &[&str] = &["app", "command", "desktop", "jar", "appimage", "run"];
-
-/// Why the default handler must not get `path`, or `None` when it may.
-/// Windows: an extension from the list above or from PATHEXT. Elsewhere: an
-/// executable file (the default handler may run it) or one of the
-/// launcher extensions above (`.app` bundles are directories, so this also
-/// applies to directories there).
+/// Why the default handler must not OPEN `path` (it is revealed in its
+/// folder instead), or `None` when it may: a file on the passive list
+/// above, or a directory, which opens in the file manager. On every
+/// platform a name ending in a dot or a space is refused (Windows drops
+/// those when it resolves the name, so `a.exe.` IS `a.exe`). On Unix an
+/// executable file is refused whatever its name, and on macOS an `.app`
+/// bundle (a directory that the handler would launch).
 fn default_open_refusal(path: &Path, kind: PathKind) -> Option<String> {
+    let refused = || {
+        Some(format!(
+            "not opening {}: choose an editor in Settings to open it",
+            path.display()
+        ))
+    };
+    if has_trailing_dot_or_space(path) {
+        return refused();
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    let refused = format!(
-        "not running {}: choose an editor in Settings to open it",
-        path.display()
-    );
-    #[cfg(windows)]
-    {
-        if kind == PathKind::Dir {
-            return None;
+    match kind {
+        PathKind::Dir => {
+            if cfg!(target_os = "macos") && ext == "app" {
+                return refused();
+            }
+            None
         }
-        let in_pathext = std::env::var("PATHEXT").is_ok_and(|v| {
-            v.split(';').any(|e| {
-                e.strip_prefix('.')
-                    .is_some_and(|e| e.eq_ignore_ascii_case(&ext))
-            })
-        });
-        if !ext.is_empty() && (in_pathext || RUNNABLE_EXTENSIONS.contains(&ext.as_str())) {
-            return Some(refused);
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if RUNNABLE_EXTENSIONS.contains(&ext.as_str()) {
-            return Some(refused);
-        }
-        let executable = std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
-        if kind == PathKind::File && executable {
-            return Some(refused);
+        PathKind::File => {
+            if !PASSIVE_EXTENSIONS.contains(&ext.as_str()) {
+                return refused();
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+                    return refused();
+                }
+            }
+            None
         }
     }
-    None
 }
 
-/// Hand `path` to the OS default handler (the file manager for a directory).
+/// Whether the last component of `path` ends in `.` or a space.
+fn has_trailing_dot_or_space(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with('.') || n.ends_with(' '))
+}
+
+/// With no editor configured: hand `path` to the OS default handler when it
+/// is passive (a directory opens in the file manager), else show it
+/// selected in its folder (Explorer's select, Finder's reveal, the file
+/// manager on the parent directory elsewhere). A name ending in a dot or a
+/// space is refused outright: what it names is not what it reads as.
 fn open_with_os(path: &Path, kind: PathKind) -> Result<(), String> {
-    if let Some(reason) = default_open_refusal(path, kind) {
-        return Err(reason);
+    if has_trailing_dot_or_space(path) {
+        return Err(format!(
+            "not opening {}: the name ends in a dot or a space",
+            path.display()
+        ));
+    }
+    if default_open_refusal(path, kind).is_some() {
+        return tauri_plugin_opener::reveal_item_in_dir(path)
+            .map_err(|e| format!("cannot show {} in its folder: {e}", path.display()));
     }
     tauri_plugin_opener::open_path(path, None::<&str>)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))
@@ -574,22 +576,58 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    /// With no editor configured only passive types reach the OS handler;
+    /// scripts, help files, remote-desktop files and a name that Windows
+    /// would read without its trailing dot are revealed (or refused), never
+    /// opened.
     #[test]
-    fn default_handler_refuses_runnable_files() {
-        for name in ["setup.exe", "run.CMD", "x.ps1", "s.vbs", "link.lnk", "a.js"] {
+    fn default_handler_opens_only_passive_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let p = dir.path().join(name);
+            if !name.ends_with('.') && !name.ends_with(' ') {
+                std::fs::write(&p, "").unwrap();
+            }
+            p
+        };
+        for name in [
+            "x.sh",
+            "x.py",
+            "x.chm",
+            "x.rdp",
+            "a.exe.",
+            "a.md ",
+            "setup.exe",
+            "run.CMD",
+            "x.ps1",
+            "s.vbs",
+            "link.lnk",
+            "a.js",
+            "x.jnlp",
+            "x.library-ms",
+            "x.iso",
+            "x.appinstaller",
+            "page.html",
+            "pic.svg",
+            "main.rs",
+            "README",
+        ] {
             assert!(
-                default_open_refusal(Path::new(name), PathKind::File).is_some(),
+                default_open_refusal(&file(name), PathKind::File).is_some(),
                 "{name}"
             );
         }
-        for name in ["main.rs", "README", "notes.md", "app.ts"] {
+        for name in ["x.md", "x.png", "notes.TXT", "build.log", "spec.pdf"] {
             assert!(
-                default_open_refusal(Path::new(name), PathKind::File).is_none(),
+                default_open_refusal(&file(name), PathKind::File).is_none(),
                 "{name}"
             );
         }
-        assert!(default_open_refusal(Path::new(r"C:\w\tools.exe"), PathKind::Dir).is_none());
+        assert!(default_open_refusal(&dir.path().join("tools.exe"), PathKind::Dir).is_none());
+        assert!(default_open_refusal(&dir.path().join("dots."), PathKind::Dir).is_some());
+        assert!(has_trailing_dot_or_space(Path::new("C:/w/a.exe.")));
+        assert!(has_trailing_dot_or_space(Path::new("/w/a.md ")));
+        assert!(!has_trailing_dot_or_space(Path::new("/w/a.md")));
     }
 
     #[cfg(unix)]
@@ -597,14 +635,21 @@ mod tests {
     fn default_handler_refuses_executables_and_launchers() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("build");
+        let script = dir.path().join("notes.md");
         std::fs::write(&script, "#!/bin/sh").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(default_open_refusal(&script, PathKind::File).is_some());
-        let text = dir.path().join("notes.md");
+        assert!(
+            default_open_refusal(&script, PathKind::File).is_some(),
+            "an executable file is never opened, whatever its name"
+        );
+        let text = dir.path().join("plain.md");
         std::fs::write(&text, "").unwrap();
         assert!(default_open_refusal(&text, PathKind::File).is_none());
-        assert!(default_open_refusal(Path::new("/Applications/X.app"), PathKind::Dir).is_some());
+        if cfg!(target_os = "macos") {
+            assert!(
+                default_open_refusal(Path::new("/Applications/X.app"), PathKind::Dir).is_some()
+            );
+        }
     }
 
     /// Captured `docker inspect -f '{{json .Mounts}}'` shape (Docker Desktop

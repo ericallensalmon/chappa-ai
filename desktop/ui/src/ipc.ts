@@ -282,12 +282,13 @@ export interface AgentToolDto {
    *  with a machine mode (claude, opencode) may be `json`. */
   transport: AgentTransport;
   /** The argv that continues a saved session; `{session_id}` is
-   *  substituted (claude `["--resume", "{session_id}"]`, opencode
+   *  substituted (claude `["--resume={session_id}"]`, opencode
    *  `["-s", "{session_id}"]`). Goes before the tool's own args. Empty =
    *  no resume offered for this tool. */
   resume_argv: string[];
   /** The argv that passes the first prompt on the command line, with
-   *  `{prompt}` where the text goes (claude / codex `["{prompt}"]`).
+   *  `{prompt}` where the text goes (claude / codex `["--", "{prompt}"]`; a
+   *  prompt starting with `-` is refused unless the word before it is `--`).
    *  Appended last. Empty = the prompt is typed once the TUI is ready,
    *  held while a startup question is on screen. */
   prompt_argv: string[];
@@ -1327,6 +1328,22 @@ export function confirmProjectTrust(id: number, run: boolean, hash?: string): Pr
   return call("confirm_project_trust", { id, run, hash: hash ?? null });
 }
 
+/** The trust prompt for an open project's loaded content (every command,
+ *  not only the auto-start ones), asked when a start was refused because
+ *  that content is not trusted. Answer through `confirmProjectTrust` with
+ *  `hash`. */
+export interface TrustPromptDto {
+  hash: string;
+  commands: string[];
+}
+
+export function projectTrustPrompt(id: number): Promise<TrustPromptDto> {
+  return call("project_trust_prompt", { id });
+}
+
+/** What a start refused for untrusted content begins with. */
+export const UNTRUSTED_START = "not trusted";
+
 export function listProjectProcesses(id: number): Promise<ProjectProcessDto[]> {
   return call("list_project_processes", { id });
 }
@@ -1683,7 +1700,7 @@ export interface SourceDto {
   warning: string | null;
   /** When this source's agent prompts are shown before a run. */
   promptPolicy: SourcePromptPolicy;
-  /** Action ids whose prompt was accepted once already. */
+  /** Launch digests (`promptHash`) accepted once already. */
   promptsShown: string[];
   /** Jobs started from this source, oldest first. */
   jobs: SourceJobDto[];
@@ -1718,6 +1735,10 @@ export interface SourceActionDto {
   verdict: ActionVerdictDto;
   /** An `agent` action whose prompt must be shown before this run. */
   needsPrompt: boolean;
+  /** An `agent` action's launch digest (prompt, resolved folder, tool,
+   *  env). Sent back with the run: Rust refuses it when the action changed
+   *  after this entry was drawn. Absent for other kinds. */
+  promptHash?: string;
 }
 
 /** The Rust-parsed action: the contract's `Action` with `env` always
@@ -1784,7 +1805,8 @@ export function sourceActions(sourceId: string, view: string, key: string | null
 
 /** Run one action; with `owner`, one of `sourceId`'s item actions on the
  *  row `key` of that other source; with `values`, what the dialog asked
- *  for (Rust checks them against the action's inputs). */
+ *  for (Rust checks them against the action's inputs); with `promptHash`,
+ *  the launch digest of the agent prompt that was shown. */
 export function sourceRunAction(
   sourceId: string,
   view: string,
@@ -1794,10 +1816,12 @@ export function sourceRunAction(
   note: string | null,
   owner?: string,
   values?: Record<string, unknown>,
+  promptHash?: string,
 ): Promise<ActionOutcomeDto> {
   const args: Record<string, unknown> = { sourceId, view, key, actionId, confirmed, note };
   if (owner) args.owner = owner;
   if (values) args.values = values;
+  if (promptHash) args.promptHash = promptHash;
   return call("source_run_action", args);
 }
 

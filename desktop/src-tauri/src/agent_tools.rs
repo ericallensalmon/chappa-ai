@@ -307,7 +307,7 @@ impl SessionCapture {
 /// from their command line; nothing is assumed for the rest.
 pub fn resume_argv_template(tool_type: ToolType) -> Vec<String> {
     match tool_type {
-        ToolType::Claude => vec!["--resume".into(), SESSION_ID_SLOT.into()],
+        ToolType::Claude => vec![format!("--resume={SESSION_ID_SLOT}")],
         ToolType::Opencode => vec!["-s".into(), SESSION_ID_SLOT.into()],
         _ => Vec::new(),
     }
@@ -323,10 +323,12 @@ pub fn resume_args(template: &[String], session_id: &str) -> Vec<String> {
 }
 
 /// The per-type first-prompt template: claude and codex take the prompt as
-/// a positional argument; nothing is assumed for the rest.
+/// a positional argument, after `--` so a prompt that starts with `-` is
+/// still the prompt (both CLIs end their options there); nothing is
+/// assumed for the rest.
 pub fn prompt_argv_template(tool_type: ToolType) -> Vec<String> {
     match tool_type {
-        ToolType::Claude | ToolType::Codex => vec![PROMPT_SLOT.into()],
+        ToolType::Claude | ToolType::Codex => vec!["--".into(), PROMPT_SLOT.into()],
         _ => Vec::new(),
     }
 }
@@ -334,11 +336,26 @@ pub fn prompt_argv_template(tool_type: ToolType) -> Vec<String> {
 /// `template` with every [`PROMPT_SLOT`] replaced by `prompt` (inside a
 /// word too, so `--prompt={prompt}` works). The prompt stays ONE argument
 /// however many spaces or newlines it holds.
-pub fn prompt_args(template: &[String], prompt: &str) -> Vec<String> {
-    template
+///
+/// A prompt that starts with `-` in a word of its own would be read by the
+/// program as an option (a source's text could otherwise switch a flag
+/// on), so it is refused unless the word before it is `--`, the end of
+/// options.
+pub fn prompt_args(template: &[String], prompt: &str) -> Result<Vec<String>, String> {
+    for (i, word) in template.iter().enumerate() {
+        let after_end_of_options = i > 0 && template[i - 1] == "--";
+        if word == PROMPT_SLOT && prompt.starts_with('-') && !after_end_of_options {
+            return Err(
+                "the prompt starts with '-', which this tool would read as an option; \
+                 reword it, or put `--` before {prompt} in the tool's prompt argv"
+                    .into(),
+            );
+        }
+    }
+    Ok(template
         .iter()
         .map(|word| word.replace(PROMPT_SLOT, prompt))
-        .collect()
+        .collect())
 }
 
 /// Compile a `regex` capture pattern: one capture group, the id. Errors are
@@ -456,14 +473,20 @@ impl AgentTool {
     /// The parity `command` string: `docker exec -u U -it -w W [-e K=V…]
     /// CONTAINER program args…`, or `program args…` for Host. Display only.
     pub fn command_line(&self) -> String {
+        self.command_line_as(EnvFlags::WithValues)
+    }
+
+    /// [`AgentTool::command_line`] with `-e K` instead of `-e K=V`: the
+    /// spelling for anything served beyond the app's own settings pane.
+    pub fn command_line_without_env_values(&self) -> String {
+        self.command_line_as(EnvFlags::NamesOnly)
+    }
+
+    fn command_line_as(&self, env: EnvFlags) -> String {
         let mut words: Vec<String> = Vec::new();
         if self.runtime.is_docker() {
             words.push("docker".into());
-            words.extend(docker_exec_prefix(
-                &self.runtime,
-                &self.env,
-                EnvFlags::WithValues,
-            ));
+            words.extend(docker_exec_prefix(&self.runtime, &self.env, env));
         }
         words.push(self.program.clone());
         words.extend(self.args.iter().cloned());
@@ -1419,7 +1442,7 @@ mod tests {
     #[test]
     fn resume_templates_and_substitution() {
         let claude = AgentTool::template(ToolType::Claude);
-        assert_eq!(claude.resume_argv, vec!["--resume", "{session_id}"]);
+        assert_eq!(claude.resume_argv, vec!["--resume={session_id}"]);
         assert_eq!(claude.session_capture, SessionCapture::Json);
         let opencode = AgentTool::template(ToolType::Opencode);
         assert_eq!(opencode.resume_argv, vec!["-s", "{session_id}"]);
@@ -1442,7 +1465,7 @@ mod tests {
         );
         assert!(resume_args(&[], "ses-1").is_empty());
         let pasted = parse_command_line("claude --dangerously-skip-permissions").tool;
-        assert_eq!(pasted.resume_argv, vec!["--resume", "{session_id}"]);
+        assert_eq!(pasted.resume_argv, vec!["--resume={session_id}"]);
         assert_eq!(
             parse_command_line("mytool -x").tool.session_capture,
             SessionCapture::None
@@ -1547,7 +1570,7 @@ mod tests {
         assert_eq!(store.get(1).unwrap().session_capture, SessionCapture::Json);
         assert_eq!(
             store.get(1).unwrap().resume_argv,
-            vec!["--resume", "{session_id}"]
+            vec!["--resume={session_id}"]
         );
         assert_eq!(store.get(2).unwrap().session_capture, SessionCapture::None);
         assert!(store.get(2).unwrap().resume_argv.is_empty());
@@ -1561,11 +1584,11 @@ mod tests {
     fn prompt_argv_templates_substitution_and_backfill() {
         assert_eq!(
             AgentTool::template(ToolType::Claude).prompt_argv,
-            vec!["{prompt}"]
+            vec!["--", "{prompt}"]
         );
         assert_eq!(
             AgentTool::template(ToolType::Codex).prompt_argv,
-            vec!["{prompt}"]
+            vec!["--", "{prompt}"]
         );
         for t in [ToolType::Opencode, ToolType::Gemini, ToolType::Custom] {
             assert!(AgentTool::template(t).prompt_argv.is_empty(), "{t:?}");
@@ -1574,13 +1597,30 @@ mod tests {
             prompt_args(
                 &["--prompt={prompt}".into(), "{prompt}".into()],
                 "fix the\nfailing test"
-            ),
+            )
+            .unwrap(),
             vec!["--prompt=fix the\nfailing test", "fix the\nfailing test"]
         );
-        assert!(prompt_args(&[], "x").is_empty());
+        assert!(prompt_args(&[], "x").unwrap().is_empty());
+        // A prompt that reads as an option: after `--` it stays the prompt,
+        // inside a word it is harmless, as a word of its own it is refused.
+        assert_eq!(
+            prompt_args(&["--".into(), "{prompt}".into()], "--help").unwrap(),
+            vec!["--", "--help"]
+        );
+        assert_eq!(
+            prompt_args(&["--prompt={prompt}".into()], "-x").unwrap(),
+            vec!["--prompt=-x"]
+        );
+        assert!(
+            prompt_args(&["{prompt}".into()], "--dangerously-skip-permissions")
+                .unwrap_err()
+                .contains("option")
+        );
+        assert!(prompt_args(&["-p".into(), "{prompt}".into()], "-x").is_err());
         assert_eq!(
             parse_command_line("claude --verbose").tool.prompt_argv,
-            vec!["{prompt}"]
+            vec!["--", "{prompt}"]
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -1598,7 +1638,7 @@ mod tests {
         let mut store = AgentToolStore::new(path);
         assert_eq!(
             store.get(1).unwrap().prompt_argv,
-            vec!["{prompt}"],
+            vec!["--", "{prompt}"],
             "absent key: the template"
         );
         assert!(

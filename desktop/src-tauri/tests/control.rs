@@ -120,6 +120,33 @@ fn token_file_is_created_once_with_restrictive_permissions() {
     assert_restrictive(&cfg.join(TOKEN_FILE));
 }
 
+/// A token file someone else could read (made by hand, copied in, or left
+/// under a shared folder's access list) is replaced, never reused: its
+/// token may already be known.
+#[test]
+fn a_token_file_readable_by_others_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let leaked = "ab".repeat(32);
+    std::fs::write(cfg.join(TOKEN_FILE), &leaked).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(cfg.join(TOKEN_FILE), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+    }
+    let token = load_or_create_token(&cfg).expect("replace");
+    assert_ne!(token, leaked);
+    assert_eq!(token.len(), 64);
+    assert_restrictive(&cfg.join(TOKEN_FILE));
+    assert_eq!(
+        load_or_create_token(&cfg).unwrap(),
+        token,
+        "kept from now on"
+    );
+}
+
 #[cfg(unix)]
 fn assert_restrictive(path: &Path) {
     use std::os::unix::fs::PermissionsExt;

@@ -202,7 +202,12 @@ impl RelaySource {
             }
         }
         let names: Vec<String> = self.config.engines.iter().map(|e| e.name.clone()).collect();
-        let (wanted, mut planned) = relay::plan(&names, &found, &self.config.port_set());
+        let (wanted, mut planned) = relay::plan(
+            &names,
+            &found,
+            &self.config.port_set(),
+            &relay::reserved_ports(&self.addr),
+        );
         planned
             .problems
             .retain(|p| !failed.iter().any(|f| f.engine == p.engine));

@@ -31,6 +31,11 @@ thiserror = "1"
 # `[extend] path`) by parsing it, not by searching its text.
 toml = "0.9"
 
+[target.'cfg(windows)'.dependencies]
+# `owner_only`: the process token's user SID and a file's access list, read
+# from the system rather than from environment variables or tool output.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+
 [features]
 # `test_support`: helpers for the tests of crates that depend on this one.
 # Enable it from `[dev-dependencies]` only.

@@ -1681,6 +1681,17 @@ fn live_names(probe: &dyn OutputProbe) -> String {
         .join(", ")
 }
 
+/// A timer body is typed into a terminal as if the person had typed it, so
+/// it may carry line breaks but no other control character: an ESC would
+/// start a terminal sequence, a CR would submit part of it early, a Ctrl-C
+/// would interrupt the program.
+fn check_body(body: &str) -> Result<()> {
+    if body.is_empty() {
+        return Err(CoordError::Invalid("`body` must not be empty".into()));
+    }
+    crate::sources::actions::reject_controls("`body`", body).map_err(CoordError::Invalid)
+}
+
 impl TimerService {
     /// Build a service over an explicit clock/probe/deliverer and START its
     /// two threads. Tests call this with a fake clock and a fake probe; the
@@ -2056,9 +2067,7 @@ impl TimerService {
         if !self.inner.running {
             return Err(not_running());
         }
-        if body.is_empty() {
-            return Err(CoordError::Invalid("`body` must not be empty".into()));
-        }
+        check_body(&body)?;
         let uuid = self.pin_target(delivery_process_id)?;
         let now = self.lock()?.now();
         // `loop: true` = repeat every delay_ms; `repeat_every_ms` overrides
@@ -2096,9 +2105,7 @@ impl TimerService {
         if !self.inner.running {
             return Err(not_running());
         }
-        if body.is_empty() {
-            return Err(CoordError::Invalid("`body` must not be empty".into()));
-        }
+        check_body(&body)?;
         if processes.is_empty() {
             return Err(CoordError::Invalid("`processes` must not be empty".into()));
         }

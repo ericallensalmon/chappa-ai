@@ -342,12 +342,12 @@ describe("Agents settings section", () => {
 
   it("the Resume group: templates prefilled, per-kind hints, the pattern row for regex, and the saved shape", async () => {
     const { api, host, section: s } = await section([]);
-    // The claude template: json capture, `--resume {session_id}`, both hints.
+    // The claude template: json capture, `--resume={session_id}`, both hints.
     field<HTMLSelectElement>(host, "newAgentType").value = "claude";
     action(host, "addAgent").click();
     const modal = s.modalElement!;
     expect(field<HTMLSelectElement>(modal, "session_capture").value).toBe("json");
-    expect(field<HTMLTextAreaElement>(modal, "resume_argv").value).toBe("--resume\n{session_id}");
+    expect(field<HTMLTextAreaElement>(modal, "resume_argv").value).toBe("--resume={session_id}");
     expect(modal.querySelector(".chappa-agent-resume-hint")?.textContent).toMatch(/\{session_id\} is substituted/);
     expect(modal.querySelector(".chappa-agent-capture-hint")?.textContent).toMatch(/machine-mode adapter/);
     expect(field<HTMLInputElement>(modal, "session_pattern").closest<HTMLElement>("div")!.style.display).toBe("none");

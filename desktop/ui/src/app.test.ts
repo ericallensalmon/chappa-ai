@@ -1133,6 +1133,56 @@ describe("App projects", () => {
     panelDispose(app);
   });
 
+  it("a start refused for untrusted content asks the trust prompt, and starts once the person chose Run", async () => {
+    const { api, calls } = projectApi();
+    let trusted = false;
+    const started: string[] = [];
+    api.startProjectProcess = vi.fn(async (_id: number, name: string) => {
+      if (!trusted) throw new Error(`not trusted: \`${name}\` is defined by this project's chappa.yml`);
+      started.push(name);
+      return 77;
+    });
+    api.projectTrustPrompt = vi.fn(async () => ({ hash: "h-loaded", commands: ["every command"] }));
+    api.confirmProjectTrust = vi.fn(async (id: number, run: boolean, hash?: string) => {
+      calls.confirmTrust.push([id, run]);
+      expect(hash).toBe("h-loaded");
+      trusted = run;
+    });
+    const asked: string[][] = [];
+    let answer = false;
+    const root = document.createElement("div");
+    const app = new App({
+      root,
+      api,
+      confirm: async () => false,
+      confirmProjectTrust: async (commands) => {
+        asked.push(commands);
+        return answer;
+      },
+    });
+    await app.mount();
+    await app.openProject(1);
+    await FLUSH();
+    const first = projectRows(root)[0];
+    asked.length = 0;
+    calls.confirmTrust.length = 0;
+    // Skip: nothing is trusted and nothing starts.
+    click(rowButton(first, "Start"));
+    await FLUSH();
+    expect(asked).toEqual([["every command"]]);
+    expect(calls.confirmTrust).toEqual([]);
+    expect(started).toEqual([]);
+    // Run: the shown content is trusted (by the hash it was built from) and
+    // the start goes through.
+    answer = true;
+    click(rowButton(first, "Start"));
+    await FLUSH();
+    await FLUSH();
+    expect(calls.confirmTrust).toEqual([[1, true]]);
+    expect(started).toEqual(["import + summarize on open"]);
+    panelDispose(app);
+  });
+
   it("process-row Start/Stop/Restart buttons work via mousedown→click", async () => {
     const { api, calls } = projectApi();
     const root = document.createElement("div");

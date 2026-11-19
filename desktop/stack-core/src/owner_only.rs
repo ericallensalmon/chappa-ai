@@ -8,7 +8,10 @@
 //! [`restrict`] rewrites it: the current user's full-control grant becomes
 //! the only entry. A caller that cannot restrict a secret's file must not
 //! keep the file (fail closed): [`write_new`] removes what it wrote when the
-//! restriction fails.
+//! restriction fails. [`write_new`] creates the file empty, restricts it and
+//! only then writes, so the secret never sits under the folder's access
+//! list; [`is_owner_only`] tells whether a file found on disk can be
+//! trusted to have stayed private.
 
 use std::fs;
 use std::io::{self, Write};
@@ -29,20 +32,15 @@ use std::path::Path;
 ///
 /// `icacls` is run by its full System32 path, never resolved by name, so a
 /// same-named binary next to the program or earlier on `PATH` can't stand
-/// in for it. The grant names `DOMAIN\user` when `USERDOMAIN` is set: a bare
-/// name is looked up on the local machine first, so on a domain-joined
-/// machine a local account sharing the user's name would otherwise get the
-/// grant.
+/// in for it. The grant names the user by the SID of this process's own
+/// token (`*S-1-5-21-…`), never by `USERNAME` / `USERDOMAIN`: those are
+/// plain environment variables any parent can set, and a name is looked up
+/// (a local account sharing the user's name would match first).
 ///
 /// Unix: `0700` for a folder, `0600` for anything else.
 #[cfg(windows)]
 pub fn restrict(path: &Path) -> io::Result<()> {
-    let user = std::env::var("USERNAME")
-        .map_err(|_| io::Error::other("USERNAME not set; cannot restrict the access list"))?;
-    let principal = match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
-        _ => user,
-    };
+    let principal = format!("*{}", win::current_user_sid()?);
     let icacls = icacls_path()?;
     let run = |args: &[std::ffi::OsString]| -> io::Result<()> {
         let mut cmd = std::process::Command::new(&icacls);
@@ -117,10 +115,15 @@ pub fn create_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Write `bytes` to the new file `path` (it must not exist) as an
-/// owner-only file. On Unix the mode is set at creation; elsewhere the file
-/// is restricted right after it is written and before anything else can
-/// rely on it. When that fails the file is removed and the error returned:
-/// a secret is never left readable by others.
+/// owner-only file. The file is created EMPTY, restricted, and only then
+/// written: the secret never exists under any other access list. On Unix
+/// the mode is set at creation as well. On Windows the file is opened with
+/// no sharing for the whole sequence, so nobody can open it while it still
+/// carries the folder's access list and keep that handle to read the
+/// secret later (the access list is changed on the path; it does not need
+/// a handle that shares data access). When any step fails the file is
+/// removed and the error returned: a secret is never left readable by
+/// others.
 pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut o = fs::OpenOptions::new();
     o.write(true).create_new(true);
@@ -129,18 +132,196 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        o.share_mode(0);
+    }
     // A file that is already there is never touched (nor removed below).
     let mut f = o.open(path)?;
     let result = (|| {
+        restrict(path)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        restrict(path)
+        f.sync_all()
     })();
+    drop(f);
     if result.is_err() {
         let _ = fs::remove_file(path);
     }
     result
+}
+
+/// Whether `path` is open to the current user alone: on Unix no group or
+/// other permission bit; on Windows an access list that inherits nothing
+/// and holds only allow entries for this process's own user. A file that is
+/// not (made by hand, copied in, or written by an older build under a
+/// folder anyone can read) may already have been read by someone else, so
+/// a secret in it is replaced rather than reused.
+#[cfg(unix)]
+pub fn is_owner_only(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(fs::metadata(path)?.permissions().mode() & 0o077 == 0)
+}
+
+#[cfg(windows)]
+pub fn is_owner_only(path: &Path) -> io::Result<bool> {
+    win::is_owner_only(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn is_owner_only(_path: &Path) -> io::Result<bool> {
+    Ok(true)
+}
+
+/// The Win32 calls behind the Windows side: the process token's user SID
+/// and the file's access list as the system holds it.
+#[cfg(windows)]
+mod win {
+    use std::io;
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        AclSizeInformation, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+        GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// `ACCESS_ALLOWED_ACE_TYPE`.
+    const ACCESS_ALLOWED: u8 = 0;
+
+    /// The string form of a SID (`S-1-5-21-…`).
+    ///
+    /// # Safety
+    /// `sid` must point at a valid SID.
+    unsafe fn sid_string(sid: PSID) -> io::Result<String> {
+        let mut wide: *mut u16 = std::ptr::null_mut();
+        if ConvertSidToStringSidW(sid, &mut wide) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut len = 0;
+        while *wide.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(wide, len));
+        LocalFree(wide.cast());
+        Ok(text)
+    }
+
+    /// The user SID of this process's token, read once.
+    pub fn current_user_sid() -> io::Result<String> {
+        static SID: OnceLock<String> = OnceLock::new();
+        if let Some(sid) = SID.get() {
+            return Ok(sid.clone());
+        }
+        let sid = read_token_user()?;
+        Ok(SID.get_or_init(|| sid).clone())
+    }
+
+    fn read_token_user() -> io::Result<String> {
+        // SAFETY: plain Win32 calls on this process's own token; the buffer
+        // is sized by the first call and aligned for TOKEN_USER (u64s).
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut needed = 0u32;
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+            let mut buf = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+            let ok = GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut needed,
+            );
+            let err = io::Error::last_os_error();
+            CloseHandle(token);
+            if ok == 0 {
+                return Err(err);
+            }
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            sid_string(user.User.Sid)
+        }
+    }
+
+    pub fn is_owner_only(path: &Path) -> io::Result<bool> {
+        use std::os::windows::ffi::OsStrExt;
+        let me = current_user_sid()?;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: the out-pointers are valid; the descriptor the call
+        // allocates is freed with LocalFree once read, and the DACL and ACE
+        // pointers into it are only used before that.
+        unsafe {
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let rc = GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            if rc != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(rc as i32));
+            }
+            let verdict = (|| -> io::Result<bool> {
+                // No DACL at all grants everyone everything.
+                if dacl.is_null() {
+                    return Ok(false);
+                }
+                let mut control = 0u16;
+                let mut revision = 0u32;
+                if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if control & SE_DACL_PROTECTED == 0 {
+                    return Ok(false);
+                }
+                let mut info = ACL_SIZE_INFORMATION::default();
+                if GetAclInformation(
+                    dacl,
+                    (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                ) == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if info.AceCount == 0 {
+                    return Ok(false);
+                }
+                for i in 0..info.AceCount {
+                    let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+                    if GetAce(dacl, i, &mut ace) == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let header = &*(ace as *const ACE_HEADER);
+                    if header.AceType != ACCESS_ALLOWED {
+                        return Ok(false);
+                    }
+                    let allowed = ace as *const ACCESS_ALLOWED_ACE;
+                    let sid = std::ptr::addr_of!((*allowed).SidStart) as PSID;
+                    if sid_string(sid)? != me {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })();
+            LocalFree(sd);
+            verdict
+        }
+    }
 }
 
 /// What `icacls` lists for `path`: one line per access entry.
@@ -162,6 +343,7 @@ pub(crate) fn access_entries(path: &Path) -> (Vec<String>, String) {
 /// The strict check: exactly one entry, not inherited, the current user's.
 #[cfg(all(test, windows))]
 pub(crate) fn assert_owner_only(path: &Path) {
+    assert!(is_owner_only(path).unwrap(), "{}", path.display());
     let (entries, text) = access_entries(path);
     assert!(
         !text.contains("(I)"),
@@ -203,6 +385,61 @@ mod tests {
             assert_owner_only(&dir);
             assert_owner_only(&file);
         }
+    }
+
+    /// A file left with the folder's access list (or wider mode bits) is
+    /// not owner-only; once restricted it is.
+    #[test]
+    fn a_plain_file_is_not_owner_only_until_restricted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain");
+        fs::write(&file, "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(!is_owner_only(&file).unwrap());
+        restrict(&file).unwrap();
+        assert!(is_owner_only(&file).unwrap());
+    }
+
+    /// The new file is restricted before a byte of the secret is in it, and
+    /// on Windows nobody else can open it while that happens.
+    #[cfg(windows)]
+    #[test]
+    fn a_new_file_cannot_be_opened_by_anyone_else_while_it_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("secret");
+        let mut o = fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            o.share_mode(0);
+        }
+        let held = o.open(&file).unwrap();
+        let err = fs::File::open(&file).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(32), "a sharing violation: {err}");
+        restrict(&file).expect("the access list changes on a file opened unshared");
+        drop(held);
+        assert_owner_only(&file);
+        fs::remove_file(&file).unwrap();
+        write_new(&file, b"s").unwrap();
+        assert_owner_only(&file);
+        assert_eq!(fs::read(&file).unwrap(), b"s");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_grant_names_the_process_token_user_by_sid() {
+        let sid = win::current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        // The environment cannot redirect the grant.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("t");
+        fs::write(&file, "x").unwrap();
+        restrict(&file).unwrap();
+        assert!(is_owner_only(&file).unwrap());
     }
 
     #[cfg(windows)]

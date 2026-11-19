@@ -1634,6 +1634,16 @@ fn http_errors_surface_the_apps_message() {
     let err = call_tool(&bad, "list_processes", &json!({})).unwrap_err();
     assert!(matches!(err, ToolError::Untrusted(_)), "{err:?}");
     assert_eq!(server.requests().len(), before);
+    // A control URL off this machine is refused before anything connects:
+    // the token would travel over plain HTTP.
+    for far in ["http://192.0.2.10:8324", "http://10.0.0.5:8324/chappa"] {
+        let remote = Client::new(far, TokenSource::Literal(TOKEN.into()));
+        let err = call_tool(&remote, "list_processes", &json!({})).unwrap_err();
+        assert!(
+            matches!(&err, ToolError::Untrusted(m) if m.contains("loopback")),
+            "{far}: {err:?}"
+        );
+    }
 }
 
 /// Launching an agent past a secret scan that did not finish is a person's

@@ -380,7 +380,10 @@ fn spawn_agent_passes_extra_args_verbatim_and_delivers_the_prompt_when_ready() {
 fn control_routes_list_tools_and_guard_spawns() {
     let dir = tempfile::tempdir().unwrap();
     let tools = AgentToolsState::with_path(dir.path().join("agent_tools.json"));
-    let tool = host_tool(&tools, "guarded", Some(1));
+    let mut tool = host_tool(&tools, "guarded", Some(1));
+    tool.env
+        .insert("SERVICE_API_KEY".into(), "not-for-token-holders".into());
+    let tool = tools.upsert(tool).unwrap();
     let registry = Registry::with_docker(FakeDocker::new());
     let state = ControlState {
         registry: registry.clone(),
@@ -400,6 +403,12 @@ fn control_routes_list_tools_and_guard_spawns() {
     assert_eq!(list[0]["runtime"]["kind"], "host");
     assert_eq!(list[0]["container"], Value::Null);
     assert_eq!(list[0]["command"], tool.command_line());
+    // A tool's env values are its credentials: only the names are listed.
+    assert_eq!(list[0]["env"], json!(["SERVICE_API_KEY"]));
+    assert!(
+        !list.to_string().contains("not-for-token-holders"),
+        "{list}"
+    );
 
     let (status, first) = http(
         &addr,
@@ -1650,6 +1659,45 @@ fn a_prompt_argv_tool_gets_its_prompt_on_the_command_line_and_types_nothing() {
         ("fix the failing test", 0, true, Some("argv"))
     );
     registry.close(id);
+
+    // A prompt that would read as an option is refused before anything
+    // spawns; after `--` the same text is just the prompt.
+    let ctx = || SpawnContext {
+        registry: &registry,
+        tools: &tools,
+        settings: &settings,
+        projects: &projects,
+        records: &records,
+        actor: None,
+    };
+    let before = registry.list().len();
+    let err = app_lib::agents::spawn_agent_headless(
+        ctx(),
+        SpawnAgentRequest {
+            agent_tool_id: tool.id,
+            prompt: Some("--dangerously-skip-permissions".into()),
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.contains("option"), "{err}");
+    assert_eq!(registry.list().len(), before, "nothing spawned");
+    let mut ended = tool.clone();
+    ended.prompt_argv = vec!["--".into(), "{prompt}".into()];
+    let ended = tools.upsert(ended).unwrap();
+    let resp = app_lib::agents::spawn_agent_headless(
+        ctx(),
+        SpawnAgentRequest {
+            agent_tool_id: ended.id,
+            prompt: Some("--help is the prompt".into()),
+            ..SpawnAgentRequest::default()
+        },
+    )
+    .expect("spawn");
+    wait_until(|| {
+        screen_contains(&registry, resp.process_id, "--help is the prompt").then_some(())
+    });
+    registry.close(resp.process_id);
 }
 
 /// An agent that writes its CLI settings file while it runs (what a

@@ -221,7 +221,9 @@ export function outcomeText(outcome: ActionOutcome): string {
 /**
  * The whole click: ask what the action needs asked, then run it. The
  * `agent` prompt dialog is shown when Rust says it must be (`needsPrompt`),
- * and `confirmed: true` goes out only after the user accepted. Resolves
+ * and `confirmed: true` goes out only after the user accepted; an agent run
+ * always carries the launch digest of the entry it was drawn from, so Rust
+ * can refuse one whose prompt changed in the meantime. Resolves
  * null when the user backed out. `opts.owner`: the action is one of
  * `sourceId`'s item actions on the row `key` of that other source (its
  * confirm text already names the row; Rust filled it).
@@ -249,9 +251,10 @@ export async function runAction(
   } else if (action.kind === "agent") {
     if (entry.needsPrompt) {
       if (!(await confirmAgentPrompt(action, verdict, sourceLabel, dialog))) return null;
+      confirmed = true;
     }
-    // Shown or not needed: either way the launch is the user's call now.
-    confirmed = true;
+    // Not shown now: Rust runs it only if this exact launch was accepted before.
+    return api.run(sourceId, view, key, action.id, confirmed, note, opts.owner, undefined, entry.promptHash);
   }
   if (values) return api.run(sourceId, view, key, action.id, confirmed, note, opts.owner, values);
   return opts.owner

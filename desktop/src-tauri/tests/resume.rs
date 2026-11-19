@@ -778,7 +778,39 @@ fn resume_distinguishes_no_session_rejection_and_acceptance() {
         .expect("accepted");
     assert_eq!(chosen.session_id, "ses-older");
     assert!(w.screen(chosen.term_id).contains("resumed ses-older"));
+    // A record saved before ids were checked can hold one that reads as an
+    // option: resume refuses it (saved or explicit), never passes it on.
+    w.records.run_session(
+        &record_id,
+        &chosen.run_uuid,
+        Session::new(
+            "custom",
+            "--dangerously-skip-permissions",
+            SessionSource::Announced,
+            11,
+        ),
+    );
+    assert_eq!(
+        w.session(&record_id).unwrap().session_id,
+        "--dangerously-skip-permissions"
+    );
     w.registry.close(chosen.term_id);
+    wait_until(|| {
+        (w.last_run(&record_id).map(|r| r.status) == Some(ProcessStatus::Stopped)).then_some(())
+    });
+    let err = w
+        .records
+        .resume(w.deps(), &record_id, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, ResumeFailure::Unavailable { message, .. } if message.contains("not a plain id")),
+        "{err:?}"
+    );
+    let err = w
+        .records
+        .resume(w.deps(), &record_id, Some("-x".into()), None)
+        .unwrap_err();
+    assert!(matches!(&err, ResumeFailure::Unavailable { .. }), "{err:?}");
     let _ = (&w.workspace, &w.projects);
 }
 
@@ -904,6 +936,18 @@ fn session_and_resume_routes_answer_typed_outcomes() {
         "{}",
     );
     assert_eq!(status, 400, "{body}");
+    // An id that would read as an option on the resume command line is
+    // refused, and the saved one stays.
+    let (status, body) = http(
+        &addr,
+        "POST",
+        &format!("/processes/{term}/session"),
+        &token,
+        Some(&actor),
+        r#"{"session_id": "--dangerously-skip-permissions"}"#,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(w.session(&record_id).unwrap().session_id, "ses-mcp");
     let (status, _) = http(
         &addr,
         "POST",

@@ -14,8 +14,8 @@ import {
 
 const ok: ActionVerdictDto = { enabled: true, reason: null, hidden: false, cwd: null, tool: null };
 
-function entry(action: SourceActionDto["action"], verdict: Partial<ActionVerdictDto> = {}, needsPrompt = false): SourceActionDto {
-  return { action, verdict: { ...ok, ...verdict }, needsPrompt };
+function entry(action: SourceActionDto["action"], verdict: Partial<ActionVerdictDto> = {}, needsPrompt = false, promptHash?: string): SourceActionDto {
+  return promptHash ? { action, verdict: { ...ok, ...verdict }, needsPrompt, promptHash } : { action, verdict: { ...ok, ...verdict }, needsPrompt };
 }
 
 const agent = {
@@ -154,16 +154,17 @@ describe("the dialogs", () => {
     press("Escape");
     expect(await cancelled).toBeNull();
     expect(run).not.toHaveBeenCalled();
-    // Accepting sends confirmed: true.
-    const launched = runAction("src", "Fixture", "work", "ABC-1", entry(agent, {}, true), { run });
+    // Accepting sends confirmed: true with the digest of what was shown.
+    const launched = runAction("src", "Fixture", "work", "ABC-1", entry(agent, {}, true, "h-shown"), { run });
     await Promise.resolve();
     okButton().click();
     expect(await launched).toEqual({ kind: "launched", term_id: 9, what: "agent" });
-    expect(run).toHaveBeenLastCalledWith("src", "work", "ABC-1", "agent-here", true, null);
-    // Already shown: no dialog, still the user's click, still confirmed.
-    await runAction("src", "Fixture", "work", "ABC-1", entry(agent, {}, false), { run });
+    expect(run).toHaveBeenLastCalledWith("src", "work", "ABC-1", "agent-here", true, null, undefined, undefined, "h-shown");
+    // Already accepted: no dialog and no confirm, only the digest — Rust
+    // runs it only when that exact launch was accepted before.
+    await runAction("src", "Fixture", "work", "ABC-1", entry(agent, {}, false, "h-shown"), { run });
     expect(document.querySelector(".chappa-dialog")).toBeNull();
-    expect(run).toHaveBeenLastCalledWith("src", "work", "ABC-1", "agent-here", true, null);
+    expect(run).toHaveBeenLastCalledWith("src", "work", "ABC-1", "agent-here", false, null, undefined, undefined, "h-shown");
     // A link needs nothing and sends confirmed: false.
     await runAction("src", "Fixture", "work", "ABC-1", entry({ kind: "link", id: "o", label: "Open", url: "https://x" }), { run });
     expect(run).toHaveBeenLastCalledWith("src", "work", "ABC-1", "o", false, null);

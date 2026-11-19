@@ -81,6 +81,8 @@ export interface TerminalApi {
   pickDirectory(title?: string, start?: string): Promise<string | null>;
   openProject(id: number): Promise<ipc.OpenProjectResult>;
   confirmProjectTrust(id: number, run: boolean, hash?: string): Promise<void>;
+  /** The trust prompt of an open project's loaded content. */
+  projectTrustPrompt?(id: number): Promise<ipc.TrustPromptDto>;
   listProjectProcesses(id: number): Promise<ipc.ProjectProcessDto[]>;
   startProjectProcess(
     id: number,
@@ -206,7 +208,8 @@ export const tauriApi: TerminalApi = {
   removeProject: (id) => ipc.removeProject(id),
   pickDirectory: (title, start) => ipc.pickDirectory(title, start),
   openProject: (id) => ipc.openProject(id),
-  confirmProjectTrust: (id, run) => ipc.confirmProjectTrust(id, run),
+  confirmProjectTrust: (id, run, hash) => ipc.confirmProjectTrust(id, run, hash),
+  projectTrustPrompt: (id) => ipc.projectTrustPrompt(id),
   listProjectProcesses: (id) => ipc.listProjectProcesses(id),
   startProjectProcess: (id, name, frames) => ipc.startProjectProcess(id, name, frames),
   stopProjectProcess: (id, name) => ipc.stopProjectProcess(id, name),

@@ -59,6 +59,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use term_core::actor::{epoch_ms, TermHandle};
 use term_core::pty::ExitStatus;
+use term_core::session::is_valid_session_id;
 
 use crate::agent_tools::ToolType;
 use crate::event_ring::{EventRing, Sequenced};
@@ -316,7 +317,11 @@ impl Adapter {
         match (ty, subtype) {
             ("system", "init") if nested => out.push((AgentEventKind::Raw, value)),
             ("system", "init") => {
-                if let Some(session) = value.get("session_id").and_then(Value::as_str) {
+                if let Some(session) = value
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| is_valid_session_id(id))
+                {
                     self.session_id = Some(session.to_owned());
                 }
                 self.model = value
@@ -463,6 +468,7 @@ impl Adapter {
                     self.session_id = value
                         .get("sessionID")
                         .and_then(Value::as_str)
+                        .filter(|id| is_valid_session_id(id))
                         .map(str::to_owned);
                 }
                 self.in_turn = false;
@@ -821,6 +827,14 @@ impl JsonAgent {
     /// start its reader threads. The caller guarantees no previous reader
     /// is live (`send_input` joins it; the first spawn has none).
     pub fn spawn_child(self: &Arc<Self>, message: Option<&str>) -> Result<(), String> {
+        // A per-turn CLI takes the message as its last argument: one that
+        // starts with `-` would be read as an option instead.
+        if !self.mode.persistent && message.is_some_and(|m| m.starts_with('-')) {
+            return Err(
+                "a message that starts with '-' would be read as an option by this CLI; reword it"
+                    .into(),
+            );
+        }
         let session = self.session_id();
         let args = self.child_args(session.as_deref(), message);
         let mut command = Command::new(&self.recipe.command);
@@ -1374,6 +1388,20 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         assert_eq!(kinds(&plain_user), ["raw"]);
+    }
+
+    /// A session id that is not one plain word is never taken from the
+    /// stream: it would become an argv word on the next turn or resume.
+    #[test]
+    fn a_session_id_of_the_wrong_shape_is_not_taken() {
+        let mut c = Adapter::new(AdapterKind::ClaudeStreamJson);
+        c.map_line(r#"{"type":"system","subtype":"init","session_id":"--settings=x","model":"m"}"#);
+        assert_eq!(c.session_id, None);
+        c.map_line(r#"{"type":"system","subtype":"init","session_id":"ses-ok","model":"m"}"#);
+        assert_eq!(c.session_id.as_deref(), Some("ses-ok"));
+        let mut o = Adapter::new(AdapterKind::OpencodeJson);
+        o.map_line(r#"{"type":"step_start","sessionID":"-s x","part":{}}"#);
+        assert_eq!(o.session_id, None);
     }
 
     /// The opencode adapter over the REAL capture (`opencode run --format

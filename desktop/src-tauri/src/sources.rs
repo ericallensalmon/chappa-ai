@@ -371,16 +371,56 @@ impl Default for Sources {
 pub struct LaunchEnv {
     pub addr: String,
     pub token: String,
+    /// The app's own loopback ports (its control surface and every
+    /// source's listener): the source must not hand them on.
+    pub reserved_ports: Vec<u16>,
 }
 
 impl LaunchEnv {
-    /// The two variables, ready to extend a spawn spec's env with.
+    /// The variables, ready to extend a spawn spec's env with: the address
+    /// and token, and the reserved ports when there are any.
     pub fn env(&self) -> Vec<(String, String)> {
-        vec![
+        let mut env = vec![
             (identity::ADDR_ENV.to_owned(), self.addr.clone()),
             (identity::TOKEN_ENV.to_owned(), self.token.clone()),
-        ]
+        ];
+        if !self.reserved_ports.is_empty() {
+            let ports: Vec<String> = self.reserved_ports.iter().map(u16::to_string).collect();
+            env.push((
+                stack_core::child_env::RESERVED_PORTS_ENV.to_owned(),
+                ports.join(","),
+            ));
+        }
+        env
     }
+}
+
+/// The loopback ports this app owns: its control surface (the fixed port,
+/// and the one it actually bound) and the address of every source it
+/// knows, plus `own` (the one being handed out).
+fn reserved_ports(inner: &Inner, own: u16) -> Vec<u16> {
+    let mut ports = std::collections::BTreeSet::from([own]);
+    if let Some(fixed) = crate::control_http::BIND
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+    {
+        ports.insert(fixed);
+    }
+    let bound = crate::control_http::BOUND_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if bound != 0 {
+        ports.insert(bound);
+    }
+    for state in inner.sources.values() {
+        if let Some(port) = state
+            .origin
+            .addr()
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+        {
+            ports.insert(port);
+        }
+    }
+    ports.into_iter().collect()
 }
 
 impl Sources {
@@ -457,8 +497,10 @@ impl Sources {
         let addr = format!("127.0.0.1:{port}");
         let token = identity::new_token_hex()?;
         let key = SourceStore::launched_key(project_path, command);
+        let reserved;
         {
             let mut inner = self.lock();
+            reserved = reserved_ports(&inner, port);
             let origin = Origin::Launched {
                 project_id,
                 project_path: project_path.to_path_buf(),
@@ -492,7 +534,11 @@ impl Sources {
         }
         self.notify();
         self.emit_sources();
-        Ok(LaunchEnv { addr, token })
+        Ok(LaunchEnv {
+            addr,
+            token,
+            reserved_ports: reserved,
+        })
     }
 
     /// The spawn succeeded: remember the terminal and start proving identity.
@@ -1426,6 +1472,11 @@ pub struct ActionDto {
     pub verdict: ActionVerdict,
     /// Whether an `agent` action's prompt must be shown before this run.
     pub needs_prompt: bool,
+    /// An `agent` action's launch digest (prompt, resolved folder, tool,
+    /// env): the webview sends it back with the run so a prompt replaced
+    /// after it was drawn is refused rather than launched unseen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_hash: Option<String>,
 }
 
 impl Sources {
@@ -1561,9 +1612,11 @@ impl Sources {
         Ok(())
     }
 
-    /// Whether `action_id`'s prompt must be shown before it runs now:
-    /// always under `PromptPolicy::Always`, else until it was accepted once.
-    pub fn prompt_needs_dialog(&self, source_id: &str, action_id: &str) -> Result<bool, String> {
+    /// Whether the launch with digest `launch` (see
+    /// [`actions::agent_launch_hash`]) must be shown before it runs now:
+    /// always under `PromptPolicy::Always`, else until that exact launch
+    /// was accepted once.
+    pub fn prompt_needs_dialog(&self, source_id: &str, launch: &str) -> Result<bool, String> {
         let inner = self.lock();
         let state = Self::trusted_state(&inner, source_id)?;
         let store = inner
@@ -1572,12 +1625,12 @@ impl Sources {
             .ok_or_else(|| "sources store not initialized".to_owned())?;
         Ok(match store.prompt_policy(&state.key) {
             PromptPolicy::Always => true,
-            PromptPolicy::FirstTime => !store.prompt_shown(&state.key, action_id),
+            PromptPolicy::FirstTime => !store.prompt_shown(&state.key, launch),
         })
     }
 
-    /// The user accepted `action_id`'s prompt.
-    pub fn mark_prompt_shown(&self, source_id: &str, action_id: &str) -> Result<(), String> {
+    /// The user accepted the launch with digest `launch`.
+    pub fn mark_prompt_shown(&self, source_id: &str, launch: &str) -> Result<(), String> {
         {
             let mut inner = self.lock();
             let key = Self::trusted_state(&inner, source_id)?.key.clone();
@@ -1585,7 +1638,7 @@ impl Sources {
                 .store
                 .as_mut()
                 .ok_or_else(|| "sources store not initialized".to_owned())?
-                .mark_prompt_shown(&key, action_id)?;
+                .mark_prompt_shown(&key, launch)?;
         }
         self.emit_sources();
         Ok(())
@@ -1656,15 +1709,19 @@ impl Sources {
                 hide.push(f.action.id().to_owned());
                 continue;
             }
+            let prompt_hash = actions::agent_action_hash(&f.action, tools, roots);
             let needs_prompt = matches!(f.action, SourceAction::Agent { .. })
                 && match policy {
                     PromptPolicy::Always => true,
-                    PromptPolicy::FirstTime => !shown.iter().any(|id| id == f.action.id()),
+                    PromptPolicy::FirstTime => !prompt_hash
+                        .as_ref()
+                        .is_some_and(|h| shown.iter().any(|s| s == h)),
                 };
             out.push(ActionDto {
                 action: f.action,
                 verdict,
                 needs_prompt,
+                prompt_hash,
             });
         }
         if !hide.is_empty() {
@@ -1893,6 +1950,7 @@ impl Sources {
                     action,
                     verdict,
                     needs_prompt: false,
+                    prompt_hash: None,
                 }
             })
             .collect())
@@ -2465,7 +2523,8 @@ pub struct SourceDto {
     pub warning: Option<String>,
     /// When this source's agent prompts are shown before a run.
     pub prompt_policy: PromptPolicy,
-    /// Action ids whose prompt the user has already accepted once.
+    /// Launch digests (see [`ActionDto::prompt_hash`]) the user has
+    /// already accepted once.
     pub prompts_shown: Vec<String>,
     /// The jobs started from this source, oldest first.
     pub jobs: Vec<JobRecord>,
@@ -2828,10 +2887,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_env_carries_exactly_the_two_variables() {
-        let env = LaunchEnv {
+    fn launch_env_carries_the_address_token_and_reserved_ports() {
+        let mut env = LaunchEnv {
             addr: "127.0.0.1:5000".into(),
             token: "ab".repeat(32),
+            reserved_ports: Vec::new(),
         };
         assert_eq!(
             env.env(),
@@ -2839,6 +2899,11 @@ mod tests {
                 ("CHAPPA_SOURCE_ADDR".to_owned(), "127.0.0.1:5000".to_owned()),
                 ("CHAPPA_SOURCE_TOKEN".to_owned(), "ab".repeat(32)),
             ]
+        );
+        env.reserved_ports = vec![5000, 8324];
+        assert_eq!(
+            env.env()[2],
+            ("CHAPPA_RESERVED_PORTS".to_owned(), "5000,8324".to_owned())
         );
     }
 
