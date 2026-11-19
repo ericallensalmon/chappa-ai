@@ -8,14 +8,18 @@
 //     node desktop/sources/github/index.mjs
 //
 // chappa sets both variables when it launches a source. Optional:
-//   GH_BIN                          the gh executable (default "gh"); a
-//                                   .js/.mjs/.cjs path runs under this Node
+//   GH_BIN                          the gh executable, an absolute path
+//                                   (default: gh from PATH); a .js/.mjs/.cjs
+//                                   path runs under this Node
 //   CHAPPA_GITHUB_REFRESH_SECONDS   minimum seconds between GitHub fetches
 //                                   (default 60), however often the app polls
 // No packages; one line per request on stderr.
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isValidChallenge, proof } from "../lib/identity.mjs";
 import { ISSUES_SEARCH, SEARCH_ISSUES, SEARCH_PRS, VIEWER, searches } from "./queries.mjs";
 import { RECENT_DAYS, toPr } from "./buckets.mjs";
@@ -31,7 +35,12 @@ const token = process.env.CHAPPA_SOURCE_TOKEN;
 // (`gh` and anything else this source starts never sees the token).
 delete process.env.CHAPPA_SOURCE_ADDR;
 delete process.env.CHAPPA_SOURCE_TOKEN;
-const ghBin = process.env.GH_BIN || "gh";
+// gh runs from this source's own folder and is found by an absolute path,
+// never by its bare name: the app starts a source in the project folder,
+// and on Windows a bare name is looked up in the working directory before
+// PATH, so a `gh.exe` a cloned repository carries would run with the
+// person's GitHub login.
+const HERE = dirname(fileURLToPath(import.meta.url));
 const minRefreshMs = 1000 * Number(process.env.CHAPPA_GITHUB_REFRESH_SECONDS ?? 60);
 
 if (!addr || !/^[0-9a-f]{64}$/.test(token ?? "")) {
@@ -66,6 +75,51 @@ const MANIFEST = {
 
 // ---- gh ----------------------------------------------------------------
 
+function runnable(file) {
+  try {
+    if (!statSync(file).isFile()) return false;
+    if (process.platform !== "win32") accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `name` on PATH, as an absolute path, or null. Only absolute PATH entries
+ * are searched: an empty or relative entry means "the working directory",
+ * which is exactly where a planted program would sit. On Windows the
+ * PATHEXT extensions a program can be started with directly (.COM, .EXE)
+ * are tried, in PATHEXT's order.
+ */
+function findOnPath(name, env = process.env, platform = process.platform) {
+  let exts = [""];
+  if (platform === "win32") {
+    exts = (env.PATHEXT || ".COM;.EXE").split(";").filter((e) => /^\.(com|exe)$/i.test(e));
+    if (exts.length === 0) exts = [".EXE"];
+  }
+  for (const dir of String(env.PATH ?? "").split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue;
+    for (const ext of exts) {
+      const file = join(dir, name + ext);
+      if (runnable(file)) return file;
+    }
+  }
+  return null;
+}
+
+/** The gh to run: `{ file }`, or `{ error }` fit to show the user. */
+function ghProgram() {
+  const named = process.env.GH_BIN;
+  if (named) {
+    return isAbsolute(named)
+      ? { file: named }
+      : { error: `gh CLI not found (GH_BIN must be an absolute path, not ${named})` };
+  }
+  const file = findOnPath("gh");
+  return file ? { file } : { error: "gh CLI not found on PATH; install it and run gh auth login" };
+}
+
 /** A gh failure with a message fit to show the user as-is. */
 class GhError extends Error {
   constructor(message, fatal = false) { super(message); this.fatal = fatal; }
@@ -79,12 +133,14 @@ class GhError extends Error {
 function ghOnce(query, vars = {}) {
   const args = ["api", "graphql", "-f", `query=${query}`];
   for (const [k, v] of Object.entries(vars)) args.push("-f", `${k}=${v}`);
-  const [file, argv] = /\.[cm]?js$/i.test(ghBin) ? [process.execPath, [ghBin, ...args]] : [ghBin, args];
+  const gh = ghProgram();
+  if (gh.error) return Promise.reject(new GhError(gh.error, true));
+  const [file, argv] = /\.[cm]?js$/i.test(gh.file) ? [process.execPath, [gh.file, ...args]] : [gh.file, args];
   return new Promise((ok, no) => {
-    execFile(file, argv, { maxBuffer: 64 * 1024 * 1024, timeout: GH_TIMEOUT_MS, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(file, argv, { cwd: HERE, maxBuffer: 64 * 1024 * 1024, timeout: GH_TIMEOUT_MS, windowsHide: true }, (err, stdout, stderr) => {
       const errText = String(stderr ?? "").trim();
       if (err) {
-        if (err.code === "ENOENT") return no(new GhError(`gh CLI not found (${ghBin}); install it and run gh auth login`, true));
+        if (err.code === "ENOENT") return no(new GhError(`gh CLI not found (${gh.file}); install it and run gh auth login`, true));
         if (err.code === 4 || /gh auth login/.test(errText)) return no(new GhError("gh is not logged in; run gh auth login", true));
         if (err.killed) return no(new GhError(`gh timed out after ${GH_TIMEOUT_MS / 1000} s`));
         const line = errText.split(/\r?\n/).find(Boolean) ?? `gh exited ${err.code}`;

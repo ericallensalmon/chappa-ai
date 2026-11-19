@@ -336,7 +336,7 @@ pub fn run_op(
     op: &ReviewOp,
     say: &mut dyn FnMut(&str),
 ) -> Result<Option<ReviewRecord>, (i32, String)> {
-    let git = Git::new(&*world.git_cli);
+    let git = Git::new(&*world.git_cli, loaded);
     let work_dir = loaded.work_dir();
     let now = world.clock.now_utc();
     match op {
@@ -703,7 +703,7 @@ pub fn accept(
                 _ => format!("{label} is not one you are reviewing"),
             };
             if existing.is_some() {
-                let git = Git::new(&*world.git_cli);
+                let git = Git::new(&*world.git_cli, loaded);
                 return match remove(&git, loaded, &name, &mut |_| {}) {
                     Ok(()) => Accepted::Done(format!("{why}; its review workspace was removed")),
                     Err(e) => refused(409, "dirty", format!("{why}, but {e}")),
@@ -722,7 +722,7 @@ pub fn accept(
                 "a mutating action must be confirmed",
             );
         }
-        let git = Git::new(&*world.git_cli);
+        let git = Git::new(&*world.git_cli, loaded);
         let ids = repo_identities(&git, loaded);
         let Some(clone) = ids.iter().find_map(|(name, id)| match id {
             Ok(Some(i)) if i.matches(&pr.forge, &pr.repo) => Some(name.clone()),
@@ -820,7 +820,7 @@ pub fn accept(
     if id.starts_with(REMOVE_PREFIX) {
         let wt = ReviewRecord::dir(&work_dir, &rec.name);
         if wt.exists() {
-            match Git::new(&*world.git_cli).uncommitted(&wt) {
+            match Git::new(&*world.git_cli, loaded).uncommitted(&wt) {
                 Ok(0) => {}
                 Ok(n) => {
                     return refused(

@@ -7,17 +7,20 @@
 //! `chappa.yml`, or a `chappa.stack.yml` beside it, never both.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 use stack_core::definition::{
     validate, Diagnostic, Severity, StackDef, StacksDocument, ValidationContext,
 };
+use stack_core::git::KnownRepos;
 use stack_core::intent::{instance_id, ActiveRecord};
+use stack_core::provenance::{GitError, GitFacts};
 use stack_core::runner::{SharedCheckoutGuard, StackRunner, Tools};
 use stack_core::workspace::{load_allow_file, ItemRecord, ALLOW_FILE};
 
 use crate::commands::ProjectCommands;
-use crate::world::World;
+use crate::world::{Shared, World};
 
 /// What the server was started for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +65,47 @@ pub struct Loaded {
     /// the source compares with the hash the person trusted before it runs
     /// anything. `None` when it could not be computed.
     pub definition_hash: Option<String>,
+    /// The runners' git facts, checked (see [`CheckedGit`]); made on first
+    /// use from the world the first runner is made with.
+    checked_git: OnceLock<CheckedGit>,
+}
+
+/// [`GitFacts`] that ask git only about folders whose git folder is the
+/// project's, a clone's, or a worktree's of a clone
+/// ([`KnownRepos::check`]). A runner asks about the bound item's
+/// worktrees, whose `.git` files anything working in them can rewrite.
+pub struct CheckedGit {
+    inner: Shared<dyn GitFacts + Send + Sync>,
+    known: KnownRepos,
+}
+
+impl CheckedGit {
+    fn check(&self, repo: &Path) -> Result<(), GitError> {
+        self.known.check(repo).map_err(GitError::Refused)
+    }
+}
+
+impl GitFacts for CheckedGit {
+    fn head_commit(&self, repo: &Path) -> Result<String, GitError> {
+        self.check(repo)?;
+        self.inner.head_commit(repo)
+    }
+    fn current_branch(&self, repo: &Path) -> Result<Option<String>, GitError> {
+        self.check(repo)?;
+        self.inner.current_branch(repo)
+    }
+    fn count_between(&self, repo: &Path, from: &str, to: &str) -> Result<u32, GitError> {
+        self.check(repo)?;
+        self.inner.count_between(repo, from, to)
+    }
+    fn dirty_hash(&self, repo: &Path) -> Result<Option<String>, GitError> {
+        self.check(repo)?;
+        self.inner.dirty_hash(repo)
+    }
+    fn commit_exists(&self, repo: &Path, sha: &str) -> Result<bool, GitError> {
+        self.check(repo)?;
+        self.inner.commit_exists(repo, sha)
+    }
 }
 
 /// The item a slot is bound to (`active.json`) and its worktree per clone:
@@ -167,6 +211,7 @@ impl Loaded {
             slot,
             binding: Binding::default(),
             definition_hash,
+            checked_git: OnceLock::new(),
         };
         // The work folder holds baselines, scratch and workspaces: it is
         // made git-ignored whenever the definition is read.
@@ -202,6 +247,26 @@ impl Loaded {
             .with_item(self.binding.item.clone(), self.binding.branches.clone())
     }
 
+    /// Where git may run for this stack: the project, its clones, and
+    /// worktrees of those clones.
+    pub fn known_repos(&self) -> KnownRepos {
+        let clones: Vec<PathBuf> = self
+            .stack
+            .repos()
+            .values()
+            .map(|r| self.stack.repo_dir(&self.dir, &r.path))
+            .collect();
+        KnownRepos::new(&self.dir, &clones)
+    }
+
+    /// The runners' git facts: `world`'s, asked only about known folders.
+    pub fn checked_git(&self, world: &World) -> &CheckedGit {
+        self.checked_git.get_or_init(|| CheckedGit {
+            inner: world.git.clone(),
+            known: self.known_repos(),
+        })
+    }
+
     /// A runner with no binding and no guard.
     pub fn plain_runner<'a>(&'a self, world: &'a World, now_utc: &str) -> StackRunner<'a> {
         StackRunner::new(
@@ -210,7 +275,7 @@ impl Loaded {
             &self.dir,
             Tools {
                 cli: &*world.cli,
-                git: &*world.git,
+                git: self.checked_git(world),
                 commands: &self.commands,
                 gateways: &*world.gateways,
             },

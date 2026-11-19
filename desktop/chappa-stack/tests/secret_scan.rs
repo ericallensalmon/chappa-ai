@@ -158,7 +158,7 @@ impl Sec {
 }
 
 /// A stack project with item ABC-1 active in slot 0 and one worktree of
-/// api, a git repository on its branch with `main` as the base. `git`
+/// api, a worktree of the clone `api` on its branch with `main` as the base. `git`
 /// decides whether the worktree is a real repository (for commit scans).
 fn setup(policy: &str, git: bool) -> Option<Sec> {
     if git && !has_git() {
@@ -176,13 +176,29 @@ fn setup(policy: &str, git: bool) -> Option<Sec> {
         ],
     );
     let wt = p.dir.join(WT);
-    fs::create_dir_all(&wt).unwrap();
-    fs::write(wt.join("README"), "api\n").unwrap();
     if git {
-        test_git(&wt, &["init", "-q", "-b", "main"]);
+        // A real worktree of the clone `api`: under the work folder, git
+        // runs in nothing else.
+        let clone = p.dir.join("api");
+        test_git(&clone, &["init", "-q", "-b", "main"]);
+        commit_file(&clone, "README", "api\n", "start");
+        let path = wt.display().to_string();
+        test_git(
+            &clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/ABC-1-fix",
+                &path,
+                "main",
+            ],
+        );
         fs::write(wt.join(".gitignore"), ".env\n").unwrap();
-        commit_file(&wt, "README", "api\n", "start");
-        test_git(&wt, &["checkout", "-q", "-b", "task/ABC-1-fix"]);
+    } else {
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join("README"), "api\n").unwrap();
     }
     let work = p.work();
     fs::write(
@@ -1279,4 +1295,61 @@ fn real_gitleaks_uses_a_trusted_project_config_and_falls_back_when_it_changes() 
     let env = s.env();
     assert!(is_found(&env["secretScan"]), "{env}");
     assert!(review(&env).unwrap().to_string().contains("is not trusted"));
+}
+
+#[test]
+fn a_build_context_file_too_large_to_scan_leaves_the_scan_unfinished() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = dir.path().join("ctx");
+    fs::create_dir_all(ctx.join("node_modules").join("pkg")).unwrap();
+    fs::write(ctx.join("Dockerfile"), "FROM scratch\nCOPY . /app\n").unwrap();
+    fs::write(
+        ctx.join("node_modules").join("pkg").join("index.js"),
+        "PLANTED in a folder a working-tree scan skips\n",
+    )
+    .unwrap();
+    let scanner = Planted::default();
+    let e = secret_scan::scan_build(&scanner, dir.path(), "api", &ctx, None, NOW);
+    assert_eq!(e.error, None, "{e:?}");
+    assert_eq!(e.findings.len(), 1, "the build sends node_modules: {e:?}");
+
+    fs::write(ctx.join("big.bin"), vec![b'x'; 2 * 1024 * 1024]).unwrap();
+    let e = secret_scan::scan_build(&scanner, dir.path(), "api", &ctx, None, NOW);
+    let err = e.error.as_deref().unwrap_or_default();
+    assert!(err.contains("over the size limit"), "{e:?}");
+}
+
+#[test]
+fn a_build_context_that_sends_git_warns_without_reading_it_or_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = dir.path().join("ctx");
+    fs::create_dir_all(ctx.join(".git").join("objects")).unwrap();
+    fs::write(ctx.join("Dockerfile"), "FROM scratch\nCOPY . /app\n").unwrap();
+    fs::write(ctx.join("main.txt"), "nothing here\n").unwrap();
+    // A pack too large to scan: inside .git it neither is read nor leaves
+    // the scan unfinished.
+    fs::write(
+        ctx.join(".git").join("objects").join("pack.pack"),
+        vec![b'x'; 2 * 1024 * 1024],
+    )
+    .unwrap();
+    fs::write(ctx.join(".git").join("config"), "PLANTED in git config\n").unwrap();
+    let scanner = Planted::default();
+    let e = secret_scan::scan_build(&scanner, dir.path(), "api", &ctx, None, NOW);
+    assert_eq!(e.error, None, "{e:?}");
+    assert!(e.findings.is_empty(), "{e:?}");
+    assert_eq!(e.warnings, [secret_scan::git_in_context(".git")]);
+    assert!(
+        secret_scan::outcome_line(&e).contains("the repository history goes into the image"),
+        "{}",
+        secret_scan::outcome_line(&e)
+    );
+    assert!(
+        !scanner.take_read().iter().any(|f| f.starts_with(".git")),
+        "nothing under .git is read"
+    );
+
+    fs::write(ctx.join(".dockerignore"), ".git\n").unwrap();
+    let e = secret_scan::scan_build(&scanner, dir.path(), "api", &ctx, None, NOW);
+    assert_eq!((e.error.as_deref(), e.warnings.len()), (None, 0), "{e:?}");
 }

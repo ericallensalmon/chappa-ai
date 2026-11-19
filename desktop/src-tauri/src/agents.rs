@@ -1961,7 +1961,9 @@ pub fn spawn_agent_with(
         .map(str::trim)
         .filter(|w| !w.is_empty());
     let cwd: Option<PathBuf> = match working_dir {
-        Some(dir) => Some(check_cwd(&ctx.projects.cwd_roots(req.project_id), dir).into_result()?),
+        Some(dir) => {
+            Some(check_cwd(&ctx.projects.cwd_roots(req.project_id, None), dir).into_result()?)
+        }
         None => project.as_ref().map(|(_, root)| root.clone()),
     };
     crate::sources::actions::validate_env(

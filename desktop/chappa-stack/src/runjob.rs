@@ -508,7 +508,7 @@ fn execute(
         auto_save(world, project_dir, rec, spec, out)?;
     }
     if let Some(r) = resume {
-        checkout_worktrees(world, r, out)?;
+        checkout_worktrees(world, &loaded, r, out)?;
     }
     // The item (or review) the plan builds from, and whether the slot is
     // bound to it as the job's first step.
@@ -989,8 +989,13 @@ fn auto_save(
 
 /// Put each worktree a resume builds from on its saved commit; refused,
 /// with nothing moved, when any has uncommitted changes now.
-fn checkout_worktrees(world: &World, r: &ResumeWork, out: &mut Out<'_>) -> Result<(), Failure> {
-    let git = Git::new(&*world.git_cli);
+fn checkout_worktrees(
+    world: &World,
+    loaded: &Loaded,
+    r: &ResumeWork,
+    out: &mut Out<'_>,
+) -> Result<(), Failure> {
+    let git = Git::new(&*world.git_cli, loaded);
     for c in &r.checkouts {
         match git.uncommitted(&c.worktree) {
             Ok(0) => {}

@@ -8,7 +8,11 @@
 //! - an open project's directory;
 //! - a git worktree of an open project (`git worktree list --porcelain`,
 //!   argv only; work-item folders are usually sibling worktrees, so this is
-//!   the common case);
+//!   the common case). The list comes from files under the repository's
+//!   git folder, which whatever works in the repository can write, so an
+//!   entry git marks prunable is dropped and every other one must point
+//!   back: its `.git` file names its own git folder in this repository
+//!   ([`stack_core::git::check_worktree_link`]);
 //! - an extra root a TRUSTED source asked for in its manifest (the user
 //!   approved it with the source's trust hash).
 //!
@@ -18,7 +22,6 @@
 //! carries its reason as data, so a disabled button can say why.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -221,43 +224,96 @@ pub fn display(path: &Path) -> String {
 /// up (the cached list stays).
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The worktree paths in `git worktree list --porcelain` output: every
-/// `worktree <path>` line, the main worktree included, in order.
+/// The worktree paths in `git worktree list --porcelain` output: the
+/// `worktree <path>` line of every entry, the main worktree included, in
+/// order, except entries git marks `prunable` (their folder is gone, or
+/// their record names a folder that does not point back).
 pub fn parse_worktree_list(porcelain: &str) -> Vec<PathBuf> {
-    porcelain
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
+    let mut out = Vec::new();
+    let mut current: Option<PathBuf> = None;
+    let mut prunable = false;
+    let mut flush = |current: &mut Option<PathBuf>, prunable: &mut bool| {
+        if let Some(p) = current.take() {
+            if !*prunable {
+                out.push(p);
+            }
+        }
+        *prunable = false;
+    };
+    for line in porcelain.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            flush(&mut current, &mut prunable);
+            let path = path.trim();
+            if !path.is_empty() {
+                current = Some(PathBuf::from(path));
+            }
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            prunable = true;
+        }
+    }
+    flush(&mut current, &mut prunable);
+    out
+}
+
+/// The listed worktrees that really are worktrees of the repository whose
+/// shared git folder is `common`: the main one (its `.git` is that
+/// folder) and linked ones whose `.git` file names their own git folder
+/// under it.
+pub fn linked_back(listed: Vec<PathBuf>, common: &Path) -> Vec<PathBuf> {
+    let Ok(common) = std::fs::canonicalize(common) else {
+        return Vec::new();
+    };
+    let commons = [common.clone()];
+    listed
+        .into_iter()
+        .filter(|w| {
+            let dot = w.join(".git");
+            match std::fs::symlink_metadata(&dot) {
+                Ok(m) if m.is_dir() => std::fs::canonicalize(&dot).is_ok_and(|d| d == common),
+                Ok(m) if m.is_file() => stack_core::git::check_worktree_link(w, &commons).is_ok(),
+                _ => false,
+            }
+        })
         .collect()
 }
 
-/// `git -C <root> worktree list --porcelain`, argv only, on its own
-/// thread with a deadline. `None` when git is missing, the folder is not a
-/// repository, or the call did not finish in time.
-pub fn git_worktrees(root: &Path) -> Option<Vec<PathBuf>> {
+/// Run `git -C <root> <args>` with the hardening of [`stack_core::git`],
+/// on its own thread with a deadline; its stdout when it succeeded.
+fn git_output(root: &Path, args: &'static [&'static str]) -> Option<String> {
     let root = root.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["worktree", "list", "--porcelain"])
-            .env("GIT_TERMINAL_PROMPT", "0")
+        let out = stack_core::git::command(stack_core::git::PROGRAM, &root)
+            .args(args)
             .output();
         let _ = tx.send(out);
     });
     let out = rx.recv_timeout(GIT_TIMEOUT).ok()?.ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(parse_worktree_list(&String::from_utf8_lossy(&out.stdout)))
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The worktrees of the repository holding `root`, from `git worktree list
+/// --porcelain` and checked by [`linked_back`]. `None` when git is
+/// missing, the folder is not a repository, or a call did not finish in
+/// time.
+pub fn git_worktrees(root: &Path) -> Option<Vec<PathBuf>> {
+    let common = git_output(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let listed = git_output(root, &["worktree", "list", "--porcelain"])?;
+    Some(linked_back(
+        parse_worktree_list(&listed),
+        Path::new(common.trim()),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn project(path: &Path) -> Root {
         Root::new(
@@ -282,6 +338,15 @@ mod tests {
         );
         assert!(parse_worktree_list("").is_empty());
         assert!(parse_worktree_list("fatal: not a git repository").is_empty());
+    }
+
+    #[test]
+    fn porcelain_drops_prunable_entries() {
+        let text = "worktree /code/app\nHEAD 0123\nbranch refs/heads/main\n\nworktree /code/gone\nHEAD 4567\ndetached\nprunable gitdir file points to non-existent location\n\nworktree /code/kept\nHEAD 89ab\ndetached\n\nworktree /code/bare-prunable\nprunable\n";
+        assert_eq!(
+            parse_worktree_list(text),
+            vec![PathBuf::from("/code/app"), PathBuf::from("/code/kept")]
+        );
     }
 
     #[test]
@@ -504,5 +569,55 @@ mod tests {
         );
         assert!(resolved.contains(&resolve_best_effort(&wt)), "{resolved:?}");
         assert!(git_worktrees(dir.path()).is_none(), "not a repository");
+
+        // A worktree record written by hand into the git folder, naming a
+        // sibling folder: as git lists it (prunable while the folder has no
+        // .git), and once the folder has a .git file that names some other
+        // git folder.
+        let head = std::fs::read_to_string(repo.join(".git").join("HEAD")).unwrap();
+        let forged = repo.join(".git").join("worktrees").join("forged");
+        std::fs::create_dir_all(&forged).unwrap();
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(
+            forged.join("gitdir"),
+            format!("{}\n", sibling.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(forged.join("commondir"), "../..\n").unwrap();
+        std::fs::write(forged.join("HEAD"), head).unwrap();
+        let roots = |list: Vec<PathBuf>| -> Vec<Root> {
+            list.iter()
+                .map(|p| Root::new(p, RootKind::Worktree { project_id: 1 }))
+                .collect()
+        };
+        let sibling_text = sibling.display().to_string();
+        let wt_text = wt.display().to_string();
+        let listed = git_worktrees(&repo).unwrap();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(check_cwd(&roots(listed.clone()), &sibling_text)
+            .allowed()
+            .is_none());
+        assert!(check_cwd(&roots(listed), &wt_text).allowed().is_some());
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(
+            sibling.join(".git"),
+            format!("gitdir: {}\n", elsewhere.display()),
+        )
+        .unwrap();
+        let porcelain = git_output(&repo, &["worktree", "list", "--porcelain"]).unwrap();
+        assert_eq!(
+            parse_worktree_list(&porcelain).len(),
+            3,
+            "git lists the forged entry: {porcelain}"
+        );
+        let listed = git_worktrees(&repo).unwrap();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(check_cwd(&roots(listed.clone()), &sibling_text)
+            .allowed()
+            .is_none());
+        assert!(check_cwd(&roots(listed), &wt_text).allowed().is_some());
     }
 }

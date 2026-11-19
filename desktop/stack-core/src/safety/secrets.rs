@@ -54,7 +54,6 @@ use super::{Finding, Location, Policy, SafetyError, SecretScanner};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// What to scan. The later gates pick one per occasion: item open and agent
 /// launch scan the working tree, a push-time or agent-time check adds the
@@ -74,13 +73,18 @@ pub enum ScanTarget {
     },
     /// Added lines of every commit in `<base>..HEAD`.
     CommitsAhead { root: PathBuf, base: String },
-    /// An image build context: what the build would send. With
-    /// `dockerignore`, `root/.dockerignore` is honoured (missing file:
-    /// nothing excluded).
+    /// An image build context: what the build would send, every file
+    /// under `root` (see [`listing::list_build_context`]). With
+    /// `dockerignore`, the engine's ignore files are honoured (see
+    /// [`build_ignore_files`]; none present: nothing excluded).
+    /// `dockerfile` is the build's Dockerfile when it is not the context's
+    /// own `Dockerfile`.
     BuildContext {
         root: PathBuf,
         #[serde(default)]
         dockerignore: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dockerfile: Option<PathBuf>,
     },
     /// Env files handed to components, scanned as they are wherever they
     /// live: their values end up readable through the engine, so a value
@@ -123,6 +127,10 @@ pub struct ScanReport {
     pub skipped: Vec<SkippedFile>,
     /// Given paths outside the root (incremental rescans).
     pub outside_root: usize,
+    /// Build contexts: the `.git` folders the build would send, which are
+    /// not read (see [`FileList::git_dirs`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_dirs: Vec<String>,
 }
 
 /// The list of files `target` would scan. Exposed so a gate can show it
@@ -133,22 +141,27 @@ pub fn list_target(target: &ScanTarget, limits: &ListLimits) -> Result<FileList,
         ScanTarget::WorkingTree { root, excludes } => {
             listing::list_files(root, &PatternSet::excludes(excludes), limits)
         }
-        ScanTarget::BuildContext { root, dockerignore } => {
-            let patterns = if *dockerignore {
-                match fs::read_to_string(root.join(".dockerignore")) {
-                    Ok(text) => PatternSet::dockerignore(&text),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => PatternSet::default(),
-                    Err(e) => {
-                        return Err(SafetyError::Io {
-                            path: root.join(".dockerignore"),
-                            message: e.to_string(),
-                        })
+        ScanTarget::BuildContext {
+            root,
+            dockerignore,
+            dockerfile,
+        } => {
+            let mut sets = Vec::new();
+            if *dockerignore {
+                for file in build_ignore_files(root, dockerfile.as_deref()) {
+                    match fs::read_to_string(&file) {
+                        Ok(text) => sets.push(PatternSet::dockerignore(&text)),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            return Err(SafetyError::Io {
+                                path: file,
+                                message: e.to_string(),
+                            })
+                        }
                     }
                 }
-            } else {
-                PatternSet::default()
-            };
-            listing::list_files(root, &patterns, limits)
+            }
+            listing::list_build_context(root, &sets, limits)
         }
         ScanTarget::Files {
             root,
@@ -162,6 +175,33 @@ pub fn list_target(target: &ScanTarget, limits: &ListLimits) -> Result<FileList,
         )),
         ScanTarget::EnvFiles { .. } | ScanTarget::CommitsAhead { .. } => Ok(FileList::default()),
     }
+}
+
+/// The ignore files an engine may read for a build of the context `root`
+/// with `dockerfile` (`None`: the context's own `Dockerfile` or
+/// `Containerfile`). Which one wins depends on the engine and its builder:
+/// BuildKit reads `<Dockerfile>.dockerignore` before the context's
+/// `.dockerignore`, the classic builder only the latter, podman prefers
+/// `.containerignore`. The listing leaves a file out only when every one
+/// of these that exists leaves it out, so whichever the engine reads, what
+/// it sends is scanned; an ignore file the engine does not read can only
+/// make the scan read more.
+pub fn build_ignore_files(root: &Path, dockerfile: Option<&Path>) -> Vec<PathBuf> {
+    let files: Vec<PathBuf> = match dockerfile {
+        Some(d) => vec![d.to_path_buf()],
+        None => vec![root.join("Dockerfile"), root.join("Containerfile")],
+    };
+    let mut out = Vec::new();
+    for f in files {
+        for ext in [".dockerignore", ".containerignore"] {
+            let mut name = f.clone().into_os_string();
+            name.push(ext);
+            out.push(PathBuf::from(name));
+        }
+    }
+    out.push(root.join(".containerignore"));
+    out.push(root.join(".dockerignore"));
+    out
 }
 
 /// Run `scanner` over `target` and subtract `baseline`.
@@ -184,6 +224,7 @@ pub fn scan(
             report.scanned_files = list.files.len();
             report.skipped = list.skipped.clone();
             report.outside_root = list.outside_root;
+            report.git_dirs = list.git_dirs.clone();
             if list.files.is_empty() {
                 Vec::new()
             } else {
@@ -262,9 +303,7 @@ fn verify_base(root: &Path, base: &str, git: &Path) -> Result<(), SafetyError> {
             "`{base}` is not a usable base revision"
         )));
     }
-    let out = crate::child_env::scrub(&mut Command::new(git))
-        .arg("-C")
-        .arg(root)
+    let out = crate::git::command(git, root)
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
         .arg(format!("{base}^{{commit}}"))
         .output()

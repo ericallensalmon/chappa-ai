@@ -262,7 +262,23 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     // The judged list of ABC-1: everything offered except nothing hidden
     // here; the agent action resolves the tool named `claude` and the real
     // folder, and needs its prompt shown (first time).
-    let roots = deps.projects.cwd_roots(Some(st.project_id));
+    // The roots the fixture was trusted with count for its own actions
+    // only: not for another source's, nor for a control-API spawn.
+    deps.projects.set_sources(deps.sources.clone());
+    let roots = deps.projects.cwd_roots(Some(st.project_id), Some(sid));
+    let source_roots = |roots: &[app_lib::roots::Root]| {
+        roots
+            .iter()
+            .filter(|r| matches!(r.kind, app_lib::roots::RootKind::Source { .. }))
+            .count()
+    };
+    assert_eq!(source_roots(&roots), 1, "{roots:?}");
+    let pid = Some(st.project_id);
+    assert_eq!(
+        source_roots(&deps.projects.cwd_roots(pid, Some("another"))),
+        0
+    );
+    assert_eq!(source_roots(&deps.projects.cwd_roots(pid, None)), 0);
     let listed = deps
         .sources
         .actions(sid, "work", Some("ABC-1"), &deps.tools.list(), &roots)

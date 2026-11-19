@@ -32,7 +32,12 @@
 //! live, before they are accepted and when their job runs.
 //!
 //! git runs through [`crate::world::World::git_cli`], argv only, never a
-//! shell, each call under a time limit and with terminal prompts off.
+//! shell, each call under a time limit, with terminal prompts off and the
+//! config overrides of [`stack_core::git`] (a repository's own config never
+//! runs a command). Outside the project and the stack's clones, git runs
+//! only in a worktree whose `.git` file names its own git folder in one of
+//! those clones (see [`stack_core::git::check_worktree_link`]): anything
+//! working in the worktree can rewrite that file.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -45,6 +50,7 @@ use std::time::Duration;
 
 use stack_core::cli::{EngineCli, Invocation};
 use stack_core::definition::{Mode, ANY_SOURCE};
+use stack_core::git::KnownRepos;
 use stack_core::images::ProvenanceCache;
 use stack_core::intent::ActiveRecord;
 use stack_core::planner::{BindTarget, Change, Plan};
@@ -101,31 +107,39 @@ const PRS_CAP: usize = 100;
 
 // ------------------------------------------------------------------- git
 
-/// git through an [`EngineCli`]: `git -C <dir> …`, argv only, with
-/// `GIT_TERMINAL_PROMPT=0` so a missing credential fails instead of
-/// waiting for a prompt nobody sees.
+/// git through an [`EngineCli`]: `git <overrides> -C <dir> …` (see
+/// [`stack_core::git::invocation`]), argv only, with terminal prompts off so
+/// a missing credential fails instead of waiting for a prompt nobody sees.
 pub struct Git<'a> {
     pub cli: &'a dyn EngineCli,
+    /// Where git may run: the project, the stack's clones, and worktrees
+    /// of those clones (see [`Loaded::known_repos`]).
+    known: KnownRepos,
 }
 
 impl<'a> Git<'a> {
-    pub fn new(cli: &'a dyn EngineCli) -> Self {
-        Self { cli }
+    /// git for the stack `loaded`.
+    pub fn new(cli: &'a dyn EngineCli, loaded: &Loaded) -> Self {
+        Self {
+            cli,
+            known: loaded.known_repos(),
+        }
+    }
+
+    /// Refuse a folder that is neither the project, a clone, nor a worktree
+    /// of a clone. A worktree's `.git` file (and the item record that names
+    /// the worktree) can be rewritten by whatever works there, and git
+    /// would read the config of whatever git folder it names.
+    fn guard(&self, dir: &Path) -> Result<(), String> {
+        self.known.check(dir)
     }
 
     fn inv(&self, dir: &Path, args: &[&str], limit: Duration) -> Invocation {
-        let mut argv = vec![
-            "git".to_string(),
-            "-C".to_string(),
-            dir.display().to_string(),
-        ];
-        argv.extend(args.iter().map(|a| a.to_string()));
-        Invocation::from_argv(&argv)
-            .timeout(limit)
-            .env("GIT_TERMINAL_PROMPT", "0")
+        stack_core::git::invocation(dir, args).timeout(limit)
     }
 
     fn run(&self, dir: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
+        self.guard(dir)?;
         match self.cli.run(&self.inv(dir, args, limit)) {
             Ok(o) if o.ok() => Ok(o.stdout),
             Ok(o) => Err(format!("`git {}` failed ({})", args.join(" "), o.summary())),
@@ -142,7 +156,11 @@ impl<'a> Git<'a> {
     /// such branch.
     pub fn remote_branch(&self, clone: &Path, branch: &str) -> Result<Option<String>, String> {
         let r = format!("refs/heads/{branch}");
-        let out = self.run(clone, &["ls-remote", "--heads", "origin", &r], LS_REMOTE)?;
+        let out = self.run(
+            clone,
+            &["ls-remote", "--heads", "--end-of-options", "origin", &r],
+            LS_REMOTE,
+        )?;
         Ok(out.lines().find_map(|l| {
             let (sha, name) = l.split_once('\t')?;
             (name.trim() == r).then(|| sha.trim().to_string())
@@ -156,6 +174,7 @@ impl<'a> Git<'a> {
                 "rev-parse",
                 "--verify",
                 "--quiet",
+                "--end-of-options",
                 &format!("refs/heads/{branch}"),
             ],
             LOCAL_GIT,
@@ -167,14 +186,23 @@ impl<'a> Git<'a> {
     /// return its commit.
     pub fn fetch_branch(&self, clone: &Path, branch: &str) -> Result<String, String> {
         let spec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-        self.run(clone, &["fetch", "--no-tags", "origin", &spec], FETCH)?;
+        self.run(
+            clone,
+            &["fetch", "--no-tags", "--end-of-options", "origin", &spec],
+            FETCH,
+        )?;
         self.rev_parse(clone, &format!("refs/remotes/origin/{branch}"))
     }
 
     pub fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String, String> {
         self.run(
             dir,
-            &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{rev}^{{commit}}"),
+            ],
             LOCAL_GIT,
         )
         .map(|s| s.trim().to_string())
@@ -190,12 +218,25 @@ impl<'a> Git<'a> {
     ) -> Result<(), String> {
         let p = path.display().to_string();
         if self.local_branch_exists(clone, branch) {
-            self.run(clone, &["worktree", "add", &p, branch], LOCAL_GIT * 4)
+            self.run(
+                clone,
+                &["worktree", "add", "--end-of-options", &p, branch],
+                LOCAL_GIT * 4,
+            )
         } else {
             let upstream = format!("refs/remotes/origin/{branch}");
             self.run(
                 clone,
-                &["worktree", "add", "--track", "-b", branch, &p, &upstream],
+                &[
+                    "worktree",
+                    "add",
+                    "--track",
+                    "-b",
+                    branch,
+                    "--end-of-options",
+                    &p,
+                    &upstream,
+                ],
                 LOCAL_GIT * 4,
             )
         }
@@ -213,7 +254,16 @@ impl<'a> Git<'a> {
         let p = path.display().to_string();
         self.run(
             clone,
-            &["worktree", "add", "--no-track", "-b", branch, &p, start],
+            &[
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                branch,
+                "--end-of-options",
+                &p,
+                start,
+            ],
             LOCAL_GIT * 4,
         )
         .map(|_| ())
@@ -221,8 +271,12 @@ impl<'a> Git<'a> {
 
     pub fn worktree_remove(&self, clone: &Path, path: &Path) -> Result<(), String> {
         let p = path.display().to_string();
-        self.run(clone, &["worktree", "remove", &p], LOCAL_GIT * 4)
-            .map(|_| ())
+        self.run(
+            clone,
+            &["worktree", "remove", "--end-of-options", &p],
+            LOCAL_GIT * 4,
+        )
+        .map(|_| ())
     }
 
     /// A worktree at `commit` with no branch (a review checkout).
@@ -235,7 +289,14 @@ impl<'a> Git<'a> {
         let p = path.display().to_string();
         self.run(
             clone,
-            &["worktree", "add", "--detach", &p, commit],
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                "--end-of-options",
+                &p,
+                commit,
+            ],
             LOCAL_GIT * 4,
         )
         .map(|_| ())
@@ -243,8 +304,12 @@ impl<'a> Git<'a> {
 
     /// Fetch one refspec from origin (`+refs/pull/12/head:refs/remotes/origin/pr/12`).
     pub fn fetch_spec(&self, clone: &Path, spec: &str) -> Result<(), String> {
-        self.run(clone, &["fetch", "--no-tags", "origin", spec], FETCH)
-            .map(|_| ())
+        self.run(
+            clone,
+            &["fetch", "--no-tags", "--end-of-options", "origin", spec],
+            FETCH,
+        )
+        .map(|_| ())
     }
 
     /// Put a worktree on `commit`: on `branch` when its tip is that commit
@@ -263,13 +328,17 @@ impl<'a> Git<'a> {
                 == Some(commit)
             {
                 return self
-                    .run(worktree, &["checkout", "-q", b], LOCAL_GIT * 4)
+                    .run(
+                        worktree,
+                        &["checkout", "-q", "--end-of-options", b],
+                        LOCAL_GIT * 4,
+                    )
                     .map(|_| ());
             }
         }
         self.run(
             worktree,
-            &["checkout", "-q", "--detach", commit],
+            &["checkout", "-q", "--detach", "--end-of-options", commit],
             LOCAL_GIT * 4,
         )
         .map(|_| ())
@@ -283,14 +352,22 @@ impl<'a> Git<'a> {
 
     /// The last commit that touched `file` in the repo at `dir`.
     pub fn last_commit_of(&self, dir: &Path, file: &str) -> Option<String> {
-        self.run(dir, &["log", "-1", "--format=%H", "--", file], LOCAL_GIT)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        let [textconv, ext_diff] = stack_core::git::NO_DIFF_HELPERS;
+        self.run(
+            dir,
+            &["log", "-1", "--format=%H", textconv, ext_diff, "--", file],
+            LOCAL_GIT,
+        )
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
     }
 
     /// `core.longpaths` of the clone (git's own setting; unset is off).
     pub fn long_paths(&self, clone: &Path) -> LongPaths {
+        if self.guard(clone).is_err() {
+            return LongPaths::Unknown;
+        }
         match self
             .cli
             .run(&self.inv(clone, &["config", "--get", "core.longpaths"], LOCAL_GIT))
@@ -335,7 +412,13 @@ impl<'a> Git<'a> {
         let range = format!("refs/remotes/origin/{base}...HEAD");
         if let Ok(s) = self.run(
             worktree,
-            &["rev-list", "--left-right", "--count", &range],
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                "--end-of-options",
+                &range,
+            ],
             LOCAL_GIT,
         ) {
             let mut it = s.split_whitespace().filter_map(|n| n.parse::<u32>().ok());
@@ -439,7 +522,7 @@ impl WorkCache {
     pub fn refresh(&self, world: &World, loaded: &Loaded) {
         let now = world.clock.now_secs();
         let before = self.snapshot();
-        let git = Git::new(&*world.git_cli);
+        let git = Git::new(&*world.git_cli, loaded);
         let work_dir = loaded.work_dir();
         let stale = |at: u64, ttl: u64| before.stale || now.saturating_sub(at) >= ttl;
         let identities = if before
@@ -1153,7 +1236,7 @@ pub fn run_op(
     op: &WorkspaceOp,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), OpFailure> {
-    let git = Git::new(&*world.git_cli);
+    let git = Git::new(&*world.git_cli, loaded);
     let work_dir = loaded.work_dir();
     let now = world.clock.now_utc();
     match op {
@@ -2149,7 +2232,7 @@ pub fn accept(
                 "a mutating action must be confirmed",
             );
         }
-        let blockers = archive_blockers(&Git::new(&*world.git_cli), &dir, &rec);
+        let blockers = archive_blockers(&Git::new(&*world.git_cli, inp.loaded), &dir, &rec);
         if !blockers.is_empty() {
             return refused(
                 409,
@@ -2399,7 +2482,7 @@ fn start_work(
     {
         return refused(500, "workspace", e);
     }
-    let git = Git::new(&*world.git_cli);
+    let git = Git::new(&*world.git_cli, inp.loaded);
     let identities = repo_identities(&git, inp.loaded);
     let mut checkouts = Vec::new();
     let mut notes = Vec::new();

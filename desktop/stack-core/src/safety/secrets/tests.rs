@@ -181,6 +181,7 @@ fn build_context_honours_dockerignore_only_when_asked() {
             &ScanTarget::BuildContext {
                 root: root.to_path_buf(),
                 dockerignore,
+                dockerfile: None,
             },
             &no_git(),
         )
@@ -207,6 +208,7 @@ fn build_context_honours_dockerignore_only_when_asked() {
         &ScanTarget::BuildContext {
             root: bare.path().to_path_buf(),
             dockerignore: true,
+            dockerfile: None,
         },
         &no_git(),
     )
@@ -472,8 +474,13 @@ fn stub_gitleaks_is_found_on_a_temp_path_and_its_report_is_stripped() {
     assert!(!shown.contains(&v), "{shown}");
 
     let args = fs::read_to_string(bin.join("args.txt")).unwrap();
+    assert!(args.starts_with("dir "), "{args}");
+    assert!(
+        args.trim_end().ends_with("-- ."),
+        "the path comes last, after --: {args}"
+    );
     for want in [
-        "dir .",
+        "--ignore-gitleaks-allow",
         "--redact",
         "--report-format json",
         "--report-path",
@@ -886,6 +893,7 @@ fn real_gitleaks_over_env_files_and_build_contexts() {
             &ScanTarget::BuildContext {
                 root: ctx.clone(),
                 dockerignore,
+                dockerfile: None,
             },
             &no_git(),
             &Baseline::default(),
@@ -1181,4 +1189,136 @@ fn real_gitleaks_layers_a_project_config_on_the_app_config_or_the_settings_one()
     assert!(found.contains(&("house-marker".into(), 4)), "{found:?}");
     assert!(found.contains(&("github-pat".into(), 2)), "{found:?}");
     assert!(!found.iter().any(|(_, l)| *l == 1), "{found:?}");
+}
+
+// ------------------------------------------- what the scanned tree controls
+
+#[test]
+fn build_context_reads_every_ignore_file_the_engine_might_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = dir.path().join("ctx");
+    write(&ctx, "Dockerfile", "FROM scratch\nCOPY . /app\n");
+    write(&ctx, "secret.env", "x\n");
+    write(&ctx, ".dockerignore", "*\n");
+    let listed = |dockerfile: Option<PathBuf>| -> Vec<String> {
+        list_target(
+            &ScanTarget::BuildContext {
+                root: ctx.clone(),
+                dockerignore: true,
+                dockerfile,
+            },
+            &no_git(),
+        )
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect()
+    };
+    assert!(listed(None).is_empty(), "only `*` excludes everything");
+    // BuildKit reads the Dockerfile's own ignore file before the context's.
+    write(&ctx, "Dockerfile.dockerignore", "");
+    assert!(listed(None).contains(&"secret.env".to_string()));
+    fs::remove_file(ctx.join("Dockerfile.dockerignore")).unwrap();
+    // podman prefers `.containerignore`.
+    write(&ctx, ".containerignore", "Dockerfile\n");
+    assert!(listed(None).contains(&"secret.env".to_string()));
+    fs::remove_file(ctx.join(".containerignore")).unwrap();
+    // A Dockerfile elsewhere: its ignore file sits beside it.
+    write(dir.path(), "build/App.Dockerfile", "FROM scratch\n");
+    let df = dir.path().join("build/App.Dockerfile");
+    assert!(listed(Some(df.clone())).is_empty());
+    write(
+        dir.path(),
+        "build/App.Dockerfile.dockerignore",
+        "Dockerfile\n",
+    );
+    assert_eq!(listed(Some(df)), [".dockerignore", "secret.env"]);
+}
+
+#[test]
+fn real_gitleaks_reports_what_the_scanned_tree_marks_allowed_or_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let Some(scanner) = real_gitleaks(&work) else {
+        return;
+    };
+    let token = planted_token();
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    write(&repo, "a.txt", "a\n");
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+    write(
+        &repo,
+        "cfg.py",
+        &format!("token = \"{token}\"  # gitleaks:allow\n"),
+    );
+    write(&repo, "-dash.txt", &format!("token: {token}\n"));
+    git(&repo, &["add", "--", "cfg.py", "-dash.txt"]);
+    git(&repo, &["commit", "-q", "-m", "add config"]);
+    // Every file binary to `git diff`, from the repository's own attributes.
+    write(&repo.join(".git"), "info/attributes", "* -diff\n");
+
+    for linked in [true, false] {
+        let mut s = scanner.clone();
+        s.stage_with_links = linked;
+        let report = scan(
+            &s,
+            &ScanTarget::WorkingTree {
+                root: repo.clone(),
+                excludes: vec![],
+            },
+            &ListLimits::default(),
+            &Baseline::default(),
+        )
+        .unwrap();
+        let files: Vec<String> = report.findings.iter().map(file_of).collect();
+        assert!(files.contains(&"cfg.py".to_string()), "{report:?}");
+        assert!(files.contains(&"-dash.txt".to_string()), "{report:?}");
+    }
+    let commits = scan(
+        &scanner,
+        &ScanTarget::CommitsAhead {
+            root: repo.clone(),
+            base,
+        },
+        &ListLimits::default(),
+        &Baseline::default(),
+    )
+    .unwrap();
+    let files: Vec<String> = commits.findings.iter().map(file_of).collect();
+    assert!(files.contains(&"cfg.py".to_string()), "{commits:?}");
+    assert!(files.contains(&"-dash.txt".to_string()), "{commits:?}");
+
+    // The build context from a repository that ignores everything for the
+    // classic builder and nothing for BuildKit.
+    let ctx = dir.path().join("ctx");
+    write(&ctx, "Dockerfile", "FROM scratch\nCOPY . /app\n");
+    write(&ctx, ".dockerignore", "*\n");
+    write(&ctx, "Dockerfile.dockerignore", "");
+    write(&ctx, "secret.env", &format!("API={token}\n"));
+    let built = scan(
+        &scanner,
+        &ScanTarget::BuildContext {
+            root: ctx.clone(),
+            dockerignore: true,
+            dockerfile: None,
+        },
+        &ListLimits::default(),
+        &Baseline::default(),
+    )
+    .unwrap();
+    assert_eq!(built.findings.len(), 1, "{built:?}");
+    assert_eq!(file_of(&built.findings[0]), "secret.env");
+}
+
+#[test]
+fn the_commit_scan_log_options_turn_off_what_the_repository_configures() {
+    assert_eq!(
+        super::gitleaks::commit_log_opts("abc1234..HEAD"),
+        "--log-opts=--text --no-textconv --no-ext-diff --end-of-options abc1234..HEAD"
+    );
 }

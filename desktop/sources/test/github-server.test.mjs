@@ -4,10 +4,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { proof } from "../lib/identity.mjs";
 
@@ -26,12 +26,13 @@ function freePort() {
   });
 }
 
-async function start(env = {}) {
+async function start(env = {}, cwd = undefined) {
   const port = await freePort();
   const addr = `127.0.0.1:${port}`;
   const child = spawn(process.execPath, [script], {
     env: { ...process.env, CHAPPA_SOURCE_ADDR: addr, CHAPPA_SOURCE_TOKEN: TOKEN, GH_BIN: stub, ...env },
     stdio: ["ignore", "ignore", "pipe"],
+    cwd,
   });
   let log = "";
   await new Promise((ok, no) => {
@@ -49,8 +50,8 @@ async function start(env = {}) {
   return { addr, call, stop: () => child.kill(), log: () => log };
 }
 
-async function withSource(env, fn) {
-  const src = await start(env);
+async function withSource(env, fn, cwd = undefined) {
+  const src = await start(env, cwd);
   try { return await fn(src); } finally { src.stop(); }
 }
 
@@ -148,13 +149,47 @@ test("gh not logged in gives an empty list and one clear error", () => withSourc
   assert.match(body.freshness.errors[0].message, /not logged in; run gh auth login/);
 }));
 
-test("gh missing gives an empty list and one clear error", () => withSource({ GH_BIN: "gh-that-is-not-installed" }, async (src) => {
+test("gh missing gives an empty list and one clear error", () => withSource({ GH_BIN: join(tmpdir(), "gh-that-is-not-installed") }, async (src) => {
   const { status, body } = await src.call("/api/prs");
   assert.equal(status, 200);
   assert.deepEqual(body.items, []);
   assert.equal(body.freshness.errors.length, 1);
   assert.match(body.freshness.errors[0].message, /gh CLI not found/);
 }));
+
+test("a relative GH_BIN is refused, not looked up", () => withSource({ GH_BIN: "gh" }, async (src) => {
+  const { body } = await src.call("/api/prs");
+  assert.deepEqual(body.items, []);
+  assert.match(body.freshness.errors[0].message, /GH_BIN must be an absolute path/);
+}));
+
+test("a gh in the folder the source was started in never runs", async () => {
+  // The folder holds a `gh` (`gh.exe` on Windows) that is really Node, and
+  // a script named `api`: run as `gh api graphql …` it runs that script,
+  // which leaves a marker. PATH names that folder only relatively, the
+  // way a planted program gets found; one absolute entry holds no gh.
+  const dir = mkdtempSync(join(tmpdir(), "gh-cwd-"));
+  const marker = join(dir, "MARKER");
+  try {
+    const fake = join(dir, process.platform === "win32" ? "gh.exe" : "gh");
+    if (process.platform === "win32") copyFileSync(process.execPath, fake);
+    else symlinkSync(process.execPath, fake);
+    writeFileSync(join(dir, "api"), `require("fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`);
+    const empty = join(dir, "empty-bin");
+    mkdirSync(empty);
+    const PATH = ["", ".", "relative-bin", empty].join(delimiter);
+    const body = await withSource({ GH_BIN: undefined, PATH }, async (src) => {
+      const r = await src.call("/api/prs");
+      assert.equal(r.status, 200);
+      return r.body;
+    }, dir);
+    assert.equal(existsSync(marker), false, "the gh in the working folder ran");
+    assert.deepEqual(body.items, []);
+    assert.match(body.freshness.errors[0].message, /gh CLI not found on PATH/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("GitHub is asked at most once per refresh interval, however often the app polls", async () => {
   const dir = mkdtempSync(join(tmpdir(), "gh-stub-"));
