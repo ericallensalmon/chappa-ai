@@ -17,6 +17,8 @@
 // cancel. The confirm focuses its OK button, the prompt focuses (and selects)
 // its input, so the very first keystroke lands where it should.
 
+import { visibleText } from "./visible";
+
 const BACKDROP_CSS =
   "position:fixed;top:0;right:0;bottom:0;left:0;z-index:200;display:flex;align-items:center;" +
   "justify-content:center;padding:24px;box-sizing:border-box;background:rgba(0,0,0,.55);";
@@ -136,7 +138,7 @@ function mount<T>(
   canSubmit: () => boolean = () => true,
   /** Whether a document-level Enter submits (true) or cancels (false). */
   enterSubmits: () => boolean = () => true,
-): void {
+): (value: T) => void {
   const previous = document.activeElement as HTMLElement | null;
   let done = false;
 
@@ -149,6 +151,11 @@ function mount<T>(
     resolve(value);
   };
 
+  const enterActivates = (): boolean => {
+    const el = document.activeElement;
+    return el instanceof HTMLElement && el.dataset.enterClicks === "true" && shell.box.contains(el);
+  };
+
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -158,6 +165,12 @@ function mount<T>(
       // The command editor's glob list is a textarea — Enter there
       // is a newline, not a submit (the OK button still submits).
       return;
+    } else if (e.key === "Enter" && enterActivates()) {
+      // A control inside the dialog that Enter works like a click on (the
+      // trust list's fold toggles): it acts, the dialog stays open.
+      e.preventDefault();
+      e.stopPropagation();
+      (document.activeElement as HTMLElement).click();
     } else if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
@@ -179,6 +192,7 @@ function mount<T>(
   // pane's own capture-phase Escape handler closes the view under the dialog.
   document.addEventListener("keydown", onKeydown, true);
   container.appendChild(shell.wrap);
+  return settle;
 }
 
 /**
@@ -206,6 +220,193 @@ export function confirmDialog(
     );
     if (opts.safeDefault) shell.cancel.focus();
     else shell.ok.focus();
+  });
+}
+
+// --- approval dialogs ------------------------------------------------
+
+/** How many characters one line of a trust entry shows before the rest
+ *  folds behind a "…(N more characters)" toggle. */
+export const TRUST_LINE_CAP = 300;
+
+// The approval box: a column whose list is the only part that scrolls, so
+// the question and the buttons stay in view however long the list is.
+const APPROVAL_BOX_CSS =
+  "min-width:320px;max-width:640px;width:100%;max-height:80vh;display:flex;flex-direction:column;" +
+  "box-sizing:border-box;background:#1b1d21;border:1px solid #2a2c31;border-radius:8px;" +
+  "box-shadow:0 8px 32px rgba(0,0,0,.6);padding:18px 20px 14px;color:#d6d8dc;" +
+  "font:13px system-ui,sans-serif;";
+const APPROVAL_LIST_CSS =
+  "flex:1 1 auto;min-height:0;overflow-y:auto;margin:0 0 10px;border:1px solid #2a2c31;" +
+  "border-radius:4px;background:#0d0e10;outline:none;";
+const APPROVAL_ENTRY_CSS =
+  "padding:6px 8px;border-bottom:1px solid #22252a;white-space:pre-wrap;word-break:break-all;" +
+  "font:12px ui-monospace,monospace;line-height:1.5;color:#d6d8dc;";
+const APPROVAL_COUNT_CSS = "margin:0 0 6px;font:11px ui-monospace,monospace;color:#8b949e;";
+const APPROVAL_HINT_CSS = "margin:0 0 10px;font:11px system-ui,sans-serif;color:#8b949e;";
+const MORE_BTN_CSS =
+  "border:none;background:none;padding:0;margin:0 0 0 2px;color:#5ea6ff;cursor:pointer;" +
+  "font:12px ui-monospace,monospace;";
+
+export interface TrustDialogOptions {
+  /** Label on the affirmative button. Defaults to "Run". */
+  okLabel?: string;
+  /** Label on the negative button. Defaults to "Cancel". */
+  cancelLabel?: string;
+  /** Characters a line shows before it folds. Defaults to {@link TRUST_LINE_CAP}. */
+  lineCap?: number;
+  /** Where the overlay attaches. Defaults to document.body. */
+  container?: HTMLElement;
+}
+
+/** One line of an entry: shown up to `cap` characters, the rest behind a
+ *  toggle that says how much is hidden. Nothing is ever dropped silently. */
+function approvalLine(line: string, cap: number, onExpand: () => void): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "chappa-trust-line";
+  const chars = [...visibleText(line)];
+  if (chars.length <= cap) {
+    row.textContent = chars.join("");
+    return row;
+  }
+  const head = document.createElement("span");
+  head.textContent = chars.slice(0, cap).join("");
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "chappa-trust-more";
+  more.style.cssText = MORE_BTN_CSS;
+  more.textContent = `…(${chars.length - cap} more characters)`;
+  // Enter unfolds, like Space or a click, instead of answering the dialog.
+  more.dataset.enterClicks = "true";
+  more.addEventListener("click", () => {
+    head.textContent = chars.join("");
+    // Focus stays in the list rather than falling to the page.
+    const list = row.closest<HTMLElement>(".chappa-trust-list");
+    more.remove();
+    list?.focus();
+    onExpand();
+  });
+  row.append(head, more);
+  return row;
+}
+
+/**
+ * The trust prompt: a question, then every entry the trust covers, one
+ * element each, under a count. Resolves true only on an explicit Run.
+ *
+ * It is built so the list cannot hide anything from the person approving
+ * it: Cancel has focus and a stray Enter cancels (the prompt opens on its
+ * own, possibly mid-typing); control characters and line breaks inside an
+ * entry's lines show as glyphs, so a value cannot pad the next entry out of
+ * view; an over-long line shows how many characters it folds and unfolds on
+ * a click; the buttons sit outside the scrolling list; and Run stays
+ * disabled until the list has been scrolled to its end (at once when it
+ * fits).
+ */
+export function trustDialog(
+  message: string,
+  entries: string[],
+  opts: TrustDialogOptions = {},
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const shell = buildShell(message, opts.okLabel ?? "Run");
+    shell.box.style.cssText = APPROVAL_BOX_CSS;
+    shell.box.classList.add("chappa-trust-dialog");
+    if (opts.cancelLabel) shell.cancel.textContent = opts.cancelLabel;
+    const cap = opts.lineCap ?? TRUST_LINE_CAP;
+
+    const count = document.createElement("div");
+    count.className = "chappa-trust-count";
+    count.style.cssText = APPROVAL_COUNT_CSS;
+    count.textContent = `${entries.length} ${entries.length === 1 ? "item" : "items"} to review`;
+    const list = document.createElement("div");
+    list.className = "chappa-trust-list";
+    list.style.cssText = APPROVAL_LIST_CSS;
+    // Focusable, so the list scrolls from the keyboard too.
+    list.tabIndex = 0;
+    const hint = document.createElement("div");
+    hint.className = "chappa-trust-hint";
+    hint.style.cssText = APPROVAL_HINT_CSS;
+    hint.textContent = "Scroll to the end of the list to enable Run.";
+
+    let seenEnd = false;
+    const check = (): void => {
+      if (!seenEnd && list.scrollTop + list.clientHeight >= list.scrollHeight - 2) seenEnd = true;
+      shell.ok.disabled = !seenEnd;
+      hint.style.display = seenEnd ? "none" : "";
+    };
+    for (const entry of entries) {
+      const el = document.createElement("div");
+      el.className = "chappa-trust-entry";
+      el.style.cssText = APPROVAL_ENTRY_CSS;
+      for (const line of entry.split("\n")) el.appendChild(approvalLine(line, cap, check));
+      list.appendChild(el);
+    }
+    list.addEventListener("scroll", check);
+    shell.box.insertBefore(count, shell.buttons);
+    shell.box.insertBefore(list, shell.buttons);
+    shell.box.insertBefore(hint, shell.buttons);
+    shell.ok.disabled = true;
+
+    mount<boolean>(
+      shell,
+      opts.container ?? document.body,
+      resolve,
+      () => true,
+      false,
+      () => !shell.ok.disabled,
+      () => document.activeElement === shell.ok,
+    );
+    shell.cancel.focus();
+    // Measured once the box is laid out in its container.
+    queueMicrotask(check);
+  });
+}
+
+/** One answer of a {@link choiceDialog}. */
+export interface DialogChoice<T> {
+  label: string;
+  value: T;
+}
+
+/**
+ * Modal with one negative answer and several affirmative ones, for a prompt
+ * the user did not ask for: the negative button has focus, and Enter, Escape
+ * and a backdrop press all answer it unless an affirmative button itself is
+ * focused. Resolves the chosen value.
+ */
+export function choiceDialog<T>(
+  message: string,
+  cancel: DialogChoice<T>,
+  choices: DialogChoice<T>[],
+  opts: { container?: HTMLElement } = {},
+): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const last = choices[choices.length - 1];
+    const shell = buildShell(message, last.label);
+    shell.cancel.textContent = cancel.label;
+    const extra = choices.slice(0, -1).map((c) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chappa-dialog-choice";
+      b.textContent = c.label;
+      b.style.cssText = OK_BTN_CSS;
+      shell.buttons.insertBefore(b, shell.ok);
+      return { button: b, value: c.value };
+    });
+    const all = [...extra, { button: shell.ok, value: last.value }];
+    const focused = (): T | undefined => all.find((c) => c.button === document.activeElement)?.value;
+    const settle = mount<T>(
+      shell,
+      opts.container ?? document.body,
+      resolve,
+      () => focused() ?? last.value,
+      cancel.value,
+      () => true,
+      () => focused() !== undefined,
+    );
+    for (const c of extra) c.button.addEventListener("click", () => settle(c.value));
+    shell.cancel.focus();
   });
 }
 

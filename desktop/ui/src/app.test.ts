@@ -6015,7 +6015,10 @@ describe("App subagent nesting", () => {
 // --- OSC 52 clipboard writes ------------------------------------------
 
 describe("App OSC 52 clipboard writes — the event path", () => {
-  type ClipDriver = { applyClipboard: (p: ipc.TerminalEventDto) => void };
+  type ClipDriver = {
+    applyClipboard: (p: ipc.TerminalEventDto) => void;
+    applyTitle: (p: ipc.TerminalEventDto) => void;
+  };
   const clipEvent = (id: number, text: string): ipc.TerminalEventDto => ({
     event: "term://clipboard",
     term_id: id,
@@ -6023,7 +6026,7 @@ describe("App OSC 52 clipboard writes — the event path", () => {
     text,
   });
 
-  async function mountWith(mode: "off" | "ask" | "allow", answer = true) {
+  async function mountWith(mode: "off" | "ask" | "allow", answer: "deny" | "once" | "always" = "always") {
     const { api } = stubApi();
     const root = document.createElement("div");
     const prompts: string[] = [];
@@ -6061,7 +6064,7 @@ describe("App OSC 52 clipboard writes — the event path", () => {
   });
 
   it("ask: prompts once for the terminal, then applies without asking and notices each write", async () => {
-    const { app, root, prompts, written, d } = await mountWith("ask", true);
+    const { app, root, prompts, written, d } = await mountWith("ask", "always");
     d.applyClipboard(clipEvent(1, "one"));
     await FLUSH();
     d.applyClipboard(clipEvent(1, "two"));
@@ -6073,7 +6076,7 @@ describe("App OSC 52 clipboard writes — the event path", () => {
   });
 
   it("ask: a closed terminal's answer is forgotten", async () => {
-    const { app, prompts, d } = await mountWith("ask", true);
+    const { app, prompts, d } = await mountWith("ask", "always");
     d.applyClipboard(clipEvent(1, "one"));
     await FLUSH();
     await app.closePanel(1);
@@ -6092,6 +6095,16 @@ describe("App OSC 52 clipboard writes — the event path", () => {
     await FLUSH();
     expect(prompts).toEqual([]);
     expect(written).toEqual(["hi"]);
+    expect(toasts(root)).toEqual(["shell set the clipboard"]);
+    panelDispose(app);
+  });
+
+  it("ask: names the terminal by its row's name, never the title its program set", async () => {
+    const { app, root, prompts, d } = await mountWith("ask", "always");
+    d.applyTitle({ event: "term://title", term_id: 1, seq: 0, title: "your editor (trusted)" });
+    d.applyClipboard(clipEvent(1, "one"));
+    await FLUSH();
+    expect(prompts).toEqual(["shell"]);
     expect(toasts(root)).toEqual(["shell set the clipboard"]);
     panelDispose(app);
   });

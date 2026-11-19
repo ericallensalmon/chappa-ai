@@ -8,11 +8,13 @@
 // `clipboardWrites` setting:
 //
 //   off    drop silently (debug log)
-//   ask    the first store from a terminal asks; the answer (allow/deny) is
-//          remembered for that terminal until it closes. One prompt per
-//          terminal at a time — stores arriving while it is open are DROPPED,
-//          never queued: replaying them later would apply text the user never
-//          saw.
+//   ask    the first store from a terminal asks. "Allow once" applies that
+//          store only; "Allow" and "Deny" are remembered for that terminal
+//          until it closes — except that a store of more than one line asks
+//          again even from an allowed terminal, because pasting it into a
+//          shell runs every line. One prompt per terminal at a time — stores
+//          arriving while it is open are DROPPED, never queued: replaying
+//          them later would apply text the user never saw.
 //   allow  apply
 //
 // Every mode caps the payload, and every write that actually lands shows a
@@ -22,14 +24,16 @@
 // confirm in front of the user and that knows which rail row a terminal is.
 
 import type { ClipboardWritesMode } from "./ipc";
+import { visibleText } from "./visible";
 
 /** Largest store applied, in decoded UTF-8 bytes. Mirrors the Rust pump's
  *  cap (`OSC52_MAX_BYTES`), which drops anything larger before it reaches the
  *  event bus; this is the same rule for any path that bypasses it. */
 export const CLIPBOARD_MAX_BYTES = 100 * 1024;
 
-/** How much of the text the confirm shows. */
-export const PREVIEW_CHARS = 80;
+/** How much of the text's start and end the confirm shows. */
+export const PREVIEW_HEAD = 48;
+export const PREVIEW_TAIL = 32;
 
 /** UTF-8 byte length without allocating when the answer is obvious. */
 export function utf8Length(text: string): number {
@@ -38,43 +42,35 @@ export function utf8Length(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-/** One code point made visible: C0/DEL as their Control Pictures glyph, C1
- *  and the bidi/zero-width formatting characters as `\u{…}` — those can make
- *  a preview read differently from what would be pasted. */
-function visible(cp: number): string {
-  if (cp < 0x20) return String.fromCodePoint(0x2400 + cp);
-  if (cp === 0x7f) return "␡";
-  if (
-    (cp >= 0x80 && cp <= 0x9f) ||
-    (cp >= 0x200b && cp <= 0x200f) ||
-    (cp >= 0x202a && cp <= 0x202e) ||
-    (cp >= 0x2066 && cp <= 0x2069) ||
-    cp === 0xfeff
-  ) {
-    return `\\u{${cp.toString(16)}}`;
-  }
-  return String.fromCodePoint(cp);
+/** The confirm's preview: the whole text when it is short, else its first
+ *  `head` and last `tail` characters around a count of what is not shown —
+ *  the end of a store is where a payload hides behind harmless-looking
+ *  text. Whitespace and control characters are made visible (a space as
+ *  `␣`, a line break as `␊`; see visible.ts), so neither can pass for
+ *  something else. */
+export function previewText(text: string, head = PREVIEW_HEAD, tail = PREVIEW_TAIL): string {
+  const chars = [...text];
+  const show = (part: string[]): string => visibleText(part.join(""), { spaces: true });
+  if (chars.length <= head + tail) return show(chars);
+  const hidden = chars.length - head - tail;
+  return `${show(chars.slice(0, head))} …(${hidden} more characters)… ${show(chars.slice(-tail))}`;
 }
 
-/** The confirm's preview: the first `max` characters with control characters
- *  made visible, and an ellipsis when the text runs on. */
-export function previewText(text: string, max = PREVIEW_CHARS): string {
-  let out = "";
-  let n = 0;
-  for (const ch of text) {
-    if (n === max) return `${out}…`;
-    out += visible(ch.codePointAt(0)!);
-    n++;
-  }
-  return out;
+/** Whether `text` is more than one line once pasted. */
+export function isMultiline(text: string): boolean {
+  return /[\r\n\u0085\u2028\u2029]/.test(text);
 }
+
+/** The answer to one clipboard confirm. */
+export type ClipboardAnswer = "deny" | "once" | "always";
 
 export interface ClipboardGateDeps {
   /** The live `clipboardWrites` setting. */
   mode(): ClipboardWritesMode;
-  /** Ask the user. `label` names the terminal, `preview` is already
-   *  sanitized, `chars` is the full length. Resolves true to allow. */
-  confirm(label: string, preview: string, chars: number): Promise<boolean>;
+  /** Ask the user. `label` names the terminal by its row's own name,
+   *  `preview` is already sanitized, `chars` is the full length, and
+   *  `multiline` says the text has more than one line. */
+  confirm(label: string, preview: string, chars: number, multiline: boolean): Promise<ClipboardAnswer>;
   /** Put the text on the OS clipboard. */
   write(text: string): Promise<void>;
   /** The brief non-blocking "<label> set the clipboard" notice. */
@@ -98,7 +94,9 @@ export class ClipboardGate {
     this.log = deps.log ?? ((m) => console.debug(m));
   }
 
-  /** Handle one OSC 52 store from terminal `termId`, labelled `label`. */
+  /** Handle one OSC 52 store from terminal `termId`, labelled `label` (the
+   *  row's own name, never a title the program set: the prompt must say
+   *  which terminal is asking in words the program cannot choose). */
   async handle(termId: number, label: string, text: string): Promise<ClipboardOutcome> {
     const bytes = utf8Length(text);
     if (bytes > CLIPBOARD_MAX_BYTES) {
@@ -112,8 +110,9 @@ export class ClipboardGate {
     }
     if (mode === "allow") return this.apply(label, text);
 
+    const multiline = isMultiline(text);
     const decision = this.decisions.get(termId);
-    if (decision === "allowed") return this.apply(label, text);
+    if (decision === "allowed" && !multiline) return this.apply(label, text);
     if (decision === "denied") {
       this.log(`[clipboard] ${label}: write dropped (denied for this terminal)`);
       return "dropped";
@@ -125,18 +124,19 @@ export class ClipboardGate {
 
     const token = {};
     this.prompting.set(termId, token);
-    let allowed = false;
+    let answer: ClipboardAnswer = "deny";
     try {
-      allowed = await this.deps.confirm(label, previewText(text), [...text].length);
+      answer = await this.deps.confirm(label, previewText(text), [...text].length, multiline);
     } catch {
-      allowed = false;
+      answer = "deny";
     }
     const stillOurs = this.prompting.get(termId) === token;
     if (stillOurs) {
       this.prompting.delete(termId);
-      this.decisions.set(termId, allowed ? "allowed" : "denied");
+      if (answer === "always") this.decisions.set(termId, "allowed");
+      else if (answer === "deny") this.decisions.set(termId, "denied");
     }
-    if (!allowed) {
+    if (answer === "deny") {
       this.log(`[clipboard] ${label}: write denied`);
       return "dropped";
     }

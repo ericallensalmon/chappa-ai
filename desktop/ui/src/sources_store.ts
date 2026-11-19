@@ -8,6 +8,7 @@
 // trust records); this store only mirrors the listing and relays answers.
 
 import * as ipc from "./ipc";
+import { visibleText } from "./visible";
 
 export type Source = ipc.SourceDto;
 export type SourceTrust = ipc.SourceTrustDto;
@@ -175,7 +176,9 @@ export function trustMessage(source: Source, trust: SourceTrust): string {
     lines.push("", "It is sent the rows of other sources' items it adds to, each time one changes.");
   }
   lines.push("", `Trust covers exactly this: ${trust.hash.slice(0, 16)}…`, "A change to any of it asks again.");
-  return lines.join("\n");
+  // Every value is the source's own text: a line break or control
+  // character in one shows as a glyph, so it cannot fake a line of its own.
+  return lines.map((l) => visibleText(l)).join("\n");
 }
 
 export class SourcesStore {

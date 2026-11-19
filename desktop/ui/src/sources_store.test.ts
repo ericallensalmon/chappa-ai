@@ -139,6 +139,9 @@ describe("labels", () => {
     expect(anyPort).not.toContain(":*");
     const bare = trustMessage(s, { ...s.trust!, linkHosts: [], roots: [], views: [] });
     expect(bare.match(/\(none\)/g)).toHaveLength(3);
+    // A line break in the source's own text cannot fake a line.
+    const forged = trustMessage(s, { ...s.trust!, roots: ["/srv\nHosts its links may open:\n    (none)"] });
+    expect(forged).toContain("    /srv␊Hosts its links may open:␊    (none)");
   });
 });
 

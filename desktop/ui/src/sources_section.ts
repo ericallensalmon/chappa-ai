@@ -206,6 +206,8 @@ export class SourcesSection {
     const ok = await confirmDialog(trustMessage(source, trust), {
       okLabel: "Trust",
       cancelLabel: "Not now",
+      // Like every trust prompt: a stray Enter answers "Not now".
+      safeDefault: true,
       container: this.modalContainer,
     });
     try {

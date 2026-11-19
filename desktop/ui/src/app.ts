@@ -31,16 +31,18 @@ import type { ProjectsSettingsApi } from "./projects_section";
 import { EditPane, type ProjectEditInfo } from "./edit_pane";
 import {
   addProjectDialog,
+  choiceDialog,
   commandDialog,
   confirmDialog,
   parentDirectory,
   promptDialog,
+  trustDialog,
   type AddProjectAnswer,
   type CommandForm,
 } from "./dialog";
 import { settingsStore, type Settings, type SettingsStore } from "./settings";
 import { JobPaneCloser, cancelQuestion, jobLabel, quitQuestion, runningJobInPane } from "./job_panes";
-import { ClipboardGate } from "./clipboard_gate";
+import { ClipboardGate, type ClipboardAnswer } from "./clipboard_gate";
 import {
   decide,
   LEVELS,
@@ -786,8 +788,8 @@ export interface AppOptions {
   /** Trust-gate confirm: shown when an opened project's chappa.yml
    *  content-hash isn't recorded as trusted. Resolve true = Run (record the
    *  hash + start the auto-start commands), false = Skip (decline; the gate
-   *  re-arms on the next open). Defaults to an in-app modal listing the
-   *  auto-start commands. */
+   *  re-arms on the next open). Defaults to the in-app trust dialog listing
+   *  every command the file defines and every stack entry. */
   confirmProjectTrust?: (commands: string[]) => Promise<boolean>;
   /** Close-project confirm: shown when the explicit "Close project"
    *  would stop RUNNING processes, listing them. Resolve true = stop + close.
@@ -799,10 +801,17 @@ export interface AppOptions {
    *  Resolve true = remove. Defaults to an in-app modal. */
   confirmProjectRemove?: (name: string, running: string[]) => Promise<boolean>;
   /** The OSC 52 confirm (`clipboardWrites: ask`): a terminal's output asked
-   *  to set the clipboard. `label` names the terminal, `preview` is the
-   *  sanitized start of the text, `chars` its full length. Resolve true =
-   *  allow (remembered for that terminal). Defaults to an in-app modal. */
-  confirmClipboardWrite?: (label: string, preview: string, chars: number) => Promise<boolean>;
+   *  to set the clipboard. `label` names the terminal by its row's name,
+   *  `preview` is the sanitized start and end of the text, `chars` its full
+   *  length, `multiline` whether it has more than one line. Resolves
+   *  "always" (remembered for that terminal), "once" or "deny". Defaults to
+   *  an in-app modal. */
+  confirmClipboardWrite?: (
+    label: string,
+    preview: string,
+    chars: number,
+    multiline: boolean,
+  ) => Promise<ClipboardAnswer>;
   /** Applies an allowed OSC 52 store. Defaults to the Rust clipboard
    *  command (works without focus or a user gesture). */
   writeClipboard?: (text: string) => Promise<void>;
@@ -2314,8 +2323,10 @@ export class App {
     this.confirmTrust =
       opts.confirmProjectTrust ??
       ((commands) =>
-        confirmDialog(
-          `Run these auto-start commands for this project?\n\n${commands.join("\n")}`,
+        trustDialog(
+          "Trust this project's commands? Trusting covers everything listed below, " +
+            "exactly as shown; commands marked auto-start then run without asking.",
+          commands,
           { okLabel: "Run" },
         ));
     this.confirmProjectClose =
@@ -2339,14 +2350,22 @@ export class App {
       mode: () => this.settings.get().clipboardWrites,
       confirm:
         opts.confirmClipboardWrite ??
-        ((label, preview, chars) =>
-          confirmDialog(
-            `"${label}" wants to set the clipboard to:\n\n${preview}\n\n` +
-              `(${chars} characters.) Allow this terminal to set the clipboard? ` +
-              `The answer holds until it closes.`,
-            // Deny holds focus and a stray Enter denies: this prompt can open
-            // while the user is typing into the terminal that caused it.
-            { okLabel: "Allow", cancelLabel: "Deny", safeDefault: true },
+        ((label, preview, chars, multiline) =>
+          // Deny holds focus and a stray Enter denies: this prompt can open
+          // while the user is typing into the terminal that caused it.
+          choiceDialog<ClipboardAnswer>(
+            `The terminal "${label}" wants to set the clipboard to:\n\n${preview}\n\n` +
+              `(${chars} characters; ␣ is a space, ␊ a line break.)` +
+              (multiline
+                ? " It is more than one line: pasted into a shell, every line runs."
+                : "") +
+              `\n\nAllow and Deny hold for this terminal until it closes; ` +
+              `text of more than one line always asks again.`,
+            { label: "Deny", value: "deny" },
+            [
+              { label: "Allow once", value: "once" },
+              { label: "Allow", value: "always" },
+            ],
           )),
       write: opts.writeClipboard ?? ((text) => ipc.writeClipboardText(text)),
       notice: (message) => this.showToast(message),
@@ -3591,7 +3610,9 @@ export class App {
   private applyClipboard(p: ipc.TerminalEventDto): void {
     const entry = this.entries.get(p.term_id);
     if (!entry || typeof p.text !== "string") return;
-    void this.clipboardGate.handle(p.term_id, this.entryLabel(entry), p.text);
+    // The row's own name, not its title: a program sets its title, and the
+    // prompt must name the asking terminal in words the program cannot pick.
+    void this.clipboardGate.handle(p.term_id, entry.name, p.text);
   }
 
   /**
@@ -5132,15 +5153,14 @@ export class App {
   /** An opened project's launch: the trust gate, then its auto-start
    *  commands. */
   private async runLaunchGate(id: number, result: ipc.OpenProjectResult): Promise<void> {
-    // Trust gate: an untrusted chappa.yml
-    // hash arms one Run/Skip confirm listing the auto-start commands; Run
-    // records the hash and proceeds. A trusted hash skips straight to
-    // auto-start.
+    // Trust gate: an untrusted chappa.yml hash arms one Run/Cancel trust
+    // dialog listing every command the file defines; Run records the hash
+    // and proceeds. A trusted hash skips straight to auto-start.
     if (result.trustPending && result.trustCommands.length === 0) {
-      // Nothing to run means nothing to confirm — a dialog asking to "run
-      // these auto-start commands" over an EMPTY list is noise (seen when
-      // adding a project with a bare chappa.yml). Record the hash as trusted so
-      // the gate doesn't re-arm on every open; there are no commands to start.
+      // Rust sends an empty list only when nothing in the file would run
+      // without a click (no auto-start command, no stack): a dialog over it
+      // is noise (a bare chappa.yml). Record the hash as trusted so the gate
+      // doesn't re-arm on every open; there are no commands to start.
       try {
         await this.api.confirmProjectTrust(id, true, result.trustHash);
       } catch {

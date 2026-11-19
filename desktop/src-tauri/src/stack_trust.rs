@@ -6,8 +6,9 @@
 //! plan scripts on its own. So for every `source:` command that starts the
 //! stack runner (`chappa-stack … serve`), the project's trust hash also
 //! covers [`stack_core::trust::definition_trust_hash`] of the folder it
-//! serves, the trust prompt lists what that definition can run (credential-
-//! shaped values masked), and the runner is started with
+//! serves, the trust prompt lists what that definition can run (exactly as
+//! written, credential-shaped values flagged beside it), and the runner is
+//! started with
 //! `--trusted-definition <hash>` (or `none` while nothing is trusted). The
 //! runner runs nothing while its definition hashes differently; when the
 //! person trusts the new content, the app starts it again with the new hash.
@@ -165,30 +166,34 @@ pub fn trust_hash_on_disk(root: &Path) -> Option<String> {
 }
 
 /// The trust prompt's entries for the stack definitions: one header per
-/// runner, then what each component can run (values that look like
-/// credentials masked).
+/// runner, then what each component can run, exactly as written (see
+/// [`stack_core::trust::visible`]: nothing masked, line breaks and control
+/// characters inside a value shown as glyphs).
 pub fn prompt_lines(stacks: &[StackSource]) -> Vec<String> {
+    use stack_core::trust::visible;
     let mut out = Vec::new();
     for s in stacks {
         match &s.definition {
             Ok(Some(t)) => {
                 out.push(format!(
                     "`{}` runs the stack definition in {} (every command below runs without asking again)",
-                    s.name,
-                    t.file.display()
+                    visible(&s.name),
+                    visible(&t.file.display().to_string())
                 ));
                 out.extend(t.commands.iter().cloned());
             }
             Ok(None) => out.push(format!(
                 "`{}` serves {}, which defines no stack",
-                s.name,
-                s.folder.display()
+                visible(&s.name),
+                visible(&s.folder.display().to_string())
             )),
+            // Nothing in a definition that does not load runs, so its
+            // error text may keep a credential masked.
             Err(e) => out.push(format!(
                 "`{}` serves {}, whose stack definition does not load ({}); nothing in it will run",
-                s.name,
-                s.folder.display(),
-                stack_core::credentials::mask_text(e)
+                visible(&s.name),
+                visible(&s.folder.display().to_string()),
+                visible(&stack_core::credentials::mask_text(e))
             )),
         }
     }
@@ -413,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_lists_the_stack_commands_masked_and_the_launch_carries_the_hash() {
+    fn the_prompt_lists_the_stack_commands_exactly_and_the_launch_carries_the_hash() {
         let pw = ["hu", "nt", "er2"].concat();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -428,8 +433,12 @@ mod tests {
             lines.contains("status: [node, scripts/status.js]"),
             "{lines}"
         );
-        assert!(lines.contains("DB_PASSWORD=•••• (set inline)"), "{lines}");
-        assert!(!lines.contains(&pw), "{lines}");
+        // Trusting covers the exact text, so the prompt shows it, flagged.
+        assert!(
+            lines.contains(&format!("DB_PASSWORD={pw}  ⚠ looks like")),
+            "{lines}"
+        );
+        assert!(!lines.contains(stack_core::credentials::MASK), "{lines}");
         let hash = stacks[0].runnable_hash().unwrap();
         let launched = with_trusted_definition(&yml.processes["stack"], Some(&hash));
         match &launched.command {

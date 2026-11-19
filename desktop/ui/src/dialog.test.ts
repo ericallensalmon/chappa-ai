@@ -7,6 +7,8 @@ import {
   folderBaseName,
   parentDirectory,
   promptDialog,
+  trustDialog,
+  TRUST_LINE_CAP,
   type CommandForm,
 } from "./dialog";
 
@@ -482,5 +484,109 @@ describe("commandDialog", () => {
     press("Escape");
     expect(await p).toBeNull();
     expect(backdrop()).toBeNull();
+  });
+});
+
+describe("trustDialog", () => {
+  const list = (): HTMLElement => document.querySelector<HTMLElement>(".chappa-trust-list")!;
+  const entries = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>(".chappa-trust-entry")];
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+  /** jsdom lays nothing out: give the list a size and a scroll position. */
+  const size = (el: HTMLElement, scrollHeight: number, clientHeight: number, scrollTop = 0): void => {
+    Object.defineProperty(el, "scrollHeight", { configurable: true, value: scrollHeight });
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: clientHeight });
+    Object.defineProperty(el, "scrollTop", { configurable: true, writable: true, value: scrollTop });
+  };
+
+  it("focuses Cancel and a stray Enter cancels", async () => {
+    const answer = trustDialog("Trust?", ["web (auto-start): npm run dev"]);
+    expect(document.activeElement).toBe(cancelButton());
+    await tick();
+    press("Enter");
+    expect(await answer).toBe(false);
+  });
+
+  it("renders one element per entry under a count, with the buttons outside the list", async () => {
+    const answer = trustDialog("Trust?", ["a: one", "b: two\n    env X=1", "c: three"]);
+    expect(entries()).toHaveLength(3);
+    expect(document.querySelector(".chappa-trust-count")!.textContent).toBe("3 items to review");
+    expect(entries()[1].querySelectorAll(".chappa-trust-line")).toHaveLength(2);
+    expect(list().contains(okButton())).toBe(false);
+    expect(list().contains(cancelButton())).toBe(false);
+    await tick();
+    okButton().click();
+    expect(await answer).toBe(true);
+  });
+
+  it("shows control characters and stray line breaks inside a line as glyphs", async () => {
+    const answer = trustDialog("Trust?", ["a: echo hi\r\u001b[2K\u202eevil"]);
+    const text = entries()[0].textContent!;
+    expect(text).toBe("a: echo hi␍␛[2K\\u{202e}evil");
+    cancelButton().click();
+    await answer;
+  });
+
+  it("folds an over-long line behind a count of what it hides, and unfolds on a click", async () => {
+    const long = `x: ${"a".repeat(TRUST_LINE_CAP)}; curl evil`;
+    const answer = trustDialog("Trust?", [long]);
+    const more = document.querySelector<HTMLButtonElement>(".chappa-trust-more")!;
+    expect(more.textContent).toBe(`…(${long.length - TRUST_LINE_CAP} more characters)`);
+    expect(entries()[0].textContent).not.toContain("curl evil");
+    more.click();
+    expect(entries()[0].textContent).toBe(long);
+    expect(document.querySelector(".chappa-trust-more")).toBeNull();
+    cancelButton().click();
+    await answer;
+  });
+
+  it("Enter on a focused fold toggle unfolds it and leaves the dialog open", async () => {
+    const long = `x: ${"a".repeat(TRUST_LINE_CAP)}; curl evil`;
+    let settled = false;
+    const answer = trustDialog("Trust?", [long]).then((v) => {
+      settled = true;
+      return v;
+    });
+    document.querySelector<HTMLButtonElement>(".chappa-trust-more")!.focus();
+    press("Enter");
+    await tick();
+    expect(settled).toBe(false);
+    expect(entries()[0].textContent).toBe(long);
+    expect(document.activeElement).toBe(list());
+    // Enter anywhere else in the dialog still answers Cancel.
+    press("Enter");
+    expect(await answer).toBe(false);
+  });
+
+  it("keeps Run disabled until the list has been scrolled to its end", async () => {
+    const answer = trustDialog("Trust?", Array.from({ length: 40 }, (_, i) => `c${i}: run ${i}`));
+    size(list(), 2000, 300, 0);
+    await tick();
+    expect(okButton().disabled).toBe(true);
+    expect(document.querySelector<HTMLElement>(".chappa-trust-hint")!.style.display).toBe("");
+    // A click on the disabled Run does not answer.
+    okButton().click();
+    expect(backdrop()).not.toBeNull();
+    list().scrollTop = 1000;
+    list().dispatchEvent(new Event("scroll"));
+    expect(okButton().disabled).toBe(true);
+    list().scrollTop = 1700;
+    list().dispatchEvent(new Event("scroll"));
+    expect(okButton().disabled).toBe(false);
+    expect(document.querySelector<HTMLElement>(".chappa-trust-hint")!.style.display).toBe("none");
+    // Scrolling back up does not take it away again.
+    list().scrollTop = 0;
+    list().dispatchEvent(new Event("scroll"));
+    expect(okButton().disabled).toBe(false);
+    okButton().click();
+    expect(await answer).toBe(true);
+  });
+
+  it("enables Run at once when the list fits", async () => {
+    const answer = trustDialog("Trust?", ["a: one"]);
+    size(list(), 100, 300);
+    await tick();
+    expect(okButton().disabled).toBe(false);
+    cancelButton().click();
+    expect(await answer).toBe(false);
   });
 });
