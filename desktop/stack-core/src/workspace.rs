@@ -54,13 +54,36 @@ const RESERVED: [&str; 22] = [
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
+/// Names the runner itself keeps directly under the work folder, beside
+/// the item folders: an item folder of the same name (any case: Windows
+/// and macOS compare names that way) would mix an item's files with the
+/// runner's own jobs, instances, reviews or archive, or have its scratch
+/// sweep delete the item.
+const RUNNER_NAMES: [&str; 6] = [
+    crate::intent::INSTANCES_DIR,
+    "jobs",
+    "reviews",
+    ARCHIVE_DIR,
+    crate::safety::secrets::baseline::BASELINE_FILE,
+    crate::safety::secrets::baseline::NOTES_FILE,
+];
+
+/// Whether `name` (an item folder name) is one the runner keeps for itself
+/// under the work folder ([`RUNNER_NAMES`], or the secret-scan scratch
+/// prefix).
+fn is_runner_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    RUNNER_NAMES.iter().any(|r| lower == *r) || lower.starts_with(crate::workdir::SCRATCH_PREFIX)
+}
+
 /// The folder name for a tracker key: every run of characters outside
 /// `[A-Za-z0-9._-]` becomes one `-`, leading and trailing `.` and `-` go
 /// (so `..` and `../x` cannot climb out, and Windows cannot drop a trailing
 /// dot), the result is cut to 40 characters, and a device name (`CON`,
-/// `nul.txt`) gets a leading `_`. A key with nothing usable left is
-/// refused rather than given a made-up name, since two such keys would
-/// share one folder.
+/// `nul.txt`) or a name the runner keeps for its own folders (`jobs`,
+/// `instances`, `reviews`, `_archive`, the scan scratch) gets a leading
+/// `_`. A key with nothing usable left is refused rather than given a
+/// made-up name, since two such keys would share one folder.
 pub fn item_dir_name(key: &str) -> Result<String, String> {
     let mut out = String::new();
     let mut pending = false;
@@ -79,7 +102,7 @@ pub fn item_dir_name(key: &str) -> Result<String, String> {
     let mut name = trimmed(&out);
     let reserved = {
         let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-        RESERVED.contains(&stem.as_str())
+        RESERVED.contains(&stem.as_str()) || is_runner_name(&name)
     };
     if reserved {
         name.insert(0, '_');
@@ -603,6 +626,14 @@ mod tests {
             ("日本-7", "7"),
             ("trailing.", "trailing"),
             (" spaced key ", "spaced-key"),
+            // The runner's own folders under the work folder, any case.
+            ("jobs", "_jobs"),
+            ("Instances", "_Instances"),
+            ("REVIEWS", "_REVIEWS"),
+            ("_archive", "__archive"),
+            ("secret-scan-1-0-0", "_secret-scan-1-0-0"),
+            ("secrets-baseline.json", "_secrets-baseline.json"),
+            ("jobs-1", "jobs-1"),
         ];
         for (key, want) in ok {
             assert_eq!(item_dir_name(key).as_deref(), Ok(want), "key {key:?}");

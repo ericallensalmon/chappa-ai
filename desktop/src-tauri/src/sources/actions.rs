@@ -503,7 +503,11 @@ pub fn parse_action(value: &Value) -> Result<SourceAction, String> {
             id,
             label,
             cwd: text(obj, "cwd")?,
-            prompt: text(obj, "prompt")?,
+            prompt: {
+                let prompt = text(obj, "prompt")?;
+                reject_controls("`prompt`", &prompt)?;
+                prompt
+            },
             tool: optional_text(obj, "tool")?,
             title: optional_text(obj, "title")?,
             env: env_of(obj)?,
@@ -878,6 +882,66 @@ impl ActionVerdict {
     }
 }
 
+/// Refuse text that carries a C0 or C1 control character other than `\n`.
+///
+/// A prompt is handed to an agent that may receive it as typed input, where
+/// an ESC starts a terminal sequence and a CR submits early; text that is
+/// shown for approval must also be the text that is delivered, so nothing
+/// invisible may ride along.
+pub fn reject_controls(what: &str, text: &str) -> Result<(), String> {
+    match text.chars().find(|c| c.is_control() && *c != '\n') {
+        Some(c) => Err(format!(
+            "{what} contains the control character U+{:04X}; only line breaks are allowed",
+            c as u32
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The digest of everything an `agent` action launches with: the prompt,
+/// the RESOLVED folder, the resolved tool and the env. The approval dialog
+/// is keyed on it, so the same action id carrying a different prompt (a
+/// source that reuses ids across rows, a title edited upstream, a payload
+/// replaced while the dialog was open) asks again, and the webview hands
+/// back the digest of what it displayed so the run can refuse a mismatch.
+pub fn agent_launch_hash(
+    prompt: &str,
+    cwd: &std::path::Path,
+    tool: &AgentTool,
+    env: &BTreeMap<String, String>,
+) -> String {
+    let canonical = serde_json::json!({
+        "prompt": prompt,
+        "cwd": cwd.display().to_string(),
+        "tool": {"id": tool.id, "name": tool.name, "program": tool.program},
+        "env": env,
+    });
+    project_model::hash::content_hash(canonical.to_string().as_bytes())
+}
+
+/// [`agent_launch_hash`] of an `agent` action as it would run now: `None`
+/// for any other kind, or when its tool or folder does not resolve (the
+/// verdict refuses those anyway).
+pub fn agent_action_hash(
+    action: &SourceAction,
+    tools: &[AgentTool],
+    roots: &[Root],
+) -> Option<String> {
+    let SourceAction::Agent {
+        cwd,
+        prompt,
+        tool,
+        env,
+        ..
+    } = action
+    else {
+        return None;
+    };
+    let tool = resolve_tool(tools, tool.as_deref()).ok()?;
+    let cwd = check_cwd(roots, cwd).into_result().ok()?;
+    Some(agent_launch_hash(prompt, &cwd, tool, env))
+}
+
 /// The agent tool an `agent` action names: by name among the configured
 /// tools, or the first enabled one when it names none. Disabled tools and
 /// unknown names are errors with the fix in the text.
@@ -987,6 +1051,63 @@ mod tests {
         t.program = "x".into();
         t.enabled = enabled;
         t
+    }
+
+    /// A prompt may hold line breaks but no other C0 or C1 control: an
+    /// action whose prompt carries one does not parse at all.
+    #[test]
+    fn a_prompt_with_a_control_character_does_not_parse() {
+        let agent = |prompt: &str| {
+            parse_action(
+                &json!({"kind": "agent", "id": "a", "label": "A", "cwd": "/x", "prompt": prompt}),
+            )
+        };
+        assert!(agent("line one\nline two").is_ok());
+        for bad in [
+            "a\u{1b}[201~b",
+            "go\rrm -rf",
+            "tab\there",
+            "c1\u{9b}x",
+            "\u{7f}",
+        ] {
+            let err = agent(bad).unwrap_err();
+            assert!(err.contains("control character"), "{bad:?}: {err}");
+        }
+    }
+
+    /// The launch digest moves with every part of what would run, and not
+    /// with anything else.
+    #[test]
+    fn the_launch_digest_covers_prompt_folder_tool_and_env() {
+        let t = tool(1, "claude", true);
+        let env = BTreeMap::from([("A".to_owned(), "1".to_owned())]);
+        let base = agent_launch_hash("p", std::path::Path::new("/w"), &t, &env);
+        assert_eq!(
+            base,
+            agent_launch_hash("p", std::path::Path::new("/w"), &t, &env)
+        );
+        assert_ne!(
+            base,
+            agent_launch_hash("q", std::path::Path::new("/w"), &t, &env)
+        );
+        assert_ne!(
+            base,
+            agent_launch_hash("p", std::path::Path::new("/v"), &t, &env)
+        );
+        assert_ne!(
+            base,
+            agent_launch_hash(
+                "p",
+                std::path::Path::new("/w"),
+                &tool(2, "claude", true),
+                &env
+            )
+        );
+        let other_env = BTreeMap::from([("A".to_owned(), "2".to_owned())]);
+        assert_ne!(
+            base,
+            agent_launch_hash("p", std::path::Path::new("/w"), &t, &other_env)
+        );
     }
 
     #[test]

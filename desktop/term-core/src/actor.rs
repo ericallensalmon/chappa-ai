@@ -647,8 +647,9 @@ impl TermHandle {
         rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default()
     }
 
-    /// Current terminal modes (alt screen, kitty flags) — debug surface only.
-    /// Same round-trip shape as [`TermHandle::dump_text`]; `None` when the
+    /// Current terminal modes (alt screen, kitty flags, bracketed paste) —
+    /// the debug surface, and typed deliveries that wrap their text as a
+    /// paste when the program asked for that. Same round-trip shape as [`TermHandle::dump_text`]; `None` when the
     /// actor is gone or slow.
     pub fn modes(&self) -> Option<ModeDump> {
         let (tx, rx) = channel();
@@ -796,6 +797,8 @@ struct TextReply(Sender<Vec<String>>);
 pub struct ModeDump {
     pub alt_screen: bool,
     pub kitty_flags: u32,
+    /// DEC 2004: the program asked for pastes to be bracketed.
+    pub bracketed_paste: bool,
 }
 
 /// One-shot reply channel for `modes`.
@@ -1455,6 +1458,7 @@ impl Actor {
                 let _ = reply.0.send(ModeDump {
                     alt_screen: snapshot.alt_screen,
                     kitty_flags: self.kitty_flags,
+                    bracketed_paste: snapshot.bracketed_paste,
                 });
             }
             Control::Ack(seq) => apply_ack(

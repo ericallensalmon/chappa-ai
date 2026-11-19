@@ -3,7 +3,8 @@
 //! or not its folder is on `PATH` (an app bundle's is not):
 //! `claude mcp add chappa-ai -- "/full/path/to/chappa-ai-mcp"`; `--help`
 //! prints that line with this binary's own path.
-//! Environment: CHAPPA_AI_CONTROL_URL (default: the address in the app's
+//! Environment: CHAPPA_AI_CONTROL_URL (a loopback `http://` address only,
+//! since the token is sent in clear; default: the address in the app's
 //! `control_endpoint` file, or CHAPPA_AI_CONTROL_ENDPOINT_FILE),
 //! CHAPPA_AI_CONTROL_TOKEN or CHAPPA_AI_CONTROL_TOKEN_FILE (default: the
 //! app-config `control_token`). CHAPPA_PROFILE_DIR moves the app-config

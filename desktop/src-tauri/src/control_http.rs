@@ -44,7 +44,7 @@
 //! [`json`], [`read_body`] and [`query_u64`]) — one implementation, two
 //! servers.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,6 +76,10 @@ pub const BIND: &str = "127.0.0.1:8324";
 /// A separate profile's address: loopback, port chosen by the OS. The port
 /// is published only in the profile's endpoint file.
 pub const PROFILE_BIND: &str = "127.0.0.1:0";
+
+/// The port this instance's control surface bound (0 until it did). A
+/// stack source is told it, so its relay never forwards a container to it.
+pub static BOUND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 pub const TOKEN_FILE: &str = "control_token";
 /// `<app-config>/control_endpoint` (written on each successful bind) and the
 /// one tokenless route. Defined in the MCP crate, which owns the client side
@@ -281,7 +285,7 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         path: "/processes/{id}/session",
         fields: &["session_id"],
-        description: "The process names the conversation it is running (the self-targeting half of the announce path: `set_session` over MCP sends the caller's own id here). The id lands on the row's current run under the run-uuid rule — the record head, the ledger row, and a `term://session` broadcast when it changed — and is what `POST /records/{record_id}/resume` continues later. Answers {id, record_id, run_uuid, session, durable}; durable=false for an ephemeral row (stored on the live row only). The other announce path needs no call at all: print `OSC 777;session;<id>` (`printf '\\033]777;session;%s\\007' \"$ID\"`).",
+        description: "The process names the conversation it is running (the self-targeting half of the announce path: `set_session` over MCP sends the caller's own id here). The id lands on the row's current run under the run-uuid rule — the record head, the ledger row, and a `term://session` broadcast when it changed — and is what `POST /records/{record_id}/resume` continues later. The id must be one plain word, `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` (it later becomes a word on the resume command line): anything else is a 400. Answers {id, record_id, run_uuid, session, durable}; durable=false for an ephemeral row (stored on the live row only). The other announce path needs no call at all: print `OSC 777;session;<id>` (`printf '\\033]777;session;%s\\007' \"$ID\"`).",
         handler: records::route_set_session,
     },
     Route {
@@ -295,14 +299,14 @@ pub const ROUTES: &[Route] = &[
         method: "GET",
         path: "/agent_tools",
         fields: &[],
-        description: "Registered agent tools (the shape {id, name, command, tool_type, enabled} plus model, runtime {kind: host | docker_exec, container?, user?, workdir?, tty?, max_busy_in_container?}, container (the tool's container name, or null), program, args, env, max_busy). `command` is DERIVED for display; program/args are the truth.",
+        description: "Registered agent tools (the shape {id, name, command, tool_type, enabled} plus model, runtime {kind: host | docker_exec, container?, user?, workdir?, tty?, max_busy_in_container?}, container (the tool's container name, or null), program, args, env (the variable NAMES only; values are never served), max_busy). `command` is DERIVED for display; program/args are the truth.",
         handler: list_agent_tools,
     },
     Route {
         method: "POST",
         path: "/agents",
         fields: &["agent_tool_id", "project_id?", "name?", "extra_args?", "prompt?", "working_dir?", "env?", "force?", "cols?", "rows?", "parent_process_id?", "close_on_exit?", "ephemeral?"],
-        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < `env` < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID; `env` names must be [A-Z_][A-Z0-9_]*); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `working_dir` starts the agent in a folder other than the project root; it must resolve inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else 400 with the reason. Before any spawn with a working directory the folder is scanned for secrets when Settings ▸ Security has it on (default: on when gitleaks is installed): under the block-agents policy a finding refuses the spawn with `secret-scan-blocked:` + JSON {projectRoot, cwd, findings: [{file, rule, line}], skipped} — never a value, files named from the project's folder — until it is fixed or acknowledged; under warn it launches and notifies. A scan that does not finish (no scanner while the setting forces the scan on, a timeout, a scanner error, the scan's total size limit) refuses under either policy with the same prefix and `incomplete: <why>` instead of findings; only the person can launch past it, from the app's dialog. A folder covered by a stack source's data-safety block (its database may hold real data) or secret-scan block (possible secrets in its worktrees, or their scan did not finish) refuses the spawn with the reason, naming the check, until it is clean or acknowledged in Environment. `prompt`: a tool with a prompt_argv (claude and codex by default) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv), so it can never answer a startup question; otherwise it queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), is HELD while a known startup or permission question is on screen (folder trust, a new MCP server, an external CLAUDE.md, the bypass-permissions warning: delivered=false, reason=`held: waiting on <question>` when the cap passes), then ONE atomic write of text+\\r; prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
+        description: "Spawn an agent from a registered tool. extra_args are appended to the tool's args VERBATIM (an element with spaces stays one argv entry). Env = inherited < tool.env < `env` < identity (CHAPPA_AI_PROCESS_ID/PROJECT_ID/AGENT_TOOL_ID; `env` names must be [A-Z_][A-Z0-9_]*); docker-exec runtimes pass every env entry as -e and run the program under a pid-recording sh wrapper. `working_dir` starts the agent in a folder other than the project root; it must resolve inside the project's directory or one of its git worktrees (every open project's when there is no project_id) or a folder a trusted source may use, else 400 with the reason. Before any spawn with a working directory the folder is scanned for secrets when Settings ▸ Security has it on (default: on when gitleaks is installed): under the block-agents policy a finding refuses the spawn with `secret-scan-blocked:` + JSON {projectRoot, cwd, findings: [{file, rule, line}], skipped} — never a value, files named from the project's folder — until it is fixed or acknowledged; under warn it launches and notifies. A scan that does not finish (no scanner while the setting forces the scan on, a timeout, a scanner error, the scan's total size limit) refuses under either policy with the same prefix and `incomplete: <why>` instead of findings; only the person can launch past it, from the app's dialog. A folder covered by a stack source's data-safety block (its database may hold real data) or secret-scan block (possible secrets in its worktrees, or their scan did not finish) refuses the spawn with the reason, naming the check, until it is clean or acknowledged in Environment. `prompt`: a tool with a prompt_argv (claude and codex by default, as `-- <prompt>`) gets it on the command line, last, and nothing is typed (prompt_receipt.reason=argv), so it can never answer a startup question; a prompt that starts with `-` is refused unless the word before `{prompt}` in the prompt_argv is `--`, since the program would read it as an option; otherwise it queues until the pty is ready (has_output and agent_ready_quiet_ms of silence, default 750 ms — or agent_ready_max_wait_ms after the first byte for a TUI that never goes quiet, reason=ready-by-timeout), is HELD while a known startup or permission question is on screen (folder trust, a new MCP server, an external CLAUDE.md, the bypass-permissions warning: delivered=false, reason=`held: waiting on <question>` when the cap passes), then ONE atomic write of text+\\r (text with a line break or other control character goes as a bracketed paste when the program enabled that mode, so it cannot submit early); prompt_receipt reports delivered=false with reason=exited when the child dies first. Busy guards: over max_busy / max_busy_in_container the spawn is refused naming the busy processes; force=true overrides. Returns {process_id, term_id, record_id, name, agent_instructions, prompt_receipt?, container? (status, started_at, uptime_s, mem_bytes, mem_limit_bytes), agent, forced?}. The row NESTS under its parent in the rail — `parent_process_id` if given, else the `X-Chappa-Actor` header parsed as a process id (chappa-ai-mcp sends its own CHAPPA_AI_PROCESS_ID, so an agent spawning an agent nests automatically); the candidate must name a live process or the spawn records null (a root) — a hint for the rail, never authorization. The spawn creates a durable agent RECORD (see Records): the row survives exit and close as a stopped row that can be started again, with the parent recorded by record id. `ephemeral=true` opts out (no record, the row vanishes on close); `close_on_exit=true` implies it and closes the row through the ordinary close path once the child exits (after term://exited and the exit notification; non-zero exits close too), broadcasting `term://closed {term_id, reason: \"close_on_exit\"}`; every other close broadcasts `reason: \"closed\"`. A bash-hosted tool never exits by itself: end its command with `; exit`.",
         handler: spawn_agent,
     },
     Route {
@@ -366,7 +370,7 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         path: "/records/{record_id}/resume",
         fields: &["session_id?"],
-        description: "Resume an agent record: start it again with the PROVIDER continuing `session_id` (default: the last run's saved `last_run.session`), so the agent comes back with its complete prior conversation — nothing is replayed by the app. The tool's `resume_argv` (`{session_id}` substituted: claude `--resume <id>`, opencode `-s <id>`) goes on the command line; a per-turn json CLI is continued through its adapter. The start is watched through the ready gate and answers {record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent | deferred}. A child that exits before it is ready was refused by the provider: 409 {error: resume_rejected, record_id, run_uuid, term_id, exit_code, provider_text, message} with the provider's own words (e.g. `No conversation found with session ID: <id>`) — never a silent fresh start. 409 {error: no_session} when there is nothing to resume (start the record instead); 409 {error: resume_unavailable} for a running record, a non-agent, a missing tool or an empty resume_argv; 404 for an unknown record.",
+        description: "Resume an agent record: start it again with the PROVIDER continuing `session_id` (default: the last run's saved `last_run.session`), so the agent comes back with its complete prior conversation — nothing is replayed by the app. The tool's `resume_argv` (`{session_id}` substituted: claude `--resume=<id>`, opencode `-s <id>`) goes on the command line; the id must be one plain word (`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`), and a saved id of any other shape answers 409 resume_unavailable; a per-turn json CLI is continued through its adapter. The start is watched through the ready gate and answers {record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent | deferred}. A child that exits before it is ready was refused by the provider: 409 {error: resume_rejected, record_id, run_uuid, term_id, exit_code, provider_text, message} with the provider's own words (e.g. `No conversation found with session ID: <id>`) — never a silent fresh start. 409 {error: no_session} when there is nothing to resume (start the record instead); 409 {error: resume_unavailable} for a running record, a non-agent, a missing tool or an empty resume_argv; 404 for an unknown record.",
         handler: records::route_resume_record,
     },
     Route {
@@ -635,7 +639,7 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         path: "/timers",
         fields: &["delay_ms", "body", "delivery_process_id?", "loop?", "repeat_every_ms?", "name?", "project_id?"],
-        description: "timer_set: fire `body` into a process after delay_ms. `loop: true` repeats every delay_ms; `repeat_every_ms` overrides the interval. delivery_process_id defaults to the CALLER's own process (the X-Chappa-Actor header, which chappa-ai-mcp fills from CHAPPA_AI_PROCESS_ID) — a timer delivers to exactly one process, which must be LIVE now (404 otherwise) and is pinned by its uuid. project_id defaults to the actor's own project. The body is injected verbatim as a fresh user turn through the delivery path (quiet-only policy).",
+        description: "timer_set: fire `body` into a process after delay_ms. `loop: true` repeats every delay_ms; `repeat_every_ms` overrides the interval. delivery_process_id defaults to the CALLER's own process (the X-Chappa-Actor header, which chappa-ai-mcp fills from CHAPPA_AI_PROCESS_ID) — a timer delivers to exactly one process, which must be LIVE now (404 otherwise) and is pinned by its uuid. project_id defaults to the actor's own project. The body is injected verbatim as a fresh user turn through the delivery path (quiet-only policy). It may hold line breaks but no other control character (ESC, CR, Ctrl-C and the like): 400 otherwise.",
         handler: timers::timer_set,
     },
     Route {
@@ -685,15 +689,31 @@ pub const ROUTES: &[Route] = &[
 // ---- token ------------------------------------------------------------------
 
 /// Read the token, creating it on first launch with owner-only permissions.
-/// Never regenerates an existing file (clients cache nothing, but an agent
-/// mid-session must not be locked out by an app restart).
+/// Never regenerates an existing owner-only file (clients cache nothing, but
+/// an agent mid-session must not be locked out by an app restart). A file
+/// that is NOT owner-only (a config dir on a shared path, a file copied in
+/// or made by hand) may already have been read by another user, so its
+/// token is replaced by a new one rather than reused.
 pub fn load_or_create_token(config_dir: &Path) -> std::io::Result<String> {
     let path = config_dir.join(TOKEN_FILE);
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
         if !trimmed.is_empty() {
-            return Ok(trimmed.to_owned());
+            match stack_core::owner_only::is_owner_only(&path) {
+                Ok(true) => return Ok(trimmed.to_owned()),
+                Ok(false) => log::warn!(
+                    "[control_http] {} is readable by others; replacing the token",
+                    path.display()
+                ),
+                Err(e) => log::warn!(
+                    "[control_http] cannot read the access list of {} ({e}); replacing the token",
+                    path.display()
+                ),
+            }
         }
+        // A new file, never the old one rewritten: a handle someone opened
+        // on the old file must not see the new token.
+        std::fs::remove_file(&path)?;
     }
     project_model::atomic::ensure_private_dir(config_dir).map_err(std::io::Error::other)?;
     let token = random_token()?;
@@ -716,6 +736,7 @@ pub fn random_hex(n: usize) -> std::io::Result<String> {
 
 #[cfg(unix)]
 fn write_owner_only(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     // Mode set at CREATE time: the file is never world-readable, not even
     // for the instant between create and chmod.
@@ -729,24 +750,19 @@ fn write_owner_only(path: &Path, token: &str) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
-/// Windows: the token is written to a sibling temp file, its ACL restricted
-/// THERE, and only then renamed into place — so `control_token` never exists
-/// with the directory's inherited ACL, not even for an instant, and a failed
-/// `icacls` leaves nothing behind for the next launch to trust (review: the
-/// old create-then-restrict order persisted an unrestricted file when icacls
-/// failed, and `load_or_create_token` reused it forever).
+/// Windows: the token goes into a sibling temp file through the owner-only
+/// writer (created empty and unshared, restricted, THEN written), and only
+/// then is renamed into place — so `control_token` never exists with the
+/// directory's inherited ACL, not even for an instant, the secret is never
+/// written under that ACL either, and a failed `icacls` leaves nothing
+/// behind for the next launch to trust.
 #[cfg(windows)]
 fn write_owner_only(path: &Path, token: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
-    let result = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(token.as_bytes())?;
-        drop(file);
-        // The current user's grant as the file's only access entry: the
-        // one routine the generated stack secrets use too.
-        stack_core::owner_only::restrict(&tmp)?;
-        std::fs::rename(&tmp, path)
-    })();
+    // A temp file a crashed run left is not ours to trust.
+    let _ = std::fs::remove_file(&tmp);
+    let result = stack_core::owner_only::write_new(&tmp, token.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -902,6 +918,9 @@ pub fn bind_and_publish(
     // to talk to us (they cannot tell us from an impostor), so a failure
     // here is loud; any older file is removed rather than left to name
     // a previous run.
+    if let Some(addr) = server.server_addr().to_ip() {
+        BOUND_PORT.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
+    }
     let identity = match ServerIdentity::for_server(&server, token) {
         Ok(identity) => Arc::new(identity),
         Err(err) => {
@@ -1587,8 +1606,12 @@ pub fn agent_tool_rows(state: &ControlState) -> Vec<Value> {
         .iter()
         .map(|t| {
             let mut row = serde_json::to_value(t).unwrap_or_default();
-            row["command"] = json!(t.command_line());
+            row["command"] = json!(t.command_line_without_env_values());
             row["container"] = json!(t.runtime.container());
+            // A tool's env values are often its credentials (API keys,
+            // tokens), and every token holder can read this route: the
+            // names say what the tool is given without handing it out.
+            row["env"] = json!(t.env.keys().collect::<Vec<_>>());
             row
         })
         .collect()
@@ -1708,6 +1731,9 @@ fn project_response<T: serde::Serialize>(result: Result<T, ControlError>) -> Res
         Err(err @ (ControlError::NotFound(_) | ControlError::NotOpen(_))) => {
             json(404, json!({"error": err.to_string()}))
         }
+        // The project's content is not trusted: only the person can change
+        // that, in the app's trust prompt.
+        Err(err @ ControlError::Untrusted(_)) => json(409, json!({"error": err.to_string()})),
         Err(err) => json(500, json!({"error": err.to_string()})),
     }
 }
@@ -2045,9 +2071,10 @@ mod tests {
     /// open) is a 404, everything else a 500. The messages are unchanged.
     #[test]
     fn control_errors_map_to_statuses_by_variant() {
-        let cases: [(ControlError, u16); 3] = [
+        let cases: [(ControlError, u16); 4] = [
             (ControlError::NotFound("no such project: 9".into()), 404),
             (ControlError::NotOpen("project 9 is not open".into()), 404),
+            (ControlError::Untrusted("not trusted: `web`".into()), 409),
             (
                 ControlError::Internal("projects store not initialized".into()),
                 500,

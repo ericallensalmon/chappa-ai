@@ -62,7 +62,12 @@ use serde_json::{json, Value};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
 use term_core::actor::epoch_ms;
+use term_core::session::is_valid_session_id;
 use term_core::status::ProcessStatus;
+
+/// Why a session id was refused at the control route.
+const SESSION_ID_SHAPE_MESSAGE: &str = "session_id must be one plain word: a letter or digit, \
+then up to 127 letters, digits, '.', '_', ':' or '-'";
 
 use crate::agent_json::machine_mode;
 use crate::agent_tools::{AgentToolsState, Transport};
@@ -139,6 +144,7 @@ impl From<ControlError> for RecordError {
     fn from(err: ControlError) -> Self {
         match err {
             ControlError::NotFound(m) | ControlError::NotOpen(m) => RecordError::NotFound(m),
+            ControlError::Untrusted(m) => RecordError::Unavailable(m),
             ControlError::Internal(m) => RecordError::Internal(m),
         }
     }
@@ -830,6 +836,7 @@ impl Records {
         self.parts()
             .ledger
             .runs(record_id, limit.clamp(1, RUNS_RETAINED))
+            .map(|runs| runs.into_iter().map(masked_run).collect())
             .map_err(|e| RecordError::Internal(e.to_string()))
     }
 
@@ -1137,8 +1144,40 @@ impl LateFact {
     }
 }
 
+/// Every string in `value` with its credential spans masked.
+///
+/// A run's tail is the last screen of whatever the child printed (a token
+/// echoed by a login step, a connection string in a stack trace) and its
+/// summary is free text the process posted; both are kept in the ledger and
+/// served to every holder of the control token, so they are masked before
+/// they are stored and again when they are read (rows stored before this
+/// was done).
+pub fn mask_run_value(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            let masked = stack_core::credentials::mask_text(s);
+            if masked != *s {
+                *s = masked;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(mask_run_value),
+        Value::Object(map) => map.values_mut().for_each(mask_run_value),
+        _ => {}
+    }
+}
+
+/// A run as it may be served: tail and summary masked.
+fn masked_run(mut run: Run) -> Run {
+    run.tail.iter_mut().for_each(mask_run_value);
+    if let Some(summary) = run.summary.as_mut() {
+        *summary = stack_core::credentials::mask_text(summary);
+    }
+    run
+}
+
 impl RunRecorder for Records {
-    fn run_exited(&self, record_id: &str, run_uuid: &str, exit: RunExit) {
+    fn run_exited(&self, record_id: &str, run_uuid: &str, mut exit: RunExit) {
+        exit.tail.iter_mut().for_each(mask_run_value);
         self.apply_late_fact(record_id, run_uuid, &LateFact::Exited(exit));
     }
 
@@ -1154,7 +1193,7 @@ impl RunRecorder for Records {
         self.apply_late_fact(
             record_id,
             run_uuid,
-            &LateFact::Summary(text.to_owned(), source),
+            &LateFact::Summary(stack_core::credentials::mask_text(text), source),
         );
     }
 }
@@ -1210,6 +1249,17 @@ impl Records {
                 }
             },
         };
+        // A record saved before ids were checked at capture can still hold
+        // one that would land on the command line as an option.
+        if !is_valid_session_id(&session_id) {
+            return Err(ResumeFailure::Unavailable {
+                record_id: rid(),
+                message: format!(
+                    "record {record_id} cannot be resumed: its saved session id is not a plain id \
+                     (it would be passed to the agent as something other than an id); start it fresh instead"
+                ),
+            });
+        }
         let tool = deps
             .tools
             .get(agent.tool_id)
@@ -1578,7 +1628,13 @@ pub fn route_set_session(state: &ControlState, params: &Params, query: &str, bod
     };
     let id = params.id.unwrap_or_default();
     let session_id = match a.str("session_id").map(str::trim) {
-        Some(id) if !id.is_empty() => id.to_owned(),
+        Some(id) if is_valid_session_id(id) => id.to_owned(),
+        Some(id) if !id.is_empty() => {
+            return json(
+                400,
+                json!({"error": "invalid", "message": SESSION_ID_SHAPE_MESSAGE}),
+            )
+        }
         _ => {
             return json(
                 400,
@@ -1734,13 +1790,15 @@ id printed at exit is the one kept; `announced` = only what the process says its
 ALWAYS from the two announce paths any process can use: print `OSC 777;session;<id>` — \
 `printf '\\033]777;session;%s\\007' \"$ID\"` — or call `set_session` over MCP (`POST \
 /processes/{id}/session`, `{session_id}`; the MCP tool targets the caller's own process). Every \
-sighting goes through the run-uuid rule; a change broadcasts `term://session {term_id, record_id, \
+sighting must be one plain word (`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`, it is later a word on the resume \
+command line; anything else is dropped, and a stored id of another shape is refused at resume) and \
+goes through the run-uuid rule; a change broadcasts `term://session {term_id, record_id, \
 run_uuid, session}`. Only the id is stored, never a transcript — whether the conversation can be \
 picked up again depends on the provider's own history.\n\n\
 `POST /records/{record_id}/resume` (`session_id?`, default the last run's saved session) starts an \
 agent record again with the PROVIDER continuing that session, so the agent comes back with its \
 complete prior conversation; nothing is replayed from here. The tool's `resume_argv` (`{session_id}` \
-substituted; claude `--resume <id>`, opencode `-s <id>`) goes before the tool's own args — after \
+substituted; claude `--resume=<id>`, opencode `-s <id>`) goes before the tool's own args — after \
 the machine-mode flags for a json tool; a per-turn json CLI is continued through its adapter instead. \
 The start is then watched through the ready gate: output then quiet (or the max wait) = accepted, \
 answering `{record_id, kind, term_id, run_uuid, session_id, check: quiet | ready_by_timeout | silent \

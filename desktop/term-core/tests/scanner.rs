@@ -56,8 +56,9 @@ fn osc_777_notify_title_and_body() {
 }
 
 /// `OSC 777;session;<id>` is the universal "this is my conversation id"
-/// announcement: BEL or ST terminated, inner `;` kept, surrounding blanks
-/// trimmed, an empty id dropped.
+/// announcement: BEL or ST terminated, surrounding blanks trimmed; an empty
+/// id, or one that is not a single plain word (an option, a separator, a
+/// space), is dropped.
 #[test]
 fn osc_777_session_announces_an_id() {
     let mut s = OscScanner::new();
@@ -68,14 +69,26 @@ fn osc_777_session_announces_an_id() {
         )]
     );
     assert_eq!(
-        s.feed(b"]777;session; ses_abc;v2 \\"),
-        vec![OscEvent::Session("ses_abc;v2".into())]
+        s.feed(b"]777;session; ses_abc \\"),
+        vec![OscEvent::Session("ses_abc".into())]
     );
     assert!(
         s.feed(b"]777;session;").is_empty(),
         "an empty id is not a session"
     );
     assert!(s.feed(b"]777;session").is_empty());
+    assert!(
+        s.feed(b"]777;session;--x").is_empty(),
+        "an id that reads as an option is not a session"
+    );
+    assert!(
+        s.feed(b"]777;session;ses_abc;v2").is_empty(),
+        "an id with a separator is not a session"
+    );
+    assert!(
+        s.feed(b"]777;session;a b").is_empty(),
+        "an id of two words is not a session"
+    );
     let split = feed_one_byte_at_a_time(&mut s, b"]777;session;abc\\");
     assert_eq!(split, vec![OscEvent::Session("abc".into())]);
 }

@@ -313,18 +313,10 @@ fn token_from_file(path: &PathBuf) -> Result<Token, String> {
     }
 }
 
-fn write_owner_only(path: &PathBuf, text: &str) -> Result<(), String> {
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    let mut f = o
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    f.write_all(text.as_bytes())
+/// The attached-mode token file: the owner-only writer (owner-only on
+/// Windows too, created empty and restricted before the token is written).
+fn write_owner_only(path: &std::path::Path, text: &str) -> Result<(), String> {
+    stack_core::owner_only::write_new(path, text.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 

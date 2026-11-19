@@ -28,7 +28,9 @@ use app_lib::projects::Projects;
 use app_lib::records::{Records, StartDeps};
 use app_lib::registry::Registry;
 use app_lib::settings::SettingsState;
-use app_lib::source_actions::{run_action, run_action_as, ActionDeps, ActionOutcome};
+use app_lib::source_actions::{
+    run_action, run_action_as, run_action_with, ActionDeps, ActionOutcome, Answers,
+};
 use app_lib::sources::identity::{ADDR_ENV, TOKEN_ENV};
 use app_lib::sources::{CallActor, SourceStatus, Sources, SourcesEmitter};
 use app_lib::timers::TimerHold;
@@ -405,6 +407,7 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
         .iter()
         .find(|a| a.action.id() == "agent-here")
         .unwrap();
+    let agent_hash = agent_here.prompt_hash.clone().expect("a launch digest");
     assert!(!agent_here.verdict.enabled);
     assert!(
         agent_here
@@ -426,7 +429,19 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
         "terminals are not blocked"
     );
     let agents_before = registry.agent_rows().len();
-    let err = run_action(&deps, &sid, "work", Some("ABC-1"), "agent-here", true, None).unwrap_err();
+    let err = run_action_with(
+        &deps,
+        &sid,
+        "work",
+        Some("ABC-1"),
+        "agent-here",
+        Answers {
+            confirmed: true,
+            prompt_hash: Some(&agent_hash),
+            ..Answers::default()
+        },
+    )
+    .unwrap_err();
     assert!(refused(&err), "source agent action: {err}");
     let err = spawn_agent_headless(ctx(), spawn_in(Some(&wt))).unwrap_err();
     assert!(refused(&err), "app spawn: {err}");
@@ -549,9 +564,19 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
     assert!(state_of(&sources, &registry).agents.is_empty());
 
     // And the launches are allowed again.
-    let ActionOutcome::Launched { what, .. } =
-        run_action(&deps, &sid, "work", Some("ABC-1"), "agent-here", true, None).unwrap()
-    else {
+    let ActionOutcome::Launched { what, .. } = run_action_with(
+        &deps,
+        &sid,
+        "work",
+        Some("ABC-1"),
+        "agent-here",
+        Answers {
+            confirmed: true,
+            prompt_hash: Some(&agent_hash),
+            ..Answers::default()
+        },
+    )
+    .unwrap() else {
         panic!()
     };
     assert_eq!(what, "agent");

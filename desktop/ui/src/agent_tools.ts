@@ -29,12 +29,13 @@ export const SESSION_ID_SLOT = "{session_id}";
 export const PROMPT_SLOT = "{prompt}";
 
 /** Mirror of Rust's `prompt_argv_template`: claude and codex take the first
- *  prompt as a positional argument; the rest have it typed. */
+ *  prompt as a positional argument, after `--` so a prompt that starts with
+ *  `-` stays the prompt; the rest have it typed. */
 export function promptArgvFor(toolType: AgentToolType): string[] {
   switch (toolType) {
     case "claude":
     case "codex":
-      return [PROMPT_SLOT];
+      return ["--", PROMPT_SLOT];
     default:
       return [];
   }
@@ -46,7 +47,7 @@ export function promptArgvFor(toolType: AgentToolType): string[] {
 export function resumeArgvFor(toolType: AgentToolType): string[] {
   switch (toolType) {
     case "claude":
-      return ["--resume", SESSION_ID_SLOT];
+      return [`--resume=${SESSION_ID_SLOT}`];
     case "opencode":
       return ["-s", SESSION_ID_SLOT];
     default:

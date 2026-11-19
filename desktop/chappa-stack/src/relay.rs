@@ -8,7 +8,13 @@
 //!
 //! - it binds **only** a gateway address. An unspecified address
 //!   (`0.0.0.0`, `::`) would put every stack port on the LAN; it is refused
-//!   and reported as an alert, never bound;
+//!   and reported as an alert, never bound, and so is any gateway that is
+//!   not a private or link-local address;
+//! - it never relays a port that belongs to the app ([`reserved_ports`]):
+//!   the definition picks the ports, and the app's control surface and the
+//!   sources' listeners are authenticated APIs no container should reach;
+//! - a stack runner relays only for a trusted definition, and only the
+//!   ports of components that are running now;
 //! - it serves only the container network: when a listener binds, the
 //!   relay looks up the interface that owns the gateway address and its
 //!   prefix (read again on every bind, since the gateway's subnet moves),
@@ -23,8 +29,8 @@
 //!   its containers reach those inside the engine;
 //! - each listener serves at most [`MAX_CONNECTIONS`] connections at once;
 //!   more are closed on accept;
-//! - listeners start when the instance has something running and stop when
-//!   it has nothing (the set is reconciled on every status);
+//! - listeners start when a component is running and stop when it is not
+//!   (the set is reconciled on every status);
 //! - they are real listeners on an address other than loopback, so on
 //!   Windows they need an inbound firewall rule: [`crate::relay_firewall`]
 //!   checks for one (and for what would defeat it) and offers to add it.
@@ -337,13 +343,53 @@ pub struct RelayState {
     pub guards: Vec<PeerGuard>,
 }
 
+/// The control surface's fixed port: never relayed, whatever the app says.
+pub const APP_CONTROL_PORT: u16 = 8324;
+
+/// The loopback ports no relay forwards to: the app's control surface (its
+/// fixed port, plus whatever the app lists in
+/// [`stack_core::child_env::RESERVED_PORTS_ENV`]: the port it actually
+/// bound and every source's listener) and this process's own listener
+/// (`own_addr`). A stack definition chooses the ports it relays, so
+/// without this list it could hand every container on the engine's
+/// network a path to the app's and the sources' authenticated APIs.
+pub fn reserved_ports(own_addr: &str) -> BTreeSet<u16> {
+    let mut ports = BTreeSet::from([APP_CONTROL_PORT]);
+    if let Ok(addr) = own_addr.parse::<SocketAddr>() {
+        ports.insert(addr.port());
+    }
+    if let Ok(list) = std::env::var(stack_core::child_env::RESERVED_PORTS_ENV) {
+        ports.extend(list.split(',').filter_map(|p| p.trim().parse::<u16>().ok()));
+    }
+    ports
+}
+
+/// Whether `ip` may be listened on as a gateway: a private or link-local
+/// address (the container network's side of the host), or loopback (which
+/// reaches nothing beyond this machine). Anything else (a public address,
+/// multicast, broadcast, the unspecified address) would put the forwarded
+/// loopback ports somewhere other than the container network.
+pub fn is_gateway_address(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            // fc00::/7 (unique local) and fe80::/10 (link-local).
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 || v6.is_loopback()
+        }
+    }
+}
+
 /// Work out the listeners from the engines' gateways and the ports.
 /// `gateways` maps each relayed engine to its gateway address as the
-/// engine reported it; `ports` are the host ports to relay.
+/// engine reported it; `ports` are the host ports to relay, less every
+/// port in `reserved` (see [`reserved_ports`]), which is reported and
+/// never bound.
 pub fn plan(
     relayed: &[String],
     gateways: &IndexMap<String, String>,
     ports: &BTreeSet<u16>,
+    reserved: &BTreeSet<u16>,
 ) -> (Vec<Wanted>, RelayState) {
     let mut wanted = Vec::new();
     let mut state = RelayState::default();
@@ -374,7 +420,26 @@ pub fn plan(
             });
             continue;
         }
-        for port in ports {
+        if !is_gateway_address(ip) {
+            state.problems.push(RelayProblem {
+                engine: engine.clone(),
+                text: format!(
+                    "relay for {engine}: refused to listen on {ip}, which is not a private or link-local address"
+                ),
+            });
+            continue;
+        }
+        let refused: Vec<String> = ports.intersection(reserved).map(u16::to_string).collect();
+        if !refused.is_empty() {
+            state.problems.push(RelayProblem {
+                engine: engine.clone(),
+                text: format!(
+                    "relay for {engine}: refused to relay port {}, which belongs to the app",
+                    refused.join(", ")
+                ),
+            });
+        }
+        for port in ports.difference(reserved) {
             wanted.push(Wanted {
                 engine: engine.clone(),
                 bind: SocketAddr::new(ip, *port),
@@ -646,26 +711,76 @@ mod tests {
         let ports: BTreeSet<u16> = [14001, 14002].into_iter().collect();
         let mut gw = IndexMap::new();
         gw.insert("docker".to_string(), "172.20.0.1".to_string());
-        let (w, s) = plan(&["docker".into()], &gw, &ports);
+        let none = BTreeSet::new();
+        let (w, s) = plan(&["docker".into()], &gw, &ports, &none);
         assert_eq!(w.len(), 2);
         assert_eq!(w[0].bind.to_string(), "172.20.0.1:14001");
         assert_eq!(w[0].target.to_string(), "127.0.0.1:14001");
         assert!(s.problems.is_empty());
 
         gw.insert("docker".into(), "0.0.0.0".into());
-        let (w, s) = plan(&["docker".into()], &gw, &ports);
+        let (w, s) = plan(&["docker".into()], &gw, &ports, &none);
         assert!(w.is_empty());
         assert!(s.problems[0].text.contains("refused to listen on 0.0.0.0"));
         gw.insert("docker".into(), "::".into());
-        assert!(plan(&["docker".into()], &gw, &ports).0.is_empty());
+        assert!(plan(&["docker".into()], &gw, &ports, &none).0.is_empty());
 
         gw.insert("docker".into(), "host-gateway".into());
-        let (w, s) = plan(&["docker".into()], &gw, &ports);
+        let (w, s) = plan(&["docker".into()], &gw, &ports, &none);
         assert!(w.is_empty());
         assert!(s.not_needed[0].1.contains("no relay needed"));
 
-        let (_, s) = plan(&["podman".into()], &gw, &ports);
+        let (_, s) = plan(&["podman".into()], &gw, &ports, &none);
         assert!(s.problems[0].text.contains("not known"));
+    }
+
+    /// A gateway that is not on a private or link-local network is never
+    /// listened on, and a port that belongs to the app is never relayed
+    /// even when the definition asks for it.
+    #[test]
+    fn plans_refuse_public_gateways_and_the_apps_own_ports() {
+        let ports: BTreeSet<u16> = [2375, 8324, 14001].into_iter().collect();
+        let none = BTreeSet::new();
+        let mut gw = IndexMap::new();
+        for public in [
+            "8.8.8.8",
+            "224.0.0.1",
+            "255.255.255.255",
+            "2001:db8::1",
+            "100.64.0.1",
+        ] {
+            gw.insert("docker".to_string(), public.to_string());
+            let (w, s) = plan(&["docker".into()], &gw, &ports, &none);
+            assert!(w.is_empty(), "{public}");
+            assert!(
+                s.problems[0].text.contains("not a private or link-local"),
+                "{public}"
+            );
+        }
+        for private in [
+            "172.20.0.1",
+            "10.0.0.1",
+            "192.168.65.1",
+            "169.254.1.1",
+            "fd00::1",
+            "fe80::1",
+            "127.0.0.2",
+        ] {
+            assert!(is_gateway_address(private.parse().unwrap()), "{private}");
+        }
+        gw.insert("docker".to_string(), "172.20.0.1".to_string());
+        let reserved = reserved_ports("127.0.0.1:14001");
+        assert!(reserved.contains(&APP_CONTROL_PORT) && reserved.contains(&14001));
+        let (w, s) = plan(&["docker".into()], &gw, &ports, &reserved);
+        let bound: Vec<u16> = w.iter().map(|w| w.bind.port()).collect();
+        assert_eq!(bound, vec![2375]);
+        assert!(
+            s.problems[0]
+                .text
+                .contains("refused to relay port 8324, 14001"),
+            "{:?}",
+            s.problems
+        );
     }
 
     #[test]

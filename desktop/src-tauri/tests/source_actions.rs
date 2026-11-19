@@ -26,7 +26,7 @@ use app_lib::projects::Projects;
 use app_lib::records::{Records, StartDeps};
 use app_lib::registry::{EventSink, JsonEvent, Registry};
 use app_lib::settings::SettingsState;
-use app_lib::source_actions::{run_action, ActionDeps, ActionOutcome};
+use app_lib::source_actions::{run_action, run_action_with, ActionDeps, ActionOutcome, Answers};
 use app_lib::sources::identity::{ADDR_ENV, TOKEN_ENV};
 use app_lib::sources::{CallActor, PromptPolicy, SourceStatus, Sources, SourcesEmitter};
 use app_lib::workspace::Workspace;
@@ -694,15 +694,52 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     assert!(journal[0].text.contains("git status"), "{journal:?}");
     assert_eq!(journal[0].actor.as_deref(), Some("source:fixture"));
 
-    // The agent action: the prompt must be shown first; once accepted the
-    // prompt rides the command line (nothing typed) and the row is
-    // journaled under the source. Afterwards the prompt counts as shown.
-    assert!(run("work", Some("ABC-1"), "agent-here", false, None)
+    // The agent action. What the dialog shows is the entry's launch digest
+    // (prompt, resolved folder, tool, env); the run hands it back.
+    let agent_entry = || {
+        deps.sources
+            .actions(sid, "work", Some("ABC-1"), &deps.tools.list(), &roots)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.action.id() == "agent-here")
+            .unwrap()
+    };
+    let run_agent = |confirmed: bool, shown: Option<&str>| {
+        run_action_with(
+            deps,
+            sid,
+            "work",
+            Some("ABC-1"),
+            "agent-here",
+            Answers {
+                confirmed,
+                prompt_hash: shown,
+                ..Answers::default()
+            },
+        )
+    };
+    let agents_before = deps.registry.agent_rows().len();
+    let first = agent_entry();
+    assert!(first.needs_prompt);
+    let h1 = first.prompt_hash.clone().expect("a launch digest");
+    // Not shown yet: neither an unconfirmed run, nor a "confirmed" one that
+    // cannot say what it showed, nor one that showed something else, runs.
+    assert!(run_agent(false, None)
         .unwrap_err()
         .contains("must be shown"));
-    let ActionOutcome::Launched { term_id, what } =
-        run("work", Some("ABC-1"), "agent-here", true, None).unwrap()
-    else {
+    assert!(run_agent(true, None).unwrap_err().contains("must be shown"));
+    assert!(run_agent(true, Some("not-what-was-shown"))
+        .unwrap_err()
+        .contains("changed after it was shown"));
+    assert_eq!(
+        deps.registry.agent_rows().len(),
+        agents_before,
+        "nothing launched"
+    );
+    // Accepted: the prompt rides the command line (nothing typed) and the
+    // row is journaled under the source. Afterwards that launch counts as
+    // shown.
+    let ActionOutcome::Launched { term_id, what } = run_agent(true, Some(&h1)).unwrap() else {
         panic!()
     };
     assert_eq!(what, "agent");
@@ -727,21 +764,60 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
     let meta = deps.registry.agent_meta(term_id).unwrap();
     assert_eq!(meta.project_id, Some(st.project_id));
     assert!(
-        !deps.sources.prompt_needs_dialog(sid, "agent-here").unwrap(),
+        !deps.sources.prompt_needs_dialog(sid, &h1).unwrap(),
         "shown once"
     );
+    assert!(!agent_entry().needs_prompt);
     assert!(deps.sources.listing().sources[0]
         .prompts_shown
-        .contains(&"agent-here".to_owned()));
+        .contains(&h1));
     assert!(
-        run("work", Some("ABC-1"), "agent-here", false, None).is_ok(),
+        run_agent(false, Some(&h1)).is_ok(),
         "no dialog needed the second time"
     );
+
+    // The source now hands out a different prompt under the SAME action id
+    // (a reused id, an edited title upstream): it asks again, and a run
+    // still holding the old digest (a dialog drawn before the change) is
+    // refused rather than launching text nobody saw.
+    let work = st._dir.path().join("data").join("work.json");
+    let text = std::fs::read_to_string(&work).unwrap();
+    std::fs::write(
+        &work,
+        text.replace(
+            "Review ABC-1 and summarise what is left.",
+            "Review ABC-1 and list every open question.",
+        ),
+    )
+    .unwrap();
+    deps.sources.refresh_soon(sid);
+    let second = wait_for("the new prompt", Duration::from_secs(20), || {
+        let entry = agent_entry();
+        (entry.prompt_hash.as_deref() != Some(h1.as_str())).then_some(entry)
+    });
+    assert!(second.needs_prompt, "a different prompt asks again");
+    let h2 = second.prompt_hash.clone().unwrap();
+    assert!(run_agent(false, None)
+        .unwrap_err()
+        .contains("must be shown"));
+    assert!(run_agent(false, Some(&h1))
+        .unwrap_err()
+        .contains("changed after it was shown"));
+    assert!(run_agent(true, Some(&h1))
+        .unwrap_err()
+        .contains("changed after it was shown"));
+    let ActionOutcome::Launched { term_id, .. } = run_agent(true, Some(&h2)).unwrap() else {
+        panic!()
+    };
+    wait_for("the new prompt on screen", Duration::from_secs(10), || {
+        screen_contains(&deps.registry, term_id, "list every open question").then_some(())
+    });
+
     deps.sources
         .set_prompt_policy(sid, PromptPolicy::Always)
         .unwrap();
-    assert!(deps.sources.prompt_needs_dialog(sid, "agent-here").unwrap());
-    assert!(run("work", Some("ABC-1"), "agent-here", false, None)
+    assert!(deps.sources.prompt_needs_dialog(sid, &h2).unwrap());
+    assert!(run_agent(false, Some(&h2))
         .unwrap_err()
         .contains("must be shown"));
 

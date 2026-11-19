@@ -305,7 +305,16 @@ fn opening_an_item_finds_an_ignored_env_file_in_its_worktree() {
         "unscanned",
         "a bound worktree not scanned yet"
     );
-    assert_eq!(s.block()["blocksAgents"], false);
+    // Not checked yet blocks like a finding would, and says why.
+    let b = s.block();
+    assert_eq!(b["blocksAgents"], true, "{b}");
+    assert!(
+        b["reasons"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("api worktree: not scanned yet"),
+        "{b}"
+    );
     let log = s.open_item();
     assert!(
         log.iter()
@@ -498,7 +507,9 @@ fn no_scanner_blocks_a_bound_worktree_when_a_policy_is_declared_and_says_unscann
         .as_str()
         .unwrap()
         .contains("install gitleaks"));
-    // Without `secrets:` and without a scanner, nothing is scanned or said.
+    // Without `secrets:` and without a scanner, nothing is scanned: the
+    // bound worktree is unscanned, which blocks agents (the default policy)
+    // and says to install a scanner.
     let text = fs::read_to_string(s.p.dir.join("chappa.yml")).unwrap();
     fs::write(
         s.p.dir.join("chappa.yml"),
@@ -515,7 +526,14 @@ fn no_scanner_blocks_a_bound_worktree_when_a_policy_is_declared_and_says_unscann
             b["blocksAgents"].as_bool(),
             b["policy"].is_null()
         ),
-        (Some("unscanned"), Some(false), true),
+        (Some("unscanned"), Some(true), true),
+        "{b}"
+    );
+    assert!(
+        b["reasons"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no scanner was found (install gitleaks)"),
         "{b}"
     );
 }

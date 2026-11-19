@@ -367,6 +367,44 @@ fn a_summary_printed_on_the_way_out_still_lands() {
     w.registry.close(id);
 }
 
+/// A tail and a summary are kept in the ledger and served to every holder
+/// of the control token, so a credential the child printed or posted is
+/// masked before either is stored.
+#[test]
+fn credentials_in_a_tail_or_a_summary_are_masked_before_they_are_stored() {
+    use stack_core::credentials::MASK;
+    let w = world();
+    let sink = Arc::new(MockSink::default());
+    let (id, handle) = posting_entry(&w, "s-cred", "run-c", sink.clone());
+    handle.feed(b"login: API_TOKEN=s3cr3t-value-123\r\n");
+    handle.feed(b"\x1b]777;summary;migrated postgresql://app:s3cr3tpw@db/x\x07");
+    wait_until(|| w.summary("s-cred"));
+    handle.note_child_exit(ExitStatus {
+        code: Some(0),
+        success: true,
+    });
+    let run = wait_until(|| w.last_run("s-cred").filter(|r| !r.is_open()));
+    assert_eq!(
+        run.summary,
+        Some(format!("migrated postgresql://app:{MASK}@db/x"))
+    );
+    let ledger = &w.records.runs("s-cred", 20).unwrap()[0];
+    let served = serde_json::to_string(ledger).unwrap();
+    assert!(!served.contains("s3cr3t"), "{served}");
+    let masked_line = format!("login: API_TOKEN={MASK}");
+    assert!(
+        ledger
+            .tail
+            .iter()
+            .any(|l| l.as_str() == Some(masked_line.as_str())),
+        "{:?}",
+        ledger.tail
+    );
+    let row = serde_json::to_string(&w.registry.control_snapshot(id).unwrap()).unwrap();
+    assert!(!row.contains("s3cr3t"), "{row}");
+    w.registry.close(id);
+}
+
 // ---- control route -----------------------------------------------------------
 
 fn http(

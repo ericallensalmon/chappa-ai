@@ -235,6 +235,9 @@ pub enum ControlError {
     /// The project exists but is not OPEN in the app, so it has no runtime to
     /// act on (chappa-ai can only drive processes of an open project).
     NotOpen(String),
+    /// The project's loaded content is not the trusted content, so none of
+    /// its commands may start until the trust prompt is answered with Run.
+    Untrusted(String),
     /// Everything else: store not initialized, poisoned state, spawn failure.
     Internal(String),
 }
@@ -251,14 +254,45 @@ impl ControlError {
     fn not_open(id: u32) -> Self {
         ControlError::NotOpen(format!("project {id} is not open"))
     }
+
+    fn untrusted(name: &str) -> Self {
+        ControlError::Untrusted(format!(
+            "{UNTRUSTED_START}: `{name}` is defined by this project's chappa.yml, which is not \
+             the trusted content; answer the project's trust prompt with Run first"
+        ))
+    }
+}
+
+/// The lead of a start refused because the project's content is not
+/// trusted; the webview matches it to offer the trust prompt.
+pub const UNTRUSTED_START: &str = "not trusted";
+
+/// Whether project `id`'s LOADED content is the trusted content.
+///
+/// A start runs a definition from the project folder, which anyone who can
+/// write there controls. The trust prompt is the one place the person sees
+/// what auto-starts; answering Skip (or closing it) leaves the content
+/// untrusted, and so does an edit the reload gate has not been answered
+/// for. Without this check a row click, a record start or the control
+/// route would still run those definitions: none of them shows the command
+/// first. So: no start of any command while the content is not trusted.
+fn content_trusted(inner: &Inner, id: u32) -> bool {
+    let Some(runtime) = inner.runtimes.get(&id) else {
+        return false;
+    };
+    inner
+        .store
+        .as_ref()
+        .is_some_and(|s| s.is_trusted(id, &runtime.yml_hash))
 }
 
 impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ControlError::NotFound(m) | ControlError::NotOpen(m) | ControlError::Internal(m) => {
-                f.write_str(m)
-            }
+            ControlError::NotFound(m)
+            | ControlError::NotOpen(m)
+            | ControlError::Untrusted(m)
+            | ControlError::Internal(m) => f.write_str(m),
         }
     }
 }
@@ -1910,6 +1944,56 @@ fn trust_answer_matches(
     Ok(())
 }
 
+/// The trust prompt for an open project's loaded content, asked again when
+/// a start was refused because that content is not trusted (the person
+/// skipped the prompt, or an edit is waiting for an answer). It lists every
+/// command, not only the auto-start ones: the one being started may be any
+/// of them. `hash` is what `confirm_project_trust` must be answered with.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustPromptDto {
+    pub hash: String,
+    pub commands: Vec<String>,
+}
+
+#[tauri::command]
+pub fn project_trust_prompt(
+    projects: State<'_, Projects>,
+    id: u32,
+) -> Result<TrustPromptDto, String> {
+    let inner = projects.store()?;
+    let runtime = inner
+        .runtimes
+        .get(&id)
+        .ok_or_else(|| format!("project {id} is not open"))?;
+    let mut commands: Vec<String> = runtime
+        .processes
+        .values()
+        .map(|p| trust_line(&p.def))
+        .collect();
+    let defs: IndexMap<String, ProcessDef> = runtime
+        .processes
+        .iter()
+        .map(|(n, p)| (n.clone(), p.def.clone()))
+        .collect();
+    commands.extend(crate::stack_trust::prompt_lines(
+        &crate::stack_trust::stack_sources(&runtime.root, &defs),
+    ));
+    if let Ok(yml) = ProjectYml::load_result(&runtime.root) {
+        if let Some(scan) = ScanConfigSource::of(&runtime.root, &yml) {
+            let last = inner
+                .store
+                .as_ref()
+                .and_then(|s| s.get(id))
+                .and_then(|p| p.trusted_scan_config.clone());
+            commands.push(scan.prompt_entry(last.as_deref()));
+        }
+    }
+    Ok(TrustPromptDto {
+        hash: runtime.yml_hash.clone(),
+        commands,
+    })
+}
+
 /// Current process statuses for the loaded project (reconcile / refresh).
 #[tauri::command]
 pub fn list_project_processes(
@@ -2128,7 +2212,7 @@ pub fn save_project_process(
     // first added command. A concurrent-change or load-error refusal refuses
     // the WHOLE mutation with the store untouched (`mutate`), and `refused_write`
     // reloads the project when the refusal was a concurrent disk change.
-    let was_trusted = currently_trusted(&inner, id);
+    let was_trusted = trusted_snapshot(&inner, id);
     project_model::native::mutate(inner.store.as_mut().unwrap(), id, |defs| {
         let mut def = def;
         resolve_unchanged(
@@ -2181,7 +2265,7 @@ impl Projects {
     ) -> Result<Vec<ProjectProcessDto>, String> {
         let mut inner = self.store()?;
         refuse_while_load_error(&inner, id)?;
-        let was_trusted = currently_trusted(&inner, id);
+        let was_trusted = trusted_snapshot(&inner, id);
         project_model::native::mutate(inner.store.as_mut().unwrap(), id, |defs| {
             project_model::native::remove_process(defs, name)
         })
@@ -2262,7 +2346,7 @@ pub fn duplicate_project_processes(
     if defs.is_empty() {
         return Err("nothing to duplicate".to_owned());
     }
-    let was_trusted = currently_trusted(&inner, target_id);
+    let was_trusted = trusted_snapshot(&inner, target_id);
     // The write always backwrites the target's chappa.yml.
     project_model::native::mutate(inner.store.as_mut().unwrap(), target_id, |out| {
         for (name, repro) in &defs {
@@ -2345,16 +2429,27 @@ fn refuse_while_load_error(inner: &Inner, id: u32) -> Result<(), String> {
     }
 }
 
-/// Is the file ON DISK right now the trusted one? Read before a write so
-/// `after_own_write` can carry trust across our own edit.
-fn currently_trusted(inner: &Inner, id: u32) -> bool {
+/// What the trusted content was made of, read before an own write so
+/// `after_own_write` can carry trust across exactly that edit.
+pub(crate) struct TrustSnapshot {
+    /// The stack definitions as they were trusted.
+    stacks: Vec<crate::stack_trust::StackSource>,
+    /// The project's gitleaks config as it was trusted.
+    scan: Option<ScanConfigSource>,
+}
+
+/// The parts of the content ON DISK right now when it is the trusted
+/// content, `None` when it is not (or cannot be read).
+fn trusted_snapshot(inner: &Inner, id: u32) -> Option<TrustSnapshot> {
     let store = inner.store.as_ref().unwrap();
-    let Some(root) = store.get(id).map(|p| p.path.clone()) else {
-        return false;
-    };
-    crate::stack_trust::trust_hash_on_disk(&root)
-        .map(|h| store.is_trusted(id, &h))
-        .unwrap_or(false)
+    let root = store.get(id).map(|p| p.path.clone())?;
+    let (yml, file_hash) = ProjectYml::load_result_with_hash(&root).ok()?;
+    let stacks = crate::stack_trust::stack_sources(&root, &yml.processes);
+    let scan = ScanConfigSource::of(&root, &yml);
+    let hash = crate::stack_trust::project_trust_hash(&file_hash, &stacks, scan.as_ref());
+    store
+        .is_trusted(id, &hash)
+        .then_some(TrustSnapshot { stacks, scan })
 }
 
 /// A refused write-back, before it propagates to the caller's modal: the
@@ -2387,23 +2482,52 @@ fn after_own_write(
     app: &AppHandle,
     projects: Arc<Mutex<Inner>>,
     id: u32,
-    was_trusted: bool,
+    was_trusted: Option<TrustSnapshot>,
 ) {
-    trust_own_write(inner.store.as_mut().unwrap(), id, was_trusted);
+    trust_own_write(inner.store.as_mut().unwrap(), id, was_trusted.as_ref());
     reload_locked(inner, registry, app, projects, id);
 }
 
 /// The app's own write to a project whose content was trusted before is
 /// trusted too (the user made it in the app); one to an untrusted project
 /// stays untrusted, so the next reload still asks.
-fn trust_own_write(store: &mut ProjectStore, id: u32, was_trusted: bool) {
-    if was_trusted {
-        let Some(root) = store.get(id).map(|p| p.path.clone()) else {
-            return;
-        };
-        if let Some(hash) = crate::stack_trust::trust_hash_on_disk(&root) {
-            let _ = mark_trusted_with_config(store, id, &root, hash);
-        }
+///
+/// What is trusted is what the app WROTE (the content hash of the bytes it
+/// wrote) together with the stack definitions and gitleaks config as they
+/// were trusted before the write, never a fresh read of the folder: an
+/// edit that lands on disk during the write (another writer, or an agent
+/// changing a stack definition at that moment) is not trusted by it. When
+/// the stack definitions the new commands name are not the ones the
+/// snapshot holds (a command now names another stack, or a definition
+/// changed meanwhile), nothing is carried over and the prompt asks.
+fn trust_own_write(store: &mut ProjectStore, id: u32, was_trusted: Option<&TrustSnapshot>) {
+    let Some(snapshot) = was_trusted else {
+        return;
+    };
+    let (Some(root), Some(written)) = (
+        store.get(id).map(|p| p.path.clone()),
+        store.last_written(id).map(str::to_owned),
+    ) else {
+        return;
+    };
+    let defs = store.process_defs(id);
+    let stacks_now = crate::stack_trust::stack_sources(&root, &defs);
+    let same_stacks = stacks_now.len() == snapshot.stacks.len()
+        && stacks_now
+            .iter()
+            .zip(&snapshot.stacks)
+            .all(|(a, b)| a.name == b.name && a.hash() == b.hash());
+    if !same_stacks {
+        return;
+    }
+    let hash =
+        crate::stack_trust::project_trust_hash(&written, &snapshot.stacks, snapshot.scan.as_ref());
+    if store.mark_trusted(id, hash).is_ok() {
+        let text = snapshot
+            .scan
+            .as_ref()
+            .and_then(|s| s.text().map(str::to_owned));
+        let _ = store.set_trusted_scan_config(id, text);
     }
 }
 
@@ -3125,13 +3249,14 @@ fn trust_line(def: &ProcessDef) -> String {
             stack_core::credentials::shown_env(key, value)
         ));
     }
-    // A source also receives two variables the yml does not spell out; the
+    // A source also receives variables the yml does not spell out; the
     // prompt names them so what it lists is everything the process gets.
     if def.is_source() {
         line.push_str(&format!(
-            "\n    source: receives {} and {} from the app and is polled for its views",
+            "\n    source: receives {}, {} and {} from the app and is polled for its views",
             crate::sources::identity::ADDR_ENV,
-            crate::sources::identity::TOKEN_ENV
+            crate::sources::identity::TOKEN_ENV,
+            stack_core::child_env::RESERVED_PORTS_ENV
         ));
     }
     line
@@ -3345,6 +3470,10 @@ impl Projects {
             if live_term(proc).is_some() {
                 return Ok(lifecycle_dto_of(id, name, proc, false)); // already live
             }
+            // Refused here too, before the webview is asked to start it.
+            if !content_trusted(&inner, id) {
+                return Err(ControlError::untrusted(name));
+            }
             proc.generation
         };
         let _ = app.emit(
@@ -3512,6 +3641,9 @@ fn start_process(
         .and_then(|r| r.processes.get(&name))
         .map(|p| p.def.clone())
         .ok_or_else(|| ControlError::no_process(&name, id))?;
+    if !content_trusted(&inner, id) {
+        return Err(ControlError::untrusted(&name));
+    }
     // Read the execution profile + per-actor controls fresh at every
     // start (same borrow discipline — owned clone before `&mut proc`).
     let settings = inner.launch_settings();
@@ -4150,6 +4282,30 @@ mod tests {
         }
     }
 
+    /// A start needs the loaded content to be the trusted content: a project
+    /// whose trust prompt was skipped (or never answered, or answered for
+    /// other content) starts nothing, whichever path asks.
+    #[test]
+    fn no_command_starts_while_the_loaded_content_is_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, pid, root) = stack_project(dir.path());
+        let trusted = crate::stack_trust::trust_hash_on_disk(&root).unwrap();
+        let mut inner = Inner {
+            store: Some(store),
+            ..Inner::default()
+        };
+        assert!(!content_trusted(&inner, pid), "not open: nothing to start");
+        let mut rt = runtime_of(&root);
+        rt.yml_hash = "content nobody trusted".into();
+        inner.runtimes.insert(pid, rt);
+        assert!(!content_trusted(&inner, pid));
+        inner.runtimes.get_mut(&pid).unwrap().yml_hash = trusted;
+        assert!(content_trusted(&inner, pid));
+        let err = ControlError::untrusted("web");
+        assert!(matches!(err, ControlError::Untrusted(_)));
+        assert!(err.to_string().starts_with(UNTRUSTED_START), "{err}");
+    }
+
     #[test]
     fn untrusted_means_read_only_whether_the_project_is_open_or_not() {
         let dir = tempfile::tempdir().unwrap();
@@ -4462,7 +4618,8 @@ mod tests {
         assert!(VerdictStore::beside(&sources_file).get(&id).is_none());
 
         // The app's own write is trusted content exactly when the project's
-        // content was trusted before it.
+        // content was trusted before it, and what is trusted is what the
+        // app wrote, not what the file holds when looked at again.
         let yml = root.join(project_model::yml::CHAPPA_YML_NAME);
         std::fs::write(&yml, "processes: {}\n").unwrap();
         let mut store = ProjectStore::new(dir.path().join("projects.json"));
@@ -4470,12 +4627,48 @@ mod tests {
         store
             .mark_trusted(pid, hash::file_content_hash(&yml).unwrap())
             .unwrap();
-        std::fs::write(&yml, "processes:\n  web:\n    command: npm run dev\n").unwrap();
-        trust_own_write(&mut store, pid, true);
+        let snapshot = TrustSnapshot {
+            stacks: Vec::new(),
+            scan: None,
+        };
+        let write = |store: &mut ProjectStore, command: &str| {
+            project_model::native::mutate(store, pid, |defs| {
+                defs.clear();
+                defs.insert(
+                    "web".into(),
+                    ProcessDef {
+                        command: command.into(),
+                        ..ProcessDef::default()
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        };
+        write(&mut store, "npm run dev");
+        trust_own_write(&mut store, pid, Some(&snapshot));
         assert!(store.is_trusted(pid, &hash::file_content_hash(&yml).unwrap()));
-        std::fs::write(&yml, "processes:\n  web:\n    command: npm start\n").unwrap();
-        trust_own_write(&mut store, pid, false);
+        write(&mut store, "npm start");
+        trust_own_write(&mut store, pid, None);
         assert!(!store.is_trusted(pid, &hash::file_content_hash(&yml).unwrap()));
+        // Another writer edits the file after the app's write: trusting the
+        // app's write does not trust that edit.
+        store
+            .mark_trusted(pid, hash::file_content_hash(&yml).unwrap())
+            .unwrap();
+        write(&mut store, "npm test");
+        let mut text = std::fs::read_to_string(&yml).unwrap();
+        text.push_str("  evil:\n    command: curl example.invalid\n");
+        std::fs::write(&yml, &text).unwrap();
+        trust_own_write(&mut store, pid, Some(&snapshot));
+        assert!(!store.is_trusted(pid, &hash::file_content_hash(&yml).unwrap()));
+        // A write whose commands now name a stack the snapshot did not hold
+        // carries nothing over.
+        let with_stack = TrustSnapshot {
+            stacks: crate::stack_trust::stack_sources(&root, &store.process_defs(pid)),
+            scan: None,
+        };
+        assert!(with_stack.stacks.is_empty());
     }
 
     #[test]

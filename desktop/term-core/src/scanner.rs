@@ -377,8 +377,10 @@ fn parse_osc(payload: &[u8]) -> Option<OscEvent> {
                     })
                 }
                 b"session" => {
+                    // The id ends up as a word on a resume command line:
+                    // anything that is not one plain word is not an id.
                     let id = lossy(&join_rest(&mut params)).trim().to_owned();
-                    (!id.is_empty()).then_some(OscEvent::Session(id))
+                    crate::session::is_valid_session_id(&id).then_some(OscEvent::Session(id))
                 }
                 b"summary" => cap_summary(&lossy(&join_rest(&mut params)))
                     .map(|text| OscEvent::Summary { text }),

@@ -60,8 +60,8 @@ use crate::registry::{
 use crate::roots::{check_cwd, Root};
 use crate::settings::SettingsState;
 use crate::sources::actions::{
-    action_verdict, check_input_values, resolve_tool, validate_env, NoteRule, SourceAction,
-    VerdictContext,
+    action_verdict, agent_launch_hash, check_input_values, reject_controls, resolve_tool,
+    validate_env, NoteRule, SourceAction, VerdictContext,
 };
 use crate::sources::{
     iso_utc, main_window_only, ActionDto, CallActor, CallTarget, JobRecord, PromptPolicy,
@@ -181,13 +181,18 @@ pub fn run_action(
     )
 }
 
-/// What the person answered in an endpoint action's dialog besides the
-/// confirm: the note and the input values (`{name: value}`).
+/// What the person answered in an action's dialog besides the confirm:
+/// the note and the input values (`{name: value}`) of an endpoint, and for
+/// an `agent` action the launch digest (`prompt_hash` of its [`ActionDto`])
+/// of the prompt the dialog displayed.
+///
+/// [`ActionDto`]: crate::sources::ActionDto
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Answers<'a> {
     pub confirmed: bool,
     pub note: Option<&'a str>,
     pub values: Option<&'a Value>,
+    pub prompt_hash: Option<&'a str>,
 }
 
 /// [`run_action`] with the dialog's input values.
@@ -269,7 +274,7 @@ pub fn run_action_as(
         Answers {
             confirmed,
             note,
-            values: None,
+            ..Answers::default()
         },
     )
 }
@@ -303,7 +308,7 @@ pub fn run_item_action(
         Answers {
             confirmed,
             note,
-            values: None,
+            ..Answers::default()
         },
     )
 }
@@ -324,6 +329,7 @@ fn run_found(
         confirmed,
         note,
         values,
+        prompt_hash,
     } = answers;
     let tools = deps.tools.list();
     let roots = roots_for(deps, &info);
@@ -491,22 +497,33 @@ fn run_found(
             }
         }
         SourceAction::Agent {
-            id,
             label,
             cwd,
             prompt,
             tool,
             title,
             env,
+            ..
         } => {
-            if !confirmed && deps.sources.prompt_needs_dialog(source_id, &id)? {
+            let tool = resolve_tool(&tools, tool.as_deref())?;
+            let cwd = check_cwd(&roots, &cwd).into_result()?;
+            validate_env(&env)?;
+            reject_controls("the prompt", &prompt)?;
+            // Approval is of the exact launch, not of the action id: the
+            // payload may have been replaced (or the id reused on another
+            // row) since the dialog drew its text.
+            let launch = agent_launch_hash(&prompt, &cwd, tool, &env);
+            if prompt_hash.is_some_and(|shown| shown != launch) {
+                return Err(format!(
+                    "the prompt of `{label}` changed after it was shown; open the action again to see the new text"
+                ));
+            }
+            let accepted_now = confirmed && prompt_hash == Some(launch.as_str());
+            if !accepted_now && deps.sources.prompt_needs_dialog(source_id, &launch)? {
                 return Err(format!(
                     "the prompt of `{label}` must be shown and accepted before it runs"
                 ));
             }
-            let tool = resolve_tool(&tools, tool.as_deref())?;
-            let cwd = check_cwd(&roots, &cwd).into_result()?;
-            validate_env(&env)?;
             let req = SpawnAgentRequest {
                 agent_tool_id: tool.id,
                 project_id: info.project_id,
@@ -526,8 +543,8 @@ fn run_found(
                 actor: None,
             };
             let resp = spawn_agent_with(ctx, req, Arc::new(NullSink), deps.app.clone())?;
-            if confirmed {
-                deps.sources.mark_prompt_shown(source_id, &id)?;
+            if accepted_now {
+                deps.sources.mark_prompt_shown(source_id, &launch)?;
             }
             Ok(ActionOutcome::Launched {
                 term_id: resp.process_id,
@@ -1035,6 +1052,7 @@ pub async fn source_run_action(
     note: Option<String>,
     owner: Option<String>,
     values: Option<Value>,
+    prompt_hash: Option<String>,
 ) -> Result<ActionOutcome, String> {
     main_window_only(&window)?;
     let deps = deps_of(
@@ -1045,6 +1063,7 @@ pub async fn source_run_action(
             confirmed,
             note: note.as_deref(),
             values: values.as_ref(),
+            prompt_hash: prompt_hash.as_deref(),
         };
         match (owner, key) {
             (Some(owner), Some(key)) => {

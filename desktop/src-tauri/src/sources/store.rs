@@ -9,7 +9,7 @@
 //!   "attached": [{"addr": "127.0.0.1:7000", "token_file": "/home/dev/.config/x/token"}],
 //!   "hidden_views": ["prs"],
 //!   "prompt_policy": {"<key>": "always"},
-//!   "prompts_shown": {"<key>": ["agent-here"]},
+//!   "prompts_shown": {"<key>": ["<launch digest>"]},
 //!   "key_match": {"<key>": {"enabled": false, "pattern": "[A-Z]+-\\d+"}}
 //! }
 //! ```
@@ -19,7 +19,9 @@
 //! that finds candidate keys there (absent = on, with the default pattern).
 //!
 //! `prompt_policy` is per source: `first_time` (the default) shows an
-//! `agent` action's prompt once per action id and remembers it in
+//! `agent` action's prompt once per distinct launch — the digest of its
+//! prompt, resolved folder, tool and env, not its action id, so a changed
+//! prompt under the same id asks again — and remembers the digest in
 //! `prompts_shown`; `always` shows it before every run.
 //!
 //! Trust is keyed the way the project trust gate is keyed (per project, by
@@ -33,6 +35,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub const FILE_NAME: &str = "sources.json";
+
+/// How many accepted launch digests are kept per source.
+pub const PROMPTS_SHOWN_MAX: usize = 512;
 
 /// A server started outside the app that the user pointed the app at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,12 +214,13 @@ impl SourceStore {
         self.save()
     }
 
-    /// Whether the prompt of `action_id` was shown (and accepted) before.
-    pub fn prompt_shown(&self, key: &str, action_id: &str) -> bool {
+    /// Whether the launch with digest `launch` was shown (and accepted)
+    /// before.
+    pub fn prompt_shown(&self, key: &str, launch: &str) -> bool {
         self.data
             .prompts_shown
             .get(key)
-            .is_some_and(|set| set.contains(action_id))
+            .is_some_and(|set| set.contains(launch))
     }
 
     pub fn prompts_shown(&self, key: &str) -> Vec<String> {
@@ -225,14 +231,21 @@ impl SourceStore {
             .unwrap_or_default()
     }
 
-    pub fn mark_prompt_shown(&mut self, key: &str, action_id: &str) -> Result<(), String> {
-        if self
-            .data
-            .prompts_shown
-            .entry(key.to_owned())
-            .or_default()
-            .insert(action_id.to_owned())
-        {
+    /// Remember that the launch with digest `launch` was accepted. A source
+    /// whose prompts differ per row adds one digest per row it was run on,
+    /// so the set is capped at [`PROMPTS_SHOWN_MAX`]; past it an older
+    /// digest is dropped (that launch asks again — never the other way).
+    pub fn mark_prompt_shown(&mut self, key: &str, launch: &str) -> Result<(), String> {
+        let set = self.data.prompts_shown.entry(key.to_owned()).or_default();
+        if set.insert(launch.to_owned()) {
+            while set.len() > PROMPTS_SHOWN_MAX {
+                let drop = set
+                    .iter()
+                    .find(|d| d.as_str() != launch)
+                    .cloned()
+                    .expect("more than one digest");
+                set.remove(&drop);
+            }
             self.save()?;
         }
         Ok(())
@@ -355,6 +368,20 @@ mod tests {
         assert!(SourceStore::new(dir.path().join(FILE_NAME))
             .attached()
             .is_empty());
+    }
+
+    #[test]
+    fn shown_prompts_are_capped_and_keep_the_newest() {
+        let (_dir, mut store) = temp_store();
+        for i in 0..PROMPTS_SHOWN_MAX + 3 {
+            store.mark_prompt_shown("k", &format!("{i:04}")).unwrap();
+        }
+        assert_eq!(store.prompts_shown("k").len(), PROMPTS_SHOWN_MAX);
+        let newest = format!("{:04}", PROMPTS_SHOWN_MAX + 2);
+        assert!(store.prompt_shown("k", &newest));
+        store.mark_prompt_shown("k", "0000").unwrap();
+        assert!(store.prompt_shown("k", "0000"), "the one just added stays");
+        assert_eq!(store.prompts_shown("k").len(), PROMPTS_SHOWN_MAX);
     }
 
     #[test]

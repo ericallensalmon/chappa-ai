@@ -261,6 +261,10 @@ pub struct ProjectStore {
     path: PathBuf,
     projects: Vec<Project>,
     next_id: u32,
+    /// The content hash of the project file this app last wrote, per
+    /// project, for this run only (never saved): the trust carried across
+    /// an own write covers these bytes, not a later read of the file.
+    written: std::collections::HashMap<u32, String>,
 }
 
 impl ProjectStore {
@@ -276,6 +280,7 @@ impl ProjectStore {
             path,
             projects,
             next_id,
+            written: Default::default(),
         }
     }
 
@@ -358,6 +363,17 @@ impl ProjectStore {
     /// the person trusted the project (`None`: it names none), so the next
     /// trust prompt can show what changed since. Written only when it
     /// differs.
+    /// Remember the content hash of the project file just written for `id`.
+    pub fn note_written(&mut self, id: u32, hash: String) {
+        self.written.insert(id, hash);
+    }
+
+    /// The content hash of the project file this app last wrote for `id`
+    /// during this run.
+    pub fn last_written(&self, id: u32) -> Option<&str> {
+        self.written.get(&id).map(String::as_str)
+    }
+
     pub fn set_trusted_scan_config(&mut self, id: u32, text: Option<String>) -> Result<(), String> {
         let project = self
             .projects

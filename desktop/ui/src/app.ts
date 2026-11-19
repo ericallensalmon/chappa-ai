@@ -5268,6 +5268,33 @@ export class App {
       this.disposeProcessPanel(row);
       row.status = "failed";
       this.processRowChanged(row);
+      // Refused because the project's content is not trusted: ask now, and
+      // start it once the person chose Run.
+      if (String(err).includes(ipc.UNTRUSTED_START) && (await this.askTrustToStart(projectId))) {
+        row.status = "stopped";
+        await this.startProcess(projectId, name);
+      }
+    }
+  }
+
+  /** The trust prompt for a start the content's missing trust refused;
+   *  true when the person chose Run and the content is trusted now. */
+  private async askTrustToStart(projectId: number): Promise<boolean> {
+    if (!this.api.projectTrustPrompt) return false;
+    let prompt: ipc.TrustPromptDto;
+    try {
+      prompt = await this.api.projectTrustPrompt(projectId);
+    } catch {
+      return false;
+    }
+    const run = await this.ask(`trust:${projectId}`, () => this.confirmTrust(prompt.commands));
+    if (!run) return false;
+    try {
+      await this.api.confirmProjectTrust(projectId, true, prompt.hash);
+      return true;
+    } catch {
+      // The content changed while the prompt was open: its reload asks again.
+      return false;
     }
   }
 

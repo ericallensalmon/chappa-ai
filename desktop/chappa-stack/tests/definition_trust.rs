@@ -211,3 +211,100 @@ fn the_work_folder_is_git_ignored_as_soon_as_the_definition_is_read() {
         "*\n"
     );
 }
+
+const RELAY_YML: &str = r#"
+name: relay-trust
+stacks:
+  app:
+    hostname: dev.example.test
+    slots: { count: 1, portBase: 8323, portStride: 100 }
+    relay: { engines: [docker] }
+    groups:
+      core: { engine: docker }
+      apis: { engine: podman }
+    components:
+      win:
+        group: core
+        driver: compose
+        file: stack/c.yml
+        service: win
+        modes: { prebuilt: { image: registry.example/win, tag: "1" } }
+      api:
+        group: apis
+        driver: compose
+        file: stack/c.yml
+        service: api
+        ports: 2
+        modes: { prebuilt: { image: registry.example/api, tag: "1" } }
+"#;
+
+/// `compose ps` / `inspect` on podman answering with `ctrs`.
+fn with_podman_project(cli: FakeCli, project: &str, ctrs: &[Ctr]) -> FakeCli {
+    let ps: Vec<String> = ctrs.iter().map(|c| c.ps(project).to_string()).collect();
+    let inspect: Vec<Value> = ctrs.iter().map(|c| c.inspect(project)).collect();
+    cli.on(&["podman", "compose", "-p", project, "ps"], &ps.join("\n"))
+        .on(
+            &["podman", "inspect", "--type", "container"],
+            &Value::from(inspect).to_string(),
+        )
+}
+
+/// The relay listens on an address other than loopback, so it waits for a
+/// trusted definition like everything else that runs: with nothing
+/// trusted no listener is even attempted (and the view says why), trusted
+/// it plans and binds the running component's ports except the app's own
+/// control port, and losing the trust stops what it had.
+#[test]
+fn the_relay_listens_only_for_a_trusted_definition_and_never_on_the_apps_port() {
+    let project = Project::with(
+        RELAY_YML,
+        &[(
+            "stack/c.yml",
+            "services:\n  win: { image: x }\n  api: { image: x }\n",
+        )],
+    );
+    let cli = with_docker_project(
+        with_podman_project(FakeCli::new(), "app-0-apis", &[Ctr::running("api")]),
+        "app-0-core",
+        &[],
+    );
+    let mut f = fakes(cli, FakeHttp::default());
+    // A private address no interface here has: a bind that is attempted
+    // fails and says so, which is how the test sees it was attempted.
+    f.world.gateways = chappa_stack::world::Locked::new(stack_core::compose::FakeGateways(
+        indexmap::IndexMap::from([(
+            "docker".to_string(),
+            stack_core::compose::Gateway {
+                address: "10.255.255.254".into(),
+                stable: false,
+            },
+        )]),
+    ));
+    let src = source(f.world.clone(), &project.dir);
+    let none = || DefinitionPin::parse("none").unwrap();
+
+    src.set_definition_pin(none());
+    let text = get(&src, ENV).1.to_string();
+    assert!(
+        text.contains("off until the stack definition is trusted"),
+        "{text}"
+    );
+    assert!(!text.contains("cannot listen"), "no bind attempted: {text}");
+
+    src.set_definition_pin(DefinitionPin::Trusted(hash_of(&project.dir)));
+    let text = get(&src, ENV).1.to_string();
+    assert!(
+        text.contains("cannot listen on 10.255.255.254:8325"),
+        "the running component's other port was planned: {text}"
+    );
+    assert!(
+        text.contains("refused to relay port 8324, which belongs to the app"),
+        "{text}"
+    );
+    assert!(!text.contains("10.255.255.254:8324"), "{text}");
+
+    src.set_definition_pin(none());
+    let text = get(&src, ENV).1.to_string();
+    assert!(!text.contains("cannot listen"), "stopped again: {text}");
+    assert!(text.contains("off until the stack definition is trusted"));
+}

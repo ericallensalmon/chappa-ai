@@ -823,6 +823,11 @@ impl Registry {
         id: TermId,
         mut session: Session,
     ) -> Option<(Option<RecordBinding>, bool)> {
+        // Every capture point checks the shape already; this is the one
+        // place they all pass through, so a new one cannot forget it.
+        if !term_core::session::is_valid_session_id(&session.session_id) {
+            return None;
+        }
         let (binding, changed) = {
             let mut inner = self.inner.lock().ok()?;
             let entry = inner.entries.get_mut(&id)?;
@@ -861,6 +866,9 @@ impl Registry {
         text: String,
         source: SummarySource,
     ) -> SummaryOutcome {
+        // Kept on the row and served with it: a credential in it is masked
+        // here, before anything holds it.
+        let text = stack_core::credentials::mask_text(&text);
         let (binding, changed) = {
             let Ok(mut inner) = self.inner.lock() else {
                 return SummaryOutcome::Unknown;

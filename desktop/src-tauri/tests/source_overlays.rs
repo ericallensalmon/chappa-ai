@@ -448,6 +448,7 @@ fn a_second_source_adds_to_the_first_ones_items_and_acts_on_its_rows() {
             confirmed: true,
             note: None,
             values: Some(values),
+            prompt_hash: None,
         }
     }
     let seeds = json!({"seeds": ["db/three"], "count": 3, "size": "l"});

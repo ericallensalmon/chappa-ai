@@ -633,23 +633,47 @@ impl Source {
                 Some(text) => check_hosts_text(text, h, HostOs::current()),
                 None => check_hosts_file(h),
             });
+        // The relay opens listeners on an address other than loopback, so
+        // like everything else that runs it waits for a trusted definition;
+        // until then every listener it had is stopped.
+        if !trusted || loaded.stack.relay.is_none() {
+            self.relay
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .stop_all();
+        }
         let relay_state = loaded.stack.relay.as_ref().map(|def| {
+            if !trusted {
+                let mut state = relay::RelayState::default();
+                for engine in &def.engines {
+                    state.problems.push(relay::RelayProblem {
+                        engine: engine.clone(),
+                        text: format!(
+                            "relay for {engine}: off until the stack definition is trusted in the app"
+                        ),
+                    });
+                }
+                return state;
+            }
             let gateways = obs
                 .gateways
                 .iter()
                 .map(|(e, g)| (e.clone(), g.address.clone()))
                 .collect();
-            let anything_running = obs.actual.values().any(|a| a.running);
-            let ports = if anything_running {
-                inst.components
-                    .values()
-                    .filter(|c| !def.engines.contains(&c.engine.name))
-                    .flat_map(|c| c.ports.iter().copied())
-                    .collect()
-            } else {
-                Default::default()
-            };
-            let (wanted, planned) = relay::plan(&def.engines, &gateways, &ports);
+            // Only the ports of components that are running now: a port
+            // the definition names but nothing listens on behind it is not
+            // forwarded.
+            let ports = inst
+                .components
+                .iter()
+                .filter(|(name, c)| {
+                    !def.engines.contains(&c.engine.name)
+                        && obs.actual.get(*name).is_some_and(|a| a.running)
+                })
+                .flat_map(|(_, c)| c.ports.iter().copied())
+                .collect();
+            let (wanted, planned) =
+                relay::plan(&def.engines, &gateways, &ports, &relay::reserved_ports(&self.addr));
             let mut relay = self.relay.lock().unwrap_or_else(|p| p.into_inner());
             let rebound = relay.reconcile(&wanted);
             let slots = &loaded.stack.slots;
