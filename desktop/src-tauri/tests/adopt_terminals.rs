@@ -120,7 +120,8 @@ fn cfg() -> ActorConfig {
 
 /// Wait until a predicate over the recorded payloads holds.
 fn wait_until<T>(mut pred: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Generous: a cold shell start on a loaded runner can take seconds.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(value) = pred() {
             return value;
@@ -219,16 +220,18 @@ fn attach_swaps_sink_delivers_subsequent_events_and_triggers_a_full() {
     // took effect: a frame already on its way to the old sink when the swap
     // was asked for may still land there before that.
     let a_count = sink_a.binary.lock().unwrap().len();
-    registry
-        .handle(id)
-        .expect("handle")
-        .ack(frame_seq(&b_first));
 
     // The later 'b' output reaches the NEW sink, and the OLD one sees nothing
-    // new after the swap.
+    // new after the swap. Every frame the new sink gets is acked as it lands,
+    // for the reason above: the child may repaint (a cursor move, a line
+    // break) before it prints 'b', and that frame left un-acked would hold
+    // 'b' back for good.
     wait_until(|| {
         let bufs = sink_b.binary.lock().unwrap().clone();
-        bufs.into_iter()
+        for b in &bufs {
+            registry.handle(id).expect("handle").ack(frame_seq(b));
+        }
+        bufs.iter()
             .any(|b| b.windows(4).any(|w| w == [0x62, 0, 0, 0]))
             .then_some(())
     });
