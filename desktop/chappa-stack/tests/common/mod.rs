@@ -55,6 +55,7 @@ pub struct Project {
 
 impl Project {
     pub fn example() -> Project {
+        stack_core::gate_store::install_for_tests();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("local");
         copy_dir(&example_source(), &dir);
@@ -63,6 +64,7 @@ impl Project {
 
     /// A project from a `chappa.yml` text (plus compose files by name).
     pub fn with(yml: &str, files: &[(&str, &str)]) -> Project {
+        stack_core::gate_store::install_for_tests();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("proj");
         fs::create_dir_all(&dir).unwrap();
@@ -147,8 +149,11 @@ pub struct Fakes {
     pub world: World,
 }
 
-/// A world of fakes around `cli` and `http`.
+/// A world of fakes around `cli` and `http`. The process's gate storage
+/// is installed on the way (one temp folder every test shares; records are
+/// keyed by project, and each test has its own).
 pub fn fakes(cli: FakeCli, http: FakeHttp) -> Fakes {
+    stack_core::gate_store::install_for_tests();
     let cli = Locked::new(cli);
     let http = Locked::new(http);
     let procs = Arc::new(FakeProcs::default());
@@ -189,6 +194,31 @@ pub fn source(world: World, dir: &Path) -> Arc<Source> {
         Token::parse(TOKEN).unwrap(),
         "127.0.0.1:5000".into(),
     )
+}
+
+/// The gate records of the project (or work folder) in `dir`.
+pub fn gate(dir: &Path) -> stack_core::gate_store::GateProject {
+    stack_core::gate_store::install_for_tests();
+    stack_core::gate_store::for_dir(dir).unwrap()
+}
+
+/// Bind `slot` of the project in `dir` to `item`, the way an activation
+/// records it.
+pub fn bind(dir: &Path, slot: u32, item: &str, instance: &str) {
+    let g = gate(dir);
+    let mut a = stack_core::intent::ActiveRecord::load(&g).unwrap();
+    a.set(slot, item, instance, "2026-11-14T12:00:00Z");
+    a.save(&g).unwrap();
+}
+
+/// Unbind every slot of the project in `dir`.
+pub fn unbind_all(dir: &Path) {
+    gate(dir)
+        .remove(
+            stack_core::gate_store::Scope::Project,
+            stack_core::intent::ACTIVE_RECORD,
+        )
+        .unwrap();
 }
 
 pub fn bearer() -> String {

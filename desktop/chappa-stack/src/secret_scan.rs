@@ -32,10 +32,14 @@
 //!
 //! Every finding's file is named relative to the stack project's folder
 //! (`.work/ABC-1/src/api-1a2b3c4d/.env`), whichever folder was scanned. The
-//! app's own pre-agent scan names files the same way, so one entry in
-//! `<project>/.work/secrets-baseline.json` silences a finding on both
-//! sides. The baseline is applied when the block is built, not when the
-//! scan runs, so an acknowledgement takes effect at once.
+//! app's own pre-agent scan names files the same way, so one entry in the
+//! project's baseline (in the app-private gate storage, see
+//! [`stack_core::safety::secrets::baseline`]) silences a finding on both
+//! sides, as long as the line it is on is the one acknowledged. The
+//! baseline is applied when the block is built, not when the scan runs, so
+//! an acknowledgement takes effect at once. A finding an older version's
+//! work-folder baseline listed is still a finding; it is marked
+//! `ackedBefore` and a reason line asks to confirm it again.
 //!
 //! # The wire block
 //!
@@ -92,10 +96,13 @@
 //! records an acknowledgement of each failed worktree scan on the
 //! instance, which lasts until that worktree's next scan succeeds.
 //!
-//! Results live in `<work>/instances/<instance>/secret-scan.json`: rules,
-//! files, lines, commits, counts and file stamps, never a value. The
-//! resolved instance env is written to a scratch file under `.work/` for
-//! the length of its scan only, and is never logged.
+//! Results live in the app-private gate storage, per instance, keyed by
+//! the stack's work folder: rules, files, lines, commits, counts and file
+//! stamps, never a value. Never in the work folder, where anything working
+//! in the project could write a clean result. The scanner's scratch (and
+//! the resolved instance env, written to an owner-only file for the length
+//! of its scan only and never logged) is in the gate storage's scratch
+//! folder, outside every project.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -109,8 +116,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use stack_core::definition::Mode;
 use stack_core::driver::ResolvedInstance;
+use stack_core::gate_store::Scope;
 use stack_core::instance_secrets::Secrets;
-use stack_core::jobs::write_atomic;
 use stack_core::planner::{Plan, Step};
 use stack_core::provenance::GitFacts;
 use stack_core::runner::StackRunner;
@@ -118,24 +125,21 @@ use stack_core::safety::secrets::config::{choose, ProjectScanConfig};
 use stack_core::safety::secrets::generated::{find_in_commits, find_in_tracked};
 use stack_core::safety::secrets::{
     list_target, policy_for, scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason,
-    SkippedFile,
+    SkippedFile, TreeLines,
 };
 use stack_core::safety::{Finding, Location, Policy, SafetyError, SecretScanner};
 use stack_core::workspace::ItemRecord;
 
-use crate::procs::instance_dir;
 use crate::project::{Binding, Loaded};
 use crate::world::World;
 
-pub const STORE_FILE: &str = "secret-scan.json";
+/// The scans' record name in the gate storage (instance scope).
+pub const STORE_RECORD: &str = "secret-scan";
 /// The Environment banner's id while the project's own gitleaks config is
 /// not the one in use.
 pub const CONFIG_REVIEW_BANNER: &str = "secret-scan-config";
 /// The acknowledge action's id (the wire block names it too).
 pub const ACK_ACTION_ID: &str = "secret-scan-ack";
-/// Where the baseline (and the scanner's scratch space) lives, under the
-/// stack project: the same folder the app's pre-agent scan uses.
-pub const BASELINE_DIR: &str = ".work";
 /// How often the bound worktrees are looked at for changed files.
 pub const RESCAN_EVERY: Duration = crate::background::SCRIPT_STATUS_TTL;
 /// The longest time between two full rescans.
@@ -150,7 +154,7 @@ const NAMED_IN_LINE: usize = 5;
 pub type SharedScanner = Arc<dyn SecretScanner + Send + Sync>;
 
 /// Where the stack's scanner comes from. `work_dir` is the scanner's
-/// scratch space (the project's `.work`, which no listing reads).
+/// scratch space (an owner-only folder outside every project).
 pub trait ScannerSource {
     fn scanner(&self, work_dir: &Path) -> Option<SharedScanner>;
 
@@ -322,30 +326,33 @@ pub struct ScanStore {
     pub error_ack: Option<ErrorAck>,
 }
 
+/// The file the instance's record is in, in the gate storage (empty when
+/// this process has none).
 pub fn store_path(work_dir: &Path, instance: &str) -> PathBuf {
-    instance_dir(work_dir, instance).join(STORE_FILE)
+    crate::records::gate_of(work_dir)
+        .and_then(|g| {
+            g.path(Scope::Instance(instance), STORE_RECORD)
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_or_default()
 }
 
 impl ScanStore {
-    /// A missing file is an empty store; one that cannot be read is an
-    /// error, so the instance cannot read as clean.
+    /// The instance's scans from the gate storage (keyed by the stack's
+    /// work folder). None yet is an empty store; one that cannot be read
+    /// (or is not private) is an error, so the instance cannot read as
+    /// clean.
     pub fn load(work_dir: &Path, instance: &str) -> Result<ScanStore, String> {
-        let path = store_path(work_dir, instance);
-        match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| format!("{} cannot be read: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ScanStore::default()),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
+        Ok(crate::records::gate_of(work_dir)?
+            .read(Scope::Instance(instance), STORE_RECORD)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default())
     }
 
     pub fn save(&self, work_dir: &Path, instance: &str) -> Result<(), String> {
-        let path = store_path(work_dir, instance);
-        write_atomic(
-            &path,
-            &serde_json::to_string_pretty(self).expect("store serializes"),
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))
+        crate::records::gate_of(work_dir)?
+            .write(Scope::Instance(instance), STORE_RECORD, self)
+            .map_err(|e| e.to_string())
     }
 
     /// Record a scan. One that finished ends the acknowledgement of its
@@ -794,10 +801,18 @@ pub fn scan_env(
         .iter()
         .map(|n| format!("{n}={}\n", env[*n].replace(['\r', '\n'], " ")))
         .collect();
-    if let Err(err) = fs::create_dir_all(scratch_dir) {
-        e.error
-            .get_or_insert(format!("the instance env could not be scanned: {err}"));
+    if !scratch_dir.is_absolute() {
+        e.error.get_or_insert(
+            "the instance env could not be scanned: no private scratch folder".to_string(),
+        );
         return e;
+    }
+    if !scratch_dir.is_dir() {
+        if let Err(err) = stack_core::owner_only::create_dir(scratch_dir) {
+            e.error
+                .get_or_insert(format!("the instance env could not be scanned: {err}"));
+            return e;
+        }
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -807,7 +822,7 @@ pub fn scan_env(
         "secret-scan-env-{}-{nanos}.env",
         std::process::id()
     ));
-    if let Err(err) = fs::write(&path, text.as_bytes()) {
+    if let Err(err) = stack_core::owner_only::write_new(&path, text.as_bytes()) {
         e.error
             .get_or_insert(format!("the instance env could not be scanned: {err}"));
         return e;
@@ -913,8 +928,25 @@ fn refused_tree(loaded: &Loaded, t: &Tree, why: &str, now: &str) -> [(String, Ta
     ]
 }
 
-fn scratch_of(loaded: &Loaded) -> PathBuf {
-    loaded.dir.join(BASELINE_DIR)
+/// The scanner's scratch folder: the gate storage's, outside every
+/// project. Empty (which every scan refuses) when this process has no gate
+/// storage.
+fn scratch_dir() -> PathBuf {
+    stack_core::gate_store::GateStore::installed()
+        .and_then(|s| s.scratch_dir())
+        .unwrap_or_default()
+}
+
+/// The project's acknowledged findings.
+fn baseline_of(loaded: &Loaded) -> Result<Baseline, String> {
+    let gate = stack_core::gate_store::for_dir(&loaded.dir).map_err(|e| e.to_string())?;
+    Baseline::load(&gate).map_err(|e| e.to_string())
+}
+
+/// Where a finding's line is read from: findings are named relative to the
+/// stack project (or absolute).
+fn lines_of(loaded: &Loaded) -> TreeLines {
+    TreeLines::new(&loaded.dir)
 }
 
 /// The values generated for the stack's instances, which a worktree's
@@ -1011,7 +1043,7 @@ fn update_store(
 /// The scans that follow opening an item, adding a worktree to it,
 /// restoring it or activating it: each of its worktrees and their commits.
 pub fn scan_item(world: &World, loaded: &Loaded, item: &str, say: &mut dyn FnMut(&str)) {
-    let scanner = world.secrets.scanner(&scratch_of(loaded));
+    let scanner = world.secrets.scanner(&scratch_dir());
     if !wanted(loaded, scanner.is_some()) {
         return;
     }
@@ -1090,7 +1122,7 @@ pub fn gate_builds(
     if builds.is_empty() {
         return Ok(());
     }
-    let scanner = world.secrets.scanner(&scratch_of(loaded));
+    let scanner = world.secrets.scanner(&scratch_dir());
     if !wanted(loaded, scanner.is_some()) {
         return Ok(());
     }
@@ -1104,7 +1136,8 @@ pub fn gate_builds(
             Ok(())
         };
     };
-    let baseline = Baseline::load(&scratch_of(loaded)).unwrap_or_default();
+    let baseline = baseline_of(loaded).unwrap_or_default();
+    let lines = lines_of(loaded);
     let now = world.clock.now_utc();
     let mut problems = Vec::new();
     let mut entries = Vec::new();
@@ -1125,7 +1158,7 @@ pub fn gate_builds(
         let live: Vec<String> = entry
             .findings
             .iter()
-            .filter(|f| !baseline.contains(f))
+            .filter(|f| !baseline.contains(f, &lines))
             .map(finding_line)
             .collect();
         if let Some(err) = &entry.error {
@@ -1208,13 +1241,13 @@ pub fn scan_env_for(
     inst: &ResolvedInstance,
     say: &mut dyn FnMut(&str),
 ) {
-    let Some(scanner) = world.secrets.scanner(&scratch_of(loaded)) else {
+    let Some(scanner) = world.secrets.scanner(&scratch_dir()) else {
         return;
     };
     let entry = scan_env(
         &*scanner,
         &loaded.dir,
-        &scratch_of(loaded),
+        &scratch_dir(),
         &env_files(loaded, runner, inst),
         &instance_env(loaded, inst),
         &world.clock.now_utc(),
@@ -1241,12 +1274,15 @@ pub fn rescan(
     runner: &StackRunner<'_>,
     inst: Option<&ResolvedInstance>,
 ) -> bool {
-    let Some(scanner) = world.secrets.scanner(&scratch_of(loaded)) else {
+    let Some(scanner) = world.secrets.scanner(&scratch_dir()) else {
         return false;
     };
     let instance = loaded.instance_id();
     let work_dir = loaded.work_dir();
-    let mut store = ScanStore::load(&work_dir, &instance).unwrap_or_default();
+    let read = ScanStore::load(&work_dir, &instance);
+    let unreadable = read.is_err();
+    let mut store = read.unwrap_or_default();
+    let before = store.clone();
     let now_secs = world.clock.now_secs();
     let now = world.clock.now_utc();
     let full = store
@@ -1335,7 +1371,7 @@ pub fn rescan(
             let e = scan_env(
                 &*scanner,
                 &loaded.dir,
-                &scratch_of(loaded),
+                &scratch_dir(),
                 &env_files(loaded, runner, inst),
                 &instance_env(loaded, inst),
                 &now,
@@ -1345,8 +1381,12 @@ pub fn rescan(
         }
         store.last_full_secs = Some(now_secs);
     }
-    if let Err(e) = store.save(&work_dir, &instance) {
-        eprintln!("chappa-stack: secret scan results could not be kept: {e}");
+    // Written only when something changed (each write makes a fresh
+    // owner-only file), or to replace a store that cannot be read.
+    if unreadable || store != before {
+        if let Err(e) = store.save(&work_dir, &instance) {
+            eprintln!("chappa-stack: secret scan results could not be kept: {e}");
+        }
     }
     scanned
 }
@@ -1389,6 +1429,9 @@ pub struct SecretsView {
     pub unscanned: Vec<String>,
     pub ack: Value,
     pub state: &'static str,
+    /// Findings an older version's work-folder baseline listed: still
+    /// findings, to be confirmed again.
+    pub acked_before: usize,
 }
 
 /// Put together the view from the definition, the binding, the stored
@@ -1412,6 +1455,7 @@ pub fn summarize(
         unscanned: Vec::new(),
         ack: Value::Null,
         state: "clean",
+        acked_before: 0,
     };
     if !wanted(loaded, scanner_found) {
         // Nothing can scan here, and the stack asks for nothing: the bound
@@ -1488,6 +1532,7 @@ pub fn summarize(
         });
     }
     let mut acked_notes: Vec<(String, String, String)> = Vec::new();
+    let lines = lines_of(loaded);
     for key in relevant {
         let Some(entry) = st.targets.get(&key) else {
             continue;
@@ -1495,7 +1540,11 @@ pub fn summarize(
         let (acked, live): (Vec<&Finding>, Vec<&Finding>) = entry
             .findings
             .iter()
-            .partition(|f| base.is_some_and(|b| b.contains(f)));
+            .partition(|f| base.is_some_and(|b| b.contains(f, &lines)));
+        view.acked_before += live
+            .iter()
+            .filter(|f| base.is_some_and(|b| b.acked_before(f)))
+            .count();
         if let Some(b) = base {
             for f in &acked {
                 if let Some(n) =
@@ -1635,6 +1684,21 @@ impl SecretsView {
                 ));
             }
         }
+        if self.acked_before > 0 {
+            out.push((
+                None,
+                format!(
+                    "{} of these {} acknowledged before this update — confirm again",
+                    self.acked_before,
+                    if self.acked_before == 1 {
+                        "was"
+                    } else {
+                        "were"
+                    }
+                ),
+                false,
+            ));
+        }
         for t in &self.targets {
             for w in &t.entry.warnings {
                 out.push((
@@ -1663,11 +1727,17 @@ impl SecretsView {
 
     /// The `secretScan` block (see the module docs).
     pub fn wire(&self, loaded: &Loaded) -> Value {
+        let before = (self.acked_before > 0)
+            .then(|| baseline_of(loaded).ok())
+            .flatten();
         let findings: Vec<Value> = self
             .live()
             .filter_map(|f| match &f.location {
                 Location::Source { file, line, commit } => {
                     let mut v = json!({ "rule": f.rule, "file": slashed(file) });
+                    if before.as_ref().is_some_and(|b| b.acked_before(f)) {
+                        v["ackedBefore"] = true.into();
+                    }
                     if let Some(l) = line {
                         v["line"] = (*l).into();
                     }
@@ -1772,10 +1842,10 @@ impl SecretsView {
         let live: Vec<Finding> = self.live().cloned().collect();
         let mut added = 0;
         if !live.is_empty() {
-            let dir = scratch_of(loaded);
-            let mut baseline = Baseline::load(&dir).map_err(|e| e.to_string())?;
-            added = baseline.acknowledge(&live, who, note, now_utc);
-            baseline.save(&dir).map_err(|e| e.to_string())?;
+            let gate = stack_core::gate_store::for_dir(&loaded.dir).map_err(|e| e.to_string())?;
+            let mut baseline = Baseline::load(&gate).map_err(|e| e.to_string())?;
+            added = baseline.acknowledge(&live, &lines_of(loaded), who, note, now_utc);
+            baseline.save(&gate).map_err(|e| e.to_string())?;
         }
         let keys: Vec<String> = self.agent_errors().map(|e| e.key.clone()).collect();
         let n_errors = keys.len();
@@ -1963,9 +2033,9 @@ pub fn unavailable_block(instance: &str, project: &Path, reason: &str) -> Value 
 
 /// The view now, for the payload and the ack action.
 pub fn view_of(world: &World, loaded: &Loaded) -> SecretsView {
-    let scanner_found = world.secrets.scanner(&scratch_of(loaded)).is_some();
+    let scanner_found = world.secrets.scanner(&scratch_dir()).is_some();
     let store = ScanStore::load(&loaded.work_dir(), &loaded.instance_id());
-    let baseline = Baseline::load(&scratch_of(loaded)).map_err(|e| e.to_string());
+    let baseline = baseline_of(loaded);
     summarize(loaded, &store, &baseline, scanner_found)
 }
 

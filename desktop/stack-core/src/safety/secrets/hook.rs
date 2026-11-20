@@ -12,7 +12,8 @@
 //! | `{list}` | `CHAPPA_SCAN_LIST` | a file listing the paths to scan, one per line, relative to the root |
 //! | `{range}` | `CHAPPA_SCAN_RANGE` | the commit range (`<base>..HEAD`), commit scans only |
 //!
-//! The list file lives in a fresh directory under the work directory and
+//! The list file lives in a fresh owner-only directory under the scratch
+//! folder (outside every project, as for gitleaks) and
 //! is removed afterwards. Exit codes in `ok_exit_codes` (default 0 and 1,
 //! since many scanners exit 1 when they find something) are a normal
 //! result; anything else is a failure. The hook's stderr is never quoted in

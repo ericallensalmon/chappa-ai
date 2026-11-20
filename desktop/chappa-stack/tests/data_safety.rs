@@ -492,12 +492,7 @@ fn the_block_names_the_bound_item_and_its_folders() {
         .to_string(),
     )
     .unwrap();
-    fs::write(
-        work.join("active.json"),
-        json!({ "slots": { "0": { "item": "ABC-1", "instance": "app-0", "sinceUtc": NOW } } })
-            .to_string(),
-    )
-    .unwrap();
+    bind(&p.dir, 0, "ABC-1", "app-0");
     check(&src, &f.world, &p.dir);
     let ds = env(&src)["dataSafety"].clone();
     assert_eq!(ds["blocksAgents"], true);
@@ -533,6 +528,49 @@ fn the_block_names_the_bound_item_and_its_folders() {
     assert_eq!(ds["bound"]["source"], Value::Null);
     assert_eq!(ds["bound"]["key"], "ABC-1");
     assert_eq!(ds["bound"]["folders"].as_array().unwrap().len(), 1);
+}
+
+/// A binding read from the work-folder file an older version kept (which
+/// anything working in the project can write) is shown as such, and the
+/// blocks do not narrow to the folders it names: they cover the project.
+#[test]
+fn a_binding_from_the_work_folder_file_is_shown_and_narrows_no_block() {
+    let p = project("block-agents", "warn", "");
+    let f = world_at(running_cli(Ok(MARKER_OK), &dirty_sample(&[CARD_1])));
+    let src = source(f.world.clone(), &p.dir);
+    let item = p.work().join("ABC-1");
+    fs::create_dir_all(item.join("src/api-1a2b3c4d")).unwrap();
+    fs::write(
+        p.work().join("active.json"),
+        json!({ "slots": { "0": { "item": "ABC-1", "instance": "app-0", "sinceUtc": NOW } } })
+            .to_string(),
+    )
+    .unwrap();
+    check(&src, &f.world, &p.dir);
+    let e = env(&src);
+    let ds = &e["dataSafety"];
+    assert_eq!(ds["blocksAgents"], true, "{ds}");
+    assert_eq!(ds["bound"], Value::Null, "covers the project: {ds}");
+    let banner = e["banners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "binding-from-work-folder")
+        .unwrap_or_else(|| panic!("no banner: {}", e["banners"]));
+    assert!(
+        banner["title"].as_str().unwrap().contains("bound to ABC-1"),
+        "{banner}"
+    );
+    // Recorded in the app's storage, it is the binding, and the file is
+    // never written.
+    bind(&p.dir, 0, "ABC-1", "app-0");
+    let e = env(&src);
+    assert_eq!(e["dataSafety"]["bound"]["key"], "ABC-1");
+    assert!(!e["banners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["id"] == "binding-from-work-folder"));
 }
 
 #[test]
@@ -660,6 +698,59 @@ fn blocks_agents_over_every_policy_and_state() {
 
 // ---------------------------------------------------------- acknowledge
 
+/// Verdicts and acknowledgements are read from the app's own storage
+/// only: a store written into the work folder (by anything working in the
+/// project, or kept by an older version) counts for nothing. An old
+/// acknowledgement that matches today's verdict is shown, to be confirmed
+/// again with one acknowledgement.
+#[test]
+fn a_verdict_or_acknowledgement_written_into_the_work_folder_opens_no_gate() {
+    let p = project("block-agents", "block-agents", "");
+    let f = world_at(running_cli(Ok(MARKER_OK), &dirty_sample(&[CARD_1])));
+    let src = source(f.world.clone(), &p.dir);
+    check(&src, &f.world, &p.dir);
+    let a = ack_action(&env(&src)).expect("offered while not clean");
+    let (status, body) = actor(&src, &ack_body(&a, Some("known"), true), Some("human:alex"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(env(&src)["dataSafety"]["state"], "acknowledged");
+    // The acknowledged store, as if it were in the work folder (where an
+    // older version kept it, and where anything can write), and none in
+    // the app's storage.
+    let stored = data_safety::store_path(&p.work(), "app-0");
+    let legacy = data_safety::legacy_store_path(&p.work(), "app-0");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::copy(&stored, &legacy).unwrap();
+    fs::remove_file(&stored).unwrap();
+    let ds = env(&src)["dataSafety"].clone();
+    assert_eq!(
+        (ds["state"].as_str(), ds["blocksAgents"].as_bool()),
+        (Some("unscanned"), Some(true)),
+        "{ds}"
+    );
+    // Checked again: the same findings, not acknowledged, the old
+    // acknowledgement named.
+    check(&src, &f.world, &p.dir);
+    let ds = env(&src)["dataSafety"].clone();
+    assert_eq!(
+        (ds["state"].as_str(), ds["blocksAgents"].as_bool()),
+        (Some("not-clean"), Some(true)),
+        "{ds}"
+    );
+    assert_eq!(ds["ackedBefore"], json!(["db"]), "{ds}");
+    assert!(
+        ds["reasons"]
+            .to_string()
+            .contains("db: acknowledged before this update — confirm again"),
+        "{ds}"
+    );
+    let a = ack_action(&env(&src)).expect("offered while not clean");
+    let (status, body) = actor(&src, &ack_body(&a, Some("again"), true), Some("human:alex"));
+    assert_eq!(status, 200, "{body}");
+    let ds = env(&src)["dataSafety"].clone();
+    assert_eq!(ds["state"], "acknowledged", "{ds}");
+    assert!(ds.get("ackedBefore").is_none(), "{ds}");
+}
+
 #[test]
 fn acknowledging_needs_a_confirm_and_a_note_and_ends_on_a_count_change() {
     let p = project("block-agents", "warn", "");
@@ -768,16 +859,9 @@ fn acknowledging_needs_a_confirm_and_a_note_and_ends_on_a_count_change() {
 // ------------------------------------------------------------- schedule
 
 fn check_jobs(work: &Path) -> Vec<JobRecord> {
-    let Ok(entries) = fs::read_dir(records::jobs_dir(work)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<JobRecord> = entries
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            let id = n.strip_suffix(".json")?;
-            JobRecord::load(work, id).ok().flatten()
-        })
+    let mut out: Vec<JobRecord> = records::record_ids(work)
+        .into_iter()
+        .filter_map(|id| JobRecord::load(work, &id).ok().flatten())
         .filter(|r| r.action == "data-safety-check")
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1146,6 +1230,7 @@ fn no_sampled_value_reaches_the_payload_the_logs_or_any_file() {
 
     let mut files = Vec::new();
     files_under(&p.work(), &mut files);
+    files_under(gate(&p.work()).dir(), &mut files);
     assert!(
         files.iter().any(|f| f.ends_with("data-safety.json")),
         "{files:?}"

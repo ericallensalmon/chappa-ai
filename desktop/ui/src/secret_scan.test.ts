@@ -49,6 +49,18 @@ describe("messages", () => {
     expect(anyway.body).toContain("scanner being replaced");
   });
 
+  it("mark a finding acknowledged before this update, which still blocks until confirmed", () => {
+    const old = { ...block, findings: [{ ...block.findings[0], ackedBefore: true }, block.findings[1]], skipped: 0 };
+    expect(parseSecretScanBlock(`${BLOCK_PREFIX}${JSON.stringify(old)}`)).toEqual(old);
+    expect(findingLine(old.findings[0])).toBe(".env:1  (github-pat)  — acknowledged before this update — confirm again");
+    expect(findingLine(old.findings[1])).toBe("config/settings.json  (generic-api-key)");
+    const text = blockMessage(old);
+    expect(text).toContain("The agent was not launched: 2 possible secrets");
+    expect(text).toContain("1 of these was acknowledged before this update");
+    expect(text).not.toContain(".work/ and stop blocking");
+    expect(blockMessage(block)).not.toContain("acknowledged before");
+  });
+
   it("read and explain a refusal for a scan that did not finish", () => {
     const incomplete = { projectRoot: "/p", cwd: "/p/wt", findings: [], skipped: 0, incomplete: "gitleaks was not found" };
     expect(parseSecretScanBlock(`${BLOCK_PREFIX}${JSON.stringify(incomplete)}`)).toEqual(incomplete);

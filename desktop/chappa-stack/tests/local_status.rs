@@ -2,8 +2,9 @@
 //! first state or the one the tracker's status maps to, moves follow the
 //! workflow's list and note rules, `human` and `human-exit` gates judge
 //! the `X-Chappa-Actor` header (an agent entering a `human` state waits
-//! for a person's approval), rounds and history are kept in `item.json`,
-//! and a tracker status that means another state puts a banner with the
+//! for a person's approval), rounds and history are kept in the app's gate
+//! storage (a workflow written into `item.json` counts for nothing), and a
+//! tracker status that means another state puts a banner with the
 //! move on the item. The status blocks are pinned as
 //! `tests/snapshots/local_status.json` (`UPDATE_SNAPSHOTS=1` rewrites it).
 //! git and the engines are fakes: none of this asks either.
@@ -173,12 +174,17 @@ fn rec(ws: &Ws, key: &str) -> ItemRecord {
     ItemRecord::load(&ws.p.work().join(key)).unwrap().unwrap()
 }
 
+/// The item's workflow record, from the gate storage.
+fn wf(ws: &Ws, key: &str) -> Option<stack_core::workflow::WorkflowRecord> {
+    stack_core::workflow::load_record(&gate(&ws.p.dir), key).unwrap()
+}
+
 fn action<'a>(row: &'a Value, id: &str) -> Option<&'a Value> {
     row["actions"].as_array()?.iter().find(|a| a["id"] == id)
 }
 
 fn state(ws: &Ws, key: &str) -> String {
-    rec(ws, key).workflow.unwrap().state
+    wf(ws, key).unwrap().state
 }
 
 fn kind(reply: &(u16, Value)) -> (u16, &str) {
@@ -196,7 +202,7 @@ fn no_workflow_means_no_status_block_and_no_moves() {
         .unwrap()
         .iter()
         .any(|a| a["id"].as_str().unwrap().starts_with("move:")));
-    assert!(rec(&ws, "ABC-1").workflow.is_none());
+    assert!(wf(&ws, "ABC-1").is_none());
     let reply = act(
         &ws,
         "ABC-1",
@@ -215,7 +221,7 @@ fn no_workflow_means_no_status_block_and_no_moves() {
 fn start_work_picks_the_first_state_or_the_one_the_tracker_maps_to() {
     let ws = setup();
     start(&ws, "ABC-1", "Brand new");
-    let w = rec(&ws, "ABC-1").workflow.unwrap();
+    let w = wf(&ws, "ABC-1").unwrap();
     assert_eq!(
         (
             w.state.as_str(),
@@ -227,14 +233,14 @@ fn start_work_picks_the_first_state_or_the_one_the_tracker_maps_to() {
     );
     assert_eq!(w.history.len(), 1);
     start(&ws, "ABC-2", "Code Review");
-    let w = rec(&ws, "ABC-2").workflow.unwrap();
+    let w = wf(&ws, "ABC-2").unwrap();
     assert_eq!((w.state.as_str(), w.actor.as_str()), ("review", "tracker"));
     // Another source's status falls back to the "*" map.
     start_from(&ws, "other", "XYZ-3", "Doing", Some(AGENT));
     assert_eq!(state(&ws, "XYZ-3"), "dev");
     // No actor header: the first state, by "unknown".
     start_from(&ws, "tracker", "ABC-4", "Elsewhere", None);
-    assert_eq!(rec(&ws, "ABC-4").workflow.unwrap().actor, "unknown");
+    assert_eq!(wf(&ws, "ABC-4").unwrap().actor, "unknown");
     // The block on the row says the same.
     let ls = &row(&ws, "ABC-2")["localStatus"];
     assert_eq!(
@@ -263,12 +269,9 @@ fn an_item_started_before_the_workflow_existed_stands_where_it_would_have_starte
         (&ls["id"], &ls["actor"]),
         (&json!("dev"), &json!("tracker"))
     );
-    assert!(
-        rec(&ws, "ABC-1").workflow.is_none(),
-        "nothing written by a read"
-    );
+    assert!(wf(&ws, "ABC-1").is_none(), "nothing written by a read");
     assert_eq!(run(&ws, "ABC-1", "move:review", None, AGENT).0, 200);
-    let w = rec(&ws, "ABC-1").workflow.unwrap();
+    let w = wf(&ws, "ABC-1").unwrap();
     assert_eq!(w.state, "review");
     assert_eq!(w.history.len(), 2);
 }
@@ -358,7 +361,7 @@ fn moves_follow_the_list_need_their_notes_and_must_be_confirmed() {
         run(&ws, "ABC-1", "move:dev", Some("tests fail"), HUMAN).0,
         200
     );
-    let w = rec(&ws, "ABC-1").workflow.unwrap();
+    let w = wf(&ws, "ABC-1").unwrap();
     let last = w.history.last().unwrap();
     assert_eq!(
         (
@@ -409,10 +412,47 @@ fn only_a_person_leaves_a_human_exit_state() {
         assert_eq!(kind(&reply), (409, "human-only"), "{who:?}");
     }
     assert_eq!(state(&ws, "ABC-1"), "review");
-    assert!(rec(&ws, "ABC-1").workflow.unwrap().pending.is_none());
+    assert!(wf(&ws, "ABC-1").unwrap().pending.is_none());
     // A person: straight into done, gate and all.
     assert_eq!(run(&ws, "ABC-1", "move:done", None, HUMAN).0, 200);
     assert_eq!(state(&ws, "ABC-1"), "done");
+}
+
+/// The workflow state is read from the app's own storage only: a record
+/// written into the item's folder (by anything working in it, or kept by an
+/// older version) neither moves the item past a gate nor approves a move.
+#[test]
+fn a_workflow_written_into_the_item_folder_opens_no_gate() {
+    let ws = setup();
+    start(&ws, "ABC-1", "Code Review");
+    assert_eq!(state(&ws, "ABC-1"), "review");
+    let file = ws.p.work().join("ABC-1").join("item.json");
+    let mut item: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    item["workflow"] = json!({
+        "state": "done", "sinceUtc": NOW, "actor": HUMAN, "round": 1,
+        "visits": { "done": 1 }, "history": []
+    });
+    fs::write(&file, item.to_string()).unwrap();
+    // Still where the person's storage says, and an agent still cannot
+    // leave the human-exit state.
+    assert_eq!(state(&ws, "ABC-1"), "review");
+    assert_eq!(row(&ws, "ABC-1")["localStatus"]["id"], "review");
+    let reply = run_as(&ws, "ABC-1", "move:done", None, Some(AGENT));
+    assert_eq!(kind(&reply), (409, "human-only"));
+    // A move waiting for approval is not approved by a planted record.
+    let ws = setup();
+    start(&ws, "ABC-2", "In Progress");
+    assert_eq!(run(&ws, "ABC-2", "move:done", None, AGENT).0, 200);
+    assert!(wf(&ws, "ABC-2").unwrap().pending.is_some());
+    let file = ws.p.work().join("ABC-2").join("item.json");
+    let mut item: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    item["workflow"] = json!({
+        "state": "done", "sinceUtc": NOW, "actor": HUMAN, "round": 1,
+        "visits": { "done": 1 }, "history": []
+    });
+    fs::write(&file, item.to_string()).unwrap();
+    assert_eq!(state(&ws, "ABC-2"), "dev");
+    assert!(wf(&ws, "ABC-2").unwrap().pending.is_some());
 }
 
 fn run_as(ws: &Ws, key: &str, id: &str, note: Option<&str>, actor: Option<&str>) -> (u16, Value) {
@@ -471,7 +511,7 @@ fn an_agent_entering_a_human_state_waits_for_a_person_to_approve_or_send_back() 
         run(&ws, "ABC-1", "send-back", Some("docs missing"), HUMAN).0,
         200
     );
-    let w = rec(&ws, "ABC-1").workflow.unwrap();
+    let w = wf(&ws, "ABC-1").unwrap();
     assert_eq!((w.state.as_str(), w.pending.is_none()), ("dev", true));
     let ls = &row(&ws, "ABC-1")["localStatus"];
     assert_eq!(
@@ -516,7 +556,7 @@ fn an_agent_entering_a_human_state_waits_for_a_person_to_approve_or_send_back() 
             json!({ "message": "ABC-1: In development → Done (approved; asked by agent:a1)" })
         )
     );
-    let w = rec(&ws, "ABC-1").workflow.unwrap();
+    let w = wf(&ws, "ABC-1").unwrap();
     assert_eq!(
         (w.state.as_str(), w.actor.as_str(), w.pending.is_none()),
         ("done", HUMAN, true)
@@ -562,7 +602,7 @@ fn rounds_count_how_often_the_item_entered_its_state() {
         ]
         .map(|(s, n)| (s.to_string(), n))
     );
-    assert_eq!(rec(&ws, "ABC-1").workflow.unwrap().history.len(), 6);
+    assert_eq!(wf(&ws, "ABC-1").unwrap().history.len(), 6);
 }
 
 fn banner(ws: &Ws, key: &str) -> Option<Value> {

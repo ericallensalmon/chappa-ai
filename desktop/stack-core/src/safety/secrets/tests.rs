@@ -123,6 +123,7 @@ fn working_tree_scans_the_list_and_keeps_findings_inside_it() {
     let mut baseline = Baseline::default();
     baseline.acknowledge(
         &[src("r", "src/a.rs", 1)],
+        &TreeLines::new(root),
         "me",
         "fixture",
         "2026-01-01T00:00:00Z",
@@ -421,6 +422,79 @@ fn stub_gitleaks(dir: &Path, code: i32) -> PathBuf {
     )
 }
 
+/// A stand-in for gitleaks that reports nothing (a clean scan) and, while
+/// it runs, does `swap` in the staging folder it runs from (the shell's
+/// line for each system).
+fn clean_stub_that_swaps(dir: &Path, windows: &str, unix: &str) -> PathBuf {
+    script(
+        dir,
+        "gitleaks",
+        &format!(
+            "{windows}\n\
+             :loop\n\
+             if \"%~1\"==\"\" goto done\n\
+             if \"%~1\"==\"--report-path\" echo []> \"%~2\"\n\
+             shift\n\
+             goto loop\n\
+             :done\n\
+             exit /b 0"
+        ),
+        &format!(
+            "{unix}\n\
+             while [ $# -gt 0 ]; do\n\
+             if [ \"$1\" = \"--report-path\" ]; then echo '[]' > \"$2\"; fi\n\
+             shift\n\
+             done\n\
+             exit 0"
+        ),
+    )
+}
+
+/// A clean report is trusted only when every staged file is still the one
+/// staged: a staged file swapped for another while the scanner ran fails
+/// the scan instead of passing a file nobody read.
+#[test]
+fn a_clean_report_over_a_swapped_staged_file_is_not_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    write(&root, "a.txt", "TOKEN=something\n");
+    write(&root, "b.txt", "x\n");
+    let target = ScanTarget::WorkingTree {
+        root: root.clone(),
+        excludes: vec![],
+    };
+    let run = |name: &str, windows: &str, unix: &str| {
+        let bin = dir.path().join(name);
+        fs::create_dir_all(&bin).unwrap();
+        let stub = clean_stub_that_swaps(&bin, windows, unix);
+        let scanner = GitleaksScanner::new(stub, dir.path().join("scratch"));
+        scan(&scanner, &target, &no_git(), &Baseline::default())
+    };
+    // The control: the same stub without the swap is a clean scan.
+    let clean = run("plain", "rem nothing", "true").unwrap();
+    assert!(clean.findings.is_empty());
+    assert_eq!(clean.scanned_files, 2);
+    // Replaced in the staging folder.
+    let err = run(
+        "swap",
+        "del a.txt\necho clean> a.txt",
+        "rm -f a.txt; echo clean > a.txt",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("a.txt changed while it was scanned"), "{err}");
+    // The original replaced (renamed over) while the scan ran.
+    let original = root.join("a.txt").display().to_string();
+    let err = run(
+        "orig",
+        &format!("echo other> \"{original}.new\"\nmove /y \"{original}.new\" \"{original}\" >nul"),
+        &format!("echo other > '{original}.new'; mv -f '{original}.new' '{original}'"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("changed while it was scanned"), "{err}");
+}
+
 /// An unredacted gitleaks-shaped report holding `value` in every field a
 /// value can sit in.
 fn canned_gitleaks(value: &str, file: &str) -> String {
@@ -494,16 +568,11 @@ fn stub_gitleaks_is_found_on_a_temp_path_and_its_report_is_stripped() {
     let cwd = fs::read_to_string(bin.join("cwd.txt")).unwrap();
     assert!(cwd.contains("stage"), "runs from the staging dir: {cwd}");
     assert!(args.contains("--config"), "an explicit config: {args}");
-    let leftovers: Vec<_> = fs::read_dir(&work)
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_name() != crate::workdir::IGNORE_FILE)
-        .collect();
+    let leftovers: Vec<_> = fs::read_dir(&work).unwrap().flatten().collect();
     assert!(leftovers.is_empty(), "staging and report removed");
-    assert_eq!(
-        fs::read_to_string(work.join(crate::workdir::IGNORE_FILE)).unwrap(),
-        "*\n",
-        "the work folder ignores itself"
+    assert!(
+        crate::owner_only::is_owner_only(&work).unwrap(),
+        "the scratch folder is private"
     );
 }
 
@@ -733,25 +802,24 @@ fn real_gitleaks_flags_an_ignored_env_file_and_the_baseline_silences_it() {
     let verdict = Verdict::from_findings(Policy::BlockAgents, report.findings.clone());
     assert!(verdict.blocks_agents() && !verdict.blocks_build());
 
-    // acknowledge into the project's .work, as the gate would
-    let dot_work = repo.join(".work");
-    let mut baseline = Baseline::load(&dot_work).unwrap();
+    // acknowledge into the project's gate records, as the gate would
+    let gate = crate::gate_store::GateStore::new(dir.path().join("gate")).project(&repo);
+    let mut baseline = Baseline::load(&gate).unwrap();
     baseline.acknowledge(
         &report.findings,
+        &TreeLines::new(&repo),
         "me",
         "test fixture",
         "2026-01-01T00:00:00Z",
     );
-    baseline.save(&dot_work).unwrap();
-    let on_disk = fs::read_to_string(Baseline::path(&dot_work)).unwrap();
-    assert!(!on_disk.contains(&token));
-    let again = scan(
-        &scanner,
-        &target,
-        &limits,
-        &Baseline::load(&dot_work).unwrap(),
+    baseline.save(&gate).unwrap();
+    let on_disk = fs::read_to_string(
+        gate.path(crate::gate_store::Scope::Project, baseline::BASELINE_RECORD)
+            .unwrap(),
     )
     .unwrap();
+    assert!(!on_disk.contains(&token));
+    let again = scan(&scanner, &target, &limits, &Baseline::load(&gate).unwrap()).unwrap();
     assert!(again.findings.is_empty(), "{again:?}");
     assert_eq!(again.baselined, 1);
     assert_eq!(
@@ -777,11 +845,8 @@ fn real_gitleaks_flags_an_ignored_env_file_and_the_baseline_silences_it() {
     assert_eq!(report.scanned_files, 1);
     assert_eq!(report.findings, [src("github-pat", ".env", 1)]);
     assert!(
-        fs::read_dir(&work)
-            .unwrap()
-            .flatten()
-            .all(|e| e.file_name() == crate::workdir::IGNORE_FILE),
-        "work dir left clean"
+        fs::read_dir(&work).unwrap().next().is_none(),
+        "scratch folder left clean"
     );
 }
 
@@ -1082,14 +1147,25 @@ fn real_gitleaks_default_config_catches_inline_credentials_in_agent_settings() {
     assert!(!shown.contains(&pw), "{shown}");
 }
 
+/// A scan leaves nothing in the scanned tree: its scratch and the
+/// acknowledgements live outside it, so `git status` shows nothing new.
 #[test]
-fn nothing_a_scan_leaves_in_the_work_folder_shows_up_in_git_status() {
+fn a_scan_and_an_acknowledgement_leave_nothing_in_the_scanned_tree() {
     let dir = tempfile::tempdir().unwrap();
     let repo = leaky_repo(dir.path());
-    let dot_work = repo.join(".work");
-    let Some(scanner) = real_gitleaks(&dot_work) else {
+    let scratch = dir.path().join("scratch");
+    let Some(scanner) = real_gitleaks(&scratch) else {
         return;
     };
+    let before = git(
+        &repo,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+    );
     let target = ScanTarget::WorkingTree {
         root: repo.clone(),
         excludes: vec![],
@@ -1101,15 +1177,43 @@ fn nothing_a_scan_leaves_in_the_work_folder_shows_up_in_git_status() {
         &Baseline::default(),
     )
     .unwrap();
-    let mut baseline = Baseline::load(&dot_work).unwrap();
-    baseline.acknowledge(&report.findings, "me", "fixture", "2026-01-01T00:00:00Z");
-    baseline.save(&dot_work).unwrap();
-    // A crash leaves scratch behind; it is still ignored.
-    fs::create_dir_all(dot_work.join("secret-scan-1-2-3/stage")).unwrap();
-    write(&dot_work, "secret-scan-1-2-3/stage/.env", "x\n");
-    let status = git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
-    assert!(!status.contains(".work"), "{status}");
-    assert!(Baseline::path(&dot_work).is_file());
+    let gate = crate::gate_store::GateStore::new(dir.path().join("gate")).project(&repo);
+    let mut baseline = Baseline::load(&gate).unwrap();
+    baseline.acknowledge(
+        &report.findings,
+        &TreeLines::new(&repo),
+        "me",
+        "fixture",
+        "2026-01-01T00:00:00Z",
+    );
+    baseline.save(&gate).unwrap();
+    let after = git(
+        &repo,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+    );
+    assert_eq!(before, after);
+    assert!(!repo.join(".work").exists());
+}
+
+/// Scan scratch is refused anywhere but an absolute folder, and is made
+/// owner-only.
+#[test]
+fn scratch_is_private_and_never_relative() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(gitleaks::ScratchDir::new(Path::new("rel"), "x").is_err());
+    assert!(gitleaks::ScratchDir::new(Path::new(""), "x").is_err());
+    let root = dir.path().join("scratch");
+    let one = gitleaks::ScratchDir::new(&root, "secret-scan").unwrap();
+    assert!(crate::owner_only::is_owner_only(&root).unwrap());
+    assert!(crate::owner_only::is_owner_only(&one.path).unwrap());
+    let path = one.path.clone();
+    drop(one);
+    assert!(!path.exists());
 }
 
 /// A project config is layered on the app's own config, never in place of

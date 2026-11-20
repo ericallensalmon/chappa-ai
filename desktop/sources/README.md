@@ -497,8 +497,11 @@ block beside `dataSafety`:
 A finding's file is named from the stack project's folder, the way the
 app's own scan before an agent launch names it, so acknowledging it on
 either side (the `secret-scan-ack` action, or the launch dialog) writes
-the same entry in `<project>/.work/secrets-baseline.json` and silences
-both. `secret-scan-ack` is view-level, `mutates: true`, `note:
+the same entry in the project's baseline, in the app's own storage
+(never in the project), and silences both while the line stays as it
+was acknowledged. A finding an older version's work-folder baseline
+listed carries `ackedBefore: true` and a reason line asking to confirm
+it again; it blocks like any other. `secret-scan-ack` is view-level, `mutates: true`, `note:
 "required"`; its confirm lists every finding as `file:line (rule)` and
 every unfinished worktree scan with its reason. An acknowledged
 unfinished scan lasts until that worktree's next scan succeeds.

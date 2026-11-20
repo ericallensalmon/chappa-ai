@@ -13,6 +13,7 @@ use indexmap::IndexMap;
 use stack_core::definition::{
     validate, Diagnostic, Severity, StackDef, StacksDocument, ValidationContext,
 };
+use stack_core::gate_store::GateProject;
 use stack_core::git::KnownRepos;
 use stack_core::intent::{instance_id, ActiveRecord};
 use stack_core::provenance::{GitError, GitFacts};
@@ -108,8 +109,8 @@ impl GitFacts for CheckedGit {
     }
 }
 
-/// The item a slot is bound to (`active.json`) and its worktree per clone:
-/// what every runner of the slot builds and runs from.
+/// The item a slot is bound to (the active-item record) and its worktree
+/// per clone: what every runner of the slot builds and runs from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Binding {
     /// The item's folder name.
@@ -118,6 +119,11 @@ pub struct Binding {
     /// The branch the item's record names per clone (what scripts get as
     /// `{branch:<repo>}`).
     pub branches: IndexMap<String, String>,
+    /// The binding was read from the work-folder file an older version
+    /// kept, which anything working in the project can write: it is shown
+    /// as such, and the safety blocks cover the whole project rather than
+    /// only the folders it names.
+    pub from_work_folder: bool,
 }
 
 impl Binding {
@@ -131,6 +137,7 @@ impl Binding {
                 item: Some(item.to_string()),
                 worktrees: crate::reviews::worktrees_of(work_dir, item),
                 branches: IndexMap::new(),
+                from_work_folder: false,
             };
         }
         let dir = ItemRecord::dir(work_dir, item);
@@ -151,6 +158,7 @@ impl Binding {
             item: Some(item.to_string()),
             worktrees,
             branches,
+            from_work_folder: false,
         }
     }
 }
@@ -213,19 +221,29 @@ impl Loaded {
             definition_hash,
             checked_git: OnceLock::new(),
         };
-        // The work folder holds baselines, scratch and workspaces: it is
-        // made git-ignored whenever the definition is read.
+        // The work folder holds workspaces, logs and other build material:
+        // it is made git-ignored whenever the definition is read.
         let _ = stack_core::workdir::ensure(&loaded.work_dir());
-        let active = ActiveRecord::load(&loaded.work_dir())
-            .ok()
-            .and_then(|a| a.get(slot).map(|s| s.item.clone()));
+        let (active, legacy) = loaded
+            .gate()
+            .and_then(|g| {
+                ActiveRecord::load_or_legacy(&g, &loaded.work_dir()).map_err(|e| e.to_string())
+            })
+            .map(|(a, legacy)| (a.get(slot).map(|s| s.item.clone()), legacy))
+            .unwrap_or((None, false));
         loaded.bind_item(active.as_deref());
+        loaded.binding.from_work_folder = legacy && active.is_some();
         Ok(loaded)
     }
 
-    /// Bind (or unbind) this slot's runners to `item`, whatever
-    /// `active.json` says: an activation job builds from the item it is
-    /// activating before the file says so.
+    /// The project's gate records (see [`stack_core::gate_store`]).
+    pub fn gate(&self) -> Result<GateProject, String> {
+        stack_core::gate_store::for_dir(&self.dir).map_err(|e| e.to_string())
+    }
+
+    /// Bind (or unbind) this slot's runners to `item`, whatever the
+    /// active-item record says: an activation job builds from the item it
+    /// is activating before the record says so.
     pub fn bind_item(&mut self, item: Option<&str>) {
         self.binding = match item {
             Some(i) => Binding::of_item(&self.work_dir(), i),

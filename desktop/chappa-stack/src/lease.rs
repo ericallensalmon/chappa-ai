@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use stack_core::compose::parse_utc;
 use stack_core::jobs::write_atomic;
 
-use crate::records::{self, is_job_id, jobs_dir, JobRecord, JobStatus};
+use crate::records::{self, jobs_dir, JobRecord, JobStatus};
 
 /// How long an accepted changing job may wait for its runner before it no
 /// longer holds the instance (and is settled as never started).
@@ -304,19 +304,9 @@ pub fn settle(
     .ok()
 }
 
-/// The ids of the records under `<work>/jobs/`, newest first.
+/// The ids of the stack's job records, newest first.
 fn ids_newest_first(work_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(jobs_dir(work_dir)) else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let id = name.strip_suffix(".json")?;
-            is_job_id(id).then(|| id.to_string())
-        })
-        .collect();
+    let mut ids = records::record_ids(work_dir);
     ids.sort_unstable_by(|a, b| b.cmp(a));
     ids
 }

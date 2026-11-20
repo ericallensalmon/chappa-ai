@@ -66,7 +66,7 @@
 //!
 //! An activation (a plan that binds a work item) builds from the item it
 //! activates: the runner is bound to that item's worktrees before the plan
-//! is applied, and `active.json` is written as the first step. A workspace
+//! is applied, and the active-item record is written as the first step. A workspace
 //! job (Start work, Add repo, Archive, Restore) is a git change to an item
 //! folder; see [`crate::workspaces`].
 
@@ -649,17 +649,11 @@ fn execute(
             }
             let mut steps = applied.steps;
             if let (Some(item), true) = (&binds, writes_active) {
+                let gate = loaded.gate().map_err(|e| (EXIT_REFUSED, e))?;
                 let mut active =
-                    ActiveRecord::load(work_dir).map_err(|e| (EXIT_REFUSED, e.to_string()))?;
+                    ActiveRecord::load(&gate).map_err(|e| (EXIT_REFUSED, e.to_string()))?;
                 active.set(rec.slot, item, &inst.id, &now);
-                steps.insert(
-                    0,
-                    JobStep::write(
-                        "active item",
-                        ActiveRecord::path(work_dir),
-                        serde_json::to_string_pretty(&active).expect("active serializes"),
-                    ),
-                );
+                steps.insert(0, active.save_step(&gate));
             }
             the_plan = Some(plan);
             steps
@@ -1618,7 +1612,9 @@ fn run_step(
         JobStep::Local { step: local } => {
             local.perform().map_err(|e| (None, e.to_string()))?;
             match local {
-                LocalStep::WriteFile { .. } => out.say(&format!("✓ {}", local.describe())),
+                LocalStep::WriteFile { .. } | LocalStep::WriteGate { .. } => {
+                    out.say(&format!("✓ {}", local.describe()))
+                }
                 LocalStep::Note { text } => out.say(&format!("· {text}")),
             }
             Ok(None)

@@ -141,6 +141,15 @@ pub fn run() {
             if let Err(err) = project_model::atomic::ensure_private_dir(&config_dir) {
                 log::error!("[config] cannot secure {}: {err}", config_dir.display());
             }
+            // The records that open gates (acknowledged findings, verdicts,
+            // job plans, workflow state, the active item) live in the app's
+            // own owner-only storage, never in a project's work folder; the
+            // stack runner finds the same folder from the same config dir.
+            if let Err(err) =
+                stack_core::gate_store::install(stack_core::gate_store::root_in(&config_dir))
+            {
+                log::error!("[gate] {err}");
+            }
             // Crash evidence first, before anything that could fail:
             // module inventory now, minidump + report on a native crash,
             // a report on a panic. All in the log directory.

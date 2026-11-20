@@ -152,9 +152,9 @@ fn item(p: &Project, key: &str, active: bool) -> PathBuf {
     .save(&dir)
     .unwrap();
     if active {
-        let mut a = ActiveRecord::load(&p.work()).unwrap();
+        let mut a = ActiveRecord::load(&gate(&p.dir)).unwrap();
         a.set(0, key, "app-0", NOW);
-        a.save(&p.work()).unwrap();
+        a.save(&gate(&p.dir)).unwrap();
     }
     dir
 }
@@ -551,7 +551,7 @@ fn a_mode_switch_saves_first_while_an_item_is_bound() {
     assert_eq!(list_states(&dir)[0].reason, SaveReason::BeforeModeSwitch);
 
     // With no item bound, nothing is saved and there is no twin.
-    fs::remove_file(ActiveRecord::path(&p.work())).unwrap();
+    unbind_all(&p.dir);
     deploy(&p, DIGEST_A, DIGEST_A);
     let env = get(&src, "/api/environment").1;
     let api = env["components"]
@@ -1550,7 +1550,11 @@ fn resuming_another_items_state_saves_the_bound_one_first_or_not() {
     assert_eq!(saved.len(), 2);
     assert_eq!(saved[0].reason, SaveReason::BeforeRebind);
     assert_eq!(
-        ActiveRecord::load(&p.work()).unwrap().get(0).unwrap().item,
+        ActiveRecord::load(&gate(&p.dir))
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .item,
         "ABC-2"
     );
 }

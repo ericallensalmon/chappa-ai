@@ -16,7 +16,7 @@
 //! | `alerts` | red components with their cause (`kind: state`: the view lists them in one short banner), engines that cannot be reached or run the wrong OS mode, relay failures, the hostname check, data that is not clean (`bad`) or not checked (`warn` under `unscanned: warn`) |
 //! | `facts` | the stack (instance, slot, port block, bound item, channel, who reports a script's rows; `kind: meta`: it describes the runner, not the stack's health), engines and versions (rows toned `ok` / `bad`), the memory budget, relay listeners, which peers each gateway serves and how many it refused, the relay's Windows Firewall state (added by the server, with the remove-rule action), data safety (state, policy, last scan, marker, rules hash, acknowledgement, each component, with the check and acknowledge actions; its `status` is the one badge the header shows) |
 //! | `freshness.notices` | how many reported links were left out, once for the whole view |
-//! | `banners` | definition warnings or errors; the hosts-file fix; the relay's Windows Firewall findings (added by the server, see [`crate::relay_firewall`]); agents blocked by data safety (with the acknowledge action) |
+//! | `banners` | definition warnings or errors; the hosts-file fix; the relay's Windows Firewall findings (added by the server, see [`crate::relay_firewall`]); agents blocked by data safety (with the acknowledge action); a slot binding read from an older version's work-folder file |
 //! | `dataSafety` | the instance's data-safety block the app enforces on (see [`crate::data_safety`]) |
 //! | `secretScan` | the instance's secret-scan block, added by the server with its alerts, banner and facts section (see [`crate::secret_scan`]) |
 //! | `job` | the instance's changing jobs, added by the server ([`decorate_jobs`]): `active` (pending or running: label, action, target, actor, times, `cancelling`, the log) and `last` (the newest that ended: its status `done` / `failed` / `cancelled` / `interrupted`, exit code, error line, the log); with an active job the `cancel-job` and `job-log` actions, a `running: <verb>` badge on the row it acts on and, for script stacks, a notice that status waits; a last job that did not end `done` is an alert (`bad`, `warn` when cancelled) with its `job-log` action |
@@ -1028,7 +1028,7 @@ fn data_safety_block(inp: &EnvInputs<'_>) -> Value {
     let mut block = inp.safety.wire();
     block["bound"] = data_safety::bound(inp.loaded);
     block["project"] = data_safety::project_dir(&inp.loaded.dir);
-    block["reasons"] = inp
+    let mut reasons: Vec<Value> = inp
         .safety
         .components
         .iter()
@@ -1036,6 +1036,13 @@ fn data_safety_block(inp: &EnvInputs<'_>) -> Value {
             component_problem(c).map(|(text, _)| json!({ "component": c.id, "text": text }))
         })
         .collect();
+    for c in &inp.safety.acked_before {
+        reasons.push(json!({
+            "component": c,
+            "text": format!("{c}: acknowledged before this update — confirm again"),
+        }));
+    }
+    block["reasons"] = reasons.into();
     block
 }
 
@@ -1145,6 +1152,21 @@ fn banners(inp: &EnvInputs<'_>) -> Vec<Value> {
             "title": format!("The stack definition has {} warning(s)", warnings.len()),
             "lines": warnings,
         }));
+    }
+    if inp.loaded.binding.from_work_folder {
+        if let Some(item) = &inp.loaded.binding.item {
+            out.push(json!({
+                "id": "binding-from-work-folder",
+                "tone": "warn",
+                "title": format!(
+                    "Slot {} is bound to {item} by a file in the work folder (kept by an older version, and writable by anything working in the project)",
+                    inp.loaded.slot
+                ),
+                "lines": [
+                    "Until the item is activated again, the safety checks cover the whole project, not only its folders. This file is read for one more release only."
+                ],
+            }));
+        }
     }
     if let Some(h) = &inp.hosts {
         if !h.ok() {

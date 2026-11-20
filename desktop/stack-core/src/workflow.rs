@@ -1,8 +1,13 @@
 //! The local workflow of a work item: where it stands in the stack's own
 //! status flow, who moved it there, the move waiting for a person's
-//! approval, and the history. Kept in the item's `item.json`; the rules
-//! come from the definition's `workflow:` block
-//! ([`crate::definition::WorkflowDef`]).
+//! approval, and the history. The rules come from the definition's
+//! `workflow:` block ([`crate::definition::WorkflowDef`]).
+//!
+//! **Where the record lives.** In the app-private gate storage
+//! ([`crate::gate_store`], [`load_record`] / [`save_record`]), never in the
+//! item's folder: whatever works in the item could otherwise write its own
+//! approval, or move its work past a human gate, by editing a file there.
+//! The `workflow` field older versions kept in `item.json` is not read.
 //!
 //! **Gates.** A state with gate `human` may be entered only by a person;
 //! anyone else asking to move an item there leaves the move *pending*
@@ -21,12 +26,31 @@
 //! state; [`tracker_mismatch`] says when the two disagree, so the Work row
 //! can offer the move. Nothing here ever writes to a tracker.
 //!
-//! Everything here is pure: no files, no clock, no network.
+//! Everything else here is pure: no files, no clock, no network.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::definition::{Gate, WorkflowDef};
+use crate::gate_store::{encode_key, GateError, GateProject, Scope};
+
+/// The gate storage collection the records live in, one per item key.
+pub const RECORD_COLLECTION: &str = "workflow";
+
+fn record_name(item: &str) -> String {
+    format!("{RECORD_COLLECTION}/{}", encode_key(item))
+}
+
+/// The workflow record of the item whose folder is `item`; `None` when it
+/// has none yet.
+pub fn load_record(gate: &GateProject, item: &str) -> Result<Option<WorkflowRecord>, GateError> {
+    gate.read(Scope::Project, &record_name(item))
+}
+
+/// Save the workflow record of the item whose folder is `item`.
+pub fn save_record(gate: &GateProject, item: &str, rec: &WorkflowRecord) -> Result<(), GateError> {
+    gate.write(Scope::Project, &record_name(item), rec)
+}
 
 /// The actor prefix of a call a person made.
 pub const HUMAN_PREFIX: &str = "human:";
@@ -97,7 +121,7 @@ pub fn clean_note(raw: Option<&str>) -> Option<String> {
 
 // ------------------------------------------------------------- the record
 
-/// `item.json`'s `workflow` field.
+/// An item's workflow record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRecord {

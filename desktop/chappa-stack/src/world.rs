@@ -89,6 +89,11 @@ pub const GITLEAKS_CONFIG_ARG: &str = "--gitleaks-config";
 pub const PROJECT_GITLEAKS_CONFIG_ARG: &str = "--project-gitleaks-config";
 pub const PROJECT_GITLEAKS_CONFIG_HASH_ARG: &str = "--project-gitleaks-config-hash";
 
+/// The argument naming the app-private gate storage's folder on `serve`
+/// and `run-job` (see [`stack_core::gate_store`]). Without it, the folder
+/// under the app's config folder, found the way the app finds it.
+pub const STATE_DIR_ARG: &str = "--state-dir";
+
 /// The default for [`World::settle`].
 pub const PROCESS_SETTLE: Duration = Duration::from_millis(1500);
 /// The default for [`World::hook_retry`].
@@ -184,6 +189,11 @@ impl World {
             "run-job".to_string(),
             job_id.to_string(),
         ];
+        // The job reads its plan from the gate storage this process uses.
+        if let Ok(store) = stack_core::gate_store::GateStore::installed() {
+            argv.push(STATE_DIR_ARG.to_string());
+            argv.push(store.root().display().to_string());
+        }
         if let Some(c) = &self.gitleaks_config {
             argv.push(GITLEAKS_CONFIG_ARG.to_string());
             argv.push(c.display().to_string());

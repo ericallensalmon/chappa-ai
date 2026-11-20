@@ -17,7 +17,7 @@
 //! | `review-remove:<name>` | the same | a job: `git worktree remove` (refused while it has uncommitted changes) and the record |
 //!
 //! Bringing a slot up from a review binds it the way activating an item
-//! does: `active.json` names `review:<name>` for the slot, and the bound
+//! does: the active-item record names `review:<name>` for the slot, and the bound
 //! item's state is saved first (a rebind).
 //!
 //! **Pruning.** The stack only sees a PR when a call carries it. When one
@@ -63,13 +63,13 @@ pub const UP_PREFIX: &str = "review-up:";
 pub const REMOVE_PREFIX: &str = "review-remove:";
 pub const TERMINAL_PREFIX: &str = "review-terminal:";
 pub const AGENT_PREFIX: &str = "review-agent:";
-/// How `active.json` names a slot bound to a review workspace.
+/// How the active-item record names a slot bound to a review workspace.
 pub const BINDING_PREFIX: &str = "review:";
 /// A review workspace older than this gets a badge.
 pub const STALE_DAYS: u64 = 14;
 const TEXT_CAP: usize = 300;
 
-/// Is `item` (an `active.json` entry) a review workspace, not a work item?
+/// Is `item` (an active-item entry) a review workspace, not a work item?
 pub fn is_review_binding(item: &str) -> bool {
     item.starts_with(BINDING_PREFIX)
 }
@@ -425,12 +425,13 @@ fn remove(
         git.worktree_remove(&clone, &wt)?;
     }
     let _ = fs::remove_file(ReviewRecord::path(&work_dir, name));
-    let mut active = ActiveRecord::load(&work_dir).map_err(|e| e.to_string())?;
+    let gate = loaded.gate()?;
+    let mut active = ActiveRecord::load(&gate).map_err(|e| e.to_string())?;
     let binding = format!("{BINDING_PREFIX}{name}");
     let before = active.slots.len();
     active.slots.retain(|_, s| s.item != binding);
     if active.slots.len() != before {
-        active.save(&work_dir).map_err(|e| e.to_string())?;
+        active.save(&gate).map_err(|e| e.to_string())?;
         say("✓ no slot is bound to it any more");
     }
     say(&format!(

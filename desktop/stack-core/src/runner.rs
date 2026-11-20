@@ -1617,22 +1617,22 @@ impl<'a> StackRunner<'a> {
         })
     }
 
-    /// Bind `item` to `slot`: `active.json` and the instance's intent.
+    /// Bind `item` to `slot`: the active-item record (in the gate storage
+    /// this process installed) and the instance's intent.
     pub fn activate(&self, slot: u32, item: &str) -> Result<Vec<JobStep>, RunnerError> {
         let work_dir = self.work_dir();
         let id = instance_id(self.stack_name, slot);
-        let mut active = ActiveRecord::load(&work_dir)?;
+        let gate = crate::gate_store::GateStore::installed()
+            .map_err(IntentError::from)?
+            .project(self.project_dir);
+        let mut active = ActiveRecord::load(&gate)?;
         active.set(slot, item, &id, &self.now_utc);
         let mut intent = IntentRecord::load(&work_dir, &id)?
             .unwrap_or_else(|| IntentRecord::new(self.stack_name, slot, &self.now_utc));
         intent.item = Some(item.to_string());
         intent.updated_utc = self.now_utc.clone();
         Ok(vec![
-            JobStep::write(
-                "active item",
-                ActiveRecord::path(&work_dir),
-                serde_json::to_string_pretty(&active).expect("active serializes"),
-            ),
+            active.save_step(&gate),
             JobStep::write(
                 "intent record",
                 IntentRecord::path(&work_dir, &id),

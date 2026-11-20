@@ -75,6 +75,15 @@ pub enum LocalStep {
     /// already on its ref). Kept in the step list so the user sees why a
     /// planned step produced no command.
     Note { text: String },
+    /// A record in the app-private gate storage ([`crate::gate_store`]) of
+    /// the project in `project`, project scope: written with the store this
+    /// process installed, owner-only, replaced atomically.
+    WriteGate {
+        project: PathBuf,
+        name: String,
+        value: serde_json::Value,
+        what: String,
+    },
 }
 
 impl LocalStep {
@@ -83,6 +92,18 @@ impl LocalStep {
         match self {
             LocalStep::WriteFile { path, contents, .. } => write_atomic(path, contents),
             LocalStep::Note { .. } => Ok(()),
+            LocalStep::WriteGate {
+                project,
+                name,
+                value,
+                ..
+            } => crate::gate_store::GateStore::installed()
+                .and_then(|store| {
+                    store
+                        .project(project)
+                        .write(crate::gate_store::Scope::Project, name, value)
+                })
+                .map_err(io::Error::other),
         }
     }
 
@@ -90,6 +111,7 @@ impl LocalStep {
         match self {
             LocalStep::WriteFile { what, path, .. } => format!("write {what} ({})", path.display()),
             LocalStep::Note { text } => text.clone(),
+            LocalStep::WriteGate { what, .. } => format!("write {what} (app storage)"),
         }
     }
 }
@@ -133,6 +155,17 @@ impl JobStep {
             step: LocalStep::WriteFile {
                 path,
                 contents,
+                what: what.to_string(),
+            },
+        }
+    }
+
+    pub fn write_gate(what: &str, project: &Path, name: &str, value: serde_json::Value) -> Self {
+        JobStep::Local {
+            step: LocalStep::WriteGate {
+                project: project.to_path_buf(),
+                name: name.to_string(),
+                value,
                 what: what.to_string(),
             },
         }

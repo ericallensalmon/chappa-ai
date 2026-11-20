@@ -628,7 +628,7 @@ fn activate_binds_only_the_items_repos_and_activating_another_rebinds() {
     let (code, log) = ws.run(&body);
     assert_eq!(code, EXIT_DONE, "{log}");
     assert!(log.contains("api: already on"), "{log}");
-    let active = ActiveRecord::load(&ws.p.work()).unwrap();
+    let active = ActiveRecord::load(&gate(&ws.p.dir)).unwrap();
     assert_eq!(active.get(0).unwrap().item, "ABC-1");
     let intent: Value = serde_json::from_str(
         &fs::read_to_string(ws.p.work().join("instances/app-0.json")).unwrap(),
@@ -706,7 +706,7 @@ fn activate_binds_only_the_items_repos_and_activating_another_rebinds() {
     let (code, log) = ws.run(&body);
     assert_eq!(code, EXIT_DONE, "{log}");
     assert_eq!(
-        ActiveRecord::load(&ws.p.work())
+        ActiveRecord::load(&gate(&ws.p.dir))
             .unwrap()
             .get(0)
             .unwrap()
@@ -916,9 +916,9 @@ fn archive_is_refused_while_dirty_or_unpushed_and_restore_brings_it_back() {
     git(&wt, &["push", "-q", "origin", BRANCH]);
 
     // Make it the active item first: archiving clears that.
-    let mut active = ActiveRecord::load(&ws.p.work()).unwrap();
+    let mut active = ActiveRecord::load(&gate(&ws.p.dir)).unwrap();
     active.set(0, "ABC-1", "app-0", NOW);
-    active.save(&ws.p.work()).unwrap();
+    active.save(&gate(&ws.p.dir)).unwrap();
     ws.refresh();
     let archive = action(&ws.row("ABC-1"), "archive").unwrap().clone();
     // It is the item the slot runs: its stack state is saved first, and
@@ -947,7 +947,10 @@ fn archive_is_refused_while_dirty_or_unpushed_and_restore_brings_it_back() {
         saved[0].reason,
         stack_core::states::SaveReason::BeforeArchive
     );
-    assert!(ActiveRecord::load(&ws.p.work()).unwrap().get(0).is_none());
+    assert!(ActiveRecord::load(&gate(&ws.p.dir))
+        .unwrap()
+        .get(0)
+        .is_none());
     let list = git(&ws.clone_of("api"), &["worktree", "list", "--porcelain"]);
     assert_eq!(list.matches("worktree ").count(), 1, "{list}");
 

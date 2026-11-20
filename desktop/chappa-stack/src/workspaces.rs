@@ -1488,11 +1488,12 @@ fn archive(
     fs::create_dir_all(work_dir.join(ARCHIVE_DIR)).map_err(|e| (1, e.to_string()))?;
     fs::rename(&dir, &target).map_err(|e| (1, format!("cannot move {}: {e}", dir.display())))?;
     say(&format!("✓ moved to {}", target.display()));
-    let mut active = ActiveRecord::load(&work_dir).map_err(|e| (1, e.to_string()))?;
+    let gate = loaded.gate().map_err(|e| (1, e))?;
+    let mut active = ActiveRecord::load(&gate).map_err(|e| (1, e.to_string()))?;
     let before = active.slots.len();
     active.slots.retain(|_, s| s.item != item);
     if active.slots.len() != before {
-        active.save(&work_dir).map_err(|e| (1, e.to_string()))?;
+        active.save(&gate).map_err(|e| (1, e.to_string()))?;
         say("✓ no longer the active item");
     }
     Ok(())
@@ -2445,9 +2446,7 @@ fn start_work(
             rec.url = t.url.clone().or(rec.url);
             rec.status = t.status.clone().or(rec.status);
             rec.updated_utc = inp.now_utc.to_string();
-            if rec.workflow.is_none() {
-                rec.workflow = local_status::start_record(inp.loaded, &rec, actor, inp.now_utc);
-            }
+            let _ = local_status::record_start(inp.loaded, &rec, actor, inp.now_utc);
             let _ = rec.save(&dir);
             return Accepted::Done(format!("{} already started ({})", t.key, dir.display()));
         }
@@ -2475,10 +2474,10 @@ fn start_work(
     rec.title = t.title.clone();
     rec.url = t.url.clone();
     rec.status = t.status.clone();
-    rec.workflow = local_status::start_record(inp.loaded, &rec, actor, inp.now_utc);
     if let Err(e) = fs::create_dir_all(&dir)
         .map_err(|e| e.to_string())
         .and_then(|_| rec.save(&dir))
+        .and_then(|_| local_status::record_start(inp.loaded, &rec, actor, inp.now_utc))
     {
         return refused(500, "workspace", e);
     }

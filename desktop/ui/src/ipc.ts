@@ -1153,6 +1153,9 @@ export interface SecretFindingDto {
   file: string;
   rule: string;
   line?: number | null;
+  /** An older version's baseline in the project's work folder listed it:
+   *  still a finding until it is acknowledged again. */
+  ackedBefore?: boolean;
 }
 
 /** The JSON behind a `secret-scan-blocked:` spawn refusal. */

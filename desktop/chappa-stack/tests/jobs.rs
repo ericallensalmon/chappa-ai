@@ -134,9 +134,17 @@ fn up_is_offered_with_its_plan_and_answers_a_pane_to_run_it_in() {
     assert_eq!(status, 202, "{body}");
     let id = body["jobId"].as_str().unwrap();
     assert!(records::is_job_id(id), "{id}");
+    // The job reads its plan from the same gate storage as the source.
+    let state_dir = stack_core::gate_store::install_for_tests();
     assert_eq!(
         body["run"]["argv"],
-        json!(["/opt/chappa/chappa-stack", "run-job", id])
+        json!([
+            "/opt/chappa/chappa-stack",
+            "run-job",
+            id,
+            chappa_stack::world::STATE_DIR_ARG,
+            state_dir.display().to_string()
+        ])
     );
     let cwd = body["run"]["cwd"].as_str().unwrap();
     assert!(std::path::Path::new(cwd).is_absolute());
@@ -155,6 +163,47 @@ fn up_is_offered_with_its_plan_and_answers_a_pane_to_run_it_in() {
     // Until the pane reports, the job is running.
     let (_, state) = get(&src, &format!("/api/jobs/{id}"));
     assert_eq!(state, json!({"state": "running"}));
+}
+
+/// The plan a job runs is read from the app's own storage only: a job
+/// record written into the work folder (a copy of a real one under a new
+/// id, by anything working in the project) runs nothing, while the real
+/// one is still there waiting.
+#[test]
+fn a_job_record_planted_in_the_work_folder_does_not_run() {
+    let p = Project::example();
+    let f = fakes(fresh(), FakeHttp::default());
+    let src = source(f.world.clone(), &p.dir);
+    let (_, env) = get(&src, "/api/environment");
+    let (status, body) = post(
+        &src,
+        "/api/actions",
+        &call(stack_action(&env, "up"), None, true),
+        true,
+    );
+    assert_eq!(status, 202, "{body}");
+    let real = body["jobId"].as_str().unwrap().to_string();
+    let mut planted = JobRecord::load(&p.work(), &real).unwrap().unwrap();
+    planted.id = "j20261114T120000Z-abcdef".into();
+    let dir = records::jobs_dir(&p.work());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(format!("{}.json", planted.id)),
+        serde_json::to_string_pretty(&planted).unwrap(),
+    )
+    .unwrap();
+    let before = f.cli.with(|c| c.lines().len());
+    let mut pane = Vec::new();
+    let code = run_job(&f.world, &p.dir, &planted.id, &mut pane);
+    let pane = String::from_utf8(pane).unwrap();
+    assert_eq!(code, EXIT_REFUSED, "{pane}");
+    assert!(pane.contains("no job j20261114T120000Z-abcdef"), "{pane}");
+    assert_eq!(f.cli.with(|c| c.lines().len()), before, "nothing ran");
+    assert!(JobRecord::load(&p.work(), &planted.id).unwrap().is_none());
+    assert_eq!(
+        JobRecord::load(&p.work(), &real).unwrap().unwrap().status,
+        JobStatus::Pending
+    );
 }
 
 #[test]
@@ -617,6 +666,7 @@ fn record(id: &str, created: &str, status: JobStatus) -> JobRecord {
 
 #[test]
 fn retention_keeps_the_younger_or_the_newest_whichever_keeps_more() {
+    stack_core::gate_store::install_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path();
     let jobs = [
@@ -646,6 +696,7 @@ fn retention_keeps_the_younger_or_the_newest_whichever_keeps_more() {
             JobStatus::Done,
         ),
     ];
+    fs::create_dir_all(records::jobs_dir(work)).unwrap();
     for (id, created, status) in jobs {
         record(id, created, status).save(work).unwrap();
         fs::write(JobRecord::log_path(work, id), "log").unwrap();
@@ -667,11 +718,13 @@ fn retention_keeps_the_younger_or_the_newest_whichever_keeps_more() {
         ["j20260201T000000Z-000002", "j20260101T000000Z-000001"]
     );
     for id in &removed {
-        assert!(!JobRecord::path(work, id).exists());
+        assert!(JobRecord::load(work, id).unwrap().is_none());
         assert!(!JobRecord::log_path(work, id).exists());
         assert!(!JobRecord::result_path(work, id).exists());
     }
-    assert!(JobRecord::path(work, "j20260301T000000Z-000003").exists());
+    assert!(JobRecord::load(work, "j20260301T000000Z-000003")
+        .unwrap()
+        .is_some());
     // Count keeps more than age: a 1-day window with the newest 3 kept.
     let removed = records::prune(
         work,

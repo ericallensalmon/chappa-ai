@@ -251,8 +251,9 @@ or acknowledged (or only warns, if you choose that). The stack runner also
 scans the worktrees it creates and their commits ahead of the base, every
 build context before a build, and env files and the instance environment
 before anything starts. Findings name a rule, a file and a line, never a
-value. Acknowledgements are kept per project in
-`.work/secrets-baseline.json`, shared by the app and the stack runner. A
+value. Acknowledgements are kept per project in the app's own storage,
+shared by the app and the stack runner, and each one covers the line it
+was made for: a different secret on that line is a new finding. A
 value the stack runner generated for an instance (`{secret:<name>}`, see
 [Stacks](#stacks)) that turns up in a commit or a tracked file of a bound
 worktree is reported too (rule `generated-secret`): it has left the work
@@ -349,9 +350,25 @@ keeps the last block in force: it fails closed.
   project, an agent's folder or a stack worktree holds one that is not
   git-ignored, or is committed, the app warns on project open, agent
   launch and agent exit, and offers to add it to `.gitignore`.
-- **`.work/` stays local.** The stack runner keeps its state, secrets and
-  worktrees under `.work/` and writes a `.work/.gitignore` that ignores
-  everything in it; validation also warns when `.work/` is not ignored.
+- **What opens a gate is never kept in the project.** Acknowledged
+  secret-scan findings, data-safety verdicts and acknowledgements, the job
+  plans waiting for their runner, an item's workflow state (approvals,
+  human gates) and the active item per slot live in an owner-only folder
+  under the app's config folder (`gate-state/`), keyed by the project's
+  path. A file in the project's work folder (which an agent working there
+  can write) counts for none of them: an older version's baseline there is
+  only shown, as "acknowledged before this update — confirm again", and an
+  older `.work/active.json` is read for one more release, shown as such.
+  The secret scanner's scratch (config copy, staging, report) is in the
+  same private folder, outside every project, and a clean report counts
+  only if every staged file is still the one staged. This keeps out an
+  agent that cannot reach your own files (a container, or one held to its
+  CLI's permission prompts); an agent with an unrestricted shell as you can
+  still edit the app's storage.
+- **`.work/` stays local.** The stack runner keeps its worktrees, logs and
+  generated secrets under `.work/` and writes a `.work/.gitignore` that
+  ignores everything in it; validation also warns when `.work/` is not
+  ignored.
 - **A source's token stays with the source.** `CHAPPA_SOURCE_ADDR` and
   `CHAPPA_SOURCE_TOKEN` are removed from the app's own environment at
   startup, and the stack runner removes them from everything it starts, so

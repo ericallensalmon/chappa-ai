@@ -148,6 +148,8 @@ fn a_block_refuses_launches_in_its_folder_holds_deliveries_and_lifts_on_a_person
         eprintln!("skipping: `node` is not on PATH, the fixture source cannot run");
         return;
     }
+    // The app installs its gate storage at startup; these tests share one.
+    stack_core::gate_store::install_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     let wt = root.join("wt");

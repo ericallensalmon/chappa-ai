@@ -2,16 +2,20 @@
 //!
 //! **Directory mode over a given list.** `gitleaks dir` takes one path and
 //! walks it. To make it read exactly the listed files, the runner stages
-//! them: each listed file is hard-linked into a fresh directory under the
-//! caller's work directory, at its relative path, and gitleaks scans that
-//! directory with the staging directory as its working directory, so the
-//! reported paths are the project-relative ones. A hard link copies no
+//! them: each listed file is hard-linked into a fresh owner-only directory
+//! under the caller's scratch folder (outside every project, see
+//! [`GitleaksScanner::work_dir`]), at its relative path, and gitleaks scans
+//! that directory with the staging directory as its working directory, so
+//! the reported paths are the project-relative ones. A hard link copies no
 //! data and leaves the original untouched; the staging directory is removed
-//! when the scan ends. Where a link cannot be made (the work directory is
-//! on another volume, or the filesystem has no hard links) that file is
-//! scanned on its own instead, `gitleaks dir <relative path>` run from the
-//! root, which reports the same relative path. Findings for files outside
-//! the list are discarded, so the scan never widens past what was listed.
+//! when the scan ends. Where a link cannot be made (the scratch folder is
+//! on another volume than the scanned tree, or the filesystem has no hard
+//! links) the file is copied in instead. Before a report is trusted, every
+//! staged file is checked to be what was staged: a link still the same file
+//! as the original, a copy unchanged since it was made, and the original
+//! not replaced meanwhile. Anything else fails the scan rather than passing
+//! files nobody read. Findings for files outside the list are discarded, so
+//! the scan never widens past what was listed.
 //!
 //! **Git mode.** `gitleaks git` with `--log-opts=… <base>..HEAD` (see
 //! [`commit_log_opts`]) scans the added lines of every commit in the
@@ -20,7 +24,7 @@
 //! ([`crate::git::harden_child_env`]).
 //!
 //! **Every run** passes `--redact`, writes a JSON report into a fresh
-//! directory under the work directory (never the project), and uses its
+//! owner-only directory under the scratch folder (never the project), and uses its
 //! own exit code for "leaks found" ([`LEAK_EXIT_CODE`]) so that findings are
 //! a normal result and any other non-zero exit is a failure. gitleaks logs
 //! some failures (an unknown revision in git mode, for one) and still exits
@@ -78,8 +82,12 @@ const IGNORE_FILE: &str = ".gitleaksignore";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitleaksScanner {
     pub program: PathBuf,
-    /// Reports and staging directories go here. It must not be inside a
-    /// scanned tree unless it is under `.work`, which listing always skips.
+    /// The scratch folder: each run's report, config copy, ignore folder
+    /// and staging go into a fresh owner-only directory here. It must be an
+    /// absolute folder outside every scanned tree (the app's gate storage
+    /// has one, [`crate::gate_store::GateStore::scratch_dir`]); anything
+    /// that can write in a scanned tree could otherwise swap the report or
+    /// drop an ignore file into it.
     pub work_dir: PathBuf,
     pub timeout: Duration,
     /// A gitleaks config file the user chose (never one from a scanned
@@ -247,14 +255,20 @@ struct Scratch {
     config: PathBuf,
 }
 
-/// A fresh directory under the work directory, removed on drop. The work
-/// directory is made git-ignored first ([`crate::workdir::ensure`]).
+/// A fresh owner-only directory under the scratch folder, removed on drop.
+/// The scratch folder must be absolute; it is made owner-only when this
+/// has to create it.
 pub(crate) struct ScratchDir {
     pub path: PathBuf,
 }
 
 impl ScratchDir {
     pub fn new(work_dir: &Path, prefix: &str) -> Result<Self, SafetyError> {
+        if !work_dir.is_absolute() {
+            return Err(SafetyError::Scanner(
+                "no private scratch folder for the scan".into(),
+            ));
+        }
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -266,11 +280,16 @@ impl ScratchDir {
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let path = work_dir.join(name);
-        crate::workdir::ensure(work_dir).map_err(|e| SafetyError::Io {
-            path: work_dir.to_path_buf(),
-            message: e.to_string(),
-        })?;
-        fs::create_dir_all(&path).map_err(|e| SafetyError::Io {
+        // A scratch folder that does not exist yet is made owner-only; one
+        // that does is left as it is (it may be shared, like a temp
+        // folder): each run's own folder below is owner-only either way.
+        if !work_dir.is_dir() {
+            crate::owner_only::create_dir(work_dir).map_err(|e| SafetyError::Io {
+                path: work_dir.to_path_buf(),
+                message: e.to_string(),
+            })?;
+        }
+        crate::owner_only::create_dir(&path).map_err(|e| SafetyError::Io {
             path: path.clone(),
             message: e.to_string(),
         })?;
@@ -291,35 +310,32 @@ impl SecretScanner for GitleaksScanner {
         }
         let scratch = self.scratch()?;
         let stage = scratch.dir.path.join("stage");
-        let mut staged = 0usize;
+        let mut staged = Vec::new();
         let mut alone = Vec::new();
         for f in files {
-            let dst = stage.join(f);
             // gitleaks would read a staged top-level ignore file as its own.
             let ignore_file = f.components().count() == 1
                 && f.to_string_lossy().eq_ignore_ascii_case(IGNORE_FILE);
-            let linked = !ignore_file
-                && self.stage_with_links
-                && dst
-                    .parent()
-                    .map(|p| fs::create_dir_all(p).is_ok())
-                    .unwrap_or(false)
-                && fs::hard_link(root.join(f), &dst).is_ok();
-            if linked {
-                staged += 1;
-            } else {
-                alone.push(f);
+            match (!ignore_file && self.stage_with_links)
+                .then(|| stage_one(root, &stage, f))
+                .flatten()
+            {
+                Some(s) => staged.push(s),
+                None => alone.push(f),
             }
         }
 
         let mut hits = Vec::new();
-        if staged > 0 {
+        if !staged.is_empty() {
             let report = scratch.dir.path.join("report.json");
             let mut cmd = Command::new(&self.program);
             cmd.current_dir(&stage).arg("dir");
             self.common_args(&mut cmd, &scratch, &report);
             cmd.args(["--", "."]);
             hits.extend(self.run(cmd, &report, &stage)?);
+            for s in &staged {
+                s.verify(root, &stage)?;
+            }
         }
         for (i, f) in alone.into_iter().enumerate() {
             let report = scratch.dir.path.join(format!("report-{i}.json"));
@@ -360,6 +376,127 @@ impl SecretScanner for GitleaksScanner {
         self.common_args(&mut cmd, &scratch, &report);
         crate::git::harden_child_env(&mut cmd);
         Ok(report::findings(self.run(cmd, &report, repo)?))
+    }
+}
+
+/// What a file is: the volume and file number the system knows it by, its
+/// size and modification time. Two paths with the same volume and number
+/// are one file (a hard link).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ident {
+    volume: u64,
+    number: u64,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl Ident {
+    fn of(path: &Path) -> Option<Ident> {
+        let meta = fs::symlink_metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let (volume, number) = file_number(path, &meta)?;
+        Some(Ident {
+            volume,
+            number,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+
+    fn same_file(&self, other: &Ident) -> bool {
+        self.volume == other.volume && self.number == other.number
+    }
+}
+
+#[cfg(unix)]
+fn file_number(_path: &Path, meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn file_number(path: &Path, _meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let file = fs::File::open(path).ok()?;
+    // SAFETY: the handle is the open file's and outlives the call; the
+    // out-structure is plain data.
+    unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) == 0 {
+            return None;
+        }
+        Some((
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_number(_path: &Path, _meta: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+/// One file put into the staging directory, and what it was then.
+#[derive(Debug)]
+struct Staged {
+    rel: PathBuf,
+    original: Ident,
+    staged: Ident,
+    linked: bool,
+}
+
+/// Stage `rel` (a path under `root`) into `stage`: a hard link, or a copy
+/// where no link can be made. `None` when neither works; the caller then
+/// scans the file on its own.
+fn stage_one(root: &Path, stage: &Path, rel: &Path) -> Option<Staged> {
+    let src = root.join(rel);
+    let dst = stage.join(rel);
+    fs::create_dir_all(dst.parent()?).ok()?;
+    let original = Ident::of(&src)?;
+    let linked = fs::hard_link(&src, &dst).is_ok();
+    if !linked && fs::copy(&src, &dst).is_err() {
+        return None;
+    }
+    let staged = Ident::of(&dst)?;
+    let ok = if linked {
+        staged.same_file(&original)
+    } else {
+        staged.len == original.len
+    };
+    ok.then(|| Staged {
+        rel: rel.to_path_buf(),
+        original,
+        staged,
+        linked,
+    })
+}
+
+impl Staged {
+    /// The staged file is still what was staged and the original was not
+    /// replaced or changed meanwhile: a report over it speaks for the tree.
+    fn verify(&self, root: &Path, stage: &Path) -> Result<(), SafetyError> {
+        let now_staged = Ident::of(&stage.join(&self.rel));
+        let now_original = Ident::of(&root.join(&self.rel));
+        let ok = match (now_staged, now_original) {
+            (Some(st), Some(or)) => {
+                st == self.staged && or == self.original && (!self.linked || st.same_file(&or))
+            }
+            _ => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(SafetyError::Scanner(format!(
+                "{} changed while it was scanned; scan again",
+                self.rel.to_string_lossy().replace('\\', "/")
+            )))
+        }
     }
 }
 

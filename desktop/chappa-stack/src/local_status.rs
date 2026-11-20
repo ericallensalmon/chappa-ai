@@ -10,6 +10,10 @@
 //! | `send-back` | a person declines it, with a note; the item stays where it is |
 //!
 //! Who called is the `X-Chappa-Actor` header, kept as the app writes it.
+//! The item's workflow record (its state, the move waiting for approval,
+//! the history) is kept in the app-private gate storage, never in the
+//! item's folder, so nothing working in the item can approve its own move
+//! by writing a file ([`stack_core::workflow::load_record`]).
 //! The tracker's status comes from the owner row the app sends with every
 //! overlay call (`target.item`) and from Start work; the stack never asks
 //! the tracker and never writes to it.
@@ -35,10 +39,18 @@ pub fn handles(id: &str) -> bool {
     id.starts_with(MOVE_PREFIX) || id == APPROVE_ID || id == SEND_BACK_ID || id == "move"
 }
 
-/// Where `rec` stands. An item made before the stack had a workflow has no
-/// record yet: it stands where it would have started, since it was created.
-pub fn current(def: &WorkflowDef, rec: &ItemRecord) -> Option<WorkflowRecord> {
-    rec.workflow.clone().or_else(|| {
+/// Where `rec` stands. An item with no record yet (made before the stack
+/// had a workflow, or before records moved to the gate storage) stands
+/// where it would have started, since it was created. A record that cannot
+/// be read is an error: nothing is offered or accepted on it.
+pub fn current(
+    def: &WorkflowDef,
+    loaded: &Loaded,
+    rec: &ItemRecord,
+) -> Result<Option<WorkflowRecord>, String> {
+    let gate = loaded.gate()?;
+    let stored = workflow::load_record(&gate, &rec.key).map_err(|e| e.to_string())?;
+    Ok(stored.or_else(|| {
         workflow::start(
             def,
             &rec.item_ref.source,
@@ -46,7 +58,27 @@ pub fn current(def: &WorkflowDef, rec: &ItemRecord) -> Option<WorkflowRecord> {
             NO_ACTOR,
             &rec.created_utc,
         )
-    })
+    }))
+}
+
+/// Save where a new item starts, unless it has a record already.
+pub fn record_start(
+    loaded: &Loaded,
+    rec: &ItemRecord,
+    actor: Option<&str>,
+    now_utc: &str,
+) -> Result<(), String> {
+    let Some(start) = start_record(loaded, rec, actor, now_utc) else {
+        return Ok(());
+    };
+    let gate = loaded.gate()?;
+    if workflow::load_record(&gate, &rec.key)
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Ok(());
+    }
+    workflow::save_record(&gate, &rec.key, &start).map_err(|e| e.to_string())
 }
 
 /// The record a new item starts with, or none without a workflow.
@@ -106,7 +138,7 @@ pub fn overlay_parts(loaded: &Loaded, rec: &ItemRecord) -> OverlayParts {
     let Some(def) = loaded.stack.workflow.as_ref() else {
         return OverlayParts::default();
     };
-    let Some(wrec) = current(def, rec) else {
+    let Ok(Some(wrec)) = current(def, loaded, rec) else {
         return OverlayParts::default();
     };
     let key = rec.item_ref.key.as_str();
@@ -206,8 +238,10 @@ pub fn accept(
     let Some(def) = loaded.stack.workflow.as_ref() else {
         return refused("not-offered", "this stack has no workflow");
     };
-    let Some(mut wrec) = current(def, rec) else {
-        return refused("not-offered", "this stack's workflow has no states");
+    let mut wrec = match current(def, loaded, rec) {
+        Ok(Some(w)) => w,
+        Ok(None) => return refused("not-offered", "this stack's workflow has no states"),
+        Err(e) => return Accepted::Refused(500, "workspace", e),
     };
     let req = if let Some(to) = id.strip_prefix(MOVE_PREFIX) {
         Request::Move {
@@ -264,7 +298,12 @@ pub fn accept(
     };
     let outcome = workflow::apply(def, &mut wrec, &key, &req, &caller, now_utc);
     if outcome.is_ok() {
-        rec.workflow = Some(wrec.clone());
+        let saved = loaded
+            .gate()
+            .and_then(|g| workflow::save_record(&g, &rec.key, &wrec).map_err(|e| e.to_string()));
+        if let Err(e) = saved {
+            return Accepted::Refused(500, "workspace", e);
+        }
         rec.updated_utc = now_utc.to_string();
         if let Err(e) = rec.save(dir) {
             return Accepted::Refused(500, "workspace", e);

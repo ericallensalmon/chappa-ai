@@ -1,16 +1,18 @@
 //! The work folder (`<project>/.work/` by default) as git sees it.
 //!
-//! The work folder holds the secret baseline (file and line of every
-//! acknowledged finding), scanner scratch space with hard links to scanned
-//! files, item workspaces and job logs. None of it belongs in a commit, and
+//! The work folder holds item workspaces, job logs and other build
+//! material (the records that decide gates live in the app's own storage,
+//! see [`crate::gate_store`]). None of it belongs in a commit, and
 //! a project's own `.gitignore` may not say so. So whoever creates the work
 //! folder also writes `.work/.gitignore` holding `*`, which makes git ignore
 //! the folder and everything in it whatever the project's ignore rules say.
 //! An existing `.gitignore` there is the user's and is never overwritten.
 //!
 //! A scan that crashed can leave its scratch directory behind (hard links
-//! to the files it read, a scratch env file). [`sweep_stale_scratch`] removes
-//! those once they are old enough that no scan can still be using them.
+//! to the files it read, a scratch env file) in the scratch folder, or in
+//! the work folder where older versions kept it. [`sweep_stale_scratch`]
+//! removes those once they are old enough that no scan can still be using
+//! them.
 
 use std::fs;
 use std::io;

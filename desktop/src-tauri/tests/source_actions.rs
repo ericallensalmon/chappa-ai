@@ -126,6 +126,8 @@ fn stage() -> Option<Stage> {
         eprintln!("skipping: `node` is not on PATH, the fixture source cannot run");
         return None;
     }
+    // The app installs its gate storage at startup; these tests share one.
+    stack_core::gate_store::install_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     let wt = root.join("wt");
@@ -853,6 +855,8 @@ fn the_fixture_actions_are_judged_called_run_and_journaled() {
 /// else is refused with the reason before a process exists.
 #[test]
 fn spawn_working_dir_is_checked_against_the_roots() {
+    // The app installs its gate storage at startup; these tests share one.
+    stack_core::gate_store::install_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     let inside = root.join("sub");

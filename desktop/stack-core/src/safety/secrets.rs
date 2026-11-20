@@ -43,7 +43,9 @@ pub mod pattern;
 mod process;
 mod report;
 
-pub use baseline::{fingerprint, AckNote, Baseline, BaselineEntry};
+pub use baseline::{
+    fingerprint, line_hash, AckNote, Baseline, BaselineEntry, LineSource, TreeLines,
+};
 pub use gitleaks::{find_on_path, GitleaksScanner};
 pub use hook::HookScanner;
 pub use listing::{FileList, ListLimits, ListSource, ListedFile, SkipReason, SkippedFile};
@@ -204,7 +206,8 @@ pub fn build_ignore_files(root: &Path, dockerfile: Option<&Path>) -> Vec<PathBuf
     out
 }
 
-/// Run `scanner` over `target` and subtract `baseline`.
+/// Run `scanner` over `target` and subtract `baseline` (each line read
+/// from the target's root as it is now).
 pub fn scan(
     scanner: &dyn SecretScanner,
     target: &ScanTarget,
@@ -232,7 +235,8 @@ pub fn scan(
             }
         }
     };
-    let (findings, baselined) = baseline.apply(found);
+    let lines = TreeLines::new(target.root().unwrap_or(Path::new("")));
+    let (findings, baselined) = baseline.apply(found, &lines);
     report.findings = findings;
     report.baselined = baselined;
     Ok(report)

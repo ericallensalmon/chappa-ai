@@ -150,7 +150,7 @@ pub struct StackDef {
     /// "status is slow" (`30s`, `2m`); see [`StackDef::status_slow_after`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_slow_after: Option<String>,
-    /// How long job records under `.work/jobs/` are kept.
+    /// How long job records (and their logs under `.work/jobs/`) are kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<JobsDef>,
     /// Item workspaces: which tracker rows offer Start work, the branch

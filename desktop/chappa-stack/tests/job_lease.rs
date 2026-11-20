@@ -115,18 +115,7 @@ fn a_second_change_is_refused_while_one_waits_for_its_pane_and_its_verbs_say_why
         msg.starts_with("local: bring up is running since "),
         "{msg}"
     );
-    assert_eq!(
-        std::fs::read_dir(chappa_stack::records::jobs_dir(&p.work()))
-            .unwrap()
-            .filter(|e| e
-                .as_ref()
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".json"))
-            .count(),
-        1
-    );
+    assert_eq!(chappa_stack::records::record_ids(&p.work()).len(), 1);
 
     // The view: the job, every changing verb disabled with its name, a
     // cancel and the job's log; the job's own record is the active one.

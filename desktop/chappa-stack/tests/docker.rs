@@ -285,7 +285,7 @@ fn the_example_saves_its_database_goes_down_and_resumes_it() {
     .unwrap();
     let mut active = stack_core::intent::ActiveRecord::default();
     active.set(0, "ABC-1", "local-0", "2026-11-14T12:00:00Z");
-    active.save(&p.work()).unwrap();
+    active.save(&gate(&p.dir)).unwrap();
     let mut world = World::real();
     world.spawner = Arc::new(ThreadSpawner);
     world.hosts_text = Some("127.0.0.1 localhost dev.example.test\n".into());

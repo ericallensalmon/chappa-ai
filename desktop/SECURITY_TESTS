@@ -103,6 +103,27 @@ confirmation_shapes_are_recognised_on_the_last_rows
 a_screen_hold_waits_for_the_question_and_the_person_can_release_one
 gate_refusals_map_to_statuses
 
+# Gate state lives in the app's own owner-only storage, never in the work
+# folder: what is written there opens nothing.
+gate_store::tests::a_record_that_is_not_owner_only_is_refused
+gate_store::tests::names_that_could_leave_their_folder_are_refused
+gate_store::tests::the_folders_and_records_are_owner_only
+baseline::tests::a_hand_written_work_folder_baseline_suppresses_nothing
+baseline::tests::a_different_secret_on_an_acknowledged_line_is_a_new_finding
+baseline::tests::an_entry_without_the_acknowledged_line_hash_suppresses_nothing
+a_clean_report_over_a_swapped_staged_file_is_not_trusted
+scratch_is_private_and_never_relative
+a_scan_and_an_acknowledgement_leave_nothing_in_the_scanned_tree
+the_work_folder_active_file_is_only_a_read_only_fallback
+a_hand_written_work_folder_baseline_entry_does_not_open_the_launch_gate
+a_different_secret_on_an_acknowledged_line_blocks_the_launch_again
+a_hand_written_work_folder_baseline_suppresses_nothing_in_the_block
+a_different_secret_on_an_acknowledged_line_blocks_agents_again
+a_verdict_or_acknowledgement_written_into_the_work_folder_opens_no_gate
+a_binding_from_the_work_folder_file_is_shown_and_narrows_no_block
+a_job_record_planted_in_the_work_folder_does_not_run
+a_workflow_written_into_the_item_folder_opens_no_gate
+
 [ui]
 a start refused for untrusted content asks the trust prompt, and starts once the person chose Run
 ask: names the terminal by its row's name, never the title its program set
@@ -119,6 +140,7 @@ keeps Run disabled until the list has been scrolled to its end
 arguments from agents: empty and off by default, saved one per line, the toggle lifts the list, and the hint says how far it reaches
 lists a pane's held deliveries and says why they wait
 shows the sender, the text and the reason before a release
+mark a finding acknowledged before this update, which still blocks until confirmed
 
 [node]
 gh missing gives an empty list and one clear error

@@ -179,6 +179,13 @@ fn up_change() -> Change {
     }
 }
 
+/// The gate storage every test of this file shares (records are keyed by
+/// project, and each test has its own project folder).
+fn install_gate() {
+    let root = std::env::temp_dir().join(format!("chappa-gate-example-{}", std::process::id()));
+    stack_core::gate_store::install(root).unwrap();
+}
+
 fn perform_local(steps: &[JobStep]) {
     for s in steps {
         if let JobStep::Local { step } = s {
@@ -1341,15 +1348,27 @@ fn activate_binds_an_item_to_a_slot_in_both_records() {
     let git = FakeGit::default();
     let gateways = FakeGateways::default();
     let r = runner(&ex, &cli, &git, &gateways);
+    install_gate();
     let steps = r.activate(0, "ABC-1").unwrap();
+    assert!(
+        matches!(&steps[0], JobStep::Local { step: LocalStep::WriteGate { what, .. } } if what == "active item"),
+        "{:?}",
+        steps[0]
+    );
     let w = writes(&steps);
     assert_eq!(
         w.iter().map(|(what, ..)| *what).collect::<Vec<_>>(),
-        ["active item", "intent record"]
+        ["intent record"]
     );
-    assert!(w[0].1.ends_with(Path::new(".work/active.json")));
     perform_local(&steps);
-    let active = ActiveRecord::load(&r.work_dir()).unwrap();
+    assert!(
+        !r.work_dir().join("active.json").exists(),
+        "the binding is not written into the work folder"
+    );
+    let gate = stack_core::gate_store::GateStore::installed()
+        .unwrap()
+        .project(&ex.dir);
+    let active = ActiveRecord::load(&gate).unwrap();
     assert_eq!(active.slots["0"].item, "ABC-1");
     assert_eq!(active.slots["0"].instance, "local-0");
     let (inst, intent) = r.instance(0).unwrap();

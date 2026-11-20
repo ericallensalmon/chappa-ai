@@ -668,9 +668,9 @@ fn a_saved_state_resumes_a_script_component_by_running_up_again() {
     )
     .save(&item_dir)
     .unwrap();
-    let mut a = ActiveRecord::load(&p.work()).unwrap();
+    let mut a = ActiveRecord::load(&gate(&p.dir)).unwrap();
     a.set(0, "ABC-1", "app-0", NOW);
-    a.save(&p.work()).unwrap();
+    a.save(&gate(&p.dir)).unwrap();
     wanted_running(&p, &["app"]);
     let mut f = fakes(FakeCli::new(), FakeHttp::default());
     f.world.clock = ManualClock::at(NOW);

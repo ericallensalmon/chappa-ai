@@ -301,7 +301,7 @@ fn a_github_pr_is_checked_out_at_its_pull_head_and_shown_in_the_panel() {
     assert!(matches!(rec.work, JobWork::Plan { save: None, .. }));
     let (code, pane) = rv.run(&reply);
     assert_eq!(code, EXIT_DONE, "{pane}");
-    let active = ActiveRecord::load(&rv.p.work()).unwrap();
+    let active = ActiveRecord::load(&gate(&rv.p.dir)).unwrap();
     assert_eq!(active.get(0).unwrap().item, "review:github-owner-api-12");
     let cache: Value = serde_json::from_str(
         &fs::read_to_string(rv.p.work().join("instances/app-0/provenance.json")).unwrap(),

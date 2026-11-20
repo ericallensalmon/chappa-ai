@@ -12,6 +12,7 @@ use chappa_stack::project::ProjectConfig;
 use chappa_stack::server::{self, DefinitionPin, Source};
 use chappa_stack::world::{
     World, GITLEAKS_CONFIG_ARG, PROJECT_GITLEAKS_CONFIG_ARG, PROJECT_GITLEAKS_CONFIG_HASH_ARG,
+    STATE_DIR_ARG,
 };
 use stack_core::safety::secrets::config::ProjectScanConfig;
 
@@ -19,11 +20,12 @@ const USAGE: &str = "usage:
   chappa-stack serve [--project <dir>] [--stack <name>] [--slot <n>] [--channel <name>]
                      [--trusted-definition <hash>|none] [--gitleaks-config <file>]
                      [--project-gitleaks-config <file> --project-gitleaks-config-hash <hash>|none]
-                     [--addr <loopback:port> --token-file <file>]
+                     [--addr <loopback:port> --token-file <file>] [--state-dir <dir>]
   chappa-stack relay --engine <docker|podman>[@<context>]… --ports <ports>…
                      [--addr <loopback:port> --token-file <file>]
   chappa-stack run-job <job id> [--project <dir>] [--gitleaks-config <file>]
                      [--project-gitleaks-config <file> --project-gitleaks-config-hash <hash>|none]
+                     [--state-dir <dir>]
   chappa-stack follow <file> [--hide-generated <work dir>]
   chappa-stack follow-command --hide-generated <work dir> -- <command…>
 
@@ -49,6 +51,12 @@ except the project's own:
 hashed again; it is used, ahead of the Settings config, only while the hash
 matches and it keeps gitleaks' defaults. Otherwise the scans fall back to the
 Settings config or the default, and the Environment view asks to review it.
+
+--state-dir is the folder of the app's private records: acknowledged
+findings, data-safety and secret-scan verdicts, job plans, workflow state and
+the active item per slot. Nothing in a project's work folder counts for any
+of those. Without it, the folder under the app's config folder (or under
+CHAPPA_PROFILE_DIR's profile) that the app itself uses.
 
 relay: the relay alone, as a source (launched or attached like serve), for a
 stack that no project defines. It listens on each engine's gateway address
@@ -153,7 +161,17 @@ fn project_scan_config(args: &mut Args) -> Result<ProjectScanConfig, String> {
     ProjectScanConfig::from_args(path, hash.as_deref())
 }
 
+/// Set this process's gate storage: `--state-dir`, else the app's own.
+fn install_state_dir(args: &mut Args) -> Result<(), String> {
+    let root = match args.take(STATE_DIR_ARG)? {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d),
+        _ => stack_core::gate_store::root_in(&chappa_ai_mcp::profile::config_dir()),
+    };
+    stack_core::gate_store::install(root)
+}
+
 fn serve(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
+    install_state_dir(args)?;
     let mut config = ProjectConfig::new(project_dir(args)?);
     config.stack = args.take("--stack")?;
     if let Some(s) = args.take("--slot")? {
@@ -284,13 +302,23 @@ fn relay(args: &mut Args, launch: LaunchEnv) -> Result<u8, String> {
     Ok(0)
 }
 
-/// Remove secret-scan scratch a crashed scan left in the work folder (hard
-/// links to scanned files, a scratch env file).
+/// Remove secret-scan scratch a crashed scan left behind (hard links to
+/// scanned files, a scratch env file): in the scratch folder, and in the
+/// work folder where older versions kept it.
 fn sweep_scratch(project: &std::path::Path) {
     let work = std::path::absolute(project)
         .unwrap_or_else(|_| project.to_path_buf())
         .join(stack_core::definition::DEFAULT_WORK_DIR);
-    let removed = stack_core::workdir::sweep_stale_scratch(&work, stack_core::workdir::STALE_AFTER);
+    let mut removed =
+        stack_core::workdir::sweep_stale_scratch(&work, stack_core::workdir::STALE_AFTER);
+    if let Ok(scratch) =
+        stack_core::gate_store::GateStore::installed().and_then(|s| s.scratch_dir())
+    {
+        removed.extend(stack_core::workdir::sweep_stale_scratch(
+            &scratch,
+            stack_core::workdir::STALE_AFTER,
+        ));
+    }
     if !removed.is_empty() {
         eprintln!(
             "chappa-stack: removed {} stale secret-scan scratch entr{}",
@@ -325,6 +353,7 @@ fn run_job(args: &mut Args) -> Result<u8, String> {
         return Err("run-job needs a job id".into());
     }
     let id = args.rest.remove(0);
+    install_state_dir(args)?;
     let dir = project_dir(args)?;
     let gitleaks_config = gitleaks_config(args)?;
     let project_scan = project_scan_config(args)?;

@@ -103,7 +103,7 @@
 //!   "reasons": [ { "component": "db", "text": "db: 3 findings (email-real-domain ×2, card-number ×1)" } ]
 //! ```
 //!
-//! - `bound` is the item the slot is bound to (`active.json`): its owner's
+//! - `bound` is the item the slot is bound to (the active-item record): its owner's
 //!   source and key (`source` is `null` when the item's record cannot be
 //!   read) and the absolute folders agents work in for it, the item folder
 //!   first, then each worktree. `null` when no item is active; the block
@@ -123,7 +123,15 @@
 //! any count change, a finding added or gone, a marker or rules change, or
 //! a clean rescan ends it.
 //!
-//! Verdicts live in `<work>/instances/<instance>/data-safety.json`.
+//! Verdicts and acknowledgements decide whether agents may start, so they
+//! live in the app-private gate storage ([`stack_core::gate_store`]), per
+//! instance, keyed by the stack's work folder: never in the work folder,
+//! where anything working in the project could write a clean verdict or an
+//! acknowledgement of its own. The `<work>/instances/<instance>/data-safety.json`
+//! an older version kept is not read as a verdict; an acknowledgement in it
+//! that matches the verdict now is only shown ("acknowledged before this
+//! update — confirm again"), and the block stays as it is until the person
+//! acknowledges again.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -137,7 +145,7 @@ use stack_core::cli::{CliError, Invocation};
 use stack_core::compose::parse_utc;
 use stack_core::definition::{ComponentDef, ScanWhen};
 use stack_core::driver::ResolvedInstance;
-use stack_core::jobs::write_atomic;
+use stack_core::gate_store::Scope;
 use stack_core::placeholders;
 use stack_core::runner::Observation;
 use stack_core::safety::data::{
@@ -151,7 +159,10 @@ use crate::procs::instance_dir;
 use crate::project::Loaded;
 use crate::world::World;
 
-pub const STORE_FILE: &str = "data-safety.json";
+/// The verdicts' record name in the gate storage (instance scope).
+pub const STORE_RECORD: &str = "data-safety";
+/// The work-folder file older versions kept them in.
+pub const LEGACY_STORE_FILE: &str = "data-safety.json";
 /// The acknowledge action's id (the wire block names it too).
 pub const ACK_ACTION_ID: &str = "data-safety-ack";
 /// The "run the check now" action's id.
@@ -282,30 +293,53 @@ pub struct CheckStore {
     pub components: IndexMap<String, CheckEntry>,
 }
 
+/// The file the instance's record is in, in the gate storage (empty when
+/// this process has none).
 pub fn store_path(work_dir: &Path, instance: &str) -> PathBuf {
-    instance_dir(work_dir, instance).join(STORE_FILE)
+    crate::records::gate_of(work_dir)
+        .and_then(|g| {
+            g.path(Scope::Instance(instance), STORE_RECORD)
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Where an older version kept an instance's verdicts.
+pub fn legacy_store_path(work_dir: &Path, instance: &str) -> PathBuf {
+    instance_dir(work_dir, instance).join(LEGACY_STORE_FILE)
 }
 
 impl CheckStore {
-    /// A missing file is an empty store; one that cannot be read is an
-    /// error, so the instance reads as "cannot be judged" rather than clean.
+    /// The instance's verdicts from the gate storage. None yet is an empty
+    /// store; one that cannot be read (or is not private) is an error, so
+    /// the instance reads as "cannot be judged" rather than clean.
     pub fn load(work_dir: &Path, instance: &str) -> Result<CheckStore, String> {
-        let path = store_path(work_dir, instance);
-        match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| format!("{} cannot be read: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CheckStore::default()),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
+        Ok(crate::records::gate_of(work_dir)?
+            .read(Scope::Instance(instance), STORE_RECORD)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default())
     }
 
     pub fn save(&self, work_dir: &Path, instance: &str) -> Result<(), String> {
-        let path = store_path(work_dir, instance);
-        write_atomic(
-            &path,
-            &serde_json::to_string_pretty(self).expect("store serializes"),
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))
+        crate::records::gate_of(work_dir)?
+            .write(Scope::Instance(instance), STORE_RECORD, self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The acknowledgements an older version kept in the work folder, per
+    /// component. Only ever shown, never applied: whoever can write the
+    /// work folder could have written them.
+    pub fn legacy_acks(work_dir: &Path, instance: &str) -> IndexMap<String, CheckEntry> {
+        fs::read_to_string(legacy_store_path(work_dir, instance))
+            .ok()
+            .and_then(|t| serde_json::from_str::<CheckStore>(&t).ok())
+            .map(|s| {
+                s.components
+                    .into_iter()
+                    .filter(|(_, e)| e.ack.is_some())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -560,6 +594,10 @@ pub struct InstanceSafety {
     pub configured: bool,
     /// The rules file's hash now, or why it does not load.
     pub current_rules: Option<Result<String, String>>,
+    /// Not-clean components whose verdict an older version's work-folder
+    /// store had acknowledged: shown, to be confirmed again, while nothing
+    /// was acknowledged on the instance since.
+    pub acked_before: Vec<String>,
 }
 
 /// `<stack>/<slot>`, the wire's instance name.
@@ -589,7 +627,13 @@ pub fn project_dir(dir: &Path) -> Value {
 /// for it, the item folder first and then each worktree, absolute. `null`
 /// when no item is active. An item whose record cannot be read is still
 /// named, by its folder, with `source: null`: its folder is what matters.
+/// `null` too while the binding comes from an older version's work-folder
+/// file: whatever can write there could name an empty item to narrow the
+/// block, so the block covers the whole project instead.
 pub fn bound(loaded: &Loaded) -> Value {
+    if loaded.binding.from_work_folder {
+        return Value::Null;
+    }
     let Some(item) = loaded.binding.item.as_deref() else {
         return Value::Null;
     };
@@ -697,6 +741,22 @@ pub fn summarize(
     let policy = components
         .iter()
         .fold(None, |acc, c| stronger(acc, c.policy));
+    let acked_before = match store {
+        Ok(s) if !s.components.values().any(|e| e.ack.is_some()) => {
+            let legacy = CheckStore::legacy_acks(&loaded.work_dir(), &loaded.instance_id());
+            components
+                .iter()
+                .filter(|c| c.state == SafetyState::NotClean)
+                .filter(|c| {
+                    let verdict = c.entry.as_ref().and_then(|e| e.verdict.as_ref());
+                    let old = legacy.get(&c.id).and_then(|e| e.ack.as_ref());
+                    matches!((old, verdict), (Some(a), Some(v)) if ack_survives(a, v))
+                })
+                .map(|c| c.id.clone())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     InstanceSafety {
         instance: instance_name(&loaded.stack_name, loaded.slot),
         components,
@@ -707,6 +767,7 @@ pub fn summarize(
         unscanned_policy: unscanned,
         configured,
         current_rules,
+        acked_before,
     }
 }
 
@@ -801,7 +862,7 @@ impl InstanceSafety {
 
     /// The `dataSafety` block (see the module docs).
     pub fn wire(&self) -> Value {
-        json!({
+        let mut block = json!({
             "instance": self.instance,
             "state": self.state.as_str(),
             "policy": self.policy.map(Policy::as_str),
@@ -813,7 +874,11 @@ impl InstanceSafety {
             "unscanned": self.unscanned(),
             "ack": self.ack(),
             "ackActionId": ACK_ACTION_ID,
-        })
+        });
+        if !self.acked_before.is_empty() {
+            block["ackedBefore"] = json!(self.acked_before);
+        }
+        block
     }
 
     /// What an acknowledgement would cover now: a hash over every not-clean

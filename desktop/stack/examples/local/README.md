@@ -233,8 +233,8 @@ scripts' comments show.
 After every job that starts `db`, the job runs the check and prints the
 verdict (counts only, never a value). The source checks again every six
 hours while `db` runs, and **Run data-safety check** on the row or in the
-**Data safety** facts section checks now. The verdict is kept in
-`.work/instances/local-0/data-safety.json` and shown as the payload's
+**Data safety** facts section checks now. The verdict is kept in the
+app's own storage (never in the work folder) and shown as the payload's
 `dataSafety` block, the Data safety facts and, when not clean, an alert,
 a `data not clean` badge and a banner saying agents are blocked, with
 **Acknowledge findings** (it asks for a note).

@@ -1,10 +1,16 @@
-//! Job records under `<work>/jobs/`: one id, three files.
+//! Job records: one id, a record and two files.
 //!
-//! | file | holds |
+//! | where | holds |
 //! |---|---|
-//! | `<id>.json` | the action, target, slot, the exact argv, `mutates`, status, exit code, start and end times, the paths of the other two, and the stored work (the plan the user approved) |
-//! | `<id>.log` | the console output (the job's own copy; the pane shows the same lines live) |
-//! | `<id>.result.json` | the structured outcome the views read: the steps with their exit codes and times, the components' resolved provenance, the data-safety verdicts (counts only), the notes |
+//! | the record, in the app-private gate storage ([`stack_core::gate_store`]) keyed by the stack's work folder, `jobs/<id>` | the action, target, slot, the exact argv, `mutates`, status, exit code, start and end times, the paths of the other two, and the stored work (the plan the user approved) |
+//! | `<work>/jobs/<id>.log` | the console output (the job's own copy; the pane shows the same lines live) |
+//! | `<work>/jobs/<id>.result.json` | the structured outcome the views read: the steps with their exit codes and times, the components' resolved provenance, the data-safety verdicts (counts only), the notes |
+//!
+//! The record is what `run-job` executes, so it never lives in the work
+//! folder: anything working in the project can write there, and a job
+//! record it planted (or a plan it rewrote) would run as if the person had
+//! confirmed it. A `<work>/jobs/<id>.json` an older version left (or
+//! anyone wrote) is not read.
 //!
 //! Ids are `j<UTC>-<random>` (`j20261114T120000Z-3fa9c1`), so a folder
 //! listing sorts by time. Retention keeps a record while it is younger
@@ -20,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use stack_core::compose::parse_utc;
 use stack_core::definition::{JobsDef, StackDef};
+use stack_core::gate_store::{GateProject, Scope};
 use stack_core::jobs::write_atomic;
 use stack_core::planner::{Change, Plan};
 
@@ -230,8 +237,28 @@ pub struct JobResult {
     pub error: Option<String>,
 }
 
+/// The folder of a stack's job logs, results and locks.
 pub fn jobs_dir(work_dir: &Path) -> PathBuf {
     work_dir.join(JOBS_DIR)
+}
+
+/// The gate records of the stack whose work folder is `work_dir`.
+pub fn gate_of(work_dir: &Path) -> Result<GateProject, String> {
+    stack_core::gate_store::for_dir(work_dir).map_err(|e| e.to_string())
+}
+
+fn record_name(id: &str) -> String {
+    format!("{JOBS_DIR}/{id}")
+}
+
+/// The ids of the stack's job records, oldest first.
+pub fn record_ids(work_dir: &Path) -> Vec<String> {
+    gate_of(work_dir)
+        .and_then(|g| g.list(Scope::Project, JOBS_DIR).map_err(|e| e.to_string()))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| is_job_id(id))
+        .collect()
 }
 
 /// Is `id` one of ours? Guards every path built from a request.
@@ -265,10 +292,6 @@ impl JobRecord {
         self.mutates && self.work.takes_lease()
     }
 
-    pub fn path(work_dir: &Path, id: &str) -> PathBuf {
-        jobs_dir(work_dir).join(format!("{id}.json"))
-    }
-
     pub fn log_path(work_dir: &Path, id: &str) -> PathBuf {
         jobs_dir(work_dir).join(format!("{id}.log"))
     }
@@ -277,24 +300,34 @@ impl JobRecord {
         jobs_dir(work_dir).join(format!("{id}.result.json"))
     }
 
+    /// The record of job `id` of the stack whose work folder is
+    /// `work_dir`, from the gate storage.
     pub fn load(work_dir: &Path, id: &str) -> Result<Option<JobRecord>, String> {
         if !is_job_id(id) {
             return Ok(None);
         }
-        let path = Self::path(work_dir, id);
-        match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|e| format!("{}: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
+        gate_of(work_dir)?
+            .read(Scope::Project, &record_name(id))
+            .map_err(|e| e.to_string())
     }
 
     pub fn save(&self, work_dir: &Path) -> Result<(), String> {
-        let path = Self::path(work_dir, &self.id);
-        let text = serde_json::to_string_pretty(self).expect("record serializes");
-        write_atomic(&path, &text).map_err(|e| format!("{}: {e}", path.display()))
+        if !is_job_id(&self.id) {
+            return Err(format!("`{}` is not a job id", self.id));
+        }
+        gate_of(work_dir)?
+            .write(Scope::Project, &record_name(&self.id), self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Delete the record (its log and result are the caller's).
+    pub fn remove(work_dir: &Path, id: &str) -> Result<bool, String> {
+        if !is_job_id(id) {
+            return Ok(false);
+        }
+        gate_of(work_dir)?
+            .remove(Scope::Project, &record_name(id))
+            .map_err(|e| e.to_string())
     }
 
     /// Read, change and write back one record. Records are written by the
@@ -467,22 +500,11 @@ pub fn referenced_by_saved_states(work_dir: &Path) -> BTreeSet<String> {
 
 /// Delete the records retention does not keep; their ids.
 pub fn prune(work_dir: &Path, keep: &JobsDef, now_utc: &str) -> Vec<String> {
-    let dir = jobs_dir(work_dir);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
     let now = parse_utc(now_utc).unwrap_or(0);
     let referenced = referenced_by_saved_states(work_dir);
-    let mut records: Vec<JobRecord> = entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let id = name.strip_suffix(".json")?;
-            if !is_job_id(id) {
-                return None;
-            }
-            JobRecord::load(work_dir, id).ok().flatten()
-        })
+    let mut records: Vec<JobRecord> = record_ids(work_dir)
+        .into_iter()
+        .filter_map(|id| JobRecord::load(work_dir, &id).ok().flatten())
         .collect();
     records.sort_by(|a, b| b.created_utc.cmp(&a.created_utc).then(b.id.cmp(&a.id)));
     let max_age = u64::from(keep.keep_days) * 86_400;
@@ -498,8 +520,8 @@ pub fn prune(work_dir: &Path, keep: &JobsDef, now_utc: &str) -> Vec<String> {
         if kept {
             continue;
         }
+        let _ = JobRecord::remove(work_dir, &rec.id);
         for path in [
-            JobRecord::path(work_dir, &rec.id),
             JobRecord::log_path(work_dir, &rec.id),
             JobRecord::result_path(work_dir, &rec.id),
             crate::lease::job_lock_path(work_dir, &rec.id),

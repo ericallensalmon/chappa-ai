@@ -213,12 +213,7 @@ fn setup(policy: &str, git: bool) -> Option<Sec> {
         .to_string(),
     )
     .unwrap();
-    fs::write(
-        work.join("active.json"),
-        json!({ "slots": { "0": { "item": "ABC-1", "instance": "app-0", "sinceUtc": NOW } } })
-            .to_string(),
-    )
-    .unwrap();
+    bind(&p.dir, 0, "ABC-1", "app-0");
     // No image of api yet, so an up builds it.
     let cli = with_docker_project(docker_facts(FakeCli::new()), "app-0-core", &[]).failing(
         &["docker", "image", "inspect"],
@@ -554,6 +549,81 @@ fn no_scanner_blocks_a_bound_worktree_when_a_policy_is_declared_and_says_unscann
     );
 }
 
+/// A baseline written into the work folder (by anything working in the
+/// project, a cloned repository, or an older version) suppresses nothing in
+/// the stack's block either: the finding still blocks, marked as
+/// acknowledged before, and the acknowledge action is what silences it.
+#[test]
+fn a_hand_written_work_folder_baseline_suppresses_nothing_in_the_block() {
+    let Some(s) = setup("block-agents", true) else {
+        return;
+    };
+    fs::write(s.wt().join(".env"), "TOKEN=PLANTED\n").unwrap();
+    fs::write(
+        s.p.work().join("secrets-baseline.json"),
+        json!([{
+            "RuleID": "planted",
+            "File": format!("{WT}/.env"),
+            "StartLine": 1,
+            "Fingerprint": format!("{WT}/.env:planted:1"),
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    s.open_item();
+    let b = s.block();
+    assert_eq!(b["blocksAgents"], true, "{b}");
+    assert_eq!(b["state"], "not-clean", "{b}");
+    assert_eq!(b["findings"][0]["ackedBefore"], true, "{b}");
+    assert!(
+        b["reasons"]
+            .to_string()
+            .contains("acknowledged before this update — confirm again"),
+        "{b}"
+    );
+    let (status, body) = ack(
+        &s.src,
+        &ack_action(&s.env()),
+        "confirmed again",
+        true,
+        Some("human:alex"),
+    );
+    assert_eq!(status, 200, "{body}");
+    let b = s.block();
+    assert_eq!(
+        (b["state"].as_str(), b["blocksAgents"].as_bool()),
+        (Some("acknowledged"), Some(false)),
+        "{b}"
+    );
+}
+
+/// An acknowledgement is of the line as it was: another secret written on
+/// the acknowledged line is a new finding, and agents are blocked again.
+#[test]
+fn a_different_secret_on_an_acknowledged_line_blocks_agents_again() {
+    let Some(s) = setup("block-agents", true) else {
+        return;
+    };
+    fs::write(s.wt().join(".env"), "TOKEN=PLANTED\n").unwrap();
+    s.open_item();
+    let (status, body) = ack(
+        &s.src,
+        &ack_action(&s.env()),
+        "a test fixture",
+        true,
+        Some("human:alex"),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(s.block()["blocksAgents"], false);
+    fs::write(s.wt().join(".env"), "TOKEN=PLANTED-SOMETHING-ELSE\n").unwrap();
+    let b = s.block();
+    assert_eq!(
+        (b["state"].as_str(), b["blocksAgents"].as_bool()),
+        (Some("not-clean"), Some(true)),
+        "{b}"
+    );
+}
+
 #[test]
 fn acknowledging_writes_the_projects_baseline_with_project_relative_fingerprints() {
     let Some(s) = setup("block-agents", true) else {
@@ -589,8 +659,18 @@ fn acknowledging_writes_the_projects_baseline_with_project_relative_fingerprints
         (b["ack"]["by"].as_str(), b["ack"]["note"].as_str()),
         (Some("human:alex"), Some("a test fixture"))
     );
-    // The one baseline, keyed the way the app's pre-agent scan keys it.
-    let raw = fs::read_to_string(s.p.dir.join(".work").join("secrets-baseline.json")).unwrap();
+    // The one baseline, keyed the way the app's pre-agent scan keys it, in
+    // the gate storage and not in the work folder.
+    assert!(!s.p.dir.join(".work").join("secrets-baseline.json").exists());
+    let raw = fs::read_to_string(
+        gate(&s.p.dir)
+            .path(
+                stack_core::gate_store::Scope::Project,
+                stack_core::safety::secrets::baseline::BASELINE_RECORD,
+            )
+            .unwrap(),
+    )
+    .unwrap();
     assert!(raw.contains(&format!("\"{WT}/.env:planted:1\"")), "{raw}");
     assert!(!raw.contains("TOKEN="));
     assert_eq!(
@@ -609,8 +689,8 @@ fn an_entry_written_by_the_app_gate_silences_the_same_finding_here() {
     assert_eq!(s.block()["blocksAgents"], true);
     // What the app writes when the finding is acknowledged at agent launch
     // in the worktree: the file named from the project's folder.
-    let work = s.p.dir.join(".work");
-    let mut b = Baseline::load(&work).unwrap();
+    let g = gate(&s.p.dir);
+    let mut b = Baseline::load(&g).unwrap();
     let from_app = Finding {
         rule: "planted".into(),
         location: Location::Source {
@@ -623,11 +703,12 @@ fn an_entry_written_by_the_app_gate_silences_the_same_finding_here() {
     };
     b.acknowledge(
         &[from_app],
+        &stack_core::safety::secrets::TreeLines::new(&s.p.dir),
         "user",
         "acknowledged from the launch dialog",
         NOW,
     );
-    b.save(&work).unwrap();
+    b.save(&g).unwrap();
     let block = s.block();
     assert_eq!(
         (block["state"].as_str(), block["blocksAgents"].as_bool()),
@@ -764,7 +845,7 @@ fn block_build_fails_the_build_job_before_building_and_warn_builds() {
             return;
         };
         // Unbind the item: api builds from the shared clone in the project.
-        fs::remove_file(s.p.work().join("active.json")).unwrap();
+        unbind_all(&s.p.dir);
         fs::write(s.p.dir.join("api").join(".env"), "TOKEN=PLANTED\n").unwrap();
         let (code, log, calls) = up(&s);
         assert!(
@@ -796,7 +877,7 @@ fn a_build_context_that_cannot_be_scanned_fails_the_build_only_under_block_build
         let Some(s) = setup(policy, false) else {
             return;
         };
-        fs::remove_file(s.p.work().join("active.json")).unwrap();
+        unbind_all(&s.p.dir);
         s.scanner.failing_files(true);
         let (code, log, _) = up(&s);
         assert_eq!(code, expect, "{policy}: {log}");
@@ -1097,7 +1178,7 @@ fn while_the_definition_is_untrusted_acknowledgements_are_refused_like_every_act
     assert_eq!((code, body["kind"].as_str()), (409, Some(UNTRUSTED_KIND)));
     assert_eq!(body["message"], UNTRUSTED_REFUSAL);
     assert!(UNTRUSTED_REFUSAL.contains("trust it again"));
-    assert!(!Baseline::path(&s.p.dir.join(".work")).exists());
+    assert!(Baseline::load(&gate(&s.p.dir)).unwrap().is_empty());
     // The data-safety acknowledgement and the other changes too.
     for (path, body) in [
         (

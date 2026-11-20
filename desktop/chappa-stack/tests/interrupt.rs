@@ -73,6 +73,8 @@ fn start_runner(dir: &Path, id: &str) -> std::process::Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chappa-stack"));
     cmd.args(["run-job", id, "--project"])
         .arg(dir)
+        .arg(chappa_stack::world::STATE_DIR_ARG)
+        .arg(stack_core::gate_store::install_for_tests())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

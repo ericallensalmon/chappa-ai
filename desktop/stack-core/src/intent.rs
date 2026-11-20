@@ -11,15 +11,18 @@
 //! again or stopped through the stack. That is deliberate: the stack's own
 //! view is the source of truth.
 //!
-//! Files, under the stack project's work folder (`.work/` by default):
+//! The intent record is a file under the stack project's work folder
+//! (`.work/instances/<stack>-<slot>.json`), written atomically (temp file +
+//! rename) so a crash mid-write leaves the previous record, never a
+//! truncated one.
 //!
-//! ```text
-//! .work/instances/<stack>-<slot>.json    one intent record per instance
-//! .work/active.json                      the active work item per slot
-//! ```
-//!
-//! Both are written atomically (temp file + rename) so a crash mid-write
-//! leaves the previous record, never a truncated one.
+//! The active work item per slot ([`ActiveRecord`]) decides which item's
+//! folders a stack builds from and which folders its safety blocks cover,
+//! so it lives in the app-private gate storage ([`crate::gate_store`]),
+//! where nothing working in the project can rewrite it. Older versions
+//! kept it in `.work/active.json`; that file is still read, for one
+//! release, when the storage has no record yet ([`ActiveRecord::load_or_legacy`]),
+//! and the reader says so. It is never written any more.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -29,10 +32,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::definition::Mode;
+use crate::gate_store::{GateProject, Scope};
+use crate::jobs::JobStep;
 use crate::planner::Plan;
 
 pub const INSTANCES_DIR: &str = "instances";
+/// The work-folder file older versions kept the active items in.
 pub const ACTIVE_FILE: &str = "active.json";
+/// The active items' record in the gate storage (project scope).
+pub const ACTIVE_RECORD: &str = "active";
 
 /// Desired state of one component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -94,6 +102,8 @@ pub enum IntentError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(transparent)]
+    Gate(#[from] crate::gate_store::GateError),
 }
 
 /// `<stack>-<slot>`: also the compose project prefix and the terraform workspace.
@@ -177,7 +187,7 @@ impl IntentRecord {
     }
 }
 
-/// `active.json`: which work item each slot is working on.
+/// Which work item each slot is working on.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ActiveRecord {
     /// Keyed by slot number (as a string: JSON object keys).
@@ -194,19 +204,48 @@ pub struct ActiveSlot {
 }
 
 impl ActiveRecord {
-    pub fn path(work_dir: &Path) -> PathBuf {
+    /// Where older versions kept it, under the work folder.
+    pub fn legacy_path(work_dir: &Path) -> PathBuf {
         work_dir.join(ACTIVE_FILE)
     }
 
-    /// An absent file is an empty record.
-    pub fn load(work_dir: &Path) -> Result<Self, IntentError> {
-        Ok(read_json(&Self::path(work_dir))?.unwrap_or_default())
+    /// The record in the gate storage; none is an empty record.
+    pub fn load(gate: &GateProject) -> Result<Self, IntentError> {
+        Ok(gate
+            .read(Scope::Project, ACTIVE_RECORD)?
+            .unwrap_or_default())
     }
 
-    pub fn save(&self, work_dir: &Path) -> Result<PathBuf, IntentError> {
-        let path = Self::path(work_dir);
-        write_json_atomic(&path, self)?;
-        Ok(path)
+    /// The record in the gate storage, or, while there is none, the file
+    /// an older version left in `work_dir` (read only). The flag is true
+    /// when the second was used, so the caller can show it as such and
+    /// trust it no further than a hint.
+    pub fn load_or_legacy(
+        gate: &GateProject,
+        work_dir: &Path,
+    ) -> Result<(Self, bool), IntentError> {
+        if let Some(rec) = gate.read(Scope::Project, ACTIVE_RECORD)? {
+            return Ok((rec, false));
+        }
+        match read_json::<ActiveRecord>(&Self::legacy_path(work_dir)) {
+            Ok(Some(rec)) if !rec.slots.is_empty() => Ok((rec, true)),
+            _ => Ok((ActiveRecord::default(), false)),
+        }
+    }
+
+    pub fn save(&self, gate: &GateProject) -> Result<(), IntentError> {
+        gate.write(Scope::Project, ACTIVE_RECORD, self)?;
+        Ok(())
+    }
+
+    /// The job step that saves this record, for a plan that binds an item.
+    pub fn save_step(&self, gate: &GateProject) -> JobStep {
+        JobStep::write_gate(
+            "active item",
+            gate.project_dir(),
+            ACTIVE_RECORD,
+            serde_json::to_value(self).expect("active serializes"),
+        )
     }
 
     pub fn get(&self, slot: u32) -> Option<&ActiveSlot> {
@@ -426,19 +465,22 @@ mod tests {
     #[test]
     fn active_record_shape_and_ops() {
         let dir = tempfile::tempdir().unwrap();
-        let mut a = ActiveRecord::load(dir.path()).unwrap();
+        let gate = crate::gate_store::GateStore::new(dir.path().join("gate")).project(dir.path());
+        let mut a = ActiveRecord::load(&gate).unwrap();
         assert!(a.slots.is_empty());
         a.set(0, "KEY-12", "app-0", NOW);
         a.set(2, "KEY-12", "app-2", NOW);
         a.set(1, "KEY-7", "app-1", NOW);
-        let path = a.save(dir.path()).unwrap();
-        assert_eq!(path, dir.path().join(ACTIVE_FILE));
-        let json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        a.save(&gate).unwrap();
+        assert!(
+            !dir.path().join(ACTIVE_FILE).exists(),
+            "never in the work folder"
+        );
+        let json: serde_json::Value = gate.read(Scope::Project, ACTIVE_RECORD).unwrap().unwrap();
         assert_eq!(json["slots"]["0"]["item"], "KEY-12");
         assert_eq!(json["slots"]["0"]["instance"], "app-0");
         assert_eq!(json["slots"]["0"]["sinceUtc"], NOW);
-        let back = ActiveRecord::load(dir.path()).unwrap();
+        let back = ActiveRecord::load(&gate).unwrap();
         assert_eq!(back, a);
         assert_eq!(back.get(1).unwrap().item, "KEY-7");
         assert_eq!(back.slots_for("KEY-12"), vec![0, 2]);
@@ -446,6 +488,38 @@ mod tests {
         assert!(b.clear(1).is_some());
         assert!(b.clear(1).is_none());
         assert!(b.get(1).is_none());
+    }
+
+    /// The work-folder file of an older version is read only while the
+    /// storage has no record, says it was used, and is never written.
+    #[test]
+    fn the_work_folder_active_file_is_only_a_read_only_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join(".work");
+        let gate = crate::gate_store::GateStore::new(dir.path().join("gate")).project(dir.path());
+        let (none, legacy) = ActiveRecord::load_or_legacy(&gate, &work).unwrap();
+        assert!(none.slots.is_empty() && !legacy);
+        fs::create_dir_all(&work).unwrap();
+        fs::write(
+            ActiveRecord::legacy_path(&work),
+            r#"{"slots":{"0":{"item":"OLD-1","instance":"app-0","sinceUtc":"t"}}}"#,
+        )
+        .unwrap();
+        let (old, legacy) = ActiveRecord::load_or_legacy(&gate, &work).unwrap();
+        assert!(legacy);
+        assert_eq!(old.get(0).unwrap().item, "OLD-1");
+        assert!(
+            ActiveRecord::load(&gate).unwrap().slots.is_empty(),
+            "never trusted as the record"
+        );
+        let mut now = ActiveRecord::default();
+        now.set(0, "NEW-2", "app-0", NOW);
+        now.save(&gate).unwrap();
+        let (rec, legacy) = ActiveRecord::load_or_legacy(&gate, &work).unwrap();
+        assert!(!legacy);
+        assert_eq!(rec.get(0).unwrap().item, "NEW-2");
+        let file = fs::read_to_string(ActiveRecord::legacy_path(&work)).unwrap();
+        assert!(file.contains("OLD-1"), "the old file is left alone");
     }
 
     #[test]

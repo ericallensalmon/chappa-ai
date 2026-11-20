@@ -33,8 +33,9 @@ toml = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 # `owner_only`: the process token's user SID and a file's access list, read
-# from the system rather than from environment variables or tool output.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+# from the system rather than from environment variables or tool output;
+# the secret scanner's check that a staged file is still the one it staged.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [features]
 # `test_support`: helpers for the tests of crates that depend on this one.

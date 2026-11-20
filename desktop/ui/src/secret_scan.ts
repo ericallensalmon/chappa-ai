@@ -1,10 +1,10 @@
 // The webview side of the pre-launch secret scan: reading a refused spawn's
 // findings out of its error, the dialog that names them (file and rule,
-// never a value) and offers to acknowledge them into the project's local
-// baseline, the "Launch anyway" confirm for a scan that did not finish (a
-// required note, good for that one launch, never written to the baseline),
-// and the notification text for a launch that went ahead with a warning or
-// past an unfinished scan.
+// never a value) and offers to acknowledge them (kept in the app's own
+// storage, never in the project), the "Launch anyway" confirm for a scan
+// that did not finish (a required note, good for that one launch, never
+// written to the baseline), and the notification text for a launch that
+// went ahead with a warning or past an unfinished scan.
 
 import { confirmDialog, promptDialog } from "./dialog";
 import * as ipc from "./ipc";
@@ -33,9 +33,13 @@ export function parseSecretScanBlock(err: unknown): ipc.SecretScanBlockDto | nul
   }
 }
 
+/** What a finding an older version had acknowledged says. */
+export const ACKED_BEFORE = "acknowledged before this update — confirm again";
+
 /** One finding as a line: `file:line (rule)`. */
 export function findingLine(f: ipc.SecretFindingDto): string {
-  return `${f.file}${f.line ? `:${f.line}` : ""}  (${f.rule})`;
+  const before = f.ackedBefore ? `  — ${ACKED_BEFORE}` : "";
+  return `${f.file}${f.line ? `:${f.line}` : ""}  (${f.rule})${before}`;
 }
 
 /** The review banner's lines, leading a dialog while the project's own
@@ -57,14 +61,21 @@ export function blockMessage(block: ipc.SecretScanBlockDto): string {
     ].join("\n");
   }
   const n = block.findings.length;
+  const before = block.findings.filter((f) => f.ackedBefore).length;
   const lines = [
     ...reviewLines(block.configReview),
     `The agent was not launched: ${n} possible secret${n === 1 ? "" : "s"} in ${block.cwd}.`,
     "",
     ...block.findings.map(findingLine),
     "",
-    "Fix them, or acknowledge them as known (they go into the project's local baseline under .work/ and stop blocking launches; the baseline is never committed).",
+    "Fix them, or acknowledge them as known: the app keeps the acknowledgement in its own storage, never in the project, and it covers each line as it is now (a different secret there blocks again).",
   ];
+  if (before > 0) {
+    lines.push(
+      "",
+      `${before} of these ${before === 1 ? "was" : "were"} acknowledged before this update, in a file in the project's work folder. Anything working in the project can write that file, so it no longer counts: acknowledge once to confirm them.`,
+    );
+  }
   if (block.skipped > 0) lines.push("", `${block.skipped} file${block.skipped === 1 ? " was" : "s were"} not scanned (too large, or a link).`);
   return lines.join("\n");
 }

@@ -20,7 +20,7 @@
 //! | [`env_view`] | the Environment payload from the runner's status |
 //! | [`actions`] | the verbs offered, planned for their confirm text |
 //! | [`hidden_output`] | the `logs` terminals' output with the generated secrets hidden |
-//! | [`records`] | job records under `.work/jobs/`, exit reports, retention |
+//! | [`records`] | job records (in the app-private gate storage; logs and results under `.work/jobs/`), exit reports, retention |
 //! | [`lease`] | one changing job per instance at a time, a job's runner alive or not, cancel requests, settling jobs whose runner is gone |
 //! | [`runjob`] | `run-job`: one stored job, start to finish |
 //! | [`interrupt`] | Ctrl+C in a job's terminal: the cancel, the second-press notice, the runner's end |

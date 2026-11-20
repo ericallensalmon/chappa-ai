@@ -15,7 +15,7 @@
 //! | [`planner`] | turns a requested change into an ordered, fingerprinted plan of steps |
 //! | [`provenance`] | what a component was built from, how stale that is, and image-label mapping |
 //! | [`driver`] | the engine-facing traits and the nine component states, with fakes for tests |
-//! | [`intent`] | the per-instance desired-state record and the active-item file under `.work/` |
+//! | [`intent`] | the per-instance desired-state record under `.work/` and the active-item record |
 //! | [`instance_secrets`] | `{secret:<name>}`: random values generated per instance and kept under `.work/`, so no password is written into a committed file |
 //! | [`safety`] | data-safety and secret-scan types whose findings can never carry a value, the data-safety rule engine ([`safety::data`]) and the secret-scan runner ([`safety::secrets`]) |
 //! | [`cli`] | the one [`cli::EngineCli`] trait every engine call goes through (argv, env, cwd, timeout, captured output), the real runner and a recording fake |
@@ -34,6 +34,7 @@
 //! | [`credentials`] | credential-shaped argv words and env values written inline in a committed file, and how rows and logs mask them |
 //! | [`git`] | the one way git is run: config overrides that keep a repository from running commands, the worktree link check, commit-id shapes |
 //! | [`child_env`] | the variables no child process may inherit (a source's token and address, gitleaks' config overrides) |
+//! | [`gate_store`] | the app-private, owner-only records that decide whether a gate opens (acknowledgements, verdicts, job plans, workflow state, the active binding), keyed by project and instance |
 //! | [`owner_only`] | files and folders only the current user can open: mode bits on Unix, a single access entry on Windows |
 //! | [`workdir`] | the work folder's own `.gitignore` and the sweep of stale scanner scratch |
 //! | [`workflow`] | an item's local status flow: moves, human gates, pending approvals, rounds, history, the tracker mismatch, the status block the app shows |
@@ -70,6 +71,7 @@ pub mod compose;
 pub mod credentials;
 pub mod definition;
 pub mod driver;
+pub mod gate_store;
 pub mod git;
 pub mod hosts;
 pub mod images;

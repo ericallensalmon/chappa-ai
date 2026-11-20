@@ -6,8 +6,15 @@
 //! spawn with a working directory — from the rail, the control surface, a
 //! record start or a source action — that directory is scanned with the
 //! runner in `stack_core::safety::secrets` (untracked and ignored files
-//! included, values redacted) against the project's local baseline under
-//! `<project>/.work/`.
+//! included, values redacted) against the project's baseline, which lives
+//! in the app's own gate storage (`stack_core::gate_store`), never in the
+//! project: anything working in the project could otherwise write an
+//! acknowledgement of its own. An acknowledgement is bound to the line it
+//! was made for, so a different secret on that line is a new finding. A
+//! finding the work-folder baseline of an older version listed is still a
+//! finding; the launch dialog marks it "acknowledged before this update"
+//! and one acknowledgement confirms them all. The scanner's scratch is in
+//! that storage's owner-only scratch folder, outside every project.
 //!
 //! Settings ▸ Security owns the switch ("Scan for secrets before launching
 //! an agent": automatic = on when gitleaks is installed; a project can
@@ -45,7 +52,7 @@ use project_model::settings::{SecretScanPolicy, Settings};
 use serde::{Deserialize, Serialize};
 use stack_core::safety::secrets::config::{choose, Chosen, ProjectScanConfig};
 use stack_core::safety::secrets::{
-    scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason,
+    scan, Baseline, GitleaksScanner, ListLimits, ScanTarget, SkipReason, TreeLines,
 };
 use stack_core::safety::{Finding, Location, Policy, SafetyError, SecretScanner, Severity};
 use tauri::{AppHandle, Emitter};
@@ -57,8 +64,8 @@ pub const SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const BLOCK_PREFIX: &str = "secret-scan-blocked:";
 /// The event a non-blocking outcome raises: `{term_id, notice: ScanNotice}`.
 pub const EVENT: &str = "agent://secret-scan";
-/// Where a project's baseline (and the scanner's scratch space) lives.
-pub const WORK_DIR: &str = ".work";
+/// The work folder older versions kept the baseline and scan scratch in.
+pub const LEGACY_WORK_DIR: &str = ".work";
 
 /// One finding as shown: the file, the rule and the line. There is no
 /// field for the matched text, and `Finding` upstream has none either.
@@ -69,6 +76,11 @@ pub struct FindingDto {
     pub rule: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    /// An older version's work-folder baseline listed it: shown as
+    /// "acknowledged before this update — confirm again". It blocks like
+    /// any other finding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acked_before: bool,
 }
 
 impl FindingDto {
@@ -78,6 +90,7 @@ impl FindingDto {
                 file: file.to_string_lossy().replace('\\', "/"),
                 rule: f.rule.clone(),
                 line: *line,
+                acked_before: false,
             }),
             Location::Data { .. } => None,
         }
@@ -196,13 +209,18 @@ pub fn effective_enabled(
 }
 
 /// The scanner the settings name: the configured program if any, else
-/// gitleaks on `PATH`. The scratch dir is the project's `.work`, which the
-/// file lister always skips, so staging is never itself scanned.
-pub fn detect_scanner(settings: &Settings, project_root: &Path) -> Option<GitleaksScanner> {
+/// gitleaks on `PATH`. Its scratch folder is the gate storage's, owner-only
+/// and outside every project, so nothing working in a scanned tree can
+/// swap a report or drop an ignore file into it. Without gate storage the
+/// scratch folder is empty, and every scan refuses to run.
+pub fn detect_scanner(settings: &Settings) -> Option<GitleaksScanner> {
     let configured = Some(settings.secret_scan_program.trim())
         .filter(|p| !p.is_empty())
         .map(Path::new);
-    GitleaksScanner::detect(configured, project_root.join(WORK_DIR)).map(|mut g| {
+    let scratch = stack_core::gate_store::GateStore::installed()
+        .and_then(|s| s.scratch_dir())
+        .unwrap_or_default();
+    GitleaksScanner::detect(configured, scratch).map(|mut g| {
         g.timeout = SCAN_TIMEOUT;
         // The person's own config from Settings, never one from the tree;
         // without it the scanner writes the app's config for each run.
@@ -220,8 +238,9 @@ fn to_policy(policy: SecretScanPolicy) -> Policy {
     }
 }
 
-/// Scan `cwd` with `scanner` under `policy`, subtracting the baseline kept
-/// in `<project_root>/.work`. Pure over the scanner, so tests use a fake.
+/// Scan `cwd` with `scanner` under `policy`, subtracting the project's
+/// baseline from the gate storage. Pure over the scanner, so tests use a
+/// fake.
 pub fn evaluate(
     scanner: &dyn SecretScanner,
     policy: SecretScanPolicy,
@@ -229,8 +248,10 @@ pub fn evaluate(
     cwd: &Path,
     limits: &ListLimits,
 ) -> GateOutcome {
-    let work = project_root.join(WORK_DIR);
-    let baseline = match Baseline::load(&work) {
+    let baseline = match stack_core::gate_store::for_dir(project_root)
+        .map_err(|e| e.to_string())
+        .and_then(|g| Baseline::load(&g).map_err(|e| e.to_string()))
+    {
         Ok(b) => b,
         Err(e) => {
             return GateOutcome::Incomplete(format!("the secret baseline could not be read: {e}"))
@@ -257,8 +278,16 @@ pub fn evaluate(
         .into_iter()
         .map(|f| from_project(&prefix, f))
         .collect();
-    let (fresh, _) = baseline.apply(named);
-    let findings: Vec<FindingDto> = fresh.iter().filter_map(FindingDto::from_finding).collect();
+    let (fresh, _) = baseline.apply(named, &TreeLines::new(project_root));
+    let findings: Vec<FindingDto> = fresh
+        .iter()
+        .filter_map(|f| {
+            FindingDto::from_finding(f).map(|mut d| {
+                d.acked_before = baseline.acked_before(f);
+                d
+            })
+        })
+        .collect();
     let over_total = report
         .skipped
         .iter()
@@ -357,7 +386,7 @@ pub fn decide_with(
     if !cwd.is_dir() {
         return (GateOutcome::Skipped, None);
     }
-    let scanner = detect_scanner(settings, project_root);
+    let scanner = detect_scanner(settings);
     if !effective_enabled(
         settings.secret_scan_before_agents,
         project_pref,
@@ -512,24 +541,26 @@ pub fn describe_block(block: &ScanBlock) -> String {
     )
 }
 
-/// Record `findings` in the project's baseline with the user's note, so
-/// they stop blocking launches until the file changes around them.
+/// Record `findings` in the project's baseline (in the gate storage) with
+/// the user's note, each bound to its line as it reads now, so they stop
+/// blocking launches until that line changes.
 pub fn acknowledge(
     project_root: &Path,
     findings: &[FindingDto],
     who: &str,
     note: &str,
 ) -> Result<usize, String> {
-    let work = project_root.join(WORK_DIR);
-    let mut baseline = Baseline::load(&work).map_err(|e| e.to_string())?;
+    let gate = stack_core::gate_store::for_dir(project_root).map_err(|e| e.to_string())?;
+    let mut baseline = Baseline::load(&gate).map_err(|e| e.to_string())?;
     let upstream: Vec<Finding> = findings.iter().map(FindingDto::to_finding).collect();
     let added = baseline.acknowledge(
         &upstream,
+        &TreeLines::new(project_root),
         who,
         note,
         &crate::sources::iso_utc(term_core::actor::epoch_ms()),
     );
-    baseline.save(&work).map_err(|e| e.to_string())?;
+    baseline.save(&gate).map_err(|e| e.to_string())?;
     log::info!(
         "[secret-scan] {who} acknowledged {} finding(s) in {} ({added} new): {}",
         findings.len(),
@@ -605,7 +636,7 @@ pub fn scanner_info(settings: &Settings) -> ScannerInfo {
 /// [`scanner_info`], checking the settings' config against the open project
 /// folders `roots`.
 pub fn scanner_info_with(settings: &Settings, roots: &[PathBuf]) -> ScannerInfo {
-    let scanner = detect_scanner(settings, Path::new("."));
+    let scanner = detect_scanner(settings);
     let set = settings.secret_scan_config.trim();
     ScannerInfo {
         found: scanner.is_some(),
@@ -758,7 +789,29 @@ mod tests {
         }
     }
 
+    /// The project's baseline record in the gate storage.
+    fn baseline_file(root: &Path) -> PathBuf {
+        stack_core::gate_store::for_dir(root)
+            .unwrap()
+            .path(
+                stack_core::gate_store::Scope::Project,
+                stack_core::safety::secrets::baseline::BASELINE_RECORD,
+            )
+            .unwrap()
+    }
+
+    fn notes_file(root: &Path) -> PathBuf {
+        stack_core::gate_store::for_dir(root)
+            .unwrap()
+            .path(
+                stack_core::gate_store::Scope::Project,
+                stack_core::safety::secrets::baseline::NOTES_RECORD,
+            )
+            .unwrap()
+    }
+
     fn tree() -> (tempfile::TempDir, PathBuf) {
+        stack_core::gate_store::install_for_tests();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         std::fs::create_dir_all(root.join("sub")).unwrap();
@@ -799,7 +852,8 @@ mod tests {
             vec![FindingDto {
                 file: "sub/.env".into(),
                 rule: "generic-api-key".into(),
-                line: Some(1)
+                line: Some(1),
+                acked_before: false,
             }]
         );
         let err = block_error(&block);
@@ -854,15 +908,12 @@ mod tests {
             acknowledge(&root, &block.findings, "user", "test fixture").unwrap(),
             1
         );
-        let baseline =
-            std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap();
+        let baseline = std::fs::read_to_string(baseline_file(&root)).unwrap();
         assert!(
             baseline.contains("generic-api-key") && !baseline.contains("KEY=value"),
             "{baseline}"
         );
-        let notes =
-            std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.notes.json"))
-                .unwrap();
+        let notes = std::fs::read_to_string(notes_file(&root)).unwrap();
         assert!(notes.contains("test fixture"));
         assert_eq!(
             evaluate(
@@ -884,6 +935,89 @@ mod tests {
         assert!(matches!(
             evaluate(
                 &moved,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &no_git()
+            ),
+            GateOutcome::Blocked(_)
+        ));
+    }
+
+    /// A baseline entry written by hand into the project's work folder (by
+    /// an agent, a cloned repository, or an older version) suppresses
+    /// nothing: the launch is still refused, the finding marked as
+    /// acknowledged before. The acknowledge action is what silences it, and
+    /// nothing is written into the project.
+    #[test]
+    fn a_hand_written_work_folder_baseline_entry_does_not_open_the_launch_gate() {
+        let (_dir, root) = tree();
+        std::fs::create_dir_all(root.join(".work")).unwrap();
+        std::fs::write(
+            root.join(".work").join("secrets-baseline.json"),
+            r#"[{"RuleID":"generic-api-key","File":"sub/.env","StartLine":1,"Fingerprint":"sub/.env:generic-api-key:1"}]"#,
+        )
+        .unwrap();
+        let fake = Fake::with(vec![finding("sub/.env", "generic-api-key", 1)]);
+        let GateOutcome::Blocked(block) = evaluate(
+            &fake,
+            SecretScanPolicy::BlockAgents,
+            &root,
+            &root,
+            &no_git(),
+        ) else {
+            panic!("a planted baseline entry opened the gate")
+        };
+        assert!(block.findings[0].acked_before, "{block:?}");
+        assert!(block_error(&block).contains("\"ackedBefore\":true"));
+        acknowledge(&root, &block.findings, "user", "confirmed again").unwrap();
+        assert_eq!(
+            evaluate(
+                &fake,
+                SecretScanPolicy::BlockAgents,
+                &root,
+                &root,
+                &no_git()
+            ),
+            GateOutcome::Clean { skipped: 0 }
+        );
+        let planted =
+            std::fs::read_to_string(root.join(".work").join("secrets-baseline.json")).unwrap();
+        assert!(
+            !planted.contains("LineHash"),
+            "the work folder is not written"
+        );
+    }
+
+    /// An acknowledgement covers the line it was made for: a different
+    /// secret written on that line (same file, rule and line number) blocks
+    /// the launch again.
+    #[test]
+    fn a_different_secret_on_an_acknowledged_line_blocks_the_launch_again() {
+        let (_dir, root) = tree();
+        let fake = Fake::with(vec![finding("sub/.env", "generic-api-key", 1)]);
+        let GateOutcome::Blocked(block) = evaluate(
+            &fake,
+            SecretScanPolicy::BlockAgents,
+            &root,
+            &root,
+            &no_git(),
+        ) else {
+            panic!()
+        };
+        acknowledge(&root, &block.findings, "user", "fixture").unwrap();
+        let clean = evaluate(
+            &fake,
+            SecretScanPolicy::BlockAgents,
+            &root,
+            &root,
+            &no_git(),
+        );
+        assert_eq!(clean, GateOutcome::Clean { skipped: 0 });
+        std::fs::write(root.join("sub").join(".env"), "KEY=another\n").unwrap();
+        assert!(matches!(
+            evaluate(
+                &fake,
                 SecretScanPolicy::BlockAgents,
                 &root,
                 &root,
@@ -965,7 +1099,7 @@ mod tests {
             );
         }
         // The override is not an acknowledgement: nothing reaches the baseline.
-        assert!(!root.join(WORK_DIR).join("secrets-baseline.json").exists());
+        assert!(!baseline_file(&root).exists());
         // Turning the scan off still skips it entirely.
         assert_eq!(
             gate_launch(&settings, Some(false), &root, &root, None),
@@ -1021,8 +1155,7 @@ mod tests {
         };
         assert_eq!(block.findings[0].file, ".work/ABC-1/src/api-1a2b3c4d/.env");
         acknowledge(&root, &block.findings, "user", "fixture").unwrap();
-        let raw =
-            std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json")).unwrap();
+        let raw = std::fs::read_to_string(baseline_file(&root)).unwrap();
         // The same fingerprint the stack's scan of that worktree uses.
         assert!(
             raw.contains("\".work/ABC-1/src/api-1a2b3c4d/.env:planted:1\""),
@@ -1066,11 +1199,12 @@ mod tests {
     /// blocks, the acknowledgement clears it. Skips (and says so) otherwise.
     #[test]
     fn real_gitleaks_blocks_an_ignored_env_token_until_acknowledged() {
+        stack_core::gate_store::install_for_tests();
         let settings = Settings::default();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        let Some(scanner) = detect_scanner(&settings, &root) else {
+        let Some(scanner) = detect_scanner(&settings) else {
             eprintln!("skipping: gitleaks is not on PATH");
             return;
         };
@@ -1131,11 +1265,9 @@ mod tests {
             ),
             GateOutcome::Clean { .. }
         ));
-        assert!(
-            !std::fs::read_to_string(root.join(WORK_DIR).join("secrets-baseline.json"))
-                .unwrap()
-                .contains(&token)
-        );
+        assert!(!std::fs::read_to_string(baseline_file(&root))
+            .unwrap()
+            .contains(&token));
     }
 
     /// The launch gate with the project's own gitleaks config, trusted at
@@ -1145,11 +1277,12 @@ mod tests {
     /// the config. Real gitleaks.
     #[test]
     fn real_gitleaks_uses_the_trusted_project_config_and_falls_back_with_a_review() {
+        stack_core::gate_store::install_for_tests();
         let settings = Settings::default();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join("tools")).unwrap();
-        if detect_scanner(&settings, &root).is_none() {
+        if detect_scanner(&settings).is_none() {
             eprintln!("skipping: gitleaks is not on PATH");
             return;
         }

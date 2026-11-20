@@ -9,7 +9,8 @@
 //!                               c8 = the first 8 hex of the commit it was created at (a
 //!                               creation-time label: the branch moves on, the name does not)
 //!   _archive/<KEY>/             finished items: item.json kept, worktrees removed
-//!   active.json                 the active item per slot (see [`crate::intent::ActiveRecord`])
+//!   active.json                 where older versions kept the active item per slot (now
+//!                               in the app's gate storage, see [`crate::intent::ActiveRecord`])
 //! shared-checkouts-allow.txt    shared clones a stack may build from directly
 //! ```
 //!
@@ -64,8 +65,8 @@ const RUNNER_NAMES: [&str; 6] = [
     "jobs",
     "reviews",
     ARCHIVE_DIR,
-    crate::safety::secrets::baseline::BASELINE_FILE,
-    crate::safety::secrets::baseline::NOTES_FILE,
+    crate::safety::secrets::baseline::LEGACY_BASELINE_FILE,
+    crate::safety::secrets::baseline::LEGACY_NOTES_FILE,
 ];
 
 /// Whether `name` (an item folder name) is one the runner keeps for itself
@@ -477,11 +478,6 @@ pub struct ItemRecord {
     pub updated_utc: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_utc: Option<String>,
-    /// Where the item stands in the stack's local workflow; none until
-    /// the stack has a `workflow:` block and the item was started or moved
-    /// under it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<crate::workflow::WorkflowRecord>,
     /// The state seeds the item asks for, per component: replayed after
     /// the general seed when a recipe component is rebuilt, and recorded
     /// in every saved state.
@@ -502,7 +498,6 @@ impl ItemRecord {
             created_utc: now_utc.to_string(),
             updated_utc: now_utc.to_string(),
             archived_utc: None,
-            workflow: None,
             data_seeds: IndexMap::new(),
         }
     }

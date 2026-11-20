@@ -2676,12 +2676,19 @@ fn fresh_runtime(root: &Path, def: ProcessDef) -> ProcessRuntime {
     }
 }
 
-/// Remove secret-scan scratch a crashed scan left under each project's work
-/// folder (hard links to scanned files), off the startup path.
+/// Remove secret-scan scratch a crashed scan left behind (hard links to
+/// scanned files): in the scratch folder, and under each project's work
+/// folder where older versions kept it. Off the startup path.
 fn sweep_scan_scratch(roots: Vec<PathBuf>) {
     std::thread::spawn(move || {
-        for root in roots {
-            let work = root.join(crate::secret_scan::WORK_DIR);
+        let scratch = stack_core::gate_store::GateStore::installed()
+            .and_then(|s| s.scratch_dir())
+            .ok();
+        for work in roots
+            .iter()
+            .map(|root| root.join(crate::secret_scan::LEGACY_WORK_DIR))
+            .chain(scratch)
+        {
             let removed =
                 stack_core::workdir::sweep_stale_scratch(&work, stack_core::workdir::STALE_AFTER);
             if !removed.is_empty() {
