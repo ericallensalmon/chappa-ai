@@ -20,12 +20,29 @@ pub struct AppDirs {
     /// The webview's storage, when a profile moves it; `None` leaves the
     /// webview on its platform default.
     pub webview: Option<PathBuf>,
+    /// The app's private data (the files launched agent CLIs are given
+    /// their deny rules in, among others).
+    pub data: PathBuf,
+    /// Every folder the app keeps private state in: what a launched agent
+    /// CLI is told to refuse. The whole profile under a profile; the
+    /// platform's config, data, local data and log folders otherwise.
+    pub private: Vec<PathBuf>,
 }
+
+/// The data folder's name under a profile.
+pub const DATA_SUBDIR: &str = "data";
 
 /// The platform folders, asked for only when no profile is set.
 pub trait PlatformDirs {
     fn config(&self) -> Option<PathBuf>;
     fn logs(&self) -> Option<PathBuf>;
+    fn data(&self) -> Option<PathBuf> {
+        None
+    }
+    /// The per-machine data folder (the webview's default storage).
+    fn local_data(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 impl<R: tauri::Runtime> PlatformDirs for tauri::AppHandle<R> {
@@ -34,6 +51,12 @@ impl<R: tauri::Runtime> PlatformDirs for tauri::AppHandle<R> {
     }
     fn logs(&self) -> Option<PathBuf> {
         tauri::Manager::path(self).app_log_dir().ok()
+    }
+    fn data(&self) -> Option<PathBuf> {
+        tauri::Manager::path(self).app_data_dir().ok()
+    }
+    fn local_data(&self) -> Option<PathBuf> {
+        tauri::Manager::path(self).app_local_data_dir().ok()
     }
 }
 
@@ -46,14 +69,33 @@ impl AppDirs {
                 config: profile.config_dir(),
                 logs: profile.logs_dir(),
                 webview: Some(profile.webview_dir()),
+                data: profile.root().join(DATA_SUBDIR),
+                private: vec![profile.root().to_path_buf()],
             },
             None => {
                 let config = platform.config().unwrap_or_default();
                 let logs = platform.logs().unwrap_or_else(|| config.join("logs"));
+                let data = platform.data().unwrap_or_else(|| config.clone());
+                let mut private: Vec<PathBuf> = Vec::new();
+                for dir in [
+                    Some(config.clone()),
+                    Some(data.clone()),
+                    platform.local_data(),
+                    Some(logs.clone()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !dir.as_os_str().is_empty() && !private.contains(&dir) {
+                        private.push(dir);
+                    }
+                }
                 AppDirs {
                     config,
                     logs,
                     webview: None,
+                    data,
+                    private,
                 }
             }
         }
@@ -113,7 +155,13 @@ mod tests {
         assert_eq!(dirs.config, profile.root().join("config"));
         assert_eq!(dirs.logs, profile.root().join("logs"));
         assert_eq!(dirs.webview, Some(profile.root().join("webview")));
-        for dir in [&dirs.config, &dirs.logs, dirs.webview.as_ref().unwrap()] {
+        assert_eq!(dirs.private, vec![profile.root().to_path_buf()]);
+        for dir in [
+            &dirs.config,
+            &dirs.logs,
+            dirs.webview.as_ref().unwrap(),
+            &dirs.data,
+        ] {
             assert!(dir.starts_with(profile.root()), "{}", dir.display());
         }
     }
@@ -131,6 +179,11 @@ mod tests {
                 config: PathBuf::from("platform-config"),
                 logs: PathBuf::from("platform-logs"),
                 webview: None,
+                data: PathBuf::from("platform-config"),
+                private: vec![
+                    PathBuf::from("platform-config"),
+                    PathBuf::from("platform-logs")
+                ],
             }
         );
     }
@@ -143,6 +196,33 @@ mod tests {
         };
         let dirs = AppDirs::resolve(None, &platform);
         assert_eq!(dirs.logs, PathBuf::from("platform-config").join("logs"));
+    }
+
+    #[test]
+    fn every_platform_folder_with_app_state_is_private() {
+        struct Full;
+        impl PlatformDirs for Full {
+            fn config(&self) -> Option<PathBuf> {
+                Some(PathBuf::from("cfg"))
+            }
+            fn logs(&self) -> Option<PathBuf> {
+                Some(PathBuf::from("cfg/logs"))
+            }
+            fn data(&self) -> Option<PathBuf> {
+                Some(PathBuf::from("data"))
+            }
+            fn local_data(&self) -> Option<PathBuf> {
+                Some(PathBuf::from("local"))
+            }
+        }
+        let dirs = AppDirs::resolve(None, &Full);
+        assert_eq!(dirs.data, PathBuf::from("data"));
+        assert_eq!(
+            dirs.private,
+            ["cfg", "data", "local", "cfg/logs"]
+                .map(PathBuf::from)
+                .to_vec()
+        );
     }
 
     #[test]

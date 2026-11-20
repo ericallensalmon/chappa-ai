@@ -2423,7 +2423,12 @@ Settings, trust and acknowledgements are not on this surface at all.\n\n\
 **This boundary is complete only for agents that cannot read the person's files** — containerised \
 (docker-exec) tools that see only their own workspace. An agent running unsandboxed on the host, with a \
 shell, as the same OS user, can still read `<app-config>/control_token` and act as the person, and can edit \
-the app's own files. Nothing here can tell such an agent from the person.\n\n";
+the app's own files. Nothing here can tell such an agent from the person. A guard rail for host Claude \
+Code tools: each launch is given a settings file of its own (owner-only, in the app's data folder, removed \
+when the row exits) whose `permissions.deny` holds `Read`/`Edit` rules for every folder with the app's \
+state and every other open project's folder and worktree, so a permission-limited agent is refused there by \
+its own CLI. It does not hold for a tool started with its permissions bypassed or in auto mode, nor for a \
+script that opens files itself; Settings ▸ Agents shows per tool which applies.\n\n";
 
 /// `desktop/CONTROL_API.md`, rendered from [`ROUTES`]. The test
 /// `control_api_doc_is_in_sync` fails when the checked-in file differs;

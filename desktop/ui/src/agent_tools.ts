@@ -191,6 +191,9 @@ export class AgentToolsStore {
    *  when the app found none, `undefined` while unknown (not loaded yet, or
    *  outside Tauri). */
   private mcpServerPath: string | null | undefined = undefined;
+  /** `list_agent_tools.protection`: per tool id, whether its CLI is told to
+   *  refuse the app's folders and other projects at launch. */
+  private protectionById: Record<string, ipc.ToolProtectionDto> = {};
   private loaded = false;
   private readonly subs = new Set<(tools: AgentTool[]) => void>();
 
@@ -223,12 +226,19 @@ export class AgentToolsStore {
     return this.mcpServerPath;
   }
 
+  /** What Rust says about tool `id`'s launch protection; `undefined` while
+   *  unknown (not loaded yet, outside Tauri). */
+  protection(id: number): ipc.ToolProtectionDto | undefined {
+    return this.protectionById[String(id)];
+  }
+
   async load(): Promise<AgentTool[]> {
     try {
       const listing = await this.api.listAgentTools();
       this.tools = listing.tools;
       this.machineModeTypes = [...listing.machine_mode_types];
       this.mcpServerPath = listing.mcp_server;
+      this.protectionById = { ...(listing.protection ?? {}) };
       this.loaded = true;
     } catch {
       this.tools = [];
@@ -245,7 +255,20 @@ export class AgentToolsStore {
     if (idx >= 0) this.tools[idx] = stored;
     else this.tools.push(stored);
     this.notify();
+    await this.refreshProtection();
     return cloneTool(stored);
+  }
+
+  /** Re-read the protection verdicts after an edit (they follow the args);
+   *  a failed read keeps the ones already shown. */
+  private async refreshProtection(): Promise<void> {
+    try {
+      const listing = await this.api.listAgentTools();
+      this.protectionById = { ...(listing.protection ?? {}) };
+    } catch {
+      return;
+    }
+    this.notify();
   }
 
   /** Rejects — with the message NAMING the live processes — when a live

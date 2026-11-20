@@ -490,3 +490,47 @@ describe("the MCP server note", () => {
     s.dispose();
   });
 });
+
+describe("the launch protection line", () => {
+  it("shows each tool's protection from Rust, the full wording as its tooltip, and follows an edit", async () => {
+    const claude = docker(1, { name: "claude", tool_type: "claude", program: "claude", args: [] });
+    claude.runtime = { kind: "host" };
+    const api = fakeApi([claude, docker(2)]);
+    const verdict = (t: AgentTool) =>
+      t.args.includes("--dangerously-skip-permissions")
+        ? { kind: "bypass" as const, label: "not protected — the tool runs with permissions bypassed", detail: "bypass detail" }
+        : t.tool_type === "claude"
+          ? { kind: "protected" as const, label: "protected by the tool's permissions", detail: "not a boundary" }
+          : { kind: "unsupported" as const, label: "not supported by this tool", detail: "none" };
+    api.listAgentTools = vi.fn(async () => {
+      const tools = api.tools().map((t) => ({ ...t }));
+      return {
+        tools,
+        machine_mode_types: ["claude", "opencode"] as const,
+        protection: Object.fromEntries(tools.map((t) => [String(t.id), verdict(t)])),
+      };
+    });
+    const store = new AgentToolsStore(api);
+    const settings = stubSettings();
+    await settings.store.load();
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const s = new AgentsSection({ store, settings: settings.store, modalContainer: host });
+    host.appendChild(s.element);
+    s.activate();
+    await FLUSH();
+    const line = (id: number) =>
+      host.querySelector<HTMLElement>(`[data-agent-tool="${id}"] .chappa-agent-protection`)!;
+    expect(line(1).dataset.protection).toBe("protected");
+    expect(line(1).textContent).toBe("protected by the tool's permissions");
+    expect(line(1).title).toBe("not a boundary");
+    expect(line(2).dataset.protection).toBe("unsupported");
+    expect(line(2).textContent).toBe("not supported by this tool");
+    // A bypass flag added in an edit turns the row to "not protected".
+    await store.upsert({ ...store.byId(1)!, args: ["--dangerously-skip-permissions"] });
+    await FLUSH();
+    expect(line(1).dataset.protection).toBe("bypass");
+    expect(line(1).textContent).toContain("not protected");
+    s.dispose();
+  });
+});

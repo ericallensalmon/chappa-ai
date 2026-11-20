@@ -71,6 +71,12 @@
 //! a bundled install works with its folder off `PATH`; with none found the
 //! file holds no hooks, no tool is changed, and Settings ▸ Agents says that
 //! nothing was found.
+//!
+//! At launch a host claude tool's one `--settings` (this file, the
+//! person's own, or none for a tool opted out of the hook) is replaced by a
+//! settings file made for that launch: the same settings object plus deny
+//! rules for the app's folders and the other open projects (see
+//! [`crate::launch_deny`]). The stored args never change for it.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1221,14 +1227,24 @@ pub struct AgentToolsListing {
     pub tools: Vec<AgentTool>,
     pub machine_mode_types: Vec<ToolType>,
     pub mcp_server: Option<String>,
+    /// Per tool id: whether its CLI is told to refuse the app's folders and
+    /// other projects at launch ([`crate::launch_deny::protection`]).
+    pub protection: std::collections::BTreeMap<u32, crate::launch_deny::ToolProtection>,
 }
 
 #[tauri::command]
 pub fn list_agent_tools(tools: State<'_, AgentToolsState>) -> Result<AgentToolsListing, String> {
+    let list = tools.list();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let protection = list
+        .iter()
+        .map(|t| (t.id, crate::launch_deny::protection(t, &cwd)))
+        .collect();
     Ok(AgentToolsListing {
-        tools: tools.list(),
+        tools: list,
         machine_mode_types: crate::agent_json::MACHINE_MODE_TYPES.to_vec(),
         mcp_server: tools.mcp_server().map(|p| p.display().to_string()),
+        protection,
     })
 }
 

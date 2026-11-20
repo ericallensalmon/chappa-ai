@@ -103,6 +103,19 @@ confirmation_shapes_are_recognised_on_the_last_rows
 a_screen_hold_waits_for_the_question_and_the_person_can_release_one
 gate_refusals_map_to_statuses
 
+# An agent CLI with its own permissions is launched with deny rules for the
+# app's folders and the other open projects, never its own.
+the_launch_denies_the_app_folders_and_other_projects_but_not_its_own
+a_folder_holding_the_agents_own_work_stays_reachable_and_a_nested_project_does_not
+the_launch_file_itself_is_denied
+the_launch_file_is_owner_only @unix
+deny_rules_survive_the_tools_own_settings_argument
+a_second_settings_argument_or_an_unreadable_one_refuses_the_launch
+a_bypass_flag_tool_reports_not_protected
+a_tool_without_support_reports_not_supported
+every_platform_folder_with_app_state_is_private
+a_claude_launch_carries_deny_rules_for_the_app_folders_and_not_its_own_project @unix
+
 [ui]
 a start refused for untrusted content asks the trust prompt, and starts once the person chose Run
 ask: names the terminal by its row's name, never the title its program set
@@ -119,6 +132,7 @@ keeps Run disabled until the list has been scrolled to its end
 arguments from agents: empty and off by default, saved one per line, the toggle lifts the list, and the hint says how far it reaches
 lists a pane's held deliveries and says why they wait
 shows the sender, the text and the reason before a release
+shows each tool's protection from Rust, the full wording as its tooltip, and follows an edit
 
 [node]
 gh missing gives an empty list and one clear error

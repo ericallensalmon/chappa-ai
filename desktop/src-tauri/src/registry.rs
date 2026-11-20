@@ -38,6 +38,7 @@ use term_core::status::ProgramStatus;
 use crate::agent_json::JsonAgent;
 use crate::caller::{AgentTokens, Caller};
 use crate::delivery_hold::{DeliveryHolds, HoldGate};
+use crate::launch_deny::LaunchFiles;
 use crate::spawn_gate::{GatePass, GateRequest, SpawnGate, SpawnKind};
 use term_core::frame::encode_frame;
 use term_core::pty::PtySpec;
@@ -610,6 +611,9 @@ pub struct Registry {
     /// The live agent tokens, one per row an agent token was minted for;
     /// revoked when that row exits or closes.
     tokens: AgentTokens,
+    /// The settings file each launched agent CLI was given its deny rules
+    /// in, removed when that row exits or closes.
+    launch_files: LaunchFiles,
     /// The launch gate the spawn path runs when a spawn arrives without a
     /// pass (set once at app setup; see [`crate::spawn_gate`]).
     spawn_gate: Arc<Mutex<Option<Arc<dyn SpawnGate>>>>,
@@ -658,6 +662,7 @@ impl Registry {
             run_recorder: Arc::default(),
             holds: DeliveryHolds::default(),
             tokens: AgentTokens::default(),
+            launch_files: LaunchFiles::default(),
             spawn_gate: Arc::default(),
         }
     }
@@ -667,6 +672,11 @@ impl Registry {
     /// The live agent tokens.
     pub fn tokens(&self) -> &AgentTokens {
         &self.tokens
+    }
+
+    /// The launch files of live agent rows ([`crate::launch_deny`]).
+    pub fn launch_files(&self) -> &LaunchFiles {
+        &self.launch_files
     }
 
     /// The gate the spawn path runs for a spawn that brings no pass.
@@ -1616,6 +1626,7 @@ impl Registry {
     fn close_inner(&self, id: TermId, reason: CloseReason) -> Option<CloseOutcome> {
         let entry = self.inner.lock().unwrap().entries.remove(&id)?;
         self.tokens.revoke(id);
+        self.launch_files.forget(id);
         // The json agent is marked closing (no more events) but its
         // piped child — for docker, the host `docker exec -i` client — stays
         // alive through the container-side kill, exactly like a pty agent's
@@ -2318,6 +2329,7 @@ fn spawn_pump(
                     // The row's agent token dies with its run: a resumed or
                     // restarted row is given a new one.
                     registry_owned.tokens.revoke(term_id);
+                    registry_owned.launch_files.forget(term_id);
                     apply_status(
                         term_id,
                         seq,
