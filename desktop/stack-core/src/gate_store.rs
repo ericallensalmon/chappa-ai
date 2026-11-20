@@ -358,10 +358,36 @@ fn replace_private(path: &Path, bytes: &[u8]) -> Result<(), GateError> {
     })
 }
 
+/// `dir` with its deepest existing ancestor resolved and the rest appended
+/// as spelled. Resolving only a folder that exists would key a folder one
+/// way before it is created and another way after (`/var` resolves to
+/// `/private/var` on macOS; Windows resolves short names and adds its
+/// `\\?\` prefix), and a record written before the work folder exists
+/// must still be found once it does.
 fn canonical(dir: &Path) -> PathBuf {
-    fs::canonicalize(dir)
-        .or_else(|_| std::path::absolute(dir))
-        .unwrap_or_else(|_| dir.to_path_buf())
+    use std::path::Component;
+    let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut base = abs.as_path();
+    let mut tail = Vec::new();
+    loop {
+        if let Ok(mut out) = fs::canonicalize(base) {
+            for part in tail.iter().rev() {
+                match part {
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    Component::Normal(name) => out.push(name),
+                    _ => {}
+                }
+            }
+            return out;
+        }
+        let (Some(parent), Some(last)) = (base.parent(), base.components().next_back()) else {
+            return abs;
+        };
+        tail.push(last);
+        base = parent;
+    }
 }
 
 /// The folder name a project's records live under.
@@ -471,6 +497,30 @@ mod tests {
             .contains('a'));
         assert!(pa.remove(Scope::Project, "r").unwrap());
         assert!(!pa.remove(Scope::Project, "r").unwrap());
+    }
+
+    #[test]
+    fn a_folder_keeps_its_key_from_before_it_exists_to_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GateStore::new(tmp.path().join("gate"));
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        // Reached through a link, the way a system temp folder can be.
+        #[cfg(unix)]
+        let parent = {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            link
+        };
+        #[cfg(not(unix))]
+        let parent = real.clone();
+        let work = parent.join(".work");
+        let before = store.project(&work);
+        assert_eq!(store.project(&work.join("x").join("..")), before);
+        fs::create_dir_all(&work).unwrap();
+        let after = store.project(&work);
+        assert_eq!(before, after);
+        assert_eq!(after, store.project(&real.join(".work")));
     }
 
     #[test]
