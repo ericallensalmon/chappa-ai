@@ -66,6 +66,10 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 tempfile = "3"
 # Its `test_support` helpers (scripts the tests write and then run).
 stack-core = { path = "../stack-core", features = ["test-support"] }
+# A port held bound but not listening, so a "nothing listens here" test
+# cannot meet another program that took the port. Already in the
+# dependency tree.
+socket2 = "0.6"
 
 # `setsid` for the login-shell PATH read (login_path.rs). Already in the
 # dependency tree.

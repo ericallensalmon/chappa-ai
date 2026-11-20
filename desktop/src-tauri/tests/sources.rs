@@ -242,16 +242,10 @@ fn the_client_refuses_non_loopback_addresses_and_bad_tokens_before_connecting() 
         .contains("hex"));
     // Nothing listening is Unreachable, not Untrusted: the source may still
     // be starting.
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let (_held, port) = refusing_port();
     let mut client = SourceClient::new(&format!("127.0.0.1:{port}"), &token).unwrap();
-    assert!(matches!(
-        client.verify().unwrap_err(),
-        SourceError::Unreachable(_)
-    ));
+    let err = client.verify().unwrap_err();
+    assert!(matches!(err, SourceError::Unreachable(_)), "{err}");
 }
 
 #[test]
@@ -310,6 +304,19 @@ impl Drop for Reaper {
             let _ = child.wait();
         }
     }
+}
+
+/// A loopback port that refuses connections for as long as the returned
+/// socket lives: bound, so no other program (another test's server, or a
+/// client handed the port as its own end) can take it, but not listening.
+/// A port merely bound and released can be reused before the test connects.
+fn refusing_port() -> (socket2::Socket, u16) {
+    use socket2::{Domain, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    let any: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    socket.bind(&any.into()).unwrap();
+    let port = socket.local_addr().unwrap().as_socket().unwrap().port();
+    (socket, port)
 }
 
 fn wait_for<T>(what: &str, timeout: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
@@ -518,11 +525,7 @@ fn attaching_needs_a_loopback_address_and_a_real_token_file() {
         .is_err());
     // A loopback address nothing listens on attaches fine and reads "down"
     // with the reason; the worker keeps retrying until detached.
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let (_held, port) = refusing_port();
     sources
         .attach(&format!("127.0.0.1:{port}"), &token_file)
         .unwrap();
@@ -532,7 +535,8 @@ fn attaching_needs_a_loopback_address_and_a_real_token_file() {
         (s.status == SourceStatus::Down).then(|| s.id.clone())
     });
     let s = &sources.listing().sources[0];
-    assert!(s.last_error.as_deref().unwrap().contains("not reachable"));
+    let error = s.last_error.as_deref().unwrap();
+    assert!(error.contains("not reachable"), "{error}");
     assert!(matches!(
         s.origin,
         app_lib::sources::OriginDto::Attached { .. }
