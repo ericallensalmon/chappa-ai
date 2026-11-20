@@ -123,6 +123,18 @@ a_verdict_or_acknowledgement_written_into_the_work_folder_opens_no_gate
 a_binding_from_the_work_folder_file_is_shown_and_narrows_no_block
 a_job_record_planted_in_the_work_folder_does_not_run
 a_workflow_written_into_the_item_folder_opens_no_gate
+# An agent CLI with its own permissions is launched with deny rules for the
+# app's folders and the other open projects, never its own.
+the_launch_denies_the_app_folders_and_other_projects_but_not_its_own
+a_folder_holding_the_agents_own_work_stays_reachable_and_a_nested_project_does_not
+the_launch_file_itself_is_denied
+the_launch_file_is_owner_only @unix
+deny_rules_survive_the_tools_own_settings_argument
+a_second_settings_argument_or_an_unreadable_one_refuses_the_launch
+a_bypass_flag_tool_reports_not_protected
+a_tool_without_support_reports_not_supported
+every_platform_folder_with_app_state_is_private
+a_claude_launch_carries_deny_rules_for_the_app_folders_and_not_its_own_project @unix
 
 [ui]
 a start refused for untrusted content asks the trust prompt, and starts once the person chose Run
@@ -141,6 +153,7 @@ arguments from agents: empty and off by default, saved one per line, the toggle 
 lists a pane's held deliveries and says why they wait
 shows the sender, the text and the reason before a release
 mark a finding acknowledged before this update, which still blocks until confirmed
+shows each tool's protection from Rust, the full wording as its tooltip, and follows an edit
 
 [node]
 gh missing gives an empty list and one clear error

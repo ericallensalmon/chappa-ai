@@ -488,6 +488,16 @@ export interface AgentToolsListingDto {
   /** The absolute path of the `chappa-ai-mcp` binary the app found beside
    *  itself or on PATH; `null` when none resolved. Absent outside Tauri. */
   mcp_server?: string | null;
+  /** Per tool id: whether its CLI is told, at launch, to refuse the app's
+   *  folders and other projects. Absent outside Tauri. */
+  protection?: Record<string, ToolProtectionDto>;
+}
+
+/** One tool's launch protection, as Rust words it. */
+export interface ToolProtectionDto {
+  kind: "protected" | "bypass" | "auto" | "unsupported" | "container";
+  label: string;
+  detail: string;
 }
 
 export function listAgentTools(): Promise<AgentToolsListingDto> {

@@ -1983,6 +1983,7 @@ impl Drop for TokenGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.registry.tokens().revoke(self.id);
+            self.registry.launch_files().forget(self.id);
         }
     }
 }
@@ -2183,7 +2184,7 @@ pub fn spawn_agent_with(
     } else {
         req.extra_args.clone()
     };
-    let plan = build_spawn_plan(
+    let mut plan = build_spawn_plan(
         &planned_tool,
         &extra_args,
         &env,
@@ -2191,6 +2192,43 @@ pub fn spawn_agent_with(
         &uuid,
         with_wrapper,
     );
+    // A CLI with a permission system of its own is told to refuse the
+    // app's folders and the other open projects, in a settings file made
+    // for this launch (see [`crate::launch_deny`]). Fails closed: a launch
+    // whose rules cannot be written does not start.
+    if let Some(config) = ctx.registry.launch_files().config() {
+        if crate::launch_deny::applies(&tool) {
+            // Compared as they resolve, so a symlinked or differently
+            // spelled folder is still recognised as the agent's own.
+            let resolved = |p: &Path| {
+                PathBuf::from(crate::roots::display(&crate::roots::resolve_best_effort(p)))
+            };
+            let roots_of = |id: Option<u32>| -> Vec<PathBuf> {
+                ctx.projects
+                    .cwd_roots(id, None)
+                    .iter()
+                    .map(|r| resolved(&r.path))
+                    .collect()
+            };
+            let open = roots_of(None);
+            let own = match req.project_id {
+                Some(id) => roots_of(Some(id)),
+                None => Vec::new(),
+            };
+            let private: Vec<PathBuf> = config.private.iter().map(|p| resolved(p)).collect();
+            let denied = crate::launch_deny::denied_dirs(
+                &private,
+                &open,
+                &own,
+                cwd.as_deref().map(resolved).as_deref(),
+                cfg!(windows),
+            );
+            let file = crate::launch_deny::LaunchFiles::file_for(&config, &uuid);
+            ctx.registry.launch_files().remember(id, file.clone());
+            plan.args =
+                crate::launch_deny::prepare_launch(&plan.args, &denied, cwd.as_deref(), &file)?;
+        }
+    }
     let cols = req.cols.unwrap_or(80).clamp(1, 4096);
     let rows = req.rows.unwrap_or(24).clamp(1, 4096);
     let cfg = ActorConfig {

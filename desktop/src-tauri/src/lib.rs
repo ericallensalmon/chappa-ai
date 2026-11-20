@@ -15,6 +15,7 @@ pub mod crash;
 pub mod data_safety;
 pub mod delivery_hold;
 pub mod event_ring;
+pub mod launch_deny;
 pub mod login_path;
 pub mod open_path;
 pub mod profile;
@@ -155,6 +156,12 @@ pub fn run() {
             // a report on a panic. All in the log directory.
             let log_dir = dirs.logs.clone();
             crash::install(log_dir.clone());
+            // Agent CLIs that can enforce deny rules are told, at each
+            // launch, to refuse every folder with the app's state.
+            app.state::<Registry>().launch_files().configure(
+                dirs.private.clone(),
+                dirs.data.join(launch_deny::LAUNCH_SUBDIR),
+            );
             // Load `<app-config>/settings.json` BEFORE the projects
             // store: project spawns read the execution profile out of it.
             let settings = app.state::<SettingsState>();

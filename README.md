@@ -210,6 +210,16 @@ running unsandboxed on your computer, with a shell, as you, can read your
 token file and the app's own files, and then act as you; nothing in the app
 can tell it from you.
 
+One guard rail raises that bar for Claude Code tools: at each launch the
+app hands the CLI deny rules for the app's own folders and your other open
+projects, so an agent whose permissions are limited is refused there by its
+own permission system instead of reaching them silently. It covers the
+CLI's file tools and the shell commands it recognizes as file commands
+(and the commands its sandbox runs, when you turn that on, on macOS,
+Linux and WSL2); it does not cover a tool started with its permissions
+bypassed, or a script that opens files itself outside that sandbox.
+Settings ▸ Agents says per tool whether it applies.
+
 <!-- screenshot: assets/screenshots/trust-prompt.png — The trust prompt for a newly opened project, listing its auto-start commands with their environment and working folder -->
 
 **Project trust.** Opening a project whose `chappa.yml` you have not

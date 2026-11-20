@@ -145,7 +145,9 @@ export class AgentsSection {
       "AGENTS",
       "Registered agent CLIs for the New agent menu and the spawn_agent MCP tool. Name is display " +
         "only; program + args are the truth (never re-split). Docker runtimes run the program under a " +
-        "pid-recording wrapper so closing kills the container-side process.",
+        "pid-recording wrapper so closing kills the container-side process. Each row says whether its CLI is " +
+        "told at launch to refuse the app's folders and other projects: a guard rail for an agent whose " +
+        "permissions are limited, not a boundary — an agent with a shell running as you can still reach them.",
     );
     const registryBody = settingsBlock();
     registry.card.appendChild(registryBody);
@@ -307,7 +309,9 @@ export class AgentsSection {
     // handlers still held the OLD tool. JSON per tool, "\u001e" (record
     // separator, the escape sequence — never a literal control byte in
     // source) between tools: no field can run into its neighbour.
-    const sig = tools.map((t) => JSON.stringify(t)).join("\u001e");
+    const sig = tools
+      .map((t) => JSON.stringify([t, this.store.protection(t.id) ?? null]))
+      .join("\u001e");
     if (sig === this.listSig) return;
     this.listSig = sig;
     this.list.textContent = "";
@@ -393,7 +397,19 @@ export class AgentsSection {
     del.dataset.action = "deleteAgent";
     del.addEventListener("click", () => void this.remove(tool.id));
 
-    el.append(toggle, name, type, model, runtime, transport, edit, del);
+    // Whether the CLI is told to refuse the app's folders and other
+    // projects at launch; the full wording (what it does not cover) is the
+    // tooltip.
+    const protection = this.store.protection(tool.id);
+    const guard = document.createElement("span");
+    guard.className = "chappa-agent-protection";
+    guard.style.cssText = MUTED_CSS;
+    guard.dataset.protection = protection?.kind ?? "";
+    guard.textContent = protection?.label ?? "";
+    guard.title = protection?.detail ?? "";
+    guard.style.display = protection ? "" : "none";
+
+    el.append(toggle, name, type, model, runtime, transport, guard, edit, del);
     return el;
   }
 
